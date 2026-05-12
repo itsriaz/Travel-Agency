@@ -1,0 +1,7 @@
+month,branch,currency,invoice_total,receipts_total,supplier_payments_total,expected_profit_loss,ending_customer_outstanding,ending_supplier_outstanding
+2026-01,"Imdad International Travel Agency",PKR,8750,3400,0,1700,4600,2950
+2026-02,"Imdad International Travel Agency",PKR,11500,3150,0,1500,13700,8850
+2026-02,"Noble Route",AED,1000,0,0,300,600,0
+2026-03,"Imdad International Travel Agency",PKR,13700,1400,5000,2300,26000,21550
+2026-03,"Noble Route",AED,1500,1900,0,300,600,1900
+2026-03,"Noble Route",USD,300,100,0,80,200,220

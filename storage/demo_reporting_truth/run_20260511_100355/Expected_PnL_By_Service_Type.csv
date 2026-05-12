@@ -1,0 +1,10 @@
+service_type,currency,total_receivable,total_payable,expected_profit_loss
+"Air Ticket",PKR,19050,15750,3300
+"Air Ticket",USD,300,220,80
+Hotel,PKR,7500,6800,700
+Tour,PKR,1300,1000,300
+Transport,PKR,400,300,100
+Umrah,AED,1500,1200,300
+Umrah,PKR,4200,3500,700
+Visa,AED,1000,700,300
+Visa,PKR,1500,1100,400

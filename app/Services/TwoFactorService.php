@@ -1,0 +1,276 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Services;
+
+use App\DTOs\UserSessionData;
+use App\Helpers\Auth;
+use App\Helpers\AuditLog;
+use App\Helpers\Crypto;
+use App\Helpers\Session;
+use App\Repositories\SecurityThrottleRepository;
+use App\Repositories\TwoFactorRecoveryCodeRepository;
+use App\Repositories\UserRepository;
+use BaconQrCode\Renderer\Image\SvgImageBackEnd;
+use BaconQrCode\Renderer\ImageRenderer;
+use BaconQrCode\Renderer\RendererStyle\RendererStyle;
+use BaconQrCode\Writer;
+use PragmaRX\Google2FA\Google2FA;
+
+final class TwoFactorService extends Service
+{
+    public function beginSetup(int $userId): array
+    {
+        $users = new UserRepository($this->app);
+        $user = $users->findById($userId);
+
+        if ($user === null) {
+            throw new \RuntimeException('User not found.');
+        }
+
+        $secret = Crypto::decrypt($user['two_factor_secret_pending_encrypted'] ?? null);
+
+        if ($secret === null) {
+            $google2fa = new Google2FA();
+            $secret = $google2fa->generateSecretKey();
+            $users->storePendingTwoFactorSecret($userId, Crypto::encrypt($secret));
+
+            AuditLog::record($this->app, 'auth.2fa.setup.started', [
+                'user_id' => $userId,
+            ]);
+        }
+
+        $issuer = (string) config('app.name', 'Travel Agency Operations');
+        $label = $user['email'] ?: $user['username'];
+        $otpAuthUrl = (new Google2FA())->getQRCodeUrl($issuer, $label, $secret);
+        $qrSvg = (new Writer(new ImageRenderer(
+            new RendererStyle(220),
+            new SvgImageBackEnd()
+        )))->writeString($otpAuthUrl);
+
+        return [
+            'secret' => $secret,
+            'qr_svg' => $qrSvg,
+        ];
+    }
+
+    public function completeSetup(int $userId, string $otp, string $ipAddress): array
+    {
+        $check = $this->assertOtpAllowed($userId, $ipAddress);
+        if (! $check['success']) {
+            return $check;
+        }
+
+        $users = new UserRepository($this->app);
+        $user = $users->findById($userId);
+        $secret = Crypto::decrypt($user['two_factor_secret_pending_encrypted'] ?? null);
+
+        if ($user === null || $secret === null) {
+            return ['success' => false, 'message' => '2FA setup is not ready. Please start again.'];
+        }
+
+        if (! (new Google2FA())->verifyKey($secret, trim($otp))) {
+            return $this->handleOtpFailure($userId, $ipAddress, 'setup');
+        }
+
+        $backupCodes = $this->generateRecoveryCodes();
+        $users->activateTwoFactorSecret($userId, Crypto::encrypt($secret));
+        (new TwoFactorRecoveryCodeRepository($this->app))->replaceCodes($userId, $backupCodes);
+        $this->clearOtpFailures($userId, $ipAddress);
+
+        AuditLog::record($this->app, 'auth.2fa.setup.completed', [
+            'user_id' => $userId,
+        ]);
+        AuditLog::record($this->app, 'auth.2fa.backup_codes.generated', [
+            'user_id' => $userId,
+        ]);
+
+        Session::put('_two_factor_backup_codes', $backupCodes);
+        $freshUser = $users->findForSession($userId);
+        $sessionData = new UserSessionData(
+            (int) $freshUser['id'],
+            $freshUser['name'],
+            $freshUser['username'],
+            $freshUser['email'],
+            $freshUser['role_code'],
+            (int) $freshUser['default_branch_id'],
+            array_map('intval', $users->branchIdsForUser((int) $freshUser['id'], $freshUser['role_code'])),
+            (bool) $freshUser['must_change_password'],
+            (int) $freshUser['session_version'],
+            true,
+            true
+        );
+        Auth::refresh($sessionData->toArray(), true);
+
+        return ['success' => true];
+    }
+
+    public function verifyChallenge(int $userId, string $code, string $ipAddress, bool $rememberDevice = false): array
+    {
+        $check = $this->assertOtpAllowed($userId, $ipAddress);
+        if (! $check['success']) {
+            return $check;
+        }
+
+        $users = new UserRepository($this->app);
+        $user = $users->findById($userId);
+        $secret = Crypto::decrypt($user['two_factor_secret_encrypted'] ?? null);
+        $trimmedCode = trim($code);
+        $normalized = strtoupper(str_replace('-', '', $trimmedCode));
+
+        $verified = false;
+        $usedBackupCode = false;
+
+        if ($secret !== null && preg_match('/^\d{6}$/', $normalized) === 1) {
+            $verified = (new Google2FA())->verifyKey($secret, $normalized);
+        }
+
+        if (! $verified) {
+            $backupRepo = new TwoFactorRecoveryCodeRepository($this->app);
+            $usedBackupCode = $backupRepo->consumeMatchingCode($userId, $trimmedCode);
+            $verified = $usedBackupCode;
+        }
+
+        if (! $verified) {
+            return $this->handleOtpFailure($userId, $ipAddress, 'verify');
+        }
+
+        $this->clearOtpFailures($userId, $ipAddress);
+
+        if ($usedBackupCode) {
+            AuditLog::record($this->app, 'auth.2fa.backup_code.used', [
+                'user_id' => $userId,
+                'ip_address' => $ipAddress,
+            ]);
+        }
+
+        if ($rememberDevice && ! \App\Helpers\Auth::isSuperAdmin()) {
+            (new TrustedDeviceService($this->app))->createForCurrentUser($userId);
+        }
+
+        $freshUser = $users->findForSession($userId);
+        $sessionData = new UserSessionData(
+            (int) $freshUser['id'],
+            $freshUser['name'],
+            $freshUser['username'],
+            $freshUser['email'],
+            $freshUser['role_code'],
+            (int) $freshUser['default_branch_id'],
+            array_map('intval', $users->branchIdsForUser((int) $freshUser['id'], $freshUser['role_code'])),
+            (bool) $freshUser['must_change_password'],
+            (int) $freshUser['session_version'],
+            (bool) $freshUser['two_factor_enabled'],
+            true
+        );
+        Auth::refresh($sessionData->toArray(), true);
+
+        return ['success' => true];
+    }
+
+    public function resetForReEnrollment(int $userId): array
+    {
+        $users = new UserRepository($this->app);
+        $users->resetTwoFactor($userId);
+        (new TwoFactorRecoveryCodeRepository($this->app))->replaceCodes($userId, []);
+        (new TrustedDeviceService($this->app))->revokeAllForUser($userId, '2fa_reset', $userId);
+
+        AuditLog::record($this->app, 'auth.2fa.reset', [
+            'user_id' => $userId,
+            'reason' => 'self_reenroll',
+        ]);
+
+        return $users->findForSession($userId);
+    }
+
+    public function regenerateBackupCodes(int $userId): array
+    {
+        $codes = $this->generateRecoveryCodes();
+        (new TwoFactorRecoveryCodeRepository($this->app))->replaceCodes($userId, $codes);
+
+        AuditLog::record($this->app, 'auth.2fa.backup_codes.regenerated', [
+            'user_id' => $userId,
+        ]);
+
+        return $codes;
+    }
+
+    public function adminResetTwoFactor(int $adminUserId, int $targetUserId): void
+    {
+        $users = new UserRepository($this->app);
+        $users->resetTwoFactor($targetUserId);
+        (new TwoFactorRecoveryCodeRepository($this->app))->replaceCodes($targetUserId, []);
+        (new TrustedDeviceService($this->app))->revokeAllForUser($targetUserId, '2fa_reset_by_admin', $adminUserId);
+
+        AuditLog::record($this->app, 'auth.2fa.reset_by_admin', [
+            'user_id' => $adminUserId,
+            'target_user_id' => $targetUserId,
+        ]);
+    }
+
+    public function consumeBackupCodesForDisplay(): array
+    {
+        $codes = Session::get('_two_factor_backup_codes', []);
+        Session::forget('_two_factor_backup_codes');
+
+        return is_array($codes) ? $codes : [];
+    }
+
+    private function assertOtpAllowed(int $userId, string $ipAddress): array
+    {
+        $throttle = new SecurityThrottleRepository($this->app);
+        $subjectKey = 'user:' . $userId;
+        $maxAttempts = (int) config('security.otp.max_attempts', 3);
+        $windowMinutes = (int) config('security.otp.window_minutes', 15);
+
+        if ($throttle->countRecentFailures('otp_verify', $subjectKey, $ipAddress, $windowMinutes) >= $maxAttempts) {
+            return ['success' => false, 'message' => 'Too many OTP failures. Please wait and try again.'];
+        }
+
+        return ['success' => true];
+    }
+
+    private function recordOtpFailure(int $userId, string $ipAddress, string $context): void
+    {
+        (new SecurityThrottleRepository($this->app))->record('otp_verify', 'user:' . $userId, $ipAddress, false);
+        AuditLog::record($this->app, 'auth.2fa.otp.failure', [
+            'user_id' => $userId,
+            'ip_address' => $ipAddress,
+            'context' => $context,
+        ]);
+    }
+
+    private function clearOtpFailures(int $userId, string $ipAddress): void
+    {
+        (new SecurityThrottleRepository($this->app))->clearFailures('otp_verify', 'user:' . $userId, $ipAddress);
+    }
+
+    private function handleOtpFailure(int $userId, string $ipAddress, string $context): array
+    {
+        $this->recordOtpFailure($userId, $ipAddress, $context);
+        $failures = (new SecurityThrottleRepository($this->app))->countRecentFailures(
+            'otp_verify',
+            'user:' . $userId,
+            $ipAddress,
+            (int) config('security.otp.window_minutes', 15)
+        );
+
+        if ($failures >= (int) config('security.otp.max_attempts', 3)) {
+            return ['success' => false, 'message' => 'Too many OTP failures. Please wait and try again.'];
+        }
+
+        return ['success' => false, 'message' => 'Invalid verification code.'];
+    }
+
+    private function generateRecoveryCodes(): array
+    {
+        $codes = [];
+
+        for ($i = 0; $i < 8; $i++) {
+            $raw = strtoupper(bin2hex(random_bytes(4)));
+            $codes[] = substr($raw, 0, 4) . '-' . substr($raw, 4, 4);
+        }
+
+        return $codes;
+    }
+}

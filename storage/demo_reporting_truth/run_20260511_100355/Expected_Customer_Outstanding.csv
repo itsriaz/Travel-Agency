@@ -1,0 +1,14 @@
+customer,branch,currency,total_invoice_amount,total_received,expected_outstanding,aging_bucket
+"Ayesha Noor","Imdad International Travel Agency",PKR,1300,0,1300,Current
+"Faisal Ahmed","Imdad International Travel Agency",PKR,5000,0,5000,1-30
+"Hamza Khan","Imdad International Travel Agency",PKR,6000,0,6000,1-30
+"Jalal Uddin","Imdad International Travel Agency",PKR,500,500,0,Current
+"Muhammad Bilal","Imdad International Travel Agency",PKR,2200,1000,1200,31-60
+"Nadia Khan","Imdad International Travel Agency",PKR,1050,900,150,61-90
+"Omar Farooq","Imdad International Travel Agency",PKR,2400,2400,0,Current
+"Riaz Ud Din","Imdad International Travel Agency",PKR,2800,0,2800,90+
+"Sanaullah Khan","Imdad International Travel Agency",PKR,6100,3150,2950,31-60
+"Zainab Ali","Imdad International Travel Agency",PKR,6600,0,6600,1-30
+"Ayesha Noor","Noble Route",AED,1000,400,600,1-30
+"Faisal Ahmed","Noble Route",AED,1500,1500,0,Current
+"Omar Farooq","Noble Route",USD,300,100,200,1-30

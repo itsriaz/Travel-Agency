@@ -1,0 +1,57 @@
+<?php
+
+declare(strict_types=1);
+
+return [
+    'up' => [
+        'CREATE TABLE IF NOT EXISTS booking_reminders (
+            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            branch_id INT UNSIGNED NOT NULL,
+            booking_id BIGINT UNSIGNED NOT NULL,
+            traveler_id BIGINT UNSIGNED NULL,
+            booking_service_id BIGINT UNSIGNED NULL,
+            customer_receipt_id BIGINT UNSIGNED NULL,
+            supplier_payment_id BIGINT UNSIGNED NULL,
+            supplier_obligation_id BIGINT UNSIGNED NULL,
+            reminder_type ENUM("due_date", "passport_expiry", "visa_expiry", "supplier_payment", "document_missing", "travel_date", "custom_manual") NOT NULL,
+            title VARCHAR(190) NOT NULL,
+            reminder_note TEXT NULL,
+            due_at DATETIME NOT NULL,
+            channel VARCHAR(50) NULL,
+            owner_label VARCHAR(120) NULL,
+            status ENUM("open", "due", "completed", "dismissed") NOT NULL DEFAULT "open",
+            priority ENUM("normal", "high") NOT NULL DEFAULT "normal",
+            system_generated TINYINT(1) NOT NULL DEFAULT 0,
+            reminder_key VARCHAR(190) NULL,
+            completed_at DATETIME NULL,
+            dismissed_at DATETIME NULL,
+            created_by_user_id INT UNSIGNED NULL,
+            updated_by_user_id INT UNSIGNED NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uniq_booking_reminders_key (reminder_key),
+            KEY idx_booking_reminders_branch (branch_id),
+            KEY idx_booking_reminders_booking (booking_id),
+            KEY idx_booking_reminders_traveler (traveler_id),
+            KEY idx_booking_reminders_service (booking_service_id),
+            KEY idx_booking_reminders_receipt (customer_receipt_id),
+            KEY idx_booking_reminders_supplier_payment (supplier_payment_id),
+            KEY idx_booking_reminders_supplier_obligation (supplier_obligation_id),
+            KEY idx_booking_reminders_type (reminder_type),
+            KEY idx_booking_reminders_status (status),
+            KEY idx_booking_reminders_due_at (due_at),
+            CONSTRAINT fk_booking_reminders_branch FOREIGN KEY (branch_id) REFERENCES branches (id),
+            CONSTRAINT fk_booking_reminders_booking FOREIGN KEY (booking_id) REFERENCES bookings (id) ON DELETE CASCADE,
+            CONSTRAINT fk_booking_reminders_traveler FOREIGN KEY (traveler_id) REFERENCES travelers (id) ON DELETE SET NULL,
+            CONSTRAINT fk_booking_reminders_service FOREIGN KEY (booking_service_id) REFERENCES booking_services (id) ON DELETE SET NULL,
+            CONSTRAINT fk_booking_reminders_receipt FOREIGN KEY (customer_receipt_id) REFERENCES customer_receipts (id) ON DELETE SET NULL,
+            CONSTRAINT fk_booking_reminders_supplier_payment FOREIGN KEY (supplier_payment_id) REFERENCES supplier_payments (id) ON DELETE SET NULL,
+            CONSTRAINT fk_booking_reminders_supplier_obligation FOREIGN KEY (supplier_obligation_id) REFERENCES supplier_obligations (id) ON DELETE SET NULL,
+            CONSTRAINT fk_booking_reminders_created_by FOREIGN KEY (created_by_user_id) REFERENCES users (id) ON DELETE SET NULL,
+            CONSTRAINT fk_booking_reminders_updated_by FOREIGN KEY (updated_by_user_id) REFERENCES users (id) ON DELETE SET NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci',
+    ],
+    'down' => [
+        'DROP TABLE IF EXISTS booking_reminders',
+    ],
+];

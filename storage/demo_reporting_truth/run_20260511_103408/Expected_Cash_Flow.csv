@@ -1,0 +1,14 @@
+date,branch,currency,cash_in_customer_receipts,cash_out_supplier_payments,net_cash_flow
+2026-01-05,"Imdad International Travel Agency",PKR,500,0,500
+2026-01-12,"Imdad International Travel Agency",PKR,900,0,900
+2026-01-20,"Imdad International Travel Agency",PKR,1000,0,1000
+2026-01-26,"Imdad International Travel Agency",PKR,1000,0,1000
+2026-02-03,"Imdad International Travel Agency",PKR,1000,0,1000
+2026-02-15,"Imdad International Travel Agency",PKR,750,0,750
+2026-02-20,"Imdad International Travel Agency",PKR,1400,0,1400
+2026-03-01,"Noble Route",AED,1900,0,1900
+2026-03-10,"Imdad International Travel Agency",PKR,0,2000,-2000
+2026-03-10,"Noble Route",USD,100,0,100
+2026-03-18,"Imdad International Travel Agency",PKR,0,3000,-3000
+2026-03-20,"Imdad International Travel Agency",PKR,1400,0,1400
+2026-03-25,"Imdad International Travel Agency",PKR,700,0,700

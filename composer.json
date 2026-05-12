@@ -1,0 +1,10 @@
+{
+    "name": "travel-agency/operations-system",
+    "description": "Travel Agency Operations and Accounting System",
+    "type": "project",
+    "require": {
+        "php": "^8.2",
+        "pragmarx/google2fa": "^8.0",
+        "bacon/bacon-qr-code": "^2.0"
+    }
+}

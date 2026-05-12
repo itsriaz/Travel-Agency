@@ -1,0 +1,87 @@
+<?php
+
+declare(strict_types=1);
+
+return [
+    'up' => [
+        'CREATE TABLE IF NOT EXISTS suppliers (
+            id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            branch_id INT UNSIGNED NULL,
+            code VARCHAR(50) NOT NULL UNIQUE,
+            name VARCHAR(190) NOT NULL,
+            supplier_mode ENUM("normal_payable", "running_balance") NOT NULL DEFAULT "normal_payable",
+            default_currency CHAR(3) NOT NULL,
+            is_active TINYINT(1) NOT NULL DEFAULT 1,
+            notes TEXT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            KEY idx_suppliers_branch (branch_id),
+            KEY idx_suppliers_mode (supplier_mode),
+            CONSTRAINT fk_suppliers_branch FOREIGN KEY (branch_id) REFERENCES branches (id) ON DELETE SET NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci',
+        'CREATE TABLE IF NOT EXISTS supplier_advances (
+            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            supplier_id INT UNSIGNED NOT NULL,
+            branch_id INT UNSIGNED NOT NULL,
+            currency CHAR(3) NOT NULL,
+            deposit_amount DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+            available_amount DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+            reference_no VARCHAR(100) NULL,
+            remarks TEXT NULL,
+            received_at DATE NULL,
+            created_by_user_id INT UNSIGNED NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            KEY idx_supplier_advances_supplier (supplier_id),
+            KEY idx_supplier_advances_branch (branch_id),
+            KEY idx_supplier_advances_currency (currency),
+            CONSTRAINT fk_supplier_advances_supplier FOREIGN KEY (supplier_id) REFERENCES suppliers (id) ON DELETE CASCADE,
+            CONSTRAINT fk_supplier_advances_branch FOREIGN KEY (branch_id) REFERENCES branches (id),
+            CONSTRAINT fk_supplier_advances_user FOREIGN KEY (created_by_user_id) REFERENCES users (id) ON DELETE SET NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci',
+        'CREATE TABLE IF NOT EXISTS supplier_obligations (
+            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            supplier_id INT UNSIGNED NOT NULL,
+            branch_id INT UNSIGNED NOT NULL,
+            booking_reference VARCHAR(50) NOT NULL,
+            service_line_reference VARCHAR(50) NULL,
+            obligation_group VARCHAR(50) NOT NULL DEFAULT "service_cost",
+            currency CHAR(3) NOT NULL,
+            gross_amount DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+            advance_applied_amount DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+            net_payable_amount DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+            due_date DATE NULL,
+            status ENUM("open", "partially_covered", "covered_by_advance", "paid", "cancelled") NOT NULL DEFAULT "open",
+            remarks TEXT NULL,
+            created_by_user_id INT UNSIGNED NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            KEY idx_supplier_obligations_supplier (supplier_id),
+            KEY idx_supplier_obligations_branch (branch_id),
+            KEY idx_supplier_obligations_booking (booking_reference),
+            KEY idx_supplier_obligations_service_line (service_line_reference),
+            KEY idx_supplier_obligations_status (status),
+            CONSTRAINT fk_supplier_obligations_supplier FOREIGN KEY (supplier_id) REFERENCES suppliers (id) ON DELETE CASCADE,
+            CONSTRAINT fk_supplier_obligations_branch FOREIGN KEY (branch_id) REFERENCES branches (id),
+            CONSTRAINT fk_supplier_obligations_user FOREIGN KEY (created_by_user_id) REFERENCES users (id) ON DELETE SET NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci',
+        'CREATE TABLE IF NOT EXISTS supplier_advance_applications (
+            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            supplier_advance_id BIGINT UNSIGNED NOT NULL,
+            supplier_obligation_id BIGINT UNSIGNED NOT NULL,
+            applied_amount DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+            created_by_user_id INT UNSIGNED NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uniq_supplier_advance_obligation (supplier_advance_id, supplier_obligation_id),
+            KEY idx_supplier_advance_applications_obligation (supplier_obligation_id),
+            CONSTRAINT fk_supplier_advance_applications_advance FOREIGN KEY (supplier_advance_id) REFERENCES supplier_advances (id) ON DELETE CASCADE,
+            CONSTRAINT fk_supplier_advance_applications_obligation FOREIGN KEY (supplier_obligation_id) REFERENCES supplier_obligations (id) ON DELETE CASCADE,
+            CONSTRAINT fk_supplier_advance_applications_user FOREIGN KEY (created_by_user_id) REFERENCES users (id) ON DELETE SET NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci',
+    ],
+    'down' => [
+        'DROP TABLE IF EXISTS supplier_advance_applications',
+        'DROP TABLE IF EXISTS supplier_obligations',
+        'DROP TABLE IF EXISTS supplier_advances',
+        'DROP TABLE IF EXISTS suppliers',
+    ],
+];

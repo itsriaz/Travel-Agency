@@ -1,0 +1,11 @@
+customer_id_or_code,name,branch,mobile,passport,family_id,color_tag,previous_balance_expected
+TRV-00144,"Riaz Ud Din","Imdad International Travel Agency",03001234561,PK-RIAZ-001,FAM-1001,green,2000
+TRV-00145,"Jalal Uddin","Imdad International Travel Agency",03001234562,PK-JAL-002,FAM-1002,blue,0
+TRV-00146,"Nadia Khan","Imdad International Travel Agency",03001234563,PK-NAD-003,FAM-1003,orange,0
+TRV-00147,"Muhammad Bilal","Imdad International Travel Agency",03001234564,PK-BIL-004,,none,0
+TRV-00148,"Sanaullah Khan","Imdad International Travel Agency",03001234565,PK-SAN-005,FAM-1005,gold,1250
+TRV-00149,"Ayesha Noor","Noble Route",0507001001,AE-AYE-006,DXB-2001,purple,0
+TRV-00150,"Faisal Ahmed","Noble Route",0507001002,AE-FAI-007,,red,0
+TRV-00151,"Zainab Ali","Noble Route",0507001003,AE-ZAI-008,DXB-2003,green,1000
+TRV-00152,"Omar Farooq","Imdad International Travel Agency",03001234569,PK-OMA-009,,none,0
+TRV-00153,"Hamza Khan","Noble Route",0507001004,AE-HAM-010,DXB-2004,blue,1800
