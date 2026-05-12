@@ -1152,6 +1152,9 @@ final class WorkspaceController extends BaseController
         $invoiceOutstandingMap = is_array($summary['invoiceOutstanding'] ?? null)
             ? $summary['invoiceOutstanding']
             : [];
+        $fullCustomerOutstandingMap = is_array($summary['fullCustomerOutstanding'] ?? null)
+            ? $summary['fullCustomerOutstanding']
+            : [];
         $previousBalanceMap = is_array($summary['previousBalance'] ?? null)
             ? $summary['previousBalance']
             : [];
@@ -1210,6 +1213,7 @@ final class WorkspaceController extends BaseController
             'total_receivable' => round($totalReceivable, 2),
             'total_payable' => round($totalPayable, 2),
             'current_invoice_currency' => $invoiceCurrency,
+            'full_customer_outstanding_map' => $fullCustomerOutstandingMap,
             'previous_balance_map' => $previousBalanceMap,
             'other_currency_previous_balance_map' => $otherCurrencyPreviousBalanceMap,
             'same_currency_previous_balance' => round($previousBalance, 2),

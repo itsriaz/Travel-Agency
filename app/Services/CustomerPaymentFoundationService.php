@@ -127,8 +127,20 @@ final class CustomerPaymentFoundationService extends Service
         }
         foreach ($receipts as $receiptRow) {
             $currency = (string) $receiptRow['currency'];
-            $invoiceReceived[$currency] = ($invoiceReceived[$currency] ?? 0) + (float) $receiptRow['receivedAmount'];
             $customerCredit[$currency] = ($customerCredit[$currency] ?? 0) + (float) $receiptRow['unallocatedAmount'];
+        }
+        foreach ($allocations as $allocationRow) {
+            if ((string) ($allocationRow['bookingReference'] ?? '') !== $bookingReference) {
+                continue;
+            }
+
+            $currency = (string) ($allocationRow['receivableCurrency'] ?? $allocationRow['currency'] ?? '');
+            if ($currency === '') {
+                continue;
+            }
+
+            $invoiceReceived[$currency] = ($invoiceReceived[$currency] ?? 0)
+                + (float) ($allocationRow['receivableAmountAllocated'] ?? $allocationRow['allocatedAmount'] ?? 0);
         }
 
         $invoiceCurrency = '';

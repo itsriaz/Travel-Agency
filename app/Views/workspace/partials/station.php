@@ -103,11 +103,15 @@ $effectiveCurrentInvoiceDueValue = $effectiveCurrentInvoiceDueValue > 0.005
     : ($currentInvoiceAmountValue > 0.005 ? $currentInvoiceAmountValue : 0.0);
 $currentInvoiceAmount = $invoiceCurrency . ' ' . number_format($currentInvoiceAmountValue, 2);
 $currentInvoiceBalance = $invoiceCurrency . ' ' . number_format($effectiveCurrentInvoiceDueValue, 2);
-$customerOpenBalanceTotals = $previousBalanceTotals;
-$customerOpenBalanceTotals[$invoiceCurrency] = round(
-    (float) ($customerOpenBalanceTotals[$invoiceCurrency] ?? 0) + $effectiveCurrentInvoiceDueValue,
-    2
-);
+$customerOpenBalanceTotals = is_array($customerPaymentFoundation['summary']['fullCustomerOutstanding'] ?? null)
+    ? $customerPaymentFoundation['summary']['fullCustomerOutstanding']
+    : [];
+if ($effectiveCurrentInvoiceDueValue > 0.005) {
+    $customerOpenBalanceTotals[$invoiceCurrency] = round(
+        max((float) ($customerOpenBalanceTotals[$invoiceCurrency] ?? 0), $effectiveCurrentInvoiceDueValue),
+        2
+    );
+}
 $visibleCustomerOpenBalanceTotals = array_filter(
     $customerOpenBalanceTotals,
     static fn (float $amount): bool => abs($amount) > 0.005
@@ -668,9 +672,9 @@ $supplierAdvanceBalanceTotals = $sumByCurrency($supplierFoundation['advances'] ?
             </header>
             <div class="customer-picker-modal__body">
                 <div class="workspace-feedback workspace-feedback--inline" data-payment-history-summary style="display:block;margin-bottom:12px;">
-                    Still Due:
+                    Outstanding Balance:
                     <strong><?= e($formatCurrencyTotals(array_filter(
-                        (array) ($customerPaymentFoundation['summary']['customerOutstanding'] ?? []),
+                        (array) ($customerPaymentFoundation['summary']['fullCustomerOutstanding'] ?? []),
                         static fn ($amount): bool => abs((float) $amount) > 0.005
                     ) ?: ['PKR' => 0])) ?></strong>
                 </div>

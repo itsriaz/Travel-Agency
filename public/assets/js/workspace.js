@@ -721,18 +721,22 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         const previousBalanceMap = parseBalanceMap(
-            paymentPreviousBalanceInput.dataset.paymentPreviousBalanceMap
-            || paymentPreviousBalanceInput.dataset.paymentOpenBalanceMap
-            || '{}'
+            paymentPreviousBalanceInput.dataset.paymentPreviousBalanceMap || '{}'
         );
-        const openBalanceMap = { ...previousBalanceMap };
+        const fullOpenBalanceMap = parseBalanceMap(
+            paymentPreviousBalanceInput.dataset.paymentOpenBalanceMap || '{}'
+        );
+        const hasFullOpenBalanceMap = Object.keys(fullOpenBalanceMap).length > 0;
+        const openBalanceMap = {
+            ...(hasFullOpenBalanceMap ? fullOpenBalanceMap : previousBalanceMap),
+        };
         const normalizedCurrency = currentInvoiceCurrency || paymentCurrentInvoiceInput?.dataset.paymentCurrency || 'PKR';
         const normalizedInvoiceBalance = Math.max(toNumber(currentInvoiceBalance), 0);
 
         if (normalizedInvoiceBalance > 0.005) {
-            openBalanceMap[normalizedCurrency] = roundToTwo(
-                toNumber(openBalanceMap[normalizedCurrency] || 0) + normalizedInvoiceBalance
-            );
+            openBalanceMap[normalizedCurrency] = hasFullOpenBalanceMap
+                ? roundToTwo(Math.max(toNumber(openBalanceMap[normalizedCurrency] || 0), normalizedInvoiceBalance))
+                : roundToTwo(toNumber(openBalanceMap[normalizedCurrency] || 0) + normalizedInvoiceBalance);
         } else if (!Object.prototype.hasOwnProperty.call(openBalanceMap, normalizedCurrency)) {
             openBalanceMap[normalizedCurrency] = 0;
         }
@@ -914,6 +918,14 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     const customerOutstandingByCurrency = () => {
+        const datasetTotals = paymentPreviousBalanceInput
+            ? parseBalanceMap(paymentPreviousBalanceInput.dataset.paymentOpenBalanceMap || '{}')
+            : {};
+        const datasetEntries = Object.entries(datasetTotals).filter(([, amount]) => Math.abs(toNumber(amount || 0)) > 0.005);
+        if (datasetEntries.length > 0) {
+            return Object.fromEntries(datasetEntries.map(([currency, amount]) => [currency, roundToTwo(toNumber(amount || 0))]));
+        }
+
         const totals = {};
         customerOpenReceivables.forEach((row) => {
             const currency = String(row?.currency || '').trim().toUpperCase();
@@ -956,7 +968,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const renderPaymentHistoryModal = () => {
         if (paymentHistorySummary instanceof HTMLElement) {
-            paymentHistorySummary.innerHTML = `Still Due:<strong>${formatCurrencyTotalsInline(customerOutstandingByCurrency())}</strong>`;
+            paymentHistorySummary.innerHTML = `Outstanding Balance:<strong>${formatCurrencyTotalsInline(customerOutstandingByCurrency())}</strong>`;
         }
 
         if (paymentHistoryReceiptsBody instanceof HTMLElement) {
@@ -3865,6 +3877,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const previousBalanceMap = totals.previous_balance_map && typeof totals.previous_balance_map === 'object'
             ? totals.previous_balance_map
             : null;
+        const fullCustomerOutstandingMap = totals.full_customer_outstanding_map && typeof totals.full_customer_outstanding_map === 'object'
+            ? totals.full_customer_outstanding_map
+            : null;
         const otherCurrencyPreviousBalanceMap = totals.other_currency_previous_balance_map && typeof totals.other_currency_previous_balance_map === 'object'
             ? totals.other_currency_previous_balance_map
             : null;
@@ -3951,7 +3966,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         if (paymentPreviousBalanceInput && previousBalanceMap) {
             paymentPreviousBalanceInput.dataset.paymentPreviousBalanceMap = JSON.stringify(previousBalanceMap);
-            paymentPreviousBalanceInput.dataset.paymentOpenBalanceMap = JSON.stringify(previousBalanceMap);
+            paymentPreviousBalanceInput.dataset.paymentOpenBalanceMap = JSON.stringify(fullCustomerOutstandingMap || previousBalanceMap);
         }
 
         if (serviceFields.currency && currentBookingId() <= 0 && Number.parseInt(String(serviceFields.serviceId?.value || '0'), 10) <= 0) {
