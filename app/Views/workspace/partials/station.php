@@ -590,6 +590,7 @@ $supplierAdvanceBalanceTotals = $sumByCurrency($supplierFoundation['advances'] ?
             <div class="legacy-service-context" style="margin:10px 0 6px;"><strong>Actions</strong></div>
             <div class="legacy-payment-actions">
                 <button class="btn btn-primary btn-sm legacy-payment-primary" type="button" name="receipt_action" value="save" data-payment-submit-action="save" data-payment-action="save-payment">Save Payment</button>
+                <button class="btn btn-sm" type="button" data-payment-action="new-payment">New Payment</button>
                 <button class="btn btn-sm" type="button" data-payment-exchange-settlement data-payment-action="exchange-settlement">Exchange Settlement</button>
                 <span class="workspace-feedback workspace-feedback--inline" style="display:block;">Current invoice only. Same-currency Save Payment stays unchanged.</span>
                 <button class="btn btn-sm" type="button" data-workspace-action="payment-history" data-workflow-control="payment-history" data-payment-action="payment-history">Payment History</button>
