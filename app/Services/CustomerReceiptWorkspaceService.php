@@ -481,6 +481,10 @@ final class CustomerReceiptWorkspaceService extends Service
 
         foreach ($receivables as $receivable) {
             if ((int) ($receivable['id'] ?? 0) === $targetReceivableId) {
+                if ((string) ($receivable['booking_reference'] ?? '') !== (string) ($booking['booking_reference'] ?? '')) {
+                    throw new RuntimeException('Phase 1 exchange settlement only supports the current invoice.');
+                }
+
                 return $receivable;
             }
         }

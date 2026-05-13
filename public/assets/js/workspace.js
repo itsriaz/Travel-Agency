@@ -224,6 +224,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const paymentExchangeModal = station.querySelector('[data-payment-exchange-modal]');
     const paymentExchangeCloseButtons = Array.from(station.querySelectorAll('[data-payment-exchange-close]'));
     const paymentExchangeTargetSelect = station.querySelector('[data-payment-exchange-target]');
+    const paymentExchangeInvoiceNoInput = station.querySelector('[data-payment-exchange-invoice-no]');
+    const paymentExchangeInvoiceCurrencyInput = station.querySelector('[data-payment-exchange-invoice-currency]');
     const paymentExchangeTargetCurrencyInput = station.querySelector('[data-payment-exchange-target-currency]');
     const paymentExchangeTargetBalanceInput = station.querySelector('[data-payment-exchange-target-balance]');
     const paymentExchangePaymentCurrencyInput = station.querySelector('[data-payment-exchange-payment-currency]');
@@ -893,6 +895,18 @@ document.addEventListener('DOMContentLoaded', () => {
         ].join(' / ');
     };
 
+    const currentInvoiceExchangeTargets = () => {
+        const snapshot = currentInvoiceSnapshot();
+        const invoiceCurrency = String(snapshot.invoiceCurrency || 'PKR').toUpperCase();
+
+        return currentSettlementTargets().filter((row) => {
+            const rowCurrency = String(row.currency || 'PKR').toUpperCase();
+            return row.isCurrentBooking && rowCurrency === invoiceCurrency && toNumber(row.outstandingAmount || 0) > 0.005;
+        });
+    };
+
+    const currentInvoiceExchangeTarget = () => currentInvoiceExchangeTargets()[0] || null;
+
     const replaceSettlementData = (nextReceivables = [], nextRates = {}) => {
         customerOpenReceivables = Array.isArray(nextReceivables) ? nextReceivables : [];
         dailySettlementRates = nextRates && typeof nextRates === 'object' ? nextRates : {};
@@ -1073,7 +1087,7 @@ document.addEventListener('DOMContentLoaded', () => {
         return snapshot.invoiceAmount > 0.005 || snapshot.invoiceBalance > 0.005 || snapshot.invoicePaid > 0.005;
     };
 
-    const hasCurrentInvoiceSettlementTarget = () => currentSettlementTargets().some((row) => row.isCurrentBooking);
+    const hasCurrentInvoiceSettlementTarget = () => currentInvoiceExchangeTargets().length > 0;
 
     const shouldAutoTriggerExchangeSettlement = (paymentCurrency) => {
         const normalizedPaymentCurrency = String(paymentCurrency || '').trim().toUpperCase();
@@ -1148,8 +1162,8 @@ document.addEventListener('DOMContentLoaded', () => {
             return null;
         }
 
-        const targets = currentSettlementTargets();
-        const target = targets.find((row) => Number.parseInt(String(row.id || 0), 10) === Number.parseInt(String(paymentExchangeTargetSelect.value || '0'), 10)) || null;
+        const invoiceSnapshot = currentInvoiceSnapshot();
+        const target = currentInvoiceExchangeTarget();
         if (!target) {
             return null;
         }
@@ -1160,7 +1174,12 @@ document.addEventListener('DOMContentLoaded', () => {
             : receivedNowInput?.value || 0;
         const paymentAmount = Math.max(toNumber(paymentAmountSource || 0), 0);
         const targetCurrency = String(target.currency || 'PKR');
-        const targetBalance = Math.max(toNumber(target.outstandingAmount || 0), 0);
+        const targetBalance = Math.max(
+            toNumber(invoiceSnapshot.invoiceBalance || 0) > 0.005
+                ? invoiceSnapshot.invoiceBalance
+                : target.outstandingAmount || 0,
+            0
+        );
         const rateDate = paymentSettlementRateDateInput?.value || normalizeLooseDate(paymentReceiptDateInput?.value || '') || new Date().toISOString().slice(0, 10);
         const chosenQuote = preferredSettlementQuote(targetCurrency, paymentCurrency, dailySettlementRates, rateDate);
         const quote = {
@@ -1169,6 +1188,12 @@ document.addEventListener('DOMContentLoaded', () => {
             paymentCurrency,
         };
 
+        if (paymentExchangeInvoiceNoInput) {
+            paymentExchangeInvoiceNoInput.value = String(invoiceSnapshot.invoiceNo || target.bookingReference || '').trim();
+        }
+        if (paymentExchangeInvoiceCurrencyInput) {
+            paymentExchangeInvoiceCurrencyInput.value = String(invoiceSnapshot.invoiceCurrency || targetCurrency || 'PKR');
+        }
         if (paymentExchangeTargetCurrencyInput) {
             paymentExchangeTargetCurrencyInput.value = targetCurrency;
         }
@@ -1240,7 +1265,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const remainingPaymentAmount = roundToTwo(Math.max(paymentAmount - paymentConsumed, 0));
         const samePaymentCurrencyOtherBalance = roundToTwo(
             currentSettlementTargets()
-                .filter((row) => Number.parseInt(String(row.id || 0), 10) !== Number.parseInt(String(target.id || 0), 10))
+                .filter((row) => !row.isCurrentBooking)
                 .filter((row) => String(row.currency || 'PKR') === paymentCurrency)
                 .reduce((carry, row) => carry + Math.max(toNumber(row.outstandingAmount || 0), 0), 0)
         );
@@ -1669,8 +1694,19 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (paymentExchangeSettlementButton) {
-        paymentExchangeSettlementButton.addEventListener('click', () => {
-            showFeedback('Exchange Settlement is temporarily disabled for final testing.');
+        paymentExchangeSettlementButton.addEventListener('click', async () => {
+            const invoiceSnapshot = currentInvoiceSnapshot();
+            const selectedPaymentCurrency = paymentCurrencySelect?.value || invoiceSnapshot.invoiceCurrency || 'PKR';
+            if (invoiceSnapshot.invoiceBalance <= 0.005) {
+                showFeedback('No current invoice balance is available for exchange settlement.');
+                return;
+            }
+            if (selectedPaymentCurrency === invoiceSnapshot.invoiceCurrency) {
+                showFeedback('Use Save Payment for same-currency receipts.');
+                return;
+            }
+
+            await openExchangeSettlementModal();
         });
     }
 
@@ -1962,16 +1998,19 @@ document.addEventListener('DOMContentLoaded', () => {
             const invoiceSnapshot = currentInvoiceSnapshot();
             syncPaymentCurrencyLabels(selectedPaymentCurrency);
 
-            if (isExchangeSettlement) {
-                showFeedback('Exchange Settlement is temporarily disabled for final testing.');
-                clearExchangeSettlementFields();
+            if (selectedPaymentCurrency !== invoiceSnapshot.invoiceCurrency) {
+                if (invoiceSnapshot.invoiceBalance > 0.005) {
+                    clearExchangeSettlementFields();
+                    await openExchangeSettlementModal();
+                    return;
+                }
+
+                showFeedback('Cross-currency settlement is under final testing. Please use same-currency payment for now.');
                 return;
             }
 
-            if (invoiceSnapshot.invoiceBalance > 0.005 && selectedPaymentCurrency !== invoiceSnapshot.invoiceCurrency) {
+            if (isExchangeSettlement) {
                 clearExchangeSettlementFields();
-                showFeedback('Cross-currency settlement is under final testing. Please use same-currency payment for now.');
-                return;
             }
 
             if (sameCurrencyDueNow <= 0.005) {
@@ -4788,25 +4827,21 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         await ensureExchangeSettlementTargetsReady();
-        const targets = currentSettlementTargets();
-        if (targets.length === 0) {
+        const target = currentInvoiceExchangeTarget();
+        if (!target) {
             const message = currentInvoiceNeedsSettlementTarget()
                 ? 'Save the current invoice first so it becomes available for exchange settlement.'
-                : 'No open receivable is available for exchange settlement.';
+                : 'No current invoice receivable is available for exchange settlement.';
             showFeedback(message);
             return;
         }
 
         paymentExchangeTargetSelect.innerHTML = '';
-        targets.forEach((target) => {
-            const option = document.createElement('option');
-            option.value = String(target.id || 0);
-            option.textContent = settlementTargetLabel(target);
-            if (target.isCurrentBooking && toNumber(target.outstandingAmount || 0) > 0.005 && paymentExchangeTargetSelect.options.length === 0) {
-                option.selected = true;
-            }
-            paymentExchangeTargetSelect.appendChild(option);
-        });
+        const option = document.createElement('option');
+        option.value = String(target.id || 0);
+        option.textContent = settlementTargetLabel(target);
+        option.selected = true;
+        paymentExchangeTargetSelect.appendChild(option);
 
         clearExchangeSettlementFields();
         if (paymentExchangePaymentAmountInput) {

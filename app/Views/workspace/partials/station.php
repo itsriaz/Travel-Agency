@@ -591,7 +591,7 @@ $supplierAdvanceBalanceTotals = $sumByCurrency($supplierFoundation['advances'] ?
             <div class="legacy-payment-actions">
                 <button class="btn btn-primary btn-sm legacy-payment-primary" type="button" name="receipt_action" value="save" data-payment-submit-action="save" data-payment-action="save-payment">Save Payment</button>
                 <button class="btn btn-sm" type="button" data-payment-exchange-settlement data-payment-action="exchange-settlement">Exchange Settlement</button>
-                <span class="workspace-feedback workspace-feedback--inline" style="display:block;">Exchange Settlement is temporarily disabled for final testing.</span>
+                <span class="workspace-feedback workspace-feedback--inline" style="display:block;">Current invoice only. Same-currency Save Payment stays unchanged.</span>
                 <button class="btn btn-sm" type="button" data-workspace-action="payment-history" data-workflow-control="payment-history" data-payment-action="payment-history">Payment History</button>
                 <a class="btn btn-sm" href="<?= e($ledgerUrl) ?>" <?= $workspaceBooking['id'] > 0 ? 'target="_blank" rel="noopener"' : '' ?> data-payment-action="customer-ledger">View Customer Ledger</a>
                 <button class="btn btn-success btn-sm legacy-payment-receipt" type="button" data-payment-action="print-receipt" data-payment-print-url="<?= e($latestReceiptUrl) ?>" data-payment-latest-receipt-id="<?= e((string) $latestReceiptId) ?>">Print Receipt</button>
@@ -760,13 +760,15 @@ $supplierAdvanceBalanceTotals = $sumByCurrency($supplierFoundation['advances'] ?
             <header class="customer-picker-modal__header">
                 <div>
                     <strong id="payment-exchange-title">Exchange Settlement</strong>
-                    <span>Choose the settlement target first, then confirm payment currency and today&apos;s rate.</span>
+                    <span>Confirm current-invoice cross-currency settlement using today&apos;s exact rate.</span>
                 </div>
                 <button class="btn btn-sm" type="button" data-payment-exchange-close>Close</button>
             </header>
             <div class="customer-picker-modal__body">
                 <div class="station-form-grid station-form-grid--6 station-form-grid--inline">
-                    <label class="station-field span-6"><span>Settlement Target</span><select data-payment-exchange-target></select></label>
+                    <label class="station-field span-3"><span>Current Invoice No.</span><input type="text" value="<?= e($invoiceNoLabel) ?>" readonly data-payment-exchange-invoice-no></label>
+                    <label class="station-field span-3"><span>Invoice Currency</span><input type="text" value="<?= e($invoiceCurrency) ?>" readonly data-payment-exchange-invoice-currency></label>
+                    <label class="station-field span-6" hidden><span>Settlement Target</span><select data-payment-exchange-target></select></label>
                     <label class="station-field span-2"><span>Target Currency</span><input type="text" value="" readonly data-payment-exchange-target-currency></label>
                     <label class="station-field span-2"><span>Target Balance</span><input type="text" value="" readonly data-payment-exchange-target-balance></label>
                     <label class="station-field span-2"><span>Payment Currency</span><input type="text" value="" readonly data-payment-exchange-payment-currency></label>
@@ -778,24 +780,24 @@ $supplierAdvanceBalanceTotals = $sumByCurrency($supplierFoundation['advances'] ?
                 <div class="workspace-feedback workspace-feedback--inline" data-payment-exchange-feedback hidden></div>
                 <div class="legacy-modal-grid top-gap">
                     <article>
-                        <h3>Settlement Preview</h3>
+                        <h3>Settlement Summary</h3>
                         <table class="legacy-table">
                             <tbody>
-                            <tr><th>Payment Required to Fully Clear Target</th><td data-payment-exchange-preview-required>0.00</td></tr>
-                            <tr><th>Amount Settled in Target Currency</th><td data-payment-exchange-preview-settled>0.00</td></tr>
-                            <tr><th>Payment Amount Consumed</th><td data-payment-exchange-preview-consumed>0.00</td></tr>
-                            <tr><th>Remaining Target Balance</th><td data-payment-exchange-preview-target-remaining>0.00</td></tr>
-                            <tr><th>Remaining Payment Amount</th><td data-payment-exchange-preview-payment-remaining>0.00</td></tr>
-                            <tr><th>Auto-Apply to Same Payment Currency Dues</th><td data-payment-exchange-preview-auto-apply>0.00</td></tr>
-                            <tr><th>Return / Credit After Same-Currency Dues</th><td data-payment-exchange-preview-return>0.00</td></tr>
+                            <tr><th>Invoice Amount Settled</th><td data-payment-exchange-preview-settled>0.00</td></tr>
+                            <tr><th>Payment Amount Used</th><td data-payment-exchange-preview-consumed>0.00</td></tr>
+                            <tr><th>Remaining Invoice Balance</th><td data-payment-exchange-preview-target-remaining>0.00</td></tr>
+                            <tr><th>Credit / Return</th><td data-payment-exchange-preview-return>0.00</td></tr>
+                            <tr><th hidden>Payment Required to Fully Clear Target</th><td hidden data-payment-exchange-preview-required>0.00</td></tr>
+                            <tr><th hidden>Remaining Payment Amount</th><td hidden data-payment-exchange-preview-payment-remaining>0.00</td></tr>
+                            <tr><th hidden>Auto-Apply to Same Payment Currency Dues</th><td hidden data-payment-exchange-preview-auto-apply>0.00</td></tr>
                             </tbody>
                         </table>
                     </article>
                     <article>
                         <h3>Rules</h3>
                         <div class="workspace-feedback workspace-feedback--inline" style="display:block;">
-                            Normal Save Payment remains same-currency only.
-                            Exchange Settlement settles the selected target first, then uses any remaining payment only on older dues in the same payment currency.
+                            Save Payment remains unchanged for same-currency receipts.
+                            This flow settles the current invoice first, then uses any remaining payment only on older dues in the same payment currency.
                         </div>
                     </article>
                 </div>
