@@ -306,8 +306,10 @@ final class ReportRepository extends BaseRepository
     {
         [$clause, $params] = $this->branchScope($branchIds);
         $sql = 'SELECT
+                    b.id AS booking_id,
                     b.branch_id,
                     br.name AS branch_name,
+                    b.booking_date,
                     cri.booking_reference,
                     bp.lead_traveler_name,
                     cri.service_line_reference,
@@ -324,7 +326,17 @@ final class ReportRepository extends BaseRepository
                 WHERE cri.outstanding_amount > 0
                   AND cri.status IN ("open", "partially_paid")
                   AND b.branch_id ' . $clause . '
-                ORDER BY br.name ASC, cri.currency ASC, cri.due_date IS NULL, cri.due_date ASC, cri.booking_reference ASC';
+                ORDER BY
+                    CASE
+                        WHEN overdue_days > 90 THEN 1
+                        WHEN overdue_days > 60 THEN 2
+                        WHEN overdue_days > 30 THEN 3
+                        WHEN overdue_days > 0 THEN 4
+                        ELSE 5
+                    END ASC,
+                    cri.due_date IS NULL ASC,
+                    cri.due_date ASC,
+                    cri.booking_reference ASC';
 
         $statement = $this->db->prepare($sql);
         $statement->execute(array_merge([

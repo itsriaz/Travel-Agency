@@ -111,6 +111,9 @@ final class ReportService extends Service
                 $columns = [
                     ['key' => 'branch_name', 'label' => 'Branch'],
                     ['key' => 'booking_reference', 'label' => 'Booking'],
+                    ['key' => 'invoice_date', 'label' => 'Invoice Date'],
+                    ['key' => 'due_date', 'label' => 'Due Date'],
+                    ['key' => 'age_label', 'label' => 'Age'],
                     ['key' => 'lead_traveler_name', 'label' => 'Customer'],
                     ['key' => 'service_line_reference', 'label' => 'Svc Line'],
                     ['key' => 'currency', 'label' => 'Curr.'],
@@ -576,12 +579,16 @@ final class ReportService extends Service
         foreach ($rows as $row) {
             $amount = (float) ($row['outstanding_amount'] ?? 0);
             $currency = (string) ($row['currency'] ?? 'PKR');
-            $bucket = $this->agingBucket((int) ($row['overdue_days'] ?? 0));
+            $overdueDays = (int) ($row['overdue_days'] ?? 0);
+            $bucket = $this->agingBucket($overdueDays);
             $pkrAmount = $this->convertToPkr($amount, $currency, $pkrRates, $row);
 
             $reportRow = [
                 'branch_name' => (string) ($row['branch_name'] ?? ''),
                 'booking_reference' => (string) ($row['booking_reference'] ?? ''),
+                'invoice_date' => (string) (($row['booking_date'] ?? '') !== '' ? $row['booking_date'] : 'N/A'),
+                'due_date' => (string) (($row['due_date'] ?? '') !== '' ? $row['due_date'] : 'N/A'),
+                'age_label' => $this->receivableAgeLabel($overdueDays),
                 'lead_traveler_name' => (string) (($row['lead_traveler_name'] ?? '') !== '' ? $row['lead_traveler_name'] : 'Booking Party'),
                 'service_line_reference' => (string) ($row['service_line_reference'] ?? ''),
                 'currency' => $currency,
@@ -603,6 +610,38 @@ final class ReportService extends Service
         }
 
         return [$reportRows, $this->currencySummaryCards('Outstanding', $summary, $pkrSummary)];
+    }
+
+    private function receivableAgeLabel(int $overdueDays): string
+    {
+        if ($overdueDays <= 0) {
+            return 'Not due';
+        }
+
+        if ($overdueDays === 1) {
+            return '1 day overdue';
+        }
+
+        if ($overdueDays <= 30) {
+            return $overdueDays . ' days overdue';
+        }
+
+        if ($overdueDays < 365) {
+            $months = max(1, (int) floor($overdueDays / 30));
+            return $months . ' month' . ($months === 1 ? '' : 's') . ' overdue';
+        }
+
+        $years = (int) floor($overdueDays / 365);
+        $remainingDays = $overdueDays % 365;
+        $months = (int) floor($remainingDays / 30);
+
+        $label = $years . ' year' . ($years === 1 ? '' : 's') . ' overdue';
+        if ($months > 0) {
+            $label = $years . ' year' . ($years === 1 ? '' : 's') . ' '
+                . $months . ' month' . ($months === 1 ? '' : 's') . ' overdue';
+        }
+
+        return $label;
     }
 
     private function cashFlowReport(array $data, array $pkrRates): array
