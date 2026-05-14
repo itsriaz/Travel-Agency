@@ -151,9 +151,14 @@ final class ReportService extends Service
                 $columns = [
                     ['key' => 'branch_name', 'label' => 'Branch'],
                     ['key' => 'booking_reference', 'label' => 'Booking'],
+                    ['key' => 'booking_date', 'label' => 'Booking Date'],
+                    ['key' => 'due_date', 'label' => 'Due Date'],
+                    ['key' => 'age_label', 'label' => 'Age'],
                     ['key' => 'supplier_name', 'label' => 'Supplier'],
                     ['key' => 'service_line_reference', 'label' => 'Svc Line'],
                     ['key' => 'currency', 'label' => 'Curr.'],
+                    ['key' => 'gross_amount', 'label' => 'Gross Amount'],
+                    ['key' => 'advance_applied_amount', 'label' => 'Advance Applied'],
                     ['key' => 'current_bucket', 'label' => 'Current'],
                     ['key' => 'bucket_1_30', 'label' => '1-30'],
                     ['key' => 'bucket_31_60', 'label' => '31-60'],
@@ -843,16 +848,25 @@ final class ReportService extends Service
 
         foreach ($rows as $row) {
             $amount = (float) ($row['net_payable_amount'] ?? 0);
+            $grossAmount = (float) ($row['gross_amount'] ?? 0);
+            $advanceAppliedAmount = (float) ($row['advance_applied_amount'] ?? 0);
             $currency = (string) ($row['currency'] ?? 'PKR');
-            $bucket = $this->agingBucket((int) ($row['overdue_days'] ?? 0));
+            $overdueDays = (int) ($row['overdue_days'] ?? 0);
+            $bucket = $this->agingBucket($overdueDays);
             $pkrAmount = $this->convertToPkr($amount, $currency, $pkrRates, $row);
 
             $reportRow = [
                 'branch_name' => (string) ($row['branch_name'] ?? ''),
+                'booking_id' => (int) ($row['booking_id'] ?? 0),
                 'booking_reference' => (string) ($row['booking_reference'] ?? ''),
+                'booking_date' => (string) (($row['booking_date'] ?? '') !== '' ? $row['booking_date'] : 'N/A'),
+                'due_date' => (string) (($row['due_date'] ?? '') !== '' ? $row['due_date'] : 'N/A'),
+                'age_label' => $this->receivableAgeLabel($overdueDays),
                 'supplier_name' => (string) ($row['supplier_name'] ?? ''),
                 'service_line_reference' => (string) ($row['service_line_reference'] ?? ''),
                 'currency' => $currency,
+                'gross_amount' => $this->money($grossAmount),
+                'advance_applied_amount' => $this->money($advanceAppliedAmount),
                 'current_bucket' => '',
                 'bucket_1_30' => '',
                 'bucket_31_60' => '',
