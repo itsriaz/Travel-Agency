@@ -7,6 +7,7 @@ namespace App\Services;
 use App\Repositories\AccountingRepository;
 use App\Repositories\BookingRepository;
 use App\Repositories\SupplierRepository;
+use PDO;
 use RuntimeException;
 
 final class SupplierSettlementWorkspaceService extends Service
@@ -21,33 +22,74 @@ final class SupplierSettlementWorkspaceService extends Service
         $supplier = $this->resolveSupplier($input, $accessibleBranchIds);
         $payload = $this->validatedPaymentPayload($input);
 
+        /** @var PDO $db */
+        $db = $this->app->get('db');
         $repository = new SupplierRepository($this->app);
-        $paymentNo = $repository->nextSupplierPaymentNumber();
-        $paymentId = $repository->createSupplierPayment(array_merge($payload, [
-            'supplier_id' => (int) $supplier['id'],
-            'branch_id' => (int) $booking['branch_id'],
-            'booking_reference' => (string) $booking['booking_reference'],
-            'payment_no' => $paymentNo,
-            'actor_user_id' => $actorUserId,
-        ]));
+        $accounting = new AccountingRepository($this->app);
 
-        if ($payload['status'] !== 'void') {
-            (new AccountingRepository($this->app))->postSupplierPaymentRecorded([
+        $startedTransaction = false;
+        if (! $db->inTransaction()) {
+            $db->beginTransaction();
+            $startedTransaction = true;
+        }
+
+        try {
+            $paymentNo = $repository->nextSupplierPaymentNumber();
+            $paymentId = $repository->createSupplierPayment(array_merge($payload, [
+                'supplier_id' => (int) $supplier['id'],
                 'branch_id' => (int) $booking['branch_id'],
                 'booking_reference' => (string) $booking['booking_reference'],
                 'payment_no' => $paymentNo,
-                'paid_amount' => $payload['paid_amount'],
-                'charges_amount' => $payload['charges_amount'],
-                'payment_method' => $payload['payment_method'],
-                'entry_date' => $payload['payment_date'],
-                'currency' => $payload['currency'],
                 'actor_user_id' => $actorUserId,
-            ]);
+            ]));
+
+            if ($payload['status'] !== 'void') {
+                $accounting->postSupplierPaymentRecorded([
+                    'branch_id' => (int) $booking['branch_id'],
+                    'booking_reference' => (string) $booking['booking_reference'],
+                    'payment_no' => $paymentNo,
+                    'paid_amount' => $payload['paid_amount'],
+                    'charges_amount' => $payload['charges_amount'],
+                    'payment_method' => $payload['payment_method'],
+                    'entry_date' => $payload['payment_date'],
+                    'currency' => $payload['currency'],
+                    'actor_user_id' => $actorUserId,
+                ]);
+            }
+
+            $payment = $repository->findSupplierPaymentById($paymentId);
+            if ($payment === null) {
+                throw new RuntimeException('The saved supplier payment could not be reloaded.');
+            }
+
+            $autoAllocation = $this->autoAllocateSupplierPaymentToBookingObligations(
+                $booking,
+                $payment,
+                $accounting,
+                $repository,
+                $actorUserId
+            );
+            $payment = $repository->findSupplierPaymentById($paymentId);
+
+            if ($startedTransaction && $db->inTransaction()) {
+                $db->commit();
+            }
+        } catch (\Throwable $exception) {
+            if ($startedTransaction && $db->inTransaction()) {
+                $db->rollBack();
+            }
+
+            if ($exception instanceof RuntimeException) {
+                throw $exception;
+            }
+
+            throw new RuntimeException('Supplier payment could not be saved safely.', 0, $exception);
         }
 
         return [
-            'payment' => $repository->findSupplierPaymentById($paymentId),
+            'payment' => $payment,
             'booking_id' => (int) $booking['id'],
+            'auto_allocation' => $autoAllocation,
         ];
     }
 
@@ -253,6 +295,87 @@ final class SupplierSettlementWorkspaceService extends Service
         }
 
         return $lines;
+    }
+
+    private function autoAllocateSupplierPaymentToBookingObligations(
+        array $booking,
+        array $payment,
+        AccountingRepository $accounting,
+        SupplierRepository $repository,
+        int $actorUserId
+    ): array {
+        $paymentStatus = (string) ($payment['status'] ?? '');
+        $unallocatedAmount = round((float) ($payment['unallocated_amount'] ?? 0), 2);
+        if ($paymentStatus === 'void' || $unallocatedAmount <= 0) {
+            return [
+                'allocation_count' => 0,
+                'allocated_amount' => 0.0,
+                'remaining_unallocated_amount' => $unallocatedAmount,
+            ];
+        }
+
+        $eligibleObligations = array_values(array_filter(
+            $repository->openObligationsForBooking((string) $booking['booking_reference']),
+            static function (array $obligation) use ($payment): bool {
+                return (int) ($obligation['supplier_id'] ?? 0) === (int) ($payment['supplier_id'] ?? 0)
+                    && (string) ($obligation['currency'] ?? '') === (string) ($payment['currency'] ?? '')
+                    && in_array((string) ($obligation['status'] ?? ''), ['open', 'partially_covered'], true)
+                    && (float) ($obligation['net_payable_amount'] ?? 0) > 0;
+            }
+        ));
+
+        $allocatedAmount = 0.0;
+        $allocationCount = 0;
+
+        foreach ($eligibleObligations as $obligation) {
+            $remainingUnallocated = round($unallocatedAmount - $allocatedAmount, 2);
+            if ($remainingUnallocated <= 0) {
+                break;
+            }
+
+            $obligationBalance = round((float) ($obligation['net_payable_amount'] ?? 0), 2);
+            if ($obligationBalance <= 0) {
+                continue;
+            }
+
+            $allocationAmount = min($remainingUnallocated, $obligationBalance);
+            if ($allocationAmount <= 0) {
+                continue;
+            }
+
+            // Automatic allocation is intentionally limited to the same booking,
+            // same supplier, and same currency. Any leftover stays unallocated
+            // for now; leftover-to-advance conversion is deferred to a later task.
+            $allocationId = $repository->allocateSupplierPayment(
+                (int) $payment['id'],
+                (int) $obligation['id'],
+                $allocationAmount,
+                null,
+                'Automatic same-booking same-supplier same-currency allocation on supplier payment save.',
+                $actorUserId
+            );
+
+            $accounting->postSupplierPaymentAllocation([
+                'branch_id' => (int) $booking['branch_id'],
+                'booking_reference' => (string) $booking['booking_reference'],
+                'source_reference' => (string) $payment['payment_no'] . '-AUTO-' . $allocationId,
+                'service_line_reference' => (string) ($obligation['service_line_reference'] ?? '') !== '' ? (string) $obligation['service_line_reference'] : null,
+                'supplier_obligation_id' => (int) $obligation['id'],
+                'allocated_amount' => $allocationAmount,
+                'entry_date' => (string) $payment['payment_date'],
+                'currency' => (string) $payment['currency'],
+                'actor_user_id' => $actorUserId,
+            ]);
+
+            $allocatedAmount = round($allocatedAmount + $allocationAmount, 2);
+            $allocationCount++;
+        }
+
+        return [
+            'allocation_count' => $allocationCount,
+            'allocated_amount' => $allocatedAmount,
+            'remaining_unallocated_amount' => round($unallocatedAmount - $allocatedAmount, 2),
+        ];
     }
 
     private function normalizeCurrency(string $value): string
