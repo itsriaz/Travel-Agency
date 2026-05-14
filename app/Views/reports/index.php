@@ -62,6 +62,22 @@ $exportQuery = http_build_query([
 ]);
 ?>
 
+<style>
+    .report-booking-link {
+        color: #0d6efd;
+        text-decoration: underline;
+    }
+
+    .report-booking-link:visited {
+        color: #6c757d;
+        text-decoration: underline;
+    }
+
+    .report-booking-link:hover {
+        text-decoration: underline;
+    }
+</style>
+
 <section class="page-head">
     <div>
         <h1>Reports</h1>
@@ -167,7 +183,17 @@ $exportQuery = http_build_query([
                 <?php foreach ($rows as $row): ?>
                     <tr>
                         <?php foreach ($columns as $column): ?>
-                            <td><?= e((string) ($row[$column['key']] ?? '')) ?></td>
+                            <td>
+                                <?php if ($selectedReport === 'receivable_aging'
+                                    && (string) ($column['key'] ?? '') === 'booking_reference'
+                                    && (int) ($row['booking_id'] ?? 0) > 0): ?>
+                                    <a class="report-booking-link" href="<?= e(url('/workspace?booking_id=' . (int) $row['booking_id'])) ?>">
+                                        <?= e((string) ($row[$column['key']] ?? '')) ?>
+                                    </a>
+                                <?php else: ?>
+                                    <?= e((string) ($row[$column['key']] ?? '')) ?>
+                                <?php endif; ?>
+                            </td>
                         <?php endforeach; ?>
                     </tr>
                 <?php endforeach; ?>

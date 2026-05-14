@@ -585,6 +585,7 @@ final class ReportService extends Service
 
             $reportRow = [
                 'branch_name' => (string) ($row['branch_name'] ?? ''),
+                'booking_id' => (int) ($row['booking_id'] ?? 0),
                 'booking_reference' => (string) ($row['booking_reference'] ?? ''),
                 'invoice_date' => (string) (($row['booking_date'] ?? '') !== '' ? $row['booking_date'] : 'N/A'),
                 'due_date' => (string) (($row['due_date'] ?? '') !== '' ? $row['due_date'] : 'N/A'),
