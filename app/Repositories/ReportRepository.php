@@ -54,12 +54,18 @@ final class ReportRepository extends BaseRepository
     public function managementSummary(array $branchIds, ?string $dateFrom, ?string $dateTo): array
     {
         [$clause, $params] = $this->branchScope($branchIds);
-        $dateParams = $params;
-        $bookingWindow = $this->bookingDateWindow('b.booking_date', $dateFrom, $dateTo, $dateParams);
+        $bookingParams = $params;
+        $receiptParams = $params;
+        $supplierPaymentParams = $params;
+        $receivableParams = $params;
+        $payableParams = $params;
+        $bookingWindow = $this->bookingDateWindow('b.booking_date', $dateFrom, $dateTo, $bookingParams);
+        $receiptWindow = $this->bookingDateWindow('cr.receipt_date', $dateFrom, $dateTo, $receiptParams);
+        $supplierPaymentWindow = $this->bookingDateWindow('sp.payment_date', $dateFrom, $dateTo, $supplierPaymentParams);
+        $receivableBookingWindow = $this->bookingDateWindow('b.booking_date', $dateFrom, $dateTo, $receivableParams);
+        $payableBookingWindow = $this->bookingDateWindow('b.booking_date', $dateFrom, $dateTo, $payableParams);
         $receivableAggregateSql = $this->receivableAggregateSql();
         $payableAggregateSql = $this->payableAggregateSql();
-        $receivableFormula = $this->serviceReceivableFormula('bs');
-        $payableFormula = $this->servicePayableFormula('bs');
 
         $branchRows = $this->fetchRows(
             'SELECT
@@ -76,8 +82,8 @@ final class ReportRepository extends BaseRepository
                     br.name AS branch_name,
                     bs.id AS service_id,
                     bs.currency,
-                    COALESCE(cri.due_amount, ' . $receivableFormula . ') AS receivable_amount,
-                    COALESCE(so.gross_amount, ' . $payableFormula . ') AS payable_amount
+                    COALESCE(cri.due_amount, 0) AS receivable_amount,
+                    COALESCE(so.gross_amount, 0) AS payable_amount
                 FROM booking_services bs
                 INNER JOIN bookings b ON b.id = bs.booking_id
                 INNER JOIN branches br ON br.id = b.branch_id
@@ -93,7 +99,7 @@ final class ReportRepository extends BaseRepository
                   AND bs.is_active = 1' . $bookingWindow . '
              ) AS financial_rows
              GROUP BY financial_rows.branch_id, financial_rows.branch_name, financial_rows.currency',
-            $dateParams
+            $bookingParams
         );
 
         $serviceTypeRows = $this->fetchRows(
@@ -113,8 +119,8 @@ final class ReportRepository extends BaseRepository
                     bs.id AS service_id,
                     bs.currency,
                     bs.service_type,
-                    COALESCE(cri.due_amount, ' . $receivableFormula . ') AS receivable_amount,
-                    COALESCE(so.gross_amount, ' . $payableFormula . ') AS payable_amount
+                    COALESCE(cri.due_amount, 0) AS receivable_amount,
+                    COALESCE(so.gross_amount, 0) AS payable_amount
                 FROM booking_services bs
                 INNER JOIN bookings b ON b.id = bs.booking_id
                 INNER JOIN branches br ON br.id = b.branch_id
@@ -131,7 +137,7 @@ final class ReportRepository extends BaseRepository
              ) AS financial_rows
              GROUP BY financial_rows.branch_id, financial_rows.branch_name, financial_rows.currency, financial_rows.service_type
              ORDER BY financial_rows.branch_name ASC, financial_rows.service_type ASC, financial_rows.currency ASC',
-            $dateParams
+            $bookingParams
         );
 
         $receiptRows = $this->fetchRows(
@@ -142,11 +148,10 @@ final class ReportRepository extends BaseRepository
                 SUM(cr.received_amount) AS total_received
              FROM customer_receipts cr
              INNER JOIN branches br ON br.id = cr.branch_id
-             INNER JOIN bookings b ON b.booking_reference = cr.booking_reference
              WHERE cr.branch_id ' . $clause . '
-               AND cr.status <> "void"' . $bookingWindow . '
+               AND cr.status <> "void"' . $receiptWindow . '
              GROUP BY cr.branch_id, br.name, cr.currency',
-            $dateParams
+            $receiptParams
         );
 
         $supplierPaymentRows = $this->fetchRows(
@@ -157,11 +162,10 @@ final class ReportRepository extends BaseRepository
                 SUM(sp.paid_amount + COALESCE(sp.charges_amount, 0)) AS total_supplier_paid
              FROM supplier_payments sp
              INNER JOIN branches br ON br.id = sp.branch_id
-             INNER JOIN bookings b ON b.booking_reference = sp.booking_reference
              WHERE sp.branch_id ' . $clause . '
-               AND sp.status <> "void"' . $bookingWindow . '
+               AND sp.status <> "void"' . $supplierPaymentWindow . '
              GROUP BY sp.branch_id, br.name, sp.currency',
-            $dateParams
+            $supplierPaymentParams
         );
 
         $receivableRows = $this->fetchRows(
@@ -174,9 +178,9 @@ final class ReportRepository extends BaseRepository
              INNER JOIN bookings b ON b.booking_reference = cri.booking_reference
              INNER JOIN branches br ON br.id = b.branch_id
              WHERE cri.outstanding_amount > 0
-               AND b.branch_id ' . $clause . $bookingWindow . '
+               AND b.branch_id ' . $clause . $receivableBookingWindow . '
              GROUP BY b.branch_id, br.name, cri.currency',
-            $dateParams
+            $receivableParams
         );
 
         $payableRows = $this->fetchRows(
@@ -189,9 +193,9 @@ final class ReportRepository extends BaseRepository
              INNER JOIN bookings b ON b.booking_reference = so.booking_reference
              INNER JOIN branches br ON br.id = b.branch_id
              WHERE so.net_payable_amount > 0
-               AND b.branch_id ' . $clause . $bookingWindow . '
+               AND b.branch_id ' . $clause . $payableBookingWindow . '
              GROUP BY b.branch_id, br.name, so.currency',
-            $dateParams
+            $payableParams
         );
 
         $expenseRows = $this->expenseSummary($branchIds, $dateFrom, $dateTo);
@@ -416,12 +420,18 @@ final class ReportRepository extends BaseRepository
     public function branchPerformance(array $branchIds, ?string $dateFrom, ?string $dateTo): array
     {
         [$clause, $params] = $this->branchScope($branchIds);
-        $dateParams = $params;
-        $bookingWindow = $this->bookingDateWindow('b.booking_date', $dateFrom, $dateTo, $dateParams);
+        $bookingParams = $params;
+        $receiptParams = $params;
+        $supplierPaymentParams = $params;
+        $receivableParams = $params;
+        $payableParams = $params;
+        $bookingWindow = $this->bookingDateWindow('b.booking_date', $dateFrom, $dateTo, $bookingParams);
+        $receiptWindow = $this->bookingDateWindow('cr.receipt_date', $dateFrom, $dateTo, $receiptParams);
+        $supplierPaymentWindow = $this->bookingDateWindow('sp.payment_date', $dateFrom, $dateTo, $supplierPaymentParams);
+        $receivableBookingWindow = $this->bookingDateWindow('b.booking_date', $dateFrom, $dateTo, $receivableParams);
+        $payableBookingWindow = $this->bookingDateWindow('b.booking_date', $dateFrom, $dateTo, $payableParams);
         $receivableAggregateSql = $this->receivableAggregateSql();
         $payableAggregateSql = $this->payableAggregateSql();
-        $receivableFormula = $this->serviceReceivableFormula('bs');
-        $payableFormula = $this->servicePayableFormula('bs');
 
         $bookingRows = $this->fetchRows(
             'SELECT b.branch_id, br.name AS branch_name, COUNT(*) AS booking_count
@@ -429,7 +439,7 @@ final class ReportRepository extends BaseRepository
              INNER JOIN branches br ON br.id = b.branch_id
              WHERE b.branch_id ' . $clause . $bookingWindow . '
              GROUP BY b.branch_id, br.name',
-            $dateParams
+            $bookingParams
         );
 
         $serviceRows = $this->fetchRows(
@@ -447,8 +457,8 @@ final class ReportRepository extends BaseRepository
                     br.name AS branch_name,
                     bs.id AS service_id,
                     bs.currency,
-                    COALESCE(cri.due_amount, ' . $receivableFormula . ') AS receivable_amount,
-                    COALESCE(so.gross_amount, ' . $payableFormula . ') AS payable_amount
+                    COALESCE(cri.due_amount, 0) AS receivable_amount,
+                    COALESCE(so.gross_amount, 0) AS payable_amount
                 FROM booking_services bs
                 INNER JOIN bookings b ON b.id = bs.booking_id
                 INNER JOIN branches br ON br.id = b.branch_id
@@ -464,7 +474,7 @@ final class ReportRepository extends BaseRepository
                   AND bs.is_active = 1' . $bookingWindow . '
              ) AS financial_rows
              GROUP BY financial_rows.branch_id, financial_rows.branch_name, financial_rows.currency',
-            $dateParams
+            $bookingParams
         );
 
         $receiptRows = $this->fetchRows(
@@ -475,11 +485,10 @@ final class ReportRepository extends BaseRepository
                 SUM(cr.received_amount) AS total_received
              FROM customer_receipts cr
              INNER JOIN branches br ON br.id = cr.branch_id
-             INNER JOIN bookings b ON b.booking_reference = cr.booking_reference
              WHERE cr.branch_id ' . $clause . '
-               AND cr.status <> "void"' . $bookingWindow . '
+               AND cr.status <> "void"' . $receiptWindow . '
              GROUP BY cr.branch_id, br.name, cr.currency',
-            $dateParams
+            $receiptParams
         );
 
         $supplierPaymentRows = $this->fetchRows(
@@ -490,11 +499,10 @@ final class ReportRepository extends BaseRepository
                 SUM(sp.paid_amount) AS total_supplier_paid
              FROM supplier_payments sp
              INNER JOIN branches br ON br.id = sp.branch_id
-             INNER JOIN bookings b ON b.booking_reference = sp.booking_reference
              WHERE sp.branch_id ' . $clause . '
-               AND sp.status <> "void"' . $bookingWindow . '
+               AND sp.status <> "void"' . $supplierPaymentWindow . '
              GROUP BY sp.branch_id, br.name, sp.currency',
-            $dateParams
+            $supplierPaymentParams
         );
 
         $receivableRows = $this->fetchRows(
@@ -507,9 +515,9 @@ final class ReportRepository extends BaseRepository
              INNER JOIN bookings b ON b.booking_reference = cri.booking_reference
              INNER JOIN branches br ON br.id = b.branch_id
              WHERE cri.outstanding_amount > 0
-               AND b.branch_id ' . $clause . $bookingWindow . '
+               AND b.branch_id ' . $clause . $receivableBookingWindow . '
              GROUP BY b.branch_id, br.name, cri.currency',
-            $dateParams
+            $receivableParams
         );
 
         $payableRows = $this->fetchRows(
@@ -522,9 +530,9 @@ final class ReportRepository extends BaseRepository
              INNER JOIN bookings b ON b.booking_reference = so.booking_reference
              INNER JOIN branches br ON br.id = b.branch_id
              WHERE so.net_payable_amount > 0
-               AND b.branch_id ' . $clause . $bookingWindow . '
+               AND b.branch_id ' . $clause . $payableBookingWindow . '
              GROUP BY b.branch_id, br.name, so.currency',
-            $dateParams
+            $payableParams
         );
 
         $expenseRows = $this->expenseSummary($branchIds, $dateFrom, $dateTo);

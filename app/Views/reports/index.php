@@ -8,6 +8,51 @@ $rows = is_array($rows ?? null) ? $rows : [];
 $summaryCards = is_array($summaryCards ?? null) ? $summaryCards : [];
 $selectedReport = (string) ($selectedReport ?? 'receivable_aging');
 
+$formatReportDate = static function (?string $value): string {
+    $date = trim((string) $value);
+    if ($date === '') {
+        return '';
+    }
+
+    $timestamp = strtotime($date);
+
+    return $timestamp !== false ? date('d M Y', $timestamp) : $date;
+};
+
+$dateFrom = (string) ($filters['dateFrom'] ?? '');
+$dateTo = (string) ($filters['dateTo'] ?? '');
+$asOfDate = (string) ($filters['asOfDate'] ?? date('Y-m-d'));
+$selectedBranchId = (int) ($filters['branchId'] ?? 0);
+$selectedBranchLabel = 'All Accessible Branches';
+
+if ($selectedBranchId > 0) {
+    foreach ($branchOptions as $branchOption) {
+        if ((int) ($branchOption['id'] ?? 0) !== $selectedBranchId) {
+            continue;
+        }
+
+        $selectedBranchLabel = (string) ($branchOption['name'] ?? 'Selected Branch');
+        if (! empty($branchOption['city'])) {
+            $selectedBranchLabel .= ' - ' . (string) $branchOption['city'];
+        }
+        break;
+    }
+}
+
+if ($dateFrom !== '' && $dateTo !== '') {
+    $reportPeriodLabel = $formatReportDate($dateFrom) . ' to ' . $formatReportDate($dateTo);
+} elseif ($dateFrom !== '') {
+    $reportPeriodLabel = 'From ' . $formatReportDate($dateFrom);
+} elseif ($dateTo !== '') {
+    $reportPeriodLabel = 'Up to ' . $formatReportDate($dateTo);
+} else {
+    $reportPeriodLabel = 'All dates';
+}
+
+$dateBasisLabel = in_array($selectedReport, ['management_summary', 'branch_performance'], true)
+    ? 'Booking/service activity uses booking date. Receipts use receipt date. Supplier payments use payment date.'
+    : 'Report-specific date filters are applied.';
+
 $exportQuery = http_build_query([
     'report' => $selectedReport,
     'branch_id' => (int) ($filters['branchId'] ?? 0),
@@ -97,6 +142,12 @@ $exportQuery = http_build_query([
     <div class="panel-header">
         <h2><?= e((string) ($reportOptions[$selectedReport] ?? 'Report')) ?></h2>
         <div class="panel-meta">Dense table, export-friendly columns, original currencies preserved and PKR-converted columns shown where consolidated reporting is supported.</div>
+    </div>
+    <div class="panel-meta" style="padding: 0 1rem 0.85rem; display: grid; gap: 0.3rem;">
+        <div><strong>Report period:</strong> <?= e($reportPeriodLabel) ?></div>
+        <div><strong>As of date:</strong> <?= e($formatReportDate($asOfDate)) ?></div>
+        <div><strong>Branch:</strong> <?= e($selectedBranchLabel) ?></div>
+        <div><strong>Date basis:</strong> <?= e($dateBasisLabel) ?></div>
     </div>
     <div class="dense-table-wrap">
         <table class="dense-table">
