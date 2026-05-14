@@ -284,10 +284,15 @@ $exportQuery = http_build_query([
                     >
                         <?php foreach ($columns as $column): ?>
                             <td>
-                                <?php if ($selectedReport === 'receivable_aging'
+                                <?php if (in_array($selectedReport, ['receivable_aging', 'payable_aging'], true)
                                     && (string) ($column['key'] ?? '') === 'booking_reference'
                                     && (int) ($row['booking_id'] ?? 0) > 0): ?>
-                                    <a class="report-booking-link" href="<?= e(url('/workspace?booking_id=' . (int) $row['booking_id'])) ?>">
+                                    <a
+                                        class="report-booking-link"
+                                        href="<?= e($selectedReport === 'payable_aging'
+                                            ? url('/workspace?booking_id=' . (int) $row['booking_id'] . '#dock-panel-suppliers')
+                                            : url('/workspace?booking_id=' . (int) $row['booking_id'])) ?>"
+                                    >
                                         <?= e((string) ($row[$column['key']] ?? '')) ?>
                                     </a>
                                 <?php else: ?>
