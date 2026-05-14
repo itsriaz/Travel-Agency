@@ -599,6 +599,8 @@ final class ReportService extends Service
             $overdueDays = (int) ($row['overdue_days'] ?? 0);
             $bucket = $this->agingBucket($overdueDays);
             $pkrAmount = $this->convertToPkr($amount, $currency, $pkrRates, $row);
+            $customerName = (string) (($row['lead_traveler_name'] ?? '') !== '' ? $row['lead_traveler_name'] : 'Booking Party');
+            $drilldownKey = $this->receivableAgingDrilldownKey($customerName, $currency);
 
             $reportRow = [
                 'branch_name' => (string) ($row['branch_name'] ?? ''),
@@ -607,7 +609,7 @@ final class ReportService extends Service
                 'invoice_date' => (string) (($row['booking_date'] ?? '') !== '' ? $row['booking_date'] : 'N/A'),
                 'due_date' => (string) (($row['due_date'] ?? '') !== '' ? $row['due_date'] : 'N/A'),
                 'age_label' => $this->receivableAgeLabel($overdueDays),
-                'lead_traveler_name' => (string) (($row['lead_traveler_name'] ?? '') !== '' ? $row['lead_traveler_name'] : 'Booking Party'),
+                'lead_traveler_name' => $customerName,
                 'service_line_reference' => (string) ($row['service_line_reference'] ?? ''),
                 'currency' => $currency,
                 'current_bucket' => '',
@@ -617,6 +619,7 @@ final class ReportService extends Service
                 'bucket_91_plus' => '',
                 'total_outstanding' => $this->money($amount),
                 'pkr_outstanding' => $pkrAmount !== null ? $this->money($pkrAmount) : 'N/A',
+                'summary_drilldown_key' => $drilldownKey,
             ];
             $reportRow[$bucket] = $this->money($amount);
             $reportRows[] = $reportRow;
@@ -640,10 +643,11 @@ final class ReportService extends Service
             $overdueDays = (int) ($row['overdue_days'] ?? 0);
             $amount = (float) ($row['outstanding_amount'] ?? 0);
             $bucket = $this->agingBucket($overdueDays);
-            $key = $customerName . '|' . $currency;
+            $key = $this->receivableAgingDrilldownKey($customerName, $currency);
 
             if (! isset($summary[$key])) {
                 $summary[$key] = [
+                    'summary_drilldown_key' => $key,
                     'lead_traveler_name' => $customerName,
                     'currency' => $currency,
                     'total_outstanding' => 0.0,
@@ -695,6 +699,7 @@ final class ReportService extends Service
         $reportRows = [];
         foreach ($summary as $row) {
             $reportRows[] = [
+                'summary_drilldown_key' => (string) ($row['summary_drilldown_key'] ?? ''),
                 'lead_traveler_name' => (string) ($row['lead_traveler_name'] ?? ''),
                 'currency' => (string) ($row['currency'] ?? 'PKR'),
                 'total_outstanding' => $this->money((float) ($row['total_outstanding'] ?? 0)),
@@ -705,10 +710,16 @@ final class ReportService extends Service
                 'bucket_91_plus' => $this->money((float) ($row['bucket_91_plus'] ?? 0)),
                 'oldest_due_date' => (string) (($row['oldest_due_date_raw'] ?? '') !== '' ? $row['oldest_due_date_raw'] : 'N/A'),
                 'pending_invoice_count' => (string) ((int) ($row['pending_invoice_count'] ?? 0)),
+                'summary_drilldown_label' => (string) ($row['lead_traveler_name'] ?? '') . ' / ' . (string) ($row['currency'] ?? 'PKR'),
             ];
         }
 
         return $reportRows;
+    }
+
+    private function receivableAgingDrilldownKey(string $customerName, string $currency): string
+    {
+        return hash('sha256', trim($customerName) . '|' . strtoupper(trim($currency)));
     }
 
     private function receivableAgeLabel(int $overdueDays): string

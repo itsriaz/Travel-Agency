@@ -51,9 +51,23 @@ if ($dateFrom !== '' && $dateTo !== '') {
     $reportPeriodLabel = 'All dates';
 }
 
-$dateBasisLabel = in_array($selectedReport, ['management_summary', 'branch_performance'], true)
-    ? 'Booking/service activity uses booking date. Receipts use receipt date. Supplier payments use payment date.'
-    : 'Report-specific date filters are applied.';
+$formattedAsOfDate = $formatReportDate($asOfDate);
+
+if ($selectedReport === 'receivable_aging') {
+    $reportContextLine = 'Period: ' . $reportPeriodLabel
+        . ' | As of: ' . $formattedAsOfDate
+        . ' | Branch: ' . $selectedBranchLabel
+        . ' | Basis: Aging by due date';
+} else {
+    $dateBasisLabel = in_array($selectedReport, ['management_summary', 'branch_performance'], true)
+        ? 'Booking/service activity uses booking date. Receipts use receipt date. Supplier payments use payment date.'
+        : 'Report-specific date filters are applied.';
+
+    $reportContextLine = 'Report period: ' . $reportPeriodLabel
+        . ' | As of date: ' . $formattedAsOfDate
+        . ' | Branch: ' . $selectedBranchLabel
+        . ' | Date basis: ' . $dateBasisLabel;
+}
 
 $exportQuery = http_build_query([
     'report' => $selectedReport,
@@ -77,6 +91,46 @@ $exportQuery = http_build_query([
 
     .report-booking-link:hover {
         text-decoration: underline;
+    }
+
+    .receivable-summary-drilldown-link {
+        color: #0d6efd;
+        text-decoration: underline;
+        background: none;
+        border: 0;
+        padding: 0;
+        font: inherit;
+        cursor: pointer;
+    }
+
+    .receivable-summary-drilldown-link:hover {
+        text-decoration: underline;
+    }
+
+    .receivable-aging-filter-bar {
+        padding: 0.25rem 1rem 0.75rem;
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+    }
+
+    .receivable-aging-filter-bar[hidden] {
+        display: none;
+    }
+
+    .receivable-aging-detail-row[hidden] {
+        display: none;
+    }
+
+    .receivable-aging-detail-section {
+        scroll-margin-top: 1rem;
+    }
+
+    .report-context-line {
+        padding: 0 1rem 0.85rem;
+        line-height: 1.5;
+        overflow-wrap: anywhere;
     }
 </style>
 
@@ -159,14 +213,8 @@ $exportQuery = http_build_query([
 <section class="panel compact-panel">
     <div class="panel-header">
         <h2><?= e((string) ($reportOptions[$selectedReport] ?? 'Report')) ?></h2>
-        <div class="panel-meta">Dense table, export-friendly columns, original currencies preserved and PKR-converted columns shown where consolidated reporting is supported.</div>
     </div>
-    <div class="panel-meta" style="padding: 0 1rem 0.85rem; display: grid; gap: 0.3rem;">
-        <div><strong>Report period:</strong> <?= e($reportPeriodLabel) ?></div>
-        <div><strong>As of date:</strong> <?= e($formatReportDate($asOfDate)) ?></div>
-        <div><strong>Branch:</strong> <?= e($selectedBranchLabel) ?></div>
-        <div><strong>Date basis:</strong> <?= e($dateBasisLabel) ?></div>
-    </div>
+    <div class="panel-meta report-context-line"><?= e($reportContextLine) ?></div>
     <?php if ($selectedReport === 'receivable_aging' && $receivableAgingSummaryRows !== []): ?>
         <div class="panel-header" style="padding-top: 0.15rem;">
             <h2>Customer Outstanding Summary</h2>
@@ -185,7 +233,20 @@ $exportQuery = http_build_query([
                     <?php foreach ($receivableAgingSummaryRows as $row): ?>
                         <tr>
                             <?php foreach ($receivableAgingSummaryColumns as $column): ?>
-                                <td><?= e((string) ($row[$column['key']] ?? '')) ?></td>
+                                <td>
+                                    <?php if ((string) ($column['key'] ?? '') === 'lead_traveler_name' && (string) ($row['summary_drilldown_key'] ?? '') !== ''): ?>
+                                        <button
+                                            type="button"
+                                            class="receivable-summary-drilldown-link"
+                                            data-receivable-summary-drilldown="<?= e((string) ($row['summary_drilldown_key'] ?? '')) ?>"
+                                            data-receivable-summary-label="<?= e((string) ($row['summary_drilldown_label'] ?? '')) ?>"
+                                        >
+                                            <?= e((string) ($row[$column['key']] ?? '')) ?>
+                                        </button>
+                                    <?php else: ?>
+                                        <?= e((string) ($row[$column['key']] ?? '')) ?>
+                                    <?php endif; ?>
+                                </td>
                             <?php endforeach; ?>
                         </tr>
                     <?php endforeach; ?>
@@ -193,7 +254,13 @@ $exportQuery = http_build_query([
             </table>
         </div>
     <?php endif; ?>
-    <div class="dense-table-wrap">
+    <?php if ($selectedReport === 'receivable_aging' && $rows !== []): ?>
+        <div class="receivable-aging-filter-bar" id="receivable-aging-filter-bar" hidden>
+            <span id="receivable-aging-filter-text">Showing pending invoices for:</span>
+            <button type="button" class="btn btn-sm" id="receivable-aging-filter-clear">Show All Invoices</button>
+        </div>
+    <?php endif; ?>
+    <div class="dense-table-wrap receivable-aging-detail-section" id="receivable-aging-detail-section">
         <table class="dense-table">
             <thead>
                 <tr>
@@ -209,7 +276,12 @@ $exportQuery = http_build_query([
                     </tr>
                 <?php endif; ?>
                 <?php foreach ($rows as $row): ?>
-                    <tr>
+                    <tr
+                        <?php if ($selectedReport === 'receivable_aging' && (string) ($row['summary_drilldown_key'] ?? '') !== ''): ?>
+                            class="receivable-aging-detail-row"
+                            data-receivable-detail-key="<?= e((string) ($row['summary_drilldown_key'] ?? '')) ?>"
+                        <?php endif; ?>
+                    >
                         <?php foreach ($columns as $column): ?>
                             <td>
                                 <?php if ($selectedReport === 'receivable_aging'
@@ -229,3 +301,54 @@ $exportQuery = http_build_query([
         </table>
     </div>
 </section>
+
+<?php if ($selectedReport === 'receivable_aging' && $receivableAgingSummaryRows !== [] && $rows !== []): ?>
+    <script>
+        (function () {
+            const filterBar = document.getElementById('receivable-aging-filter-bar');
+            const filterText = document.getElementById('receivable-aging-filter-text');
+            const clearButton = document.getElementById('receivable-aging-filter-clear');
+            const detailSection = document.getElementById('receivable-aging-detail-section');
+            const summaryLinks = document.querySelectorAll('[data-receivable-summary-drilldown]');
+            const detailRows = document.querySelectorAll('[data-receivable-detail-key]');
+
+            if (!filterBar || !filterText || !clearButton || !detailSection || summaryLinks.length === 0 || detailRows.length === 0) {
+                return;
+            }
+
+            const baseFilterLabel = 'Showing pending invoices for:';
+
+            const showAllRows = function () {
+                detailRows.forEach(function (row) {
+                    row.hidden = false;
+                });
+                filterText.textContent = baseFilterLabel;
+                filterBar.hidden = true;
+            };
+
+            const applyFilter = function (drilldownKey, label) {
+                detailRows.forEach(function (row) {
+                    row.hidden = row.getAttribute('data-receivable-detail-key') !== drilldownKey;
+                });
+                filterText.textContent = baseFilterLabel + ' ' + label;
+                filterBar.hidden = false;
+                detailSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            };
+
+            summaryLinks.forEach(function (link) {
+                link.addEventListener('click', function () {
+                    const drilldownKey = link.getAttribute('data-receivable-summary-drilldown') || '';
+                    const label = link.getAttribute('data-receivable-summary-label') || '';
+                    if (drilldownKey === '') {
+                        return;
+                    }
+                    applyFilter(drilldownKey, label);
+                });
+            });
+
+            clearButton.addEventListener('click', function () {
+                showAllRows();
+            });
+        }());
+    </script>
+<?php endif; ?>
