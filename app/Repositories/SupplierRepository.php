@@ -514,31 +514,35 @@ final class SupplierRepository extends BaseRepository
 
             $updatePayment = $this->db->prepare(
                 'UPDATE supplier_payments
-                 SET allocated_amount = allocated_amount + :allocated_amount,
-                     unallocated_amount = GREATEST(0, paid_amount - (allocated_amount + :allocated_amount)),
+                 SET allocated_amount = allocated_amount + :allocated_amount_increment,
+                     unallocated_amount = GREATEST(0, paid_amount - (allocated_amount + :allocated_amount_balance)),
                      status = CASE
-                         WHEN paid_amount - (allocated_amount + :allocated_amount) <= 0 THEN "fully_allocated"
+                         WHEN paid_amount - (allocated_amount + :allocated_amount_status) <= 0 THEN "fully_allocated"
                          ELSE "partially_allocated"
                      END
                  WHERE id = :payment_id'
             );
             $updatePayment->execute([
-                'allocated_amount' => $paymentConsumedAmount,
+                'allocated_amount_increment' => $paymentConsumedAmount,
+                'allocated_amount_balance' => $paymentConsumedAmount,
+                'allocated_amount_status' => $paymentConsumedAmount,
                 'payment_id' => $paymentId,
             ]);
 
             $updateObligation = $this->db->prepare(
                 'UPDATE supplier_obligations
-                 SET net_payable_amount = GREATEST(0, net_payable_amount - :allocated_amount),
+                 SET net_payable_amount = GREATEST(0, net_payable_amount - :net_payable_allocation),
                      status = CASE
-                         WHEN net_payable_amount - :allocated_amount <= 0 AND advance_applied_amount > 0 THEN "covered_by_advance"
-                         WHEN net_payable_amount - :allocated_amount <= 0 THEN "paid"
+                         WHEN net_payable_amount - :status_allocation_with_advance <= 0 AND advance_applied_amount > 0 THEN "covered_by_advance"
+                         WHEN net_payable_amount - :status_allocation_paid <= 0 THEN "paid"
                          ELSE "partially_covered"
                      END
                  WHERE id = :obligation_id'
             );
             $updateObligation->execute([
-                'allocated_amount' => $applicableAmount,
+                'net_payable_allocation' => $applicableAmount,
+                'status_allocation_with_advance' => $applicableAmount,
+                'status_allocation_paid' => $applicableAmount,
                 'obligation_id' => $obligationId,
             ]);
 
