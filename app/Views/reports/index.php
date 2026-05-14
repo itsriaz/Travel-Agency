@@ -6,6 +6,8 @@ $filters = is_array($filters ?? null) ? $filters : [];
 $columns = is_array($columns ?? null) ? $columns : [];
 $rows = is_array($rows ?? null) ? $rows : [];
 $summaryCards = is_array($summaryCards ?? null) ? $summaryCards : [];
+$receivableAgingSummaryRows = is_array($receivableAgingSummaryRows ?? null) ? $receivableAgingSummaryRows : [];
+$receivableAgingSummaryColumns = is_array($receivableAgingSummaryColumns ?? null) ? $receivableAgingSummaryColumns : [];
 $selectedReport = (string) ($selectedReport ?? 'receivable_aging');
 
 $formatReportDate = static function (?string $value): string {
@@ -165,6 +167,32 @@ $exportQuery = http_build_query([
         <div><strong>Branch:</strong> <?= e($selectedBranchLabel) ?></div>
         <div><strong>Date basis:</strong> <?= e($dateBasisLabel) ?></div>
     </div>
+    <?php if ($selectedReport === 'receivable_aging' && $receivableAgingSummaryRows !== []): ?>
+        <div class="panel-header" style="padding-top: 0.15rem;">
+            <h2>Customer Outstanding Summary</h2>
+            <div class="panel-meta">Grouped by customer and currency, using the same receivable aging truth as the invoice-level detail below.</div>
+        </div>
+        <div class="dense-table-wrap">
+            <table class="dense-table">
+                <thead>
+                    <tr>
+                        <?php foreach ($receivableAgingSummaryColumns as $column): ?>
+                            <th><?= e((string) $column['label']) ?></th>
+                        <?php endforeach; ?>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($receivableAgingSummaryRows as $row): ?>
+                        <tr>
+                            <?php foreach ($receivableAgingSummaryColumns as $column): ?>
+                                <td><?= e((string) ($row[$column['key']] ?? '')) ?></td>
+                            <?php endforeach; ?>
+                        </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+    <?php endif; ?>
     <div class="dense-table-wrap">
         <table class="dense-table">
             <thead>

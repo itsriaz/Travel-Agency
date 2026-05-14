@@ -47,6 +47,8 @@ final class ReportService extends Service
         $rows = [];
         $columns = [];
         $summaryCards = [];
+        $receivableAgingSummaryRows = [];
+        $receivableAgingSummaryColumns = [];
 
         switch ($filters['report']) {
             case 'cash_flow':
@@ -108,6 +110,19 @@ final class ReportService extends Service
                     $reportData,
                     $this->reportingRateMapForRows($reportData, $conversionDate)
                 );
+                $receivableAgingSummaryRows = $this->receivableAgingCustomerSummary($reportData);
+                $receivableAgingSummaryColumns = [
+                    ['key' => 'lead_traveler_name', 'label' => 'Customer'],
+                    ['key' => 'currency', 'label' => 'Currency'],
+                    ['key' => 'total_outstanding', 'label' => 'Total Outstanding'],
+                    ['key' => 'current_bucket', 'label' => 'Current'],
+                    ['key' => 'bucket_1_30', 'label' => '1-30'],
+                    ['key' => 'bucket_31_60', 'label' => '31-60'],
+                    ['key' => 'bucket_61_90', 'label' => '61-90'],
+                    ['key' => 'bucket_91_plus', 'label' => '91+'],
+                    ['key' => 'oldest_due_date', 'label' => 'Oldest Due Date'],
+                    ['key' => 'pending_invoice_count', 'label' => 'Pending Invoice Count'],
+                ];
                 $columns = [
                     ['key' => 'branch_name', 'label' => 'Branch'],
                     ['key' => 'booking_reference', 'label' => 'Booking'],
@@ -462,6 +477,8 @@ final class ReportService extends Service
             'columns' => $columns,
             'rows' => $rows,
             'summaryCards' => $summaryCards,
+            'receivableAgingSummaryRows' => $receivableAgingSummaryRows,
+            'receivableAgingSummaryColumns' => $receivableAgingSummaryColumns,
             'branchOptions' => $branchOptions,
             'csvFilename' => $filters['report'] . '_' . date('Ymd_His') . '.csv',
         ];
@@ -611,6 +628,87 @@ final class ReportService extends Service
         }
 
         return [$reportRows, $this->currencySummaryCards('Outstanding', $summary, $pkrSummary)];
+    }
+
+    private function receivableAgingCustomerSummary(array $rows): array
+    {
+        $summary = [];
+
+        foreach ($rows as $row) {
+            $customerName = (string) (($row['lead_traveler_name'] ?? '') !== '' ? $row['lead_traveler_name'] : 'Booking Party');
+            $currency = (string) ($row['currency'] ?? 'PKR');
+            $overdueDays = (int) ($row['overdue_days'] ?? 0);
+            $amount = (float) ($row['outstanding_amount'] ?? 0);
+            $bucket = $this->agingBucket($overdueDays);
+            $key = $customerName . '|' . $currency;
+
+            if (! isset($summary[$key])) {
+                $summary[$key] = [
+                    'lead_traveler_name' => $customerName,
+                    'currency' => $currency,
+                    'total_outstanding' => 0.0,
+                    'current_bucket' => 0.0,
+                    'bucket_1_30' => 0.0,
+                    'bucket_31_60' => 0.0,
+                    'bucket_61_90' => 0.0,
+                    'bucket_91_plus' => 0.0,
+                    'oldest_due_date_raw' => null,
+                    'pending_invoice_count' => 0,
+                ];
+            }
+
+            $summary[$key]['total_outstanding'] += $amount;
+            $summary[$key][$bucket] += $amount;
+            $summary[$key]['pending_invoice_count']++;
+
+            $dueDate = trim((string) ($row['due_date'] ?? ''));
+            if ($dueDate !== '') {
+                $oldestDueDate = $summary[$key]['oldest_due_date_raw'];
+                if (! is_string($oldestDueDate) || $oldestDueDate === '' || $dueDate < $oldestDueDate) {
+                    $summary[$key]['oldest_due_date_raw'] = $dueDate;
+                }
+            }
+        }
+
+        usort($summary, function (array $left, array $right): int {
+            $leftDueDate = (string) ($left['oldest_due_date_raw'] ?? '');
+            $rightDueDate = (string) ($right['oldest_due_date_raw'] ?? '');
+
+            if ($leftDueDate === '' && $rightDueDate !== '') {
+                return 1;
+            }
+            if ($leftDueDate !== '' && $rightDueDate === '') {
+                return -1;
+            }
+            if ($leftDueDate !== '' && $rightDueDate !== '' && $leftDueDate !== $rightDueDate) {
+                return strcmp($leftDueDate, $rightDueDate);
+            }
+
+            $outstandingCompare = (float) ($right['total_outstanding'] ?? 0) <=> (float) ($left['total_outstanding'] ?? 0);
+            if ($outstandingCompare !== 0) {
+                return $outstandingCompare;
+            }
+
+            return strcmp((string) ($left['lead_traveler_name'] ?? ''), (string) ($right['lead_traveler_name'] ?? ''));
+        });
+
+        $reportRows = [];
+        foreach ($summary as $row) {
+            $reportRows[] = [
+                'lead_traveler_name' => (string) ($row['lead_traveler_name'] ?? ''),
+                'currency' => (string) ($row['currency'] ?? 'PKR'),
+                'total_outstanding' => $this->money((float) ($row['total_outstanding'] ?? 0)),
+                'current_bucket' => $this->money((float) ($row['current_bucket'] ?? 0)),
+                'bucket_1_30' => $this->money((float) ($row['bucket_1_30'] ?? 0)),
+                'bucket_31_60' => $this->money((float) ($row['bucket_31_60'] ?? 0)),
+                'bucket_61_90' => $this->money((float) ($row['bucket_61_90'] ?? 0)),
+                'bucket_91_plus' => $this->money((float) ($row['bucket_91_plus'] ?? 0)),
+                'oldest_due_date' => (string) (($row['oldest_due_date_raw'] ?? '') !== '' ? $row['oldest_due_date_raw'] : 'N/A'),
+                'pending_invoice_count' => (string) ((int) ($row['pending_invoice_count'] ?? 0)),
+            ];
+        }
+
+        return $reportRows;
     }
 
     private function receivableAgeLabel(int $overdueDays): string
