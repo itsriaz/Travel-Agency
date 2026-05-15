@@ -400,7 +400,8 @@ $supplierAdvanceBalanceTotals = $sumByCurrency($supplierFoundation['advances'] ?
         <label class="legacy-field legacy-field--attach"><span>Attach Last Ticket #</span><input type="text" value="" readonly></label>
         <label class="legacy-field legacy-field--place"><span>Place of services (VAT)</span><input type="text" value="OTHER" readonly></label>
         <label class="legacy-field legacy-field--airline"><span>Airline/Agent (CR)</span><input type="text" name="ticket_airline" data-ticket-field="airline" value="<?= e((string) ($activeService['airline'] ?? '')) ?>"></label>
-        <label class="legacy-field legacy-field--xs"><span>BSP</span><input type="text" value="N" readonly></label>
+       <label class="legacy-field legacy-field--sales"><span>Sales Person</span><input type="text" value="<?= e((string) ($user['username'] ?? $user['email'] ?? '')) ?>" readonly></label>
+
         <label class="legacy-field legacy-field--xs"><span>XO</span><input type="text" value="" readonly></label>
         <label class="legacy-field legacy-field--date"><span>Validation Date</span><input type="date" name="due_date" data-service-field="due_date" value="<?= e((string) ($activeService['dueDate'] ?? '')) ?>"></label>
         <label class="legacy-field legacy-field--booking-ref"><span>Booking Ref.</span><input type="text" data-service-field="lineNumber" value="<?= e((string) ($activeService['lineNumber'] ?? 'SV-DRAFT')) ?>" readonly></label>
@@ -409,7 +410,7 @@ $supplierAdvanceBalanceTotals = $sumByCurrency($supplierFoundation['advances'] ?
         <label class="legacy-field legacy-field--date"><span>Dep. Date</span><input type="date" name="ticket_departure_date" data-ticket-field="departure_date" value="<?= e((string) ($activeService['departureDate'] ?? '')) ?>"></label>
         <label class="legacy-field legacy-field--route"><span>Route</span><input type="text" value="<?= e($routeLabel) ?>" data-ticket-route-display></label>
         <label class="legacy-field legacy-field--nationality"><span>Nationality</span><input type="text" value="<?= e((string) ($leadTraveler['nationality'] ?? '')) ?>" readonly></label>
-        <label class="legacy-field legacy-field--sales"><span>Sales Person</span><input type="text" value="<?= e((string) ($user['username'] ?? $user['email'] ?? '')) ?>" readonly></label>
+                 <label class="legacy-field legacy-field--xs"><span>BSP</span><input type="text" value="N" readonly></label>
         <label class="legacy-field legacy-field--sector"><span>Sector and Description</span><input type="text" name="remarks" data-service-field="remarks" value="<?= e($sectorDescription) ?>"></label>
         <div class="legacy-inline-note legacy-inline-note--supplier-advance" data-supplier-advance-note hidden>
             <strong data-supplier-advance-summary></strong>

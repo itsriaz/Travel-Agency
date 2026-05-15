@@ -2755,8 +2755,13 @@ textarea:focus {
 .legacy-service-band {
     grid-template-columns: 176px 56px 126px 166px 166px 180px 120px 120px 56px 136px 160px 160px;
     align-items: end;
-    gap: 4px 6px;
+    gap: 4px 3px;
     padding: 4px;
+    grid-auto-flow: row;
+}
+
+.legacy-service-band > [hidden] {
+    display: none !important;
 }
 
 .legacy-field,
@@ -2916,23 +2921,19 @@ textarea:focus {
 }
 
 .legacy-field--sector {
-    grid-column: span 3;
+    grid-column: span 2;
 }
 
 .legacy-field--xs,
 .legacy-field--status {
-    justify-self: start;
-    min-width: 56px;
-}
-
-.legacy-field--xs {
-    width: 56px;
-    max-width: 56px;
+    justify-self: stretch;
+    width: 100%;
+    min-width: 0;
+    max-width: none;
 }
 
 .legacy-field--status {
-    width: 86px;
-    max-width: 86px;
+    min-width: 86px;
 }
 
 .legacy-status-pill {
@@ -3678,7 +3679,7 @@ textarea:focus {
     }
 }
 .legacy-inline-note--supplier-advance {
-    grid-column: span 2;
+    grid-column: 1 / -1;
     display: flex;
     flex-direction: column;
     gap: 2px;
@@ -3688,6 +3689,10 @@ textarea:focus {
     color: #38551d;
     font-size: 12px;
     border-radius: 4px;
+}
+
+.legacy-inline-note--supplier-advance[hidden] {
+    display: none !important;
 }
 
 .legacy-inline-note--supplier-advance strong {
