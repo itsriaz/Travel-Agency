@@ -223,6 +223,25 @@ final class SupplierRepository extends BaseRepository
         return $row !== false ? $row : null;
     }
 
+    public function availableAdvanceBalanceForSupplier(int $supplierId, int $branchId, string $currency): float
+    {
+        $statement = $this->db->prepare(
+            'SELECT COALESCE(SUM(available_amount), 0)
+             FROM supplier_advances
+             WHERE supplier_id = :supplier_id
+               AND branch_id = :branch_id
+               AND currency = :currency
+               AND available_amount > 0'
+        );
+        $statement->execute([
+            'supplier_id' => $supplierId,
+            'branch_id' => $branchId,
+            'currency' => strtoupper(trim($currency)),
+        ]);
+
+        return round((float) $statement->fetchColumn(), 2);
+    }
+
     public function registerObligation(array $data): int
     {
         return $this->transaction(function () use ($data): int {

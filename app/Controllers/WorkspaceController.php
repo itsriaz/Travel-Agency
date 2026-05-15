@@ -309,6 +309,113 @@ final class WorkspaceController extends BaseController
         ]);
     }
 
+    public function supplierAvailableAdvance(): never
+    {
+        $accessibleBranchIds = Authorization::accessibleBranchIds();
+        $currency = strtoupper(trim((string) ($_GET['currency'] ?? '')));
+        $supplierId = (int) ($_GET['supplier_id'] ?? 0);
+        $supplierName = trim((string) ($_GET['supplier_name'] ?? ''));
+        $bookingId = (int) ($_GET['booking_id'] ?? 0);
+        $branchId = (int) ($_GET['branch_id'] ?? 0);
+
+        if (! in_array($currency, ['PKR', 'AED', 'USD'], true)) {
+            $this->jsonResponse([
+                'success' => true,
+                'available' => false,
+                'message' => 'Currency is required for supplier advance lookup.',
+            ]);
+        }
+
+        $bookingRepository = new BookingRepository($this->app);
+        if ($bookingId > 0) {
+            if (! $bookingRepository->bookingExistsInBranches($bookingId, $accessibleBranchIds)) {
+                $this->jsonResponse([
+                    'success' => true,
+                    'available' => false,
+                    'message' => 'Booking is outside your accessible branches.',
+                ], 403);
+            }
+
+            $booking = $bookingRepository->findBookingById($bookingId);
+            $branchId = (int) ($booking['branch_id'] ?? 0);
+        }
+
+        if ($branchId <= 0 || ! in_array($branchId, $accessibleBranchIds, true)) {
+            $this->jsonResponse([
+                'success' => true,
+                'available' => false,
+                'message' => 'Branch is outside your accessible scope.',
+            ], 403);
+        }
+
+        $supplierRepository = new \App\Repositories\SupplierRepository($this->app);
+        $supplier = null;
+
+        if ($supplierId > 0) {
+            $supplier = $supplierRepository->findSupplierById($supplierId);
+            if ($supplier !== null) {
+                $supplierBranchId = isset($supplier['branch_id']) ? (int) $supplier['branch_id'] : 0;
+                $supplierAccessible = $supplierBranchId === 0 || in_array($supplierBranchId, $accessibleBranchIds, true);
+                if (! $supplierAccessible) {
+                    $supplier = null;
+                }
+            }
+        }
+
+        if ($supplier === null && $supplierName !== '') {
+            $supplier = $supplierRepository->findAccessibleSupplierByName($supplierName, $accessibleBranchIds);
+        }
+
+        if ($supplier === null) {
+            $this->jsonResponse([
+                'success' => true,
+                'available' => false,
+                'supplier_id' => 0,
+                'supplier_name' => $supplierName,
+                'branch_id' => $branchId,
+                'currency' => $currency,
+                'available_amount' => 0,
+                'formatted_available_amount' => $currency . ' 0.00',
+                'message' => 'Supplier not found or no available prepaid balance.',
+            ]);
+        }
+
+        $supplierBranchId = isset($supplier['branch_id']) ? (int) $supplier['branch_id'] : 0;
+        if ($supplierBranchId > 0 && $supplierBranchId !== $branchId) {
+            $this->jsonResponse([
+                'success' => true,
+                'available' => false,
+                'supplier_id' => (int) ($supplier['id'] ?? 0),
+                'supplier_name' => (string) ($supplier['name'] ?? $supplierName),
+                'branch_id' => $branchId,
+                'currency' => $currency,
+                'available_amount' => 0,
+                'formatted_available_amount' => $currency . ' 0.00',
+                'message' => 'No same-branch prepaid balance found.',
+            ]);
+        }
+
+        $availableAmount = $supplierRepository->availableAdvanceBalanceForSupplier(
+            (int) ($supplier['id'] ?? 0),
+            $branchId,
+            $currency
+        );
+
+        $this->jsonResponse([
+            'success' => true,
+            'available' => $availableAmount > 0.005,
+            'supplier_id' => (int) ($supplier['id'] ?? 0),
+            'supplier_name' => (string) ($supplier['name'] ?? $supplierName),
+            'branch_id' => $branchId,
+            'currency' => $currency,
+            'available_amount' => $availableAmount,
+            'formatted_available_amount' => $currency . ' ' . number_format($availableAmount, 2),
+            'message' => $availableAmount > 0.005
+                ? 'Available prepaid supplier balance found.'
+                : 'No available prepaid supplier balance found.',
+        ]);
+    }
+
     public function save(): never
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);

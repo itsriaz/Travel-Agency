@@ -230,7 +230,7 @@ $supplierOutstandingTotals = $sumByCurrency($supplierFoundation['obligations'] ?
 $supplierAdvanceBalanceTotals = $sumByCurrency($supplierFoundation['advances'] ?? [], 'currency', static fn (array $row): float => (float) ($row['availableAmount'] ?? 0));
 ?>
 
-<section class="legacy-workspace" data-workspace-station data-service-engine data-has-services="<?= $hasActiveServices ? '1' : '0' ?>" data-has-selected-customer="<?= ((int) ($selectedTravelerProfile['id'] ?? 0) > 0 || trim((string) ($workspaceBooking['lead'] ?? '')) !== '') ? '1' : '0' ?>" data-new-booking-url="<?= e(url('/workspace?new=1&focus=customer' . ($selectedTravelerProfile !== null ? '&customer_id=' . (int) $selectedTravelerProfile['id'] : ''))) ?>" data-autosave-invoice-url="<?= e(url('/workspace/autosave/invoice')) ?>" data-autosave-service-url="<?= e(url('/workspace/autosave/service')) ?>">
+<section class="legacy-workspace" data-workspace-station data-service-engine data-has-services="<?= $hasActiveServices ? '1' : '0' ?>" data-has-selected-customer="<?= ((int) ($selectedTravelerProfile['id'] ?? 0) > 0 || trim((string) ($workspaceBooking['lead'] ?? '')) !== '') ? '1' : '0' ?>" data-new-booking-url="<?= e(url('/workspace?new=1&focus=customer' . ($selectedTravelerProfile !== null ? '&customer_id=' . (int) $selectedTravelerProfile['id'] : ''))) ?>" data-autosave-invoice-url="<?= e(url('/workspace/autosave/invoice')) ?>" data-autosave-service-url="<?= e(url('/workspace/autosave/service')) ?>" data-supplier-advance-lookup-url="<?= e(url('/suppliers/advances/available')) ?>">
     <div class="workspace-feedback" data-workspace-feedback aria-live="polite"></div>
     <?php if ($showWorkspaceDebug && $serviceSaveDebugJson !== null): ?>
         <pre class="commercial-debug-block" style="margin:8px 0 12px; white-space:pre-wrap;">Service save debug
@@ -381,6 +381,10 @@ $supplierAdvanceBalanceTotals = $sumByCurrency($supplierFoundation['advances'] ?
         <label class="legacy-field"><span>Ticket Type</span><input type="text" value="International" readonly></label>
         <label class="legacy-field"><span>Airline/Agent (CR)</span><input type="text" name="ticket_airline" data-ticket-field="airline" value="<?= e((string) ($activeService['airline'] ?? '')) ?>"></label>
         <label class="legacy-field legacy-field--wide"><span>Tkt.Purchase From</span><input type="text" name="supplier_name" list="service-supplier-options" data-service-field="supplier" value="<?= e((string) ($activeService['supplier'] ?? '')) ?>"></label>
+        <div class="legacy-inline-note legacy-inline-note--supplier-advance" data-supplier-advance-note hidden>
+            <strong data-supplier-advance-summary></strong>
+            <span data-supplier-advance-message>This advance will be used automatically against Mkt. Fare.</span>
+        </div>
         <label class="legacy-field legacy-field--xs"><span>BSP</span><input type="text" value="N" readonly></label>
         <label class="legacy-field legacy-field--xs"><span>XO</span><input type="text" value="" readonly></label>
         <label class="legacy-field"><span>Validation Date</span><input type="date" name="due_date" data-service-field="due_date" value="<?= e((string) ($activeService['dueDate'] ?? '')) ?>"></label>

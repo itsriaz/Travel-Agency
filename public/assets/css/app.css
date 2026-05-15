@@ -3595,3 +3595,23 @@ textarea:focus {
         grid-template-columns: minmax(0, 1fr);
     }
 }
+.legacy-inline-note--supplier-advance {
+    grid-column: span 2;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 6px 10px;
+    border: 1px solid #c8d9b0;
+    background: #f4fae8;
+    color: #38551d;
+    font-size: 12px;
+    border-radius: 4px;
+}
+
+.legacy-inline-note--supplier-advance strong {
+    font-weight: 700;
+}
+
+.legacy-inline-note--supplier-advance span {
+    color: #567036;
+}

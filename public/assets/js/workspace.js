@@ -53,6 +53,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const globalPrepaidSupplierModal = station.querySelector('[data-global-prepaid-supplier-modal]');
     const globalPrepaidSupplierOpenButtons = Array.from(station.querySelectorAll('[data-global-prepaid-supplier-open]'));
     const globalPrepaidSupplierCloseButtons = Array.from(station.querySelectorAll('[data-global-prepaid-supplier-close]'));
+    const supplierAdvanceLookupUrl = station.dataset.supplierAdvanceLookupUrl || '';
+    const supplierAdvanceNote = station.querySelector('[data-supplier-advance-note]');
+    const supplierAdvanceSummary = station.querySelector('[data-supplier-advance-summary]');
+    const supplierAdvanceMessage = station.querySelector('[data-supplier-advance-message]');
     const paymentForm = station.querySelector('.legacy-payment-strip');
     const commercialEditor = station.querySelector('[data-commercial-editor="active"]');
     const commercialLookup = (id, fallbackSelector = null) => {
@@ -2764,6 +2768,8 @@ document.addEventListener('DOMContentLoaded', () => {
         lossReason: station.querySelector('[data-service-field="lossReason"]'),
         travelerId: station.querySelector('[data-service-field="travelerId"]'),
     };
+    let supplierAdvanceLookupTimerId = 0;
+    let supplierAdvanceLookupToken = 0;
     const finalSalePriceInput = commercialLookup('commercial-final-sale-price', '[data-service-final-sale]');
     const lossAmountInput = commercialLookup('commercial-loss-amount', '[data-service-loss-amount]');
     const servicePassengerNameField = commercialLookup('active-service-passenger-name', '[data-service-passenger-name]');
@@ -3165,6 +3171,118 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
+    const hideSupplierAdvanceNote = () => {
+        if (supplierAdvanceNote instanceof HTMLElement) {
+            supplierAdvanceNote.hidden = true;
+        }
+        if (supplierAdvanceSummary instanceof HTMLElement) {
+            supplierAdvanceSummary.textContent = '';
+        }
+        if (supplierAdvanceMessage instanceof HTMLElement) {
+            supplierAdvanceMessage.textContent = 'This advance will be used automatically against Mkt. Fare.';
+        }
+    };
+
+    const showSupplierAdvanceNote = (summaryText, messageText) => {
+        if (supplierAdvanceSummary instanceof HTMLElement) {
+            supplierAdvanceSummary.textContent = summaryText || '';
+        }
+        if (supplierAdvanceMessage instanceof HTMLElement) {
+            supplierAdvanceMessage.textContent = messageText || 'This advance will be used automatically against Mkt. Fare.';
+        }
+        if (supplierAdvanceNote instanceof HTMLElement) {
+            supplierAdvanceNote.hidden = String(summaryText || '').trim() === '';
+        }
+    };
+
+    const currentServiceBranchId = () => {
+        const bookingIdField = serviceForm?.elements?.namedItem('booking_id');
+        const branchIdField = serviceForm?.elements?.namedItem('auto_branch_id');
+        const bookingId = bookingIdField instanceof HTMLInputElement
+            ? Number.parseInt(bookingIdField.value || '0', 10) || 0
+            : 0;
+        const branchId = branchIdField instanceof HTMLInputElement
+            ? Number.parseInt(branchIdField.value || '0', 10) || 0
+            : 0;
+
+        return { bookingId, branchId };
+    };
+
+    const refreshSupplierAdvanceBalance = async () => {
+        if (supplierAdvanceLookupUrl === '') {
+            hideSupplierAdvanceNote();
+            return;
+        }
+
+        const supplierName = String(serviceFields.supplier?.value || '').trim();
+        const currency = String(serviceFields.currency?.value || '').trim().toUpperCase();
+        const { bookingId, branchId } = currentServiceBranchId();
+
+        if (supplierName === '' || currency === '' || (bookingId <= 0 && branchId <= 0)) {
+            hideSupplierAdvanceNote();
+            return;
+        }
+
+        const requestToken = ++supplierAdvanceLookupToken;
+
+        try {
+            const url = new URL(supplierAdvanceLookupUrl, window.location.origin);
+            url.searchParams.set('supplier_name', supplierName);
+            url.searchParams.set('currency', currency);
+            if (bookingId > 0) {
+                url.searchParams.set('booking_id', String(bookingId));
+            } else if (branchId > 0) {
+                url.searchParams.set('branch_id', String(branchId));
+            }
+
+            const response = await fetch(url.toString(), {
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest',
+                },
+                credentials: 'same-origin',
+            });
+            const payload = await response.json().catch(() => ({
+                success: false,
+                available: false,
+            }));
+
+            if (requestToken !== supplierAdvanceLookupToken) {
+                return;
+            }
+
+            if (!response.ok || payload.success === false || payload.available !== true) {
+                hideSupplierAdvanceNote();
+                return;
+            }
+
+            const formattedAmount = String(payload.formatted_available_amount || '').trim();
+            if (formattedAmount === '') {
+                hideSupplierAdvanceNote();
+                return;
+            }
+
+            showSupplierAdvanceNote(
+                `Available prepaid supplier balance: ${formattedAmount}`,
+                'This advance will be used automatically against Mkt. Fare.'
+            );
+        } catch (error) {
+            if (requestToken !== supplierAdvanceLookupToken) {
+                return;
+            }
+            hideSupplierAdvanceNote();
+        }
+    };
+
+    const scheduleSupplierAdvanceBalanceRefresh = (delay = 180) => {
+        if (supplierAdvanceLookupTimerId) {
+            window.clearTimeout(supplierAdvanceLookupTimerId);
+        }
+        supplierAdvanceLookupTimerId = window.setTimeout(() => {
+            supplierAdvanceLookupTimerId = 0;
+            void refreshSupplierAdvanceBalance();
+        }, delay);
+    };
+
     const isAirTicketServiceType = () => String(serviceTypeField?.value || '').trim().toLowerCase() === 'air ticket';
 
     const currentServicePayableAmount = () => {
@@ -3555,6 +3673,7 @@ document.addEventListener('DOMContentLoaded', () => {
         fillValue(ticketMetricFields.saleAmount, serviceLine.saleAmount ?? 0);
         syncTicketCommercialMirrors();
         syncServiceCurrencyMirror();
+        scheduleSupplierAdvanceBalanceRefresh(0);
 
         if (activeServiceReference) {
             activeServiceReference.textContent = serviceLine.lineNumber || '';
@@ -3625,6 +3744,7 @@ document.addEventListener('DOMContentLoaded', () => {
         fillValue(ticketMetricFields.saleAmount, 0);
         syncTicketCommercialMirrors();
         syncServiceCurrencyMirror();
+        scheduleSupplierAdvanceBalanceRefresh(0);
 
         if (activeServiceReference) {
             activeServiceReference.textContent = 'SV-DRAFT';
@@ -5331,6 +5451,25 @@ document.addEventListener('DOMContentLoaded', () => {
     globalPrepaidSupplierCloseButtons.forEach((button) => {
         button.addEventListener('click', closeGlobalPrepaidSupplierModal);
     });
+
+    if (serviceFields.supplier instanceof HTMLInputElement) {
+        serviceFields.supplier.addEventListener('input', () => {
+            scheduleSupplierAdvanceBalanceRefresh(220);
+        });
+        serviceFields.supplier.addEventListener('change', () => {
+            scheduleSupplierAdvanceBalanceRefresh(0);
+        });
+    }
+
+    if (serviceFields.currency instanceof HTMLSelectElement) {
+        serviceFields.currency.addEventListener('change', () => {
+            scheduleSupplierAdvanceBalanceRefresh(0);
+        });
+    }
+
+    if (serviceForm) {
+        scheduleSupplierAdvanceBalanceRefresh(0);
+    }
 
     paymentExchangeCloseButtons.forEach((button) => {
         button.addEventListener('click', closeExchangeSettlementModal);
