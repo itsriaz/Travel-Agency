@@ -36,6 +36,10 @@ if ($invoiceCurrency === '') {
 if ($invoiceCurrency === '') {
     $invoiceCurrency = 'PKR';
 }
+$globalPrepaidDefaultBranchId = (int) ($workspaceBooking['branchId'] ?? 0);
+if ($globalPrepaidDefaultBranchId <= 0) {
+    $globalPrepaidDefaultBranchId = (int) ($accessibleBranchIds[0] ?? ($branchOptions[0]['id'] ?? 0));
+}
 $clientCode = (int) ($leadTraveler['travelerId'] ?? 0) > 0 ? (string) $leadTraveler['travelerId'] : '-';
 $familyId = trim((string) ($leadTraveler['familyId'] ?? ''));
 $familyId = $familyId !== '' ? $familyId : '-';
@@ -238,6 +242,7 @@ $supplierAdvanceBalanceTotals = $sumByCurrency($supplierFoundation['advances'] ?
             <button class="btn btn-sm" type="button" data-workspace-action="add-traveler" onclick="return window.workspaceOpenStandaloneCustomerModal && window.workspaceOpenStandaloneCustomerModal(event)">Find Customer</button>
             <button class="btn btn-sm" type="button" data-workspace-action="new-customer" onclick="return window.workspaceOpenStandaloneNewCustomerModal && window.workspaceOpenStandaloneNewCustomerModal(event)">New Customer</button>
             <button class="btn btn-sm" type="button" data-workspace-action="customer-dues-finder">Receive Customer Payment</button>
+            <button class="btn btn-sm" type="button" data-global-prepaid-supplier-open>Prepaid Supplier Payment</button>
             <button class="btn btn-primary btn-sm" type="button" accesskey="n" data-workspace-action="new-booking">New Invoice</button>
             <button class="btn btn-sm" type="submit" form="workspace-search-form" accesskey="s" data-workspace-action="search-booking">Search</button>
             <button class="btn btn-sm" type="button" data-workspace-action="add-service" data-workflow-control="add-service" <?= $hasActiveServices ? '' : 'disabled' ?>>Add Service</button>
@@ -988,6 +993,41 @@ $supplierAdvanceBalanceTotals = $sumByCurrency($supplierFoundation['advances'] ?
                             <?php if (($supplierFoundation['advances'] ?? []) === []): ?><tr><td colspan="7" class="empty-cell">No supplier advance or credit recorded for this invoice yet.</td></tr><?php endif; ?>
                             </tbody>
                         </table>
+                    </article>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="customer-picker-modal customer-picker-modal--child" data-global-prepaid-supplier-modal hidden aria-hidden="true">
+        <div class="customer-picker-modal__backdrop" data-global-prepaid-supplier-close></div>
+        <div class="customer-picker-modal__dialog global-prepaid-supplier-modal" role="dialog" aria-modal="true" aria-labelledby="global-prepaid-supplier-title">
+            <header class="customer-picker-modal__header">
+                <div>
+                    <strong id="global-prepaid-supplier-title">Prepaid Supplier Payment</strong>
+                    <span>Use this when paying a supplier before purchase. This creates supplier advance and can be used later for the same supplier and currency.</span>
+                </div>
+                <button class="btn btn-sm" type="button" data-global-prepaid-supplier-close>Close</button>
+            </header>
+            <div class="customer-picker-modal__body">
+                <div class="legacy-modal-grid">
+                    <article>
+                        <h3>Record Global Supplier Advance</h3>
+                        <form method="post" action="<?= e(url('/suppliers/advances/save')) ?>">
+                            <?= \App\Helpers\Csrf::input() ?>
+                            <div class="station-form-grid station-form-grid--6 station-form-grid--inline">
+                                <label class="station-field span-2"><span>Branch</span><select name="branch_id"><?php foreach ($branchOptions as $branchRow): ?><option value="<?= e((string) $branchRow['id']) ?>" <?= (int) $branchRow['id'] === $globalPrepaidDefaultBranchId ? 'selected' : '' ?>><?= e((string) $branchRow['name']) ?></option><?php endforeach; ?></select></label>
+                                <label class="station-field span-2"><span>Supplier</span><input type="text" name="supplier_name" list="service-supplier-options" value=""></label>
+                                <label class="station-field span-2"><span>Currency</span><select name="advance_currency"><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>"><?= e($currencyOption) ?></option><?php endforeach; ?></select></label>
+                                <label class="station-field span-2"><span>Payment Date</span><input type="date" name="advance_date" value="<?= e(date('Y-m-d')) ?>"></label>
+                                <label class="station-field span-2"><span>Advance Amount</span><input type="number" step="0.01" name="advance_amount" value="0.00"></label>
+                                <label class="station-field span-3"><span>Reference</span><input type="text" name="advance_reference_number" value=""></label>
+                                <label class="station-field span-3"><span>Remarks</span><input type="text" name="advance_remarks" value=""></label>
+                            </div>
+                            <div class="station-command-buttons top-gap">
+                                <button class="btn btn-primary btn-sm" type="submit">Save Prepaid Supplier Payment</button>
+                            </div>
+                        </form>
                     </article>
                 </div>
             </div>

@@ -41,6 +41,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const customerDuesSelectedSummary = station.querySelector('[data-customer-dues-selected-summary]');
     const supplierSettlementModal = station.querySelector('[data-supplier-settlement-modal]');
     const supplierSettlementCloseButtons = Array.from(station.querySelectorAll('[data-supplier-settlement-close]'));
+    const globalPrepaidSupplierModal = station.querySelector('[data-global-prepaid-supplier-modal]');
+    const globalPrepaidSupplierOpenButtons = Array.from(station.querySelectorAll('[data-global-prepaid-supplier-open]'));
+    const globalPrepaidSupplierCloseButtons = Array.from(station.querySelectorAll('[data-global-prepaid-supplier-close]'));
     const paymentForm = station.querySelector('.legacy-payment-strip');
     const commercialEditor = station.querySelector('[data-commercial-editor="active"]');
     const commercialLookup = (id, fallbackSelector = null) => {
@@ -5132,6 +5135,25 @@ document.addEventListener('DOMContentLoaded', () => {
         supplierSettlementModal.setAttribute('aria-hidden', 'true');
     }
 
+    function openGlobalPrepaidSupplierModal() {
+        if (!globalPrepaidSupplierModal) {
+            return;
+        }
+
+        globalPrepaidSupplierModal.hidden = false;
+        globalPrepaidSupplierModal.setAttribute('aria-hidden', 'false');
+        showFeedback('Global prepaid supplier payment opened. Record supplier advance before purchase.');
+    }
+
+    function closeGlobalPrepaidSupplierModal() {
+        if (!globalPrepaidSupplierModal) {
+            return;
+        }
+
+        globalPrepaidSupplierModal.hidden = true;
+        globalPrepaidSupplierModal.setAttribute('aria-hidden', 'true');
+    }
+
     async function openExchangeSettlementModal() {
         if (!paymentExchangeModal || !paymentExchangeTargetSelect) {
             return;
@@ -5225,6 +5247,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
     supplierSettlementCloseButtons.forEach((button) => {
         button.addEventListener('click', closeSupplierSettlementModal);
+    });
+
+    globalPrepaidSupplierOpenButtons.forEach((button) => {
+        button.addEventListener('click', openGlobalPrepaidSupplierModal);
+    });
+
+    globalPrepaidSupplierCloseButtons.forEach((button) => {
+        button.addEventListener('click', closeGlobalPrepaidSupplierModal);
     });
 
     paymentExchangeCloseButtons.forEach((button) => {

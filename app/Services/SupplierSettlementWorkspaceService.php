@@ -141,6 +141,48 @@ final class SupplierSettlementWorkspaceService extends Service
         ];
     }
 
+    public function recordGlobalSupplierAdvance(array $input, int $actorUserId, array $accessibleBranchIds): array
+    {
+        $branchId = $this->resolveAccessibleBranchId((int) ($input['branch_id'] ?? 0), $accessibleBranchIds);
+        $supplier = $this->resolveSupplier($input, $accessibleBranchIds);
+        $this->assertSupplierAllowedForBranch($supplier, $branchId);
+        $currency = $this->normalizeCurrency((string) ($input['advance_currency'] ?? 'PKR'));
+        $depositAmount = $this->positiveMoney($input['advance_amount'] ?? 0, 'Advance amount');
+        $advanceDate = $this->normalizeDate((string) ($input['advance_date'] ?? ''), 'Advance date');
+
+        $repository = new SupplierRepository($this->app);
+        $advanceId = $repository->registerAdvance([
+            'supplier_id' => (int) $supplier['id'],
+            'branch_id' => $branchId,
+            'currency' => $currency,
+            'deposit_amount' => $depositAmount,
+            'available_amount' => $depositAmount,
+            'reference_no' => $this->optionalText($input['advance_reference_number'] ?? null, 100),
+            'remarks' => $this->optionalText($input['advance_remarks'] ?? null, 4000),
+            'received_at' => $advanceDate,
+            'actor_user_id' => $actorUserId,
+        ]);
+
+        (new AccountingRepository($this->app))->postSupplierAdvanceDeposit([
+            'branch_id' => $branchId,
+            'booking_reference' => null,
+            'source_reference' => 'SADV-' . $advanceId,
+            'entry_date' => $advanceDate,
+            'currency' => $currency,
+            'amount' => $depositAmount,
+            'actor_user_id' => $actorUserId,
+            'narration' => 'Global prepaid supplier payment recorded',
+        ]);
+
+        return [
+            'advance' => $repository->findAdvanceById($advanceId),
+            'branch_id' => $branchId,
+            'supplier_name' => (string) ($supplier['name'] ?? 'Supplier'),
+            'currency' => $currency,
+            'amount' => $depositAmount,
+        ];
+    }
+
     public function applySupplierAdvance(array $input, int $actorUserId, array $accessibleBranchIds): array
     {
         $booking = $this->loadBooking((int) ($input['booking_id'] ?? 0), $accessibleBranchIds);
@@ -190,6 +232,15 @@ final class SupplierSettlementWorkspaceService extends Service
         return $booking;
     }
 
+    private function resolveAccessibleBranchId(int $branchId, array $accessibleBranchIds): int
+    {
+        if ($branchId <= 0 || ! in_array($branchId, array_map('intval', $accessibleBranchIds), true)) {
+            throw new RuntimeException('Please select a valid accessible branch.');
+        }
+
+        return $branchId;
+    }
+
     private function resolveSupplier(array $input, array $accessibleBranchIds): array
     {
         $supplierId = (int) ($input['supplier_id'] ?? 0);
@@ -209,6 +260,18 @@ final class SupplierSettlementWorkspaceService extends Service
         }
 
         return $supplier;
+    }
+
+    private function assertSupplierAllowedForBranch(array $supplier, int $branchId): void
+    {
+        if ((int) ($supplier['is_active'] ?? 1) !== 1) {
+            throw new RuntimeException('Please select an active supplier.');
+        }
+
+        $supplierBranchId = (int) ($supplier['branch_id'] ?? 0);
+        if ($supplierBranchId > 0 && $supplierBranchId !== $branchId) {
+            throw new RuntimeException('The selected supplier is not available for the chosen branch.');
+        }
     }
 
     private function validatedPaymentPayload(array $input): array

@@ -703,6 +703,32 @@ final class WorkspaceController extends BaseController
         }
     }
 
+    public function saveGlobalSupplierAdvance(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+
+        try {
+            $result = (new SupplierSettlementWorkspaceService($this->app))->recordGlobalSupplierAdvance(
+                $_POST,
+                (int) Auth::id(),
+                Authorization::accessibleBranchIds()
+            );
+            Flash::success(
+                'Prepaid supplier payment recorded successfully. Recorded '
+                . (string) ($result['currency'] ?? 'PKR')
+                . ' '
+                . number_format((float) ($result['amount'] ?? 0), 2)
+                . ' advance for '
+                . (string) ($result['supplier_name'] ?? 'Supplier')
+                . '.'
+            );
+            $this->redirect('/workspace');
+        } catch (RuntimeException $exception) {
+            Flash::error($exception->getMessage());
+            $this->redirect('/workspace');
+        }
+    }
+
     public function applySupplierAdvance(): never
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);

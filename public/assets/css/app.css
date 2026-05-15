@@ -1939,6 +1939,10 @@ textarea:focus {
     padding: 20px 22px 24px;
 }
 
+.global-prepaid-supplier-modal {
+    width: min(900px, calc(100vw - 32px));
+}
+
 .customer-picker-table tbody tr {
     cursor: pointer;
 }
