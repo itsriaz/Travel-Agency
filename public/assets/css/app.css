@@ -1943,6 +1943,12 @@ textarea:focus {
     width: min(900px, calc(100vw - 32px));
 }
 
+.supplier-settlement-helper {
+    margin: 8px 0 12px;
+    color: #54708c;
+    font-size: 0.82rem;
+}
+
 .customer-picker-table tbody tr {
     cursor: pointer;
 }

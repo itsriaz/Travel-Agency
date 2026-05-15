@@ -820,8 +820,8 @@ $supplierAdvanceBalanceTotals = $sumByCurrency($supplierFoundation['advances'] ?
         <div class="customer-picker-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="supplier-settlement-title">
             <header class="customer-picker-modal__header">
                 <div>
-                    <strong id="supplier-settlement-title">Supplier Settlement</strong>
-                    <span>Track payable, payments, advances, and supplier balance for this invoice.</span>
+                    <strong id="supplier-settlement-title">Postpaid Supplier Settlement</strong>
+                    <span>Use this screen to pay existing supplier payable balances. For payments made before purchase, use the global Prepaid Supplier Payment option.</span>
                 </div>
                 <button class="btn btn-sm" type="button" data-supplier-settlement-close>Close</button>
             </header>
@@ -829,15 +829,15 @@ $supplierAdvanceBalanceTotals = $sumByCurrency($supplierFoundation['advances'] ?
                 <div class="legacy-modal-grid">
                     <article>
                         <h3>Supplier Summary</h3>
+                        <p class="supplier-settlement-helper">This popup is only for postpaid supplier settlement. Prepaid supplier payments are managed from the global Prepaid Supplier Payment action.</p>
                         <div class="legacy-highlight-strip">
                             <div class="legacy-highlight legacy-highlight--red"><span>Total Supplier Payable</span><strong><?= e($formatCurrencyTotals($supplierGrossTotals)) ?></strong></div>
                             <div class="legacy-highlight legacy-highlight--orange"><span>Advance Used</span><strong><?= e($formatCurrencyTotals($supplierAdvanceAppliedTotals)) ?></strong></div>
                             <div class="legacy-highlight legacy-highlight--pink"><span>Paid to Supplier</span><strong><?= e($formatCurrencyTotals($supplierPaidTotals)) ?></strong></div>
                             <div class="legacy-highlight legacy-highlight--red"><span>Supplier Balance</span><strong><?= e($formatCurrencyTotals($supplierOutstandingTotals)) ?></strong></div>
-                            <div class="legacy-highlight legacy-highlight--orange"><span>Advance / Credit</span><strong><?= e($formatCurrencyTotals($supplierAdvanceBalanceTotals)) ?></strong></div>
                         </div>
                         <table class="legacy-table">
-                            <thead><tr><th>Code</th><th>Supplier</th><th>Mode</th><th>Curr.</th><th>Gross</th><th>Paid</th><th>Advance</th><th>Balance</th></tr></thead>
+                            <thead><tr><th>Code</th><th>Supplier</th><th>Mode</th><th>Curr.</th><th>Gross</th><th>Paid</th><th>Balance</th></tr></thead>
                             <tbody>
                             <?php foreach (($supplierFoundation['suppliers'] ?? []) as $supplierRow): ?>
                                 <tr>
@@ -847,11 +847,10 @@ $supplierAdvanceBalanceTotals = $sumByCurrency($supplierFoundation['advances'] ?
                                     <td><?= e((string) ($supplierRow['currency'] ?? '')) ?></td>
                                     <td><?= e($formatMoney((float) ($supplierRow['grossObligation'] ?? 0))) ?></td>
                                     <td><?= e($formatMoney((float) ($supplierRow['totalPaid'] ?? 0))) ?></td>
-                                    <td><?= e($formatMoney((float) ($supplierRow['advanceBalance'] ?? 0))) ?></td>
                                     <td><?= e($formatMoney((float) ($supplierRow['balanceDue'] ?? 0))) ?></td>
                                 </tr>
                             <?php endforeach; ?>
-                            <?php if (($supplierFoundation['suppliers'] ?? []) === []): ?><tr><td colspan="8" class="empty-cell">No suppliers linked to this invoice yet.</td></tr><?php endif; ?>
+                            <?php if (($supplierFoundation['suppliers'] ?? []) === []): ?><tr><td colspan="7" class="empty-cell">No suppliers linked to this invoice yet.</td></tr><?php endif; ?>
                             </tbody>
                         </table>
                     </article>
@@ -895,35 +894,6 @@ $supplierAdvanceBalanceTotals = $sumByCurrency($supplierFoundation['advances'] ?
                                 <label class="station-field span-4"><span>Remarks</span><input type="text" name="supplier_payment_remarks" value=""></label>
                             </div>
                         <div class="station-command-buttons top-gap"><button class="btn btn-primary btn-sm" type="submit" data-booking-gated-control <?= $workspaceBooking['id'] > 0 ? '' : 'disabled' ?>>Save Supplier Payment</button></div>
-                        </form>
-                    </article>
-                    <article>
-                        <h3>Record Supplier Advance</h3>
-                        <form method="post" action="<?= e(url('/workspace/suppliers/advances/save')) ?>">
-                            <?= \App\Helpers\Csrf::input() ?>
-                            <input type="hidden" name="booking_id" value="<?= e((string) $workspaceBooking['id']) ?>">
-                            <div class="station-form-grid station-form-grid--6 station-form-grid--inline">
-                                <label class="station-field span-2"><span>Supplier</span><input type="text" name="supplier_name" list="service-supplier-options" value=""></label>
-                                <label class="station-field span-2"><span>Date</span><input type="date" name="advance_date" value="<?= e(date('Y-m-d')) ?>"></label>
-                                <label class="station-field span-2"><span>Currency</span><select name="advance_currency"><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>"><?= e($currencyOption) ?></option><?php endforeach; ?></select></label>
-                                <label class="station-field span-2"><span>Amount</span><input type="number" step="0.01" name="advance_amount" value="0.00"></label>
-                                <label class="station-field span-3"><span>Reference</span><input type="text" name="advance_reference_number" value=""></label>
-                                <label class="station-field span-3"><span>Remarks</span><input type="text" name="advance_remarks" value=""></label>
-                            </div>
-                        <div class="station-command-buttons top-gap"><button class="btn btn-sm" type="submit" data-booking-gated-control <?= $workspaceBooking['id'] > 0 ? '' : 'disabled' ?>>Save Supplier Advance</button></div>
-                        </form>
-                    </article>
-                    <article>
-                        <h3>Apply Advance</h3>
-                        <form method="post" action="<?= e(url('/workspace/suppliers/advances/apply')) ?>">
-                            <?= \App\Helpers\Csrf::input() ?>
-                            <input type="hidden" name="booking_id" value="<?= e((string) $workspaceBooking['id']) ?>">
-                            <div class="station-form-grid station-form-grid--6 station-form-grid--inline">
-                                <label class="station-field span-3"><span>Available Advance</span><select name="supplier_advance_id"><?php foreach (($supplierFoundation['advances'] ?? []) as $advanceRow): ?><?php if ((float) ($advanceRow['availableAmount'] ?? 0) <= 0) { continue; } ?><option value="<?= e((string) ($advanceRow['id'] ?? 0)) ?>"><?= e((string) (($advanceRow['supplier'] ?? '') . ' / ' . ($advanceRow['currency'] ?? '') . ' ' . $formatMoney((float) ($advanceRow['availableAmount'] ?? 0)))) ?></option><?php endforeach; ?></select></label>
-                                <label class="station-field span-3"><span>Open Obligation</span><select name="supplier_obligation_id"><?php foreach (($supplierFoundation['openObligations'] ?? []) as $openObligation): ?><option value="<?= e((string) ($openObligation['id'] ?? 0)) ?>"><?= e((string) (($openObligation['supplier'] ?? '') . ' / ' . ($openObligation['serviceLineReference'] ?? '') . ' / ' . ($openObligation['currency'] ?? '') . ' ' . $formatMoney((float) ($openObligation['netPayableAmount'] ?? 0)))) ?></option><?php endforeach; ?></select></label>
-                                <label class="station-field span-2"><span>Apply Amount</span><input type="number" step="0.01" name="advance_apply_amount" value="0.00"></label>
-                            </div>
-                        <div class="station-command-buttons top-gap"><button class="btn btn-sm" type="submit" data-booking-gated-control <?= $workspaceBooking['id'] > 0 ? '' : 'disabled' ?>>Apply Advance</button></div>
                         </form>
                     </article>
                     <article>
@@ -971,26 +941,6 @@ $supplierAdvanceBalanceTotals = $sumByCurrency($supplierFoundation['advances'] ?
                                 </tr>
                             <?php endforeach; ?>
                             <?php if (($supplierFoundation['payments'] ?? []) === []): ?><tr><td colspan="8" class="empty-cell">No supplier payments recorded for this invoice yet.</td></tr><?php endif; ?>
-                            </tbody>
-                        </table>
-                    </article>
-                    <article>
-                        <h3>Supplier Advances</h3>
-                        <table class="legacy-table">
-                            <thead><tr><th>Supplier</th><th>Date</th><th>Curr.</th><th>Deposit</th><th>Used</th><th>Available</th><th>Reference</th></tr></thead>
-                            <tbody>
-                            <?php foreach (($supplierFoundation['advances'] ?? []) as $advanceRow): ?>
-                                <tr>
-                                    <td><?= e((string) ($advanceRow['supplier'] ?? '')) ?></td>
-                                    <td><?= e((string) ($advanceRow['receivedAt'] ?? '')) ?></td>
-                                    <td><?= e((string) ($advanceRow['currency'] ?? '')) ?></td>
-                                    <td><?= e($formatMoney((float) ($advanceRow['depositAmount'] ?? 0))) ?></td>
-                                    <td><?= e($formatMoney((float) ($advanceRow['usedAmount'] ?? 0))) ?></td>
-                                    <td><?= e($formatMoney((float) ($advanceRow['availableAmount'] ?? 0))) ?></td>
-                                    <td><?= e((string) ($advanceRow['referenceNo'] ?? '')) ?></td>
-                                </tr>
-                            <?php endforeach; ?>
-                            <?php if (($supplierFoundation['advances'] ?? []) === []): ?><tr><td colspan="7" class="empty-cell">No supplier advance or credit recorded for this invoice yet.</td></tr><?php endif; ?>
                             </tbody>
                         </table>
                     </article>
