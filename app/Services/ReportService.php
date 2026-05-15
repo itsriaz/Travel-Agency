@@ -16,6 +16,7 @@ final class ReportService extends Service
     private const REPORTS = [
         'cash_flow' => 'Cash Flow / Cash Movement',
         'management_summary' => 'Management Summary',
+        'prepaid_supplier_ledger' => 'Prepaid Supplier Ledger',
         'receivable_aging' => 'Receivable Aging',
         'payable_aging' => 'Payable Aging',
         'service_profit' => 'Service Profit',
@@ -101,6 +102,29 @@ final class ReportService extends Service
                     ['key' => 'pkr_total_supplier_paid', 'label' => 'PKR Supp. Paid'],
                     ['key' => 'pkr_customer_outstanding', 'label' => 'PKR Cust. Outstd'],
                     ['key' => 'pkr_supplier_outstanding', 'label' => 'PKR Supp. Outstd'],
+                ];
+                break;
+
+            case 'prepaid_supplier_ledger':
+                $reportData = $repository->prepaidSupplierLedgerSummary(
+                    $filters['branchScopeIds'],
+                    $filters['dateFrom'],
+                    $filters['dateTo'],
+                    $filters['currency'],
+                    $filters['advanceBalanceView']
+                );
+                [$rows, $summaryCards] = $this->prepaidSupplierLedgerReport($reportData);
+                $columns = [
+                    ['key' => 'supplier_name', 'label' => 'Supplier'],
+                    ['key' => 'branch_name', 'label' => 'Branch'],
+                    ['key' => 'currency', 'label' => 'Currency'],
+                    ['key' => 'total_advance_paid', 'label' => 'Total Advance Paid'],
+                    ['key' => 'total_advance_used', 'label' => 'Total Advance Used / Spent'],
+                    ['key' => 'remaining_advance_balance', 'label' => 'Remaining Advance Balance'],
+                    ['key' => 'advance_payments_count', 'label' => 'Advance Payments'],
+                    ['key' => 'advance_uses_count', 'label' => 'Advance Uses'],
+                    ['key' => 'last_advance_date', 'label' => 'Last Advance Date'],
+                    ['key' => 'last_used_date', 'label' => 'Last Used Date'],
                 ];
                 break;
 
@@ -574,6 +598,16 @@ final class ReportService extends Service
             throw new RuntimeException('Please select a valid accessible branch filter.');
         }
 
+        $currency = strtoupper(trim((string) ($query['currency'] ?? '')));
+        if ($currency !== '' && ! in_array($currency, ['PKR', 'AED', 'USD'], true)) {
+            throw new RuntimeException('Please select a valid currency filter.');
+        }
+
+        $advanceBalanceView = strtolower(trim((string) ($query['advance_balance_view'] ?? 'all')));
+        if (! in_array($advanceBalanceView, ['all', 'only_available', 'fully_used'], true)) {
+            throw new RuntimeException('Please select a valid advance balance view.');
+        }
+
         $dateFrom = $this->normalizeOptionalDate((string) ($query['date_from'] ?? ''));
         $dateTo = $this->normalizeOptionalDate((string) ($query['date_to'] ?? ''));
         $asOfDate = $this->normalizeRequiredDate((string) ($query['as_of_date'] ?? date('Y-m-d')), 'As of date');
@@ -586,10 +620,50 @@ final class ReportService extends Service
             'report' => $report,
             'branchId' => $branchId,
             'branchScopeIds' => $branchId > 0 ? [$branchId] : array_map('intval', $accessibleBranchIds),
+            'currency' => $currency,
+            'advanceBalanceView' => $advanceBalanceView,
             'dateFrom' => $dateFrom,
             'dateTo' => $dateTo,
             'asOfDate' => $asOfDate,
         ];
+    }
+
+    private function prepaidSupplierLedgerReport(array $rows): array
+    {
+        $paidTotals = [];
+        $usedTotals = [];
+        $balanceTotals = [];
+        $reportRows = [];
+
+        foreach ($rows as $row) {
+            $currency = (string) ($row['currency'] ?? 'PKR');
+            $paid = (float) ($row['total_advance_paid'] ?? 0);
+            $used = (float) ($row['total_advance_used'] ?? 0);
+            $balance = (float) ($row['remaining_advance_balance'] ?? 0);
+
+            $reportRows[] = [
+                'supplier_name' => (string) ($row['supplier_name'] ?? 'Supplier'),
+                'branch_name' => (string) ($row['branch_name'] ?? ''),
+                'currency' => $currency,
+                'total_advance_paid' => $this->money($paid),
+                'total_advance_used' => $this->money($used),
+                'remaining_advance_balance' => $this->money($balance),
+                'advance_payments_count' => (string) ((int) ($row['advance_payments_count'] ?? 0)),
+                'advance_uses_count' => (string) ((int) ($row['advance_uses_count'] ?? 0)),
+                'last_advance_date' => (string) (($row['last_advance_date'] ?? '') !== '' ? $row['last_advance_date'] : 'N/A'),
+                'last_used_date' => (string) (($row['last_used_date'] ?? '') !== '' ? $row['last_used_date'] : 'N/A'),
+            ];
+
+            $paidTotals[$currency] = ($paidTotals[$currency] ?? 0.0) + $paid;
+            $usedTotals[$currency] = ($usedTotals[$currency] ?? 0.0) + $used;
+            $balanceTotals[$currency] = ($balanceTotals[$currency] ?? 0.0) + $balance;
+        }
+
+        return [$reportRows, array_merge(
+            $this->currencySummaryCards('Advance Paid', $paidTotals),
+            $this->currencySummaryCards('Advance Used', $usedTotals),
+            $this->currencySummaryCards('Advance Balance', $balanceTotals)
+        )];
     }
 
     private function receivableAgingReport(array $rows, array $pkrRates): array

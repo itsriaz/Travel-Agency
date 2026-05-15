@@ -25,6 +25,8 @@ $dateFrom = (string) ($filters['dateFrom'] ?? '');
 $dateTo = (string) ($filters['dateTo'] ?? '');
 $asOfDate = (string) ($filters['asOfDate'] ?? date('Y-m-d'));
 $selectedBranchId = (int) ($filters['branchId'] ?? 0);
+$selectedCurrency = (string) ($filters['currency'] ?? '');
+$advanceBalanceView = (string) ($filters['advanceBalanceView'] ?? 'all');
 $selectedBranchLabel = 'All Accessible Branches';
 
 if ($selectedBranchId > 0) {
@@ -58,6 +60,18 @@ if ($selectedReport === 'receivable_aging') {
         . ' | As of: ' . $formattedAsOfDate
         . ' | Branch: ' . $selectedBranchLabel
         . ' | Basis: Aging by due date';
+} elseif ($selectedReport === 'prepaid_supplier_ledger') {
+    $balanceViewLabel = match ($advanceBalanceView) {
+        'only_available' => 'Only available balance',
+        'fully_used' => 'Only fully used advances',
+        default => 'All advance suppliers',
+    };
+    $currencyLabel = $selectedCurrency !== '' ? $selectedCurrency : 'All currencies';
+    $reportContextLine = 'Period: ' . $reportPeriodLabel
+        . ' | Branch: ' . $selectedBranchLabel
+        . ' | Currency: ' . $currencyLabel
+        . ' | Balance view: ' . $balanceViewLabel
+        . ' | Shows prepaid supplier advances, used/spent amounts, and remaining supplier advance balances grouped by supplier, branch, and currency.';
 } else {
     $dateBasisLabel = in_array($selectedReport, ['management_summary', 'branch_performance'], true)
         ? 'Booking/service activity uses booking date. Receipts use receipt date. Supplier payments use payment date.'
@@ -72,6 +86,8 @@ if ($selectedReport === 'receivable_aging') {
 $exportQuery = http_build_query([
     'report' => $selectedReport,
     'branch_id' => (int) ($filters['branchId'] ?? 0),
+    'currency' => (string) ($filters['currency'] ?? ''),
+    'advance_balance_view' => (string) ($filters['advanceBalanceView'] ?? 'all'),
     'date_from' => (string) ($filters['dateFrom'] ?? ''),
     'date_to' => (string) ($filters['dateTo'] ?? ''),
     'as_of_date' => (string) ($filters['asOfDate'] ?? date('Y-m-d')),
@@ -193,6 +209,23 @@ $exportQuery = http_build_query([
         <label class="station-field span-1">
             <span>As Of Date</span>
             <input type="date" name="as_of_date" value="<?= e((string) ($filters['asOfDate'] ?? date('Y-m-d'))) ?>" data-report-filter="debounced">
+        </label>
+        <label class="station-field span-1">
+            <span>Currency</span>
+            <select name="currency" data-report-filter="immediate">
+                <option value="" <?= $selectedCurrency === '' ? 'selected' : '' ?>>All</option>
+                <?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?>
+                    <option value="<?= e($currencyOption) ?>" <?= $selectedCurrency === $currencyOption ? 'selected' : '' ?>><?= e($currencyOption) ?></option>
+                <?php endforeach; ?>
+            </select>
+        </label>
+        <label class="station-field span-2">
+            <span>Balance View</span>
+            <select name="advance_balance_view" data-report-filter="immediate">
+                <option value="all" <?= $advanceBalanceView === 'all' ? 'selected' : '' ?>>All advance suppliers</option>
+                <option value="only_available" <?= $advanceBalanceView === 'only_available' ? 'selected' : '' ?>>Only available balance</option>
+                <option value="fully_used" <?= $advanceBalanceView === 'fully_used' ? 'selected' : '' ?>>Only fully used advances</option>
+            </select>
         </label>
         <div class="station-command-buttons span-6 top-gap">
             <button class="btn btn-primary btn-sm" type="submit" id="reports-run-button">Run Report</button>

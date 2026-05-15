@@ -213,6 +213,113 @@ final class ReportRepository extends BaseRepository
         ];
     }
 
+    public function prepaidSupplierLedgerSummary(
+        array $branchIds,
+        ?string $dateFrom,
+        ?string $dateTo,
+        string $currency = '',
+        string $balanceView = 'all'
+    ): array {
+        $advancePlaceholders = [];
+        $usagePlaceholders = [];
+        $advanceParams = [];
+        $usageParams = [];
+
+        foreach (array_values($branchIds) as $index => $branchId) {
+            $advanceKey = 'advance_branch_' . $index;
+            $usageKey = 'usage_branch_' . $index;
+            $advancePlaceholders[] = ':' . $advanceKey;
+            $usagePlaceholders[] = ':' . $usageKey;
+            $advanceParams[$advanceKey] = (int) $branchId;
+            $usageParams[$usageKey] = (int) $branchId;
+        }
+
+        $advanceClause = 'IN (' . implode(', ', $advancePlaceholders) . ')';
+        $usageClause = 'IN (' . implode(', ', $usagePlaceholders) . ')';
+        $advanceWindow = '';
+        $usageAdvanceWindow = '';
+
+        if ($dateFrom !== null) {
+            $advanceWindow .= ' AND a.received_at >= :advance_date_from';
+            $usageAdvanceWindow .= ' AND a.received_at >= :usage_date_from';
+            $advanceParams['advance_date_from'] = $dateFrom;
+            $usageParams['usage_date_from'] = $dateFrom;
+        }
+
+        if ($dateTo !== null) {
+            $advanceWindow .= ' AND a.received_at <= :advance_date_to';
+            $usageAdvanceWindow .= ' AND a.received_at <= :usage_date_to';
+            $advanceParams['advance_date_to'] = $dateTo;
+            $usageParams['usage_date_to'] = $dateTo;
+        }
+
+        $currency = strtoupper(trim($currency));
+        if ($currency !== '') {
+            $advanceWindow .= ' AND a.currency = :advance_currency_filter';
+            $usageAdvanceWindow .= ' AND a.currency = :usage_currency_filter';
+            $advanceParams['advance_currency_filter'] = $currency;
+            $usageParams['usage_currency_filter'] = $currency;
+        }
+
+        $sql = 'SELECT
+                    advance_summary.supplier_id,
+                    advance_summary.branch_id,
+                    advance_summary.currency,
+                    s.name AS supplier_name,
+                    br.name AS branch_name,
+                    advance_summary.total_advance_paid,
+                    COALESCE(usage_summary.total_advance_used, 0) AS total_advance_used,
+                    advance_summary.remaining_advance_balance,
+                    advance_summary.advance_payments_count,
+                    COALESCE(usage_summary.advance_uses_count, 0) AS advance_uses_count,
+                    advance_summary.last_advance_date,
+                    usage_summary.last_used_date
+                FROM (
+                    SELECT
+                        a.supplier_id,
+                        a.branch_id,
+                        a.currency,
+                        SUM(a.deposit_amount) AS total_advance_paid,
+                        SUM(a.available_amount) AS remaining_advance_balance,
+                        COUNT(a.id) AS advance_payments_count,
+                        MAX(a.received_at) AS last_advance_date
+                    FROM supplier_advances a
+                    WHERE a.branch_id ' . $advanceClause . $advanceWindow . '
+                    GROUP BY a.supplier_id, a.branch_id, a.currency
+                ) AS advance_summary
+                INNER JOIN suppliers s ON s.id = advance_summary.supplier_id
+                INNER JOIN branches br ON br.id = advance_summary.branch_id
+                LEFT JOIN (
+                    SELECT
+                        a.supplier_id,
+                        a.branch_id,
+                        a.currency,
+                        SUM(aa.applied_amount) AS total_advance_used,
+                        COUNT(aa.id) AS advance_uses_count,
+                        MAX(aa.created_at) AS last_used_date
+                    FROM supplier_advance_applications aa
+                    INNER JOIN supplier_advances a ON a.id = aa.supplier_advance_id
+                    WHERE a.branch_id ' . $usageClause . $usageAdvanceWindow . '
+                    GROUP BY a.supplier_id, a.branch_id, a.currency
+                ) AS usage_summary
+                    ON usage_summary.supplier_id = advance_summary.supplier_id
+                   AND usage_summary.branch_id = advance_summary.branch_id
+                   AND usage_summary.currency = advance_summary.currency';
+
+        if ($balanceView === 'only_available') {
+            $sql .= '
+                WHERE advance_summary.remaining_advance_balance > 0';
+        } elseif ($balanceView === 'fully_used') {
+            $sql .= '
+                WHERE advance_summary.remaining_advance_balance <= 0.005';
+        }
+
+        $sql .= '
+                ORDER BY s.name ASC, br.name ASC, advance_summary.currency ASC';
+
+        return $this->fetchRows($sql, array_merge($advanceParams, $usageParams));
+    }
+
     public function grossProfitSummary(array $branchIds, ?string $dateFrom, ?string $dateTo): array
     {
         [$clause, $params] = $this->branchScope($branchIds);
