@@ -332,7 +332,7 @@ $supplierAdvanceBalanceTotals = $sumByCurrency($supplierFoundation['advances'] ?
                     <div class="customer-inline-picker__results" data-customer-autocomplete-results></div>
                 </div>
             </label>
-            <label class="legacy-field legacy-field--red legacy-invoice-header__invoice-no"><span>Invoice No.</span><input type="text" value="<?= e($invoiceNoLabel) ?>" readonly data-invoice-number-display><small data-autosave-status><?= $workspaceBooking['id'] > 0 ? 'Saved' : 'Draft' ?></small></label>
+<label class="legacy-field legacy-field--red legacy-invoice-header__invoice-no"><span>Invoice No.</span><input type="text" value="<?= e($invoiceNoLabel) ?>" readonly data-invoice-number-display><small data-autosave-status hidden><?= $workspaceBooking['id'] > 0 ? 'Saved' : 'Draft' ?></small></label>
             <label class="legacy-field legacy-invoice-header__receipt-no"><span>Receipt No.</span><input type="text" value="<?= e($receiptNo) ?>" readonly></label>
             <label class="legacy-field legacy-invoice-header__date"><span>Invoice Date</span><input type="date" name="booking_date" value="<?= e($workspaceBooking['bookingDate']) ?>"></label>
             <label class="legacy-field legacy-invoice-header__client-code"><span>Client Code</span><input type="text" value="<?= e($clientCode) ?>" data-customer-summary-client readonly></label>
@@ -368,38 +368,52 @@ $supplierAdvanceBalanceTotals = $sumByCurrency($supplierFoundation['advances'] ?
         <input type="hidden" name="auto_booking_remarks" value="<?= e($workspaceBooking['remarks']) ?>" data-auto-booking-field="remarks">
         <input type="hidden" name="service_id" value="<?= e((string) ($activeService['serviceId'] ?? 0)) ?>" data-service-field="serviceId">
         <div class="legacy-service-context">
-            <strong><span data-active-service-mode><?= (int) ($activeService['serviceId'] ?? 0) > 0 ? 'Editing Service Line' : ($hasActiveServices ? 'New Service Line' : 'First Service Line') ?></span>: <span data-active-service-reference><?= e((string) ($activeService['lineNumber'] ?? 'SV-DRAFT')) ?></span></strong>
             <span data-active-service-type><?= e(ucwords((string) ($activeService['type'] ?? 'Air Ticket'))) ?></span>
         </div>
 
+        <label class="legacy-field legacy-field--passenger"><span>Passenger Name</span><input id="active-service-passenger-name" type="text" name="service_passenger_name" list="service-passenger-options" value="<?= e($passengerName) ?>" data-service-passenger-name autocomplete="off"><input type="hidden" name="service_traveler_id" value="<?= e((string) ($activeService['travelerId'] ?? 0)) ?>" data-service-field="travelerId"></label>
         <label class="legacy-field legacy-field--xs"><span>Mode</span><input type="text" value="P" readonly></label>
-        <label class="legacy-field"><span>Service Type</span><select name="service_type" data-service-field="type"><?php foreach ($serviceTypeOptions as $serviceTypeOption): ?><option value="<?= e($serviceTypeOption) ?>" <?= $serviceTypeOption === ($activeService['type'] ?? 'air ticket') ? 'selected' : '' ?>><?= e(ucwords($serviceTypeOption)) ?></option><?php endforeach; ?></select></label>
-        <label class="legacy-field"><span>Ticket No. / Ref No.</span><input type="text" name="ticket_number" data-ticket-field="ticket_number" value="<?= e($serviceReference) ?>"></label>
+        <label class="legacy-field legacy-field--service-type"><span>Service Type</span><select name="service_type" data-service-field="type"><?php foreach ($serviceTypeOptions as $serviceTypeOption): ?><option value="<?= e($serviceTypeOption) ?>" <?= $serviceTypeOption === ($activeService['type'] ?? 'air ticket') ? 'selected' : '' ?>><?= e(ucwords($serviceTypeOption)) ?></option><?php endforeach; ?></select></label>
+        <label class="legacy-field legacy-field--ticket-ref"><span>Ticket No. / Ref No.</span><input type="text" name="ticket_number" data-ticket-field="ticket_number" value="<?= e($serviceReference) ?>"></label>
+        <label class="legacy-field legacy-field--pnr"><span>PNR.#</span><input type="text" name="ticket_pnr" data-ticket-field="pnr" value="<?= e((string) ($activeService['pnr'] ?? '')) ?>"></label>
+        <label class="legacy-field legacy-field--supplier"><span>Tkt.Purchase From</span><input type="text" name="supplier_name" list="service-supplier-options" data-service-field="supplier" value="<?= e((string) ($activeService['supplier'] ?? '')) ?>"></label>
+        <label class="legacy-field legacy-field--ticket-type">
+            <span>Ticket Type</span>
+            <select name="ticket_type" data-ticket-field="ticket_type">
+                <?php $ticketTypeValue = strtolower(trim((string) ($activeService['ticketType'] ?? ''))); ?>
+                <option value="" <?= $ticketTypeValue === '' ? 'selected' : '' ?>></option>
+                <option value="local" <?= $ticketTypeValue === 'local' ? 'selected' : '' ?>>Local</option>
+                <option value="international" <?= $ticketTypeValue === 'international' ? 'selected' : '' ?>>International</option>
+            </select>
+        </label>
+        <label class="legacy-field legacy-field--class">
+            <span>Class</span>
+            <select name="ticket_class" data-ticket-field="class">
+                <?php $ticketClassValue = strtolower(trim((string) ($activeService['class'] ?? ''))); ?>
+                <option value="" <?= $ticketClassValue === '' ? 'selected' : '' ?>></option>
+                <option value="economy" <?= $ticketClassValue === 'economy' ? 'selected' : '' ?>>Economy</option>
+                <option value="business" <?= $ticketClassValue === 'business' ? 'selected' : '' ?>>Business</option>
+                <option value="first" <?= $ticketClassValue === 'first' ? 'selected' : '' ?>>First</option>
+            </select>
+        </label>
         <label class="legacy-field legacy-field--xs"><span>Conj.</span><input type="text" value="" readonly></label>
-        <label class="legacy-field"><span>Attach Last Ticket #</span><input type="text" value="" readonly></label>
-        <label class="legacy-field"><span>Place of services (VAT)</span><input type="text" value="OTHER" readonly></label>
-        <label class="legacy-field"><span>Ticket Type</span><input type="text" value="International" readonly></label>
-        <label class="legacy-field"><span>Airline/Agent (CR)</span><input type="text" name="ticket_airline" data-ticket-field="airline" value="<?= e((string) ($activeService['airline'] ?? '')) ?>"></label>
-        <label class="legacy-field legacy-field--wide"><span>Tkt.Purchase From</span><input type="text" name="supplier_name" list="service-supplier-options" data-service-field="supplier" value="<?= e((string) ($activeService['supplier'] ?? '')) ?>"></label>
-        <div class="legacy-inline-note legacy-inline-note--supplier-advance" data-supplier-advance-note hidden>
-            <strong data-supplier-advance-summary></strong>
-            <span data-supplier-advance-message>This advance will be used automatically against Mkt. Fare.</span>
-        </div>
+        <label class="legacy-field legacy-field--attach"><span>Attach Last Ticket #</span><input type="text" value="" readonly></label>
+        <label class="legacy-field legacy-field--place"><span>Place of services (VAT)</span><input type="text" value="OTHER" readonly></label>
+        <label class="legacy-field legacy-field--airline"><span>Airline/Agent (CR)</span><input type="text" name="ticket_airline" data-ticket-field="airline" value="<?= e((string) ($activeService['airline'] ?? '')) ?>"></label>
         <label class="legacy-field legacy-field--xs"><span>BSP</span><input type="text" value="N" readonly></label>
         <label class="legacy-field legacy-field--xs"><span>XO</span><input type="text" value="" readonly></label>
-        <label class="legacy-field"><span>Validation Date</span><input type="date" name="due_date" data-service-field="due_date" value="<?= e((string) ($activeService['dueDate'] ?? '')) ?>"></label>
-        <label class="legacy-field"><span>Booking Ref.</span><input type="text" data-service-field="lineNumber" value="<?= e((string) ($activeService['lineNumber'] ?? 'SV-DRAFT')) ?>" readonly></label>
-        <label class="legacy-field legacy-field--xs"><span>Status</span><select name="service_status" data-service-field="status"><?php foreach ($serviceStatusOptions as $statusOption): ?><option value="<?= e($statusOption) ?>" <?= $statusOption === ($activeService['status'] ?? 'Open') ? 'selected' : '' ?>><?= e(substr($statusOption, 0, 3)) ?></option><?php endforeach; ?></select></label>
+        <label class="legacy-field legacy-field--date"><span>Validation Date</span><input type="date" name="due_date" data-service-field="due_date" value="<?= e((string) ($activeService['dueDate'] ?? '')) ?>"></label>
+        <label class="legacy-field legacy-field--booking-ref"><span>Booking Ref.</span><input type="text" data-service-field="lineNumber" value="<?= e((string) ($activeService['lineNumber'] ?? 'SV-DRAFT')) ?>" readonly></label>
+        <label class="legacy-field legacy-field--status"><span>Status</span><select name="service_status" data-service-field="status"><?php foreach ($serviceStatusOptions as $statusOption): ?><option value="<?= e($statusOption) ?>" <?= $statusOption === ($activeService['status'] ?? 'Open') ? 'selected' : '' ?>><?= e(substr($statusOption, 0, 3)) ?></option><?php endforeach; ?></select></label>
         <label class="legacy-field legacy-field--xs" hidden aria-hidden="true"><span>Curr.</span><select data-service-field="currency-mirror" tabindex="-1"><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>" <?= $currencyOption === (string) ($activeService['currency'] ?? $invoiceCurrency) ? 'selected' : '' ?>><?= e($currencyOption) ?></option><?php endforeach; ?></select></label>
-        <label class="legacy-field legacy-field--passenger"><span>Passenger Name</span><input id="active-service-passenger-name" type="text" name="service_passenger_name" list="service-passenger-options" value="<?= e($passengerName) ?>" data-service-passenger-name autocomplete="off"><input type="hidden" name="service_traveler_id" value="<?= e((string) ($activeService['travelerId'] ?? 0)) ?>" data-service-field="travelerId"></label>
+        <label class="legacy-field legacy-field--date"><span>Dep. Date</span><input type="date" name="ticket_departure_date" data-ticket-field="departure_date" value="<?= e((string) ($activeService['departureDate'] ?? '')) ?>"></label>
+        <label class="legacy-field legacy-field--route"><span>Route</span><input type="text" value="<?= e($routeLabel) ?>" data-ticket-route-display></label>
+        <label class="legacy-field legacy-field--nationality"><span>Nationality</span><input type="text" value="<?= e((string) ($leadTraveler['nationality'] ?? '')) ?>" readonly></label>
+        <label class="legacy-field legacy-field--sales"><span>Sales Person</span><input type="text" value="<?= e((string) ($user['username'] ?? $user['email'] ?? '')) ?>" readonly></label>
         <label class="legacy-field legacy-field--sector"><span>Sector and Description</span><input type="text" name="remarks" data-service-field="remarks" value="<?= e($sectorDescription) ?>"></label>
-        <label class="legacy-field"><span>Dep. Date</span><input type="date" name="ticket_departure_date" data-ticket-field="departure_date" value="<?= e((string) ($activeService['departureDate'] ?? '')) ?>"></label>
-        <label class="legacy-field"><span>PNR.#</span><input type="text" name="ticket_pnr" data-ticket-field="pnr" value="<?= e((string) ($activeService['pnr'] ?? '')) ?>"></label>
-        <label class="legacy-field"><span>Route</span><input type="text" value="<?= e($routeLabel) ?>" data-ticket-route-display></label>
-        <label class="legacy-field"><span>Type</span><input type="text" name="ticket_class" data-ticket-field="class" value="<?= e((string) ($activeService['class'] ?? '')) ?>"></label>
-        <label class="legacy-field"><span>Nationality</span><input type="text" value="<?= e((string) ($leadTraveler['nationality'] ?? '')) ?>" readonly></label>
-        <label class="legacy-field"><span>Sales Person</span><input type="text" value="<?= e((string) ($user['username'] ?? $user['email'] ?? '')) ?>" readonly></label>
-
+        <div class="legacy-inline-note legacy-inline-note--supplier-advance" data-supplier-advance-note hidden>
+            <strong data-supplier-advance-summary></strong>
+        </div>
         <input type="hidden" name="ticket_return_date" data-ticket-field="return_date" value="<?= e((string) ($activeService['returnDate'] ?? '')) ?>">
         <input type="hidden" name="ticket_sector_from" data-ticket-field="sector_from" value="<?= e((string) ($activeService['sectorFrom'] ?? '')) ?>">
         <input type="hidden" name="ticket_sector_to" data-ticket-field="sector_to" value="<?= e((string) ($activeService['sectorTo'] ?? '')) ?>">
@@ -407,8 +421,13 @@ $supplierAdvanceBalanceTotals = $sumByCurrency($supplierFoundation['advances'] ?
         <input type="hidden" name="ticket_vat" data-ticket-metric="vat" value="<?= e((string) ($activeService['ticketVat'] ?? 0)) ?>">
         <input type="hidden" name="ticket_commission" data-ticket-metric="commission" value="<?= e((string) ($activeService['ticketCommission'] ?? 0)) ?>">
         <input type="hidden" name="ticket_remarks" data-ticket-field="ticket_remarks" value="<?= e((string) ($activeService['ticketRemarks'] ?? '')) ?>">
-        <button class="legacy-service-save btn btn-primary btn-sm" type="submit" data-service-submit data-manual-service-save><?= (int) ($activeService['serviceId'] ?? 0) > 0 ? 'Update Service' : ($hasActiveServices ? 'Save New Service' : 'Save First Service') ?></button>
-    </form>
+
+        <?php /*
+Manual service save button disabled because service saving is now handled automatically.
+Kept here in case manual service save is needed again later.
+
+<button class="legacy-service-save btn btn-primary btn-sm" type="submit" data-service-submit data-manual-service-save><?= (int) ($activeService['serviceId'] ?? 0) > 0 ? 'Update Service' : ($hasActiveServices ? 'Save New Service' : 'Save First Service') ?></button>
+*/ ?>    </form>
 
     <datalist id="service-supplier-options">
         <?php foreach ($serviceSupplierOptions as $supplierOption): ?>
@@ -550,33 +569,49 @@ $supplierAdvanceBalanceTotals = $sumByCurrency($supplierFoundation['advances'] ?
             </div>
             <div class="legacy-service-context" style="margin-bottom:6px;"><strong>Current Invoice</strong></div>
             <label><span>Invoice Currency</span><select id="commercial-invoice-currency" name="currency" form="legacy-service-form" data-service-field="currency"><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>" <?= $currencyOption === (string) ($activeService['currency'] ?? $invoiceCurrency) ? 'selected' : '' ?>><?= e($currencyOption) ?></option><?php endforeach; ?></select></label>
-            <div class="workspace-feedback workspace-feedback--inline" data-payment-no-current-invoice<?= $hasCurrentInvoiceAmount ? ' hidden' : ' style="display:block;"' ?>>No current invoice amount.</div>
             <label data-payment-current-invoice-row<?= $hasCurrentInvoiceAmount ? '' : ' hidden' ?>><span>Invoice Amount</span><input id="commercial-payment-current-invoice" type="text" value="<?= e($currentInvoiceAmount) ?>" data-payment-current-invoice="<?= e((string) $currentInvoiceAmountValue) ?>" data-payment-currency="<?= e($invoiceCurrency) ?>" readonly></label>
             <label data-payment-paid-current-invoice-row<?= $currentReceivedPersistedAmount > 0.005 ? '' : ' hidden' ?>><span>Paid on This Invoice</span><input id="commercial-payment-already-received" type="text" value="<?= e($paidOnCurrentInvoiceDisplay) ?>" data-payment-already-received data-payment-persisted-received="<?= e((string) $currentReceivedPersistedAmount) ?>" readonly></label>
             <label data-payment-current-balance-row<?= $hasCurrentInvoiceAmount ? '' : ' hidden' ?>><span>Invoice Balance</span><input id="commercial-payment-current-balance" class="legacy-red-text" type="text" value="<?= e($currentInvoiceBalance) ?>" data-payment-current-balance data-payment-persisted-invoice-balance="<?= e((string) $effectiveCurrentInvoiceDueValue) ?>" readonly></label>
-            <div class="legacy-service-context" style="margin:10px 0 6px;"><strong>Customer Open Balance</strong></div>
-            <input type="hidden" value="<?= e($invoiceCurrency . ' ' . number_format($sameCurrencyPreviousBalanceAmount, 2)) ?>" data-payment-previous-balance="<?= e((string) $sameCurrencyPreviousBalanceAmount) ?>" data-payment-previous-balance-map="<?= e(json_encode($previousBalanceTotals, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?: '{}') ?>" data-payment-open-balance-map="<?= e(json_encode($customerOpenBalanceTotals, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?: '{}') ?>">
-            <div data-payment-previous-balances-block<?= $visibleCustomerOpenBalanceTotals !== [] ? '' : ' hidden' ?>>
-                <div data-payment-previous-balance-list>
-                    <?php foreach ($visibleCustomerOpenBalanceTotals as $currencyCode => $amount): ?>
-                        <label><span><?= e((string) $currencyCode) ?></span><input class="legacy-red-text" type="text" value="<?= e((string) $currencyCode . ' ' . number_format((float) $amount, 2)) ?>" readonly></label>
-                    <?php endforeach; ?>
-                </div>
-            </div>
-            <div class="workspace-feedback workspace-feedback--inline" data-payment-no-previous-balance<?= $visibleCustomerOpenBalanceTotals === [] ? ' style="display:block;"' : '' ?><?= $visibleCustomerOpenBalanceTotals !== [] ? ' hidden' : '' ?>>No open balance.</div>
+<div class="legacy-service-context" style="margin:10px 0 6px;" data-payment-previous-balance-heading<?= $visibleCustomerOpenBalanceTotals !== [] ? '' : ' hidden' ?>><strong>Customer Open Balance</strong></div>
+
+<input type="hidden" value="<?= e($invoiceCurrency . ' ' . number_format($sameCurrencyPreviousBalanceAmount, 2)) ?>" data-payment-previous-balance="<?= e((string) $sameCurrencyPreviousBalanceAmount) ?>" data-payment-previous-balance-map="<?= e(json_encode($previousBalanceTotals, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?: '{}') ?>" data-payment-open-balance-map="<?= e(json_encode($customerOpenBalanceTotals, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?: '{}') ?>">
+
+<div data-payment-previous-balances-block<?= $visibleCustomerOpenBalanceTotals !== [] ? '' : ' hidden' ?>>
+    <div data-payment-previous-balance-list>
+        <?php foreach ($visibleCustomerOpenBalanceTotals as $currencyCode => $amount): ?>
+            <label><span><?= e((string) $currencyCode) ?></span><input class="legacy-red-text" type="text" value="<?= e((string) $currencyCode . ' ' . number_format((float) $amount, 2)) ?>" readonly></label>
+        <?php endforeach; ?>
+    </div>
+</div>
+
+<div class="workspace-feedback workspace-feedback--inline" data-payment-no-previous-balance hidden style="display:none !important;" aria-hidden="true"></div>
             <div class="legacy-service-context" style="margin:10px 0 6px;"><strong>Receive Payment</strong></div>
             <label><span>Payment Currency</span><select name="receipt_currency" data-payment-currency-select><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>" <?= $currencyOption === $paymentCurrency ? 'selected' : '' ?>><?= e($currencyOption) ?></option><?php endforeach; ?></select></label>
             <label><span data-payment-balance-label>Balance in Payment Currency (<?= e($paymentCurrency) ?>)</span><input id="commercial-payment-total-outstanding" class="legacy-red-text" type="text" value="<?= e($totalOutstanding) ?>" data-payment-total-outstanding="<?= e((string) $totalOutstandingAmount) ?>" data-payment-total-due-now="<?= e((string) $totalOutstandingAmount) ?>" readonly></label>
             <label<?= $showCurrentInvoiceBalancePkrEquivalent ? '' : ' hidden' ?> data-payment-current-balance-pkr-row><span>PKR Equivalent of Current Balance</span><input id="commercial-payment-current-balance-pkr" type="text" value="<?= e($currentInvoiceBalancePkrEquivalent) ?>" data-payment-current-balance-pkr data-payment-pkr-rate="<?= e((string) ($currentInvoiceBalancePkrRate ?? 0)) ?>" readonly></label>
-            <label><span>Amount Receiving</span><input type="number" name="received_amount" step="0.01" value="<?= e($amountReceivedNow) ?>" data-payment-focus="received_amount"></label>
-            <label data-payment-due-row>
-                <span>Due Date</span>
-                <span class="legacy-date-entry">
-                    <input type="text" name="due_date" value="<?= e($invoiceDueDate) ?>" placeholder="YYYY-MM-DD or DD/MM/YYYY" inputmode="numeric" autocomplete="off" data-payment-due-date>
-                    <button class="btn btn-sm legacy-date-trigger" type="button" data-payment-due-trigger aria-label="Open due date calendar">Pick</button>
-                    <input type="date" value="<?= e($invoiceDueDate) ?>" tabindex="-1" aria-hidden="true" data-payment-due-picker>
-                </span>
-            </label>
+            <label>
+    <span>Amount Receiving</span>
+    <input
+        type="number"
+        name="received_amount"
+        step="0.01"
+        value="<?= e($amountReceivedNow) ?>"
+        data-payment-focus="received_amount"
+        data-payment-partial-date-trigger
+    >
+</label>
+
+<label data-payment-due-row>
+    <span>Due Date</span>
+    <input
+        type="date"
+        name="due_date"
+        value="<?= e($invoiceDueDate) ?>"
+        autocomplete="off"
+        data-payment-due-date
+        data-payment-due-picker
+    >
+</label>
             <label data-payment-return-row hidden><span>Return Amount</span><input id="commercial-payment-return-amount" class="legacy-red-text" type="text" value="PKR 0.00" readonly data-payment-return-amount></label>
             <label><span>Payment Method</span><select name="payment_method"><?php foreach (['cash' => 'Cash', 'bank_transfer' => 'Bank Transfer', 'debit_card' => 'Debit Card', 'credit_card' => 'Credit Card'] as $paymentMethodValue => $paymentMethodLabel): ?><option value="<?= e($paymentMethodValue) ?>"><?= e($paymentMethodLabel) ?></option><?php endforeach; ?></select></label>
             <input type="hidden" value="0.00" data-quick-receive-input>
@@ -596,12 +631,9 @@ $supplierAdvanceBalanceTotals = $sumByCurrency($supplierFoundation['advances'] ?
             <input type="hidden" name="settlement_rate_to_currency" value="" data-payment-settlement-rate-to>
             <input type="hidden" name="settlement_exchange_rate" value="" data-payment-settlement-rate>
             <input type="hidden" name="settlement_exchange_rate_effective_date" value="<?= e(date('Y-m-d')) ?>" data-payment-settlement-rate-date>
-            <div class="legacy-service-context" style="margin:10px 0 6px;"><strong>Actions</strong></div>
             <div class="legacy-payment-actions">
                 <button class="btn btn-primary btn-sm legacy-payment-primary" type="button" name="receipt_action" value="save" data-payment-submit-action="save" data-payment-action="save-payment">Save Payment</button>
-                <button class="btn btn-sm" type="button" data-payment-action="new-payment">New Payment</button>
                 <button class="btn btn-sm" type="button" data-payment-exchange-settlement data-payment-action="exchange-settlement">Exchange Settlement</button>
-                <span class="workspace-feedback workspace-feedback--inline" style="display:block;">Current invoice only. Same-currency Save Payment stays unchanged.</span>
                 <button class="btn btn-sm" type="button" data-workspace-action="payment-history" data-workflow-control="payment-history" data-payment-action="payment-history">Payment History</button>
                 <a class="btn btn-sm" href="<?= e($ledgerUrl) ?>" <?= $workspaceBooking['id'] > 0 ? 'target="_blank" rel="noopener"' : '' ?> data-payment-action="customer-ledger">View Customer Ledger</a>
                 <button class="btn btn-success btn-sm legacy-payment-receipt" type="button" data-payment-action="print-receipt" data-payment-print-url="<?= e($latestReceiptUrl) ?>" data-payment-latest-receipt-id="<?= e((string) $latestReceiptId) ?>">Print Receipt</button>
@@ -1841,4 +1873,236 @@ $supplierAdvanceBalanceTotals = $sumByCurrency($supplierFoundation['advances'] ?
             initStandaloneCustomerModal();
         })();
     </script>
+    <script>
+    (function () {
+        var initEnterAsTab = function () {
+            var station = document.querySelector('[data-workspace-station]');
+
+            if (!station || station.dataset.enterAsTabInit === '1') {
+                return;
+            }
+
+            station.dataset.enterAsTabInit = '1';
+
+            var shouldSkipField = function (field) {
+                if (!field) {
+                    return true;
+                }
+
+                var tag = field.tagName ? field.tagName.toLowerCase() : '';
+                var type = field.type ? field.type.toLowerCase() : '';
+
+                if (field.disabled || field.readOnly || field.hidden) {
+                    return true;
+                }
+
+                if (field.closest('[hidden]') || field.closest('[aria-hidden="true"]')) {
+                    return true;
+                }
+
+                if (tag === 'textarea') {
+                    return true;
+                }
+
+                if (tag === 'button' || tag === 'a') {
+                    return true;
+                }
+
+                if (type === 'hidden' || type === 'button' || type === 'submit' || type === 'reset') {
+                    return true;
+                }
+
+                var style = window.getComputedStyle(field);
+
+                return style.display === 'none' || style.visibility === 'hidden';
+            };
+
+            var getFocusableFields = function () {
+                return Array.prototype.filter.call(
+                    station.querySelectorAll('input, select, textarea'),
+                    function (field) {
+                        return !shouldSkipField(field);
+                    }
+                );
+            };
+
+            var focusNextField = function (currentField) {
+                var fields = getFocusableFields();
+                var currentIndex = fields.indexOf(currentField);
+
+                if (currentIndex === -1) {
+                    return;
+                }
+
+                var nextField = fields[currentIndex + 1] || fields[0];
+
+                if (nextField) {
+                    nextField.focus();
+
+                    if (typeof nextField.select === 'function' && nextField.tagName.toLowerCase() === 'input') {
+                        nextField.select();
+                    }
+
+                    if (nextField.type === 'date' && typeof nextField.showPicker === 'function') {
+                        try {
+                            nextField.showPicker();
+                        } catch (error) {
+                            // Browser may block automatic date picker. Focus still moves to date field.
+                        }
+                    }
+                }
+            };
+
+            station.addEventListener('keydown', function (event) {
+                if (event.key !== 'Enter') {
+                    return;
+                }
+
+                var target = event.target;
+
+                if (!target || shouldSkipField(target)) {
+                    return;
+                }
+
+                // Do not interfere with customer search/autocomplete Enter behavior.
+                if (
+                    target.matches('[data-customer-autocomplete-input]') ||
+                    target.matches('[data-customer-picker-input]') ||
+                    target.matches('[data-customer-dues-search]')
+                ) {
+                    return;
+                }
+
+                event.preventDefault();
+                event.stopPropagation();
+
+                focusNextField(target);
+            }, true);
+        };
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initEnterAsTab, { once: true });
+            return;
+        }
+
+        initEnterAsTab();
+    })();
+</script>
+    <script>
+    (function () {
+        var initPartialPaymentDueDatePicker = function () {
+            var station = document.querySelector('[data-workspace-station]');
+
+            if (!station || station.dataset.partialPaymentDueDatePickerInit === '1') {
+                return;
+            }
+
+            station.dataset.partialPaymentDueDatePickerInit = '1';
+
+            var amountInput = station.querySelector('[data-payment-focus="received_amount"]');
+            var dueDateInput = station.querySelector('[data-payment-due-date]');
+            var totalOutstandingInput = station.querySelector('[data-payment-total-outstanding]');
+            var currentBalanceInput = station.querySelector('[data-payment-current-balance]');
+            var currentInvoiceInput = station.querySelector('[data-payment-current-invoice]');
+
+            if (!amountInput || !dueDateInput) {
+                return;
+            }
+
+            var parseAmount = function (value) {
+                var parsed = parseFloat(String(value || '').replace(/,/g, '').replace(/[^\d.-]/g, ''));
+
+                return isNaN(parsed) ? 0 : parsed;
+            };
+
+            var getInvoiceDueAmount = function () {
+                if (totalOutstandingInput) {
+                    var totalOutstanding = parseAmount(
+                        totalOutstandingInput.getAttribute('data-payment-total-due-now')
+                        || totalOutstandingInput.getAttribute('data-payment-total-outstanding')
+                        || totalOutstandingInput.value
+                    );
+
+                    if (totalOutstanding > 0.005) {
+                        return totalOutstanding;
+                    }
+                }
+
+                if (currentBalanceInput) {
+                    var currentBalance = parseAmount(
+                        currentBalanceInput.getAttribute('data-payment-persisted-invoice-balance')
+                        || currentBalanceInput.value
+                    );
+
+                    if (currentBalance > 0.005) {
+                        return currentBalance;
+                    }
+                }
+
+                if (currentInvoiceInput) {
+                    return parseAmount(
+                        currentInvoiceInput.getAttribute('data-payment-current-invoice')
+                        || currentInvoiceInput.value
+                    );
+                }
+
+                return 0;
+            };
+
+            var openDueDatePicker = function () {
+                var receivedAmount = parseAmount(amountInput.value);
+                var invoiceDueAmount = getInvoiceDueAmount();
+
+                if (receivedAmount <= 0.005 || invoiceDueAmount <= 0.005) {
+                    return;
+                }
+
+                if (receivedAmount >= invoiceDueAmount - 0.005) {
+                    return;
+                }
+
+                dueDateInput.focus();
+
+                if (typeof dueDateInput.showPicker === 'function') {
+                    try {
+                        dueDateInput.showPicker();
+                    } catch (error) {
+                        // Browser may block automatic picker opening. The field still receives focus.
+                    }
+                }
+            };
+
+            amountInput.addEventListener('change', openDueDatePicker);
+            amountInput.addEventListener('blur', openDueDatePicker);
+
+            amountInput.addEventListener('keydown', function (event) {
+                if (event.key !== 'Enter') {
+                    return;
+                }
+
+                event.preventDefault();
+                event.stopPropagation();
+
+                openDueDatePicker();
+            });
+
+            dueDateInput.addEventListener('click', function () {
+                if (typeof dueDateInput.showPicker === 'function') {
+                    try {
+                        dueDateInput.showPicker();
+                    } catch (error) {
+                        // Native date input fallback.
+                    }
+                }
+            });
+        };
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initPartialPaymentDueDatePicker, { once: true });
+            return;
+        }
+
+        initPartialPaymentDueDatePicker();
+    })();
+</script>
 </section>

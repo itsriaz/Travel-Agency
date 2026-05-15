@@ -2753,8 +2753,9 @@ textarea:focus {
 }
 
 .legacy-service-band {
-    grid-template-columns: 50px 116px 128px 42px 108px 128px 112px 116px minmax(180px, 1.2fr) 42px 42px 118px;
+    grid-template-columns: 176px 56px 126px 166px 166px 180px 120px 120px 56px 136px 160px 160px;
     align-items: end;
+    gap: 4px 6px;
     padding: 4px;
 }
 
@@ -2841,16 +2842,97 @@ textarea:focus {
     grid-column: span 2;
 }
 
+.legacy-field--passenger,
+.legacy-field--service-type,
+.legacy-field--ticket-ref,
+.legacy-field--pnr,
+.legacy-field--supplier,
+.legacy-field--ticket-type,
+.legacy-field--class,
+.legacy-field--attach,
+.legacy-field--place,
+.legacy-field--airline,
+.legacy-field--date,
+.legacy-field--booking-ref,
+.legacy-field--route,
+.legacy-field--nationality,
+.legacy-field--sales {
+    width: 100%;
+    min-width: 0;
+}
+
 .legacy-field--passenger {
-    grid-column: span 3;
+    max-width: 176px;
+}
+
+.legacy-field--service-type {
+    max-width: 126px;
+}
+
+.legacy-field--ticket-ref {
+    max-width: 166px;
+}
+
+.legacy-field--pnr {
+    max-width: 166px;
+}
+
+.legacy-field--supplier {
+    max-width: 180px;
+}
+
+.legacy-field--ticket-type,
+.legacy-field--class {
+    max-width: 120px;
+}
+
+.legacy-field--attach {
+    max-width: 136px;
+}
+
+.legacy-field--place,
+.legacy-field--airline {
+    max-width: 160px;
+}
+
+.legacy-field--date {
+    max-width: 160px;
+}
+
+.legacy-field--booking-ref {
+    max-width: 136px;
+}
+
+.legacy-field--route {
+    max-width: 160px;
+}
+
+.legacy-field--nationality {
+    max-width: 126px;
+}
+
+.legacy-field--sales {
+    max-width: 160px;
 }
 
 .legacy-field--sector {
     grid-column: span 3;
 }
 
+.legacy-field--xs,
+.legacy-field--status {
+    justify-self: start;
+    min-width: 56px;
+}
+
 .legacy-field--xs {
-    min-width: 44px;
+    width: 56px;
+    max-width: 56px;
+}
+
+.legacy-field--status {
+    width: 86px;
+    max-width: 86px;
 }
 
 .legacy-status-pill {
@@ -3584,7 +3666,7 @@ textarea:focus {
     }
 
     .legacy-service-band {
-        grid-template-columns: repeat(12, minmax(92px, 1fr));
+        grid-template-columns: 176px 56px 126px 166px 166px 180px 120px 120px 56px 136px 160px 160px;
     }
 
     .legacy-payment-strip {
