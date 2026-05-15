@@ -2424,7 +2424,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (payload.invoice_no) {
                 setInvoiceNumber(payload.invoice_no);
             }
-            applyAutosavePaymentFoundation(payload);
+            applyAutosavePaymentFoundation(payload, { syncCommercialEditor: false });
             updatePrintReceiptTarget(payload.receipt_id || 0, payload.booking_id || currentBookingId());
             lockSavedPaymentStateFromPayload(payload, 'same_currency');
             refreshPaymentPreview();
@@ -4341,7 +4341,10 @@ document.addEventListener('DOMContentLoaded', () => {
             && bookingDateField.value.trim() !== '';
     };
 
-    const updateTotalsFromAutosave = (totals = {}) => {
+    const updateTotalsFromAutosave = (totals = {}, options = {}) => {
+        const {
+            syncCommercialEditor = true,
+        } = options;
         const receivable = toNumber(totals.total_receivable || 0);
         const payable = toNumber(totals.total_payable || 0);
         const profit = toNumber(totals.profit_loss || 0);
@@ -4368,55 +4371,57 @@ document.addEventListener('DOMContentLoaded', () => {
             ? totals.other_currency_previous_balance_map
             : null;
 
-        [airlinePayableField, airlinePayableFinancialField, airlinePayableSummary, ticketValueField].forEach((node) => {
-            if (!node) {
-                return;
-            }
+        if (syncCommercialEditor) {
+            [airlinePayableField, airlinePayableFinancialField, airlinePayableSummary, ticketValueField].forEach((node) => {
+                if (!node) {
+                    return;
+                }
 
-            if ('value' in node) {
-                node.value = formatMoney(payable);
-            } else {
-                node.textContent = formatMoney(payable);
-            }
-        });
-        [clientReceivableField, clientReceivableSummary, totalSpField].forEach((node) => {
-            if (!node) {
-                return;
-            }
+                if ('value' in node) {
+                    node.value = formatMoney(payable);
+                } else {
+                    node.textContent = formatMoney(payable);
+                }
+            });
+            [clientReceivableField, clientReceivableSummary, totalSpField].forEach((node) => {
+                if (!node) {
+                    return;
+                }
 
-            if ('value' in node) {
-                node.value = formatMoney(receivable);
-            } else {
-                node.textContent = formatMoney(receivable);
+                if ('value' in node) {
+                    node.value = formatMoney(receivable);
+                } else {
+                    node.textContent = formatMoney(receivable);
+                }
+            });
+            if (otherPayableSummary) {
+                otherPayableSummary.textContent = formatMoney(toNumber(totals.other_payable || 0));
             }
-        });
-        if (otherPayableSummary) {
-            otherPayableSummary.textContent = formatMoney(toNumber(totals.other_payable || 0));
-        }
-        if (serviceProfit) {
-            serviceProfit.textContent = formatMoney(profit);
-            serviceProfit.style.color = profit < 0 ? '#a23737' : '#0a4d73';
-        }
-        if (bottomTotalFields.fare) {
-            bottomTotalFields.fare.value = formatMoney(totalFare);
-        }
-        if (bottomTotalFields.taxes) {
-            bottomTotalFields.taxes.value = formatMoney(totalTaxes);
-        }
-        if (bottomTotalFields.other) {
-            bottomTotalFields.other.value = formatMoney(totalOther);
-        }
-        if (bottomTotalFields.sale) {
-            bottomTotalFields.sale.value = formatMoney(receivable);
-        }
-        if (bottomTotalFields.receivable) {
-            bottomTotalFields.receivable.value = formatMoney(receivable);
-        }
-        if (bottomTotalFields.payable) {
-            bottomTotalFields.payable.value = formatMoney(payable);
-        }
-        if (bottomTotalFields.profit) {
-            bottomTotalFields.profit.value = formatMoney(profit);
+            if (serviceProfit) {
+                serviceProfit.textContent = formatMoney(profit);
+                serviceProfit.style.color = profit < 0 ? '#a23737' : '#0a4d73';
+            }
+            if (bottomTotalFields.fare) {
+                bottomTotalFields.fare.value = formatMoney(totalFare);
+            }
+            if (bottomTotalFields.taxes) {
+                bottomTotalFields.taxes.value = formatMoney(totalTaxes);
+            }
+            if (bottomTotalFields.other) {
+                bottomTotalFields.other.value = formatMoney(totalOther);
+            }
+            if (bottomTotalFields.sale) {
+                bottomTotalFields.sale.value = formatMoney(receivable);
+            }
+            if (bottomTotalFields.receivable) {
+                bottomTotalFields.receivable.value = formatMoney(receivable);
+            }
+            if (bottomTotalFields.payable) {
+                bottomTotalFields.payable.value = formatMoney(payable);
+            }
+            if (bottomTotalFields.profit) {
+                bottomTotalFields.profit.value = formatMoney(profit);
+            }
         }
         if (paymentCurrentInvoiceInput) {
             paymentCurrentInvoiceInput.dataset.paymentCurrency = currentInvoiceCurrency;
@@ -4475,10 +4480,10 @@ document.addEventListener('DOMContentLoaded', () => {
         refreshPaymentPreview();
     };
 
-    const applyAutosavePaymentFoundation = (payload = {}) => {
+    const applyAutosavePaymentFoundation = (payload = {}, options = {}) => {
         refreshSettlementDataFromPayload(payload);
         refreshPaymentHistoryFromPayload(payload);
-        updateTotalsFromAutosave(payload.totals || {});
+        updateTotalsFromAutosave(payload.totals || {}, options);
     };
 
     const persistInvoiceAutosave = (options = {}) => {
