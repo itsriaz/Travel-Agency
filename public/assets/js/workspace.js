@@ -41,6 +41,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const customerDuesSelectedSummary = station.querySelector('[data-customer-dues-selected-summary]');
     const supplierSettlementModal = station.querySelector('[data-supplier-settlement-modal]');
     const supplierSettlementCloseButtons = Array.from(station.querySelectorAll('[data-supplier-settlement-close]'));
+    const simplePostpaidForm = station.querySelector('[data-simple-postpaid-form]');
+    const simplePostpaidSelectors = Array.from(station.querySelectorAll('[data-simple-postpaid-select]'));
+    const simplePostpaidSupplierDisplay = station.querySelector('[data-simple-postpaid-supplier-display]');
+    const simplePostpaidCurrencyDisplay = station.querySelector('[data-simple-postpaid-currency-display]');
+    const simplePostpaidCurrencyInput = station.querySelector('[data-simple-postpaid-currency-input]');
+    const simplePostpaidAmountInput = station.querySelector('[data-simple-postpaid-amount]');
+    const simplePostpaidTotal = station.querySelector('[data-simple-postpaid-total]');
+    const simplePostpaidFeedback = station.querySelector('[data-simple-postpaid-feedback]');
+    const simplePostpaidSubmit = station.querySelector('[data-simple-postpaid-submit]');
     const globalPrepaidSupplierModal = station.querySelector('[data-global-prepaid-supplier-modal]');
     const globalPrepaidSupplierOpenButtons = Array.from(station.querySelectorAll('[data-global-prepaid-supplier-open]'));
     const globalPrepaidSupplierCloseButtons = Array.from(station.querySelectorAll('[data-global-prepaid-supplier-close]'));
@@ -5135,6 +5144,60 @@ document.addEventListener('DOMContentLoaded', () => {
         supplierSettlementModal.setAttribute('aria-hidden', 'true');
     }
 
+    function updateSimplePostpaidSupplierForm() {
+        if (!simplePostpaidForm) {
+            return;
+        }
+
+        const selectedRows = simplePostpaidSelectors.filter((input) => input.checked);
+        const selectedSuppliers = Array.from(new Set(selectedRows.map((input) => String(input.dataset.supplierName || '')))).filter(Boolean);
+        const selectedCurrencies = Array.from(new Set(selectedRows.map((input) => String(input.dataset.currency || '')))).filter(Boolean);
+        const selectedTotal = selectedRows.reduce((sum, input) => sum + Number(input.dataset.balance || 0), 0);
+        const enteredAmount = Number(simplePostpaidAmountInput ? simplePostpaidAmountInput.value || 0 : 0);
+
+        if (simplePostpaidSupplierDisplay) {
+            if (selectedSuppliers.length === 1) {
+                simplePostpaidSupplierDisplay.value = selectedSuppliers[0];
+            } else if (selectedSuppliers.length > 1) {
+                simplePostpaidSupplierDisplay.value = `${selectedSuppliers.length} suppliers selected`;
+            } else {
+                simplePostpaidSupplierDisplay.value = '';
+            }
+        }
+
+        if (simplePostpaidCurrencyDisplay) {
+            simplePostpaidCurrencyDisplay.value = selectedCurrencies.length === 1 ? selectedCurrencies[0] : '';
+        }
+
+        if (simplePostpaidCurrencyInput) {
+            simplePostpaidCurrencyInput.value = selectedCurrencies.length === 1 ? selectedCurrencies[0] : '';
+        }
+
+        if (simplePostpaidTotal) {
+            simplePostpaidTotal.textContent = selectedCurrencies.length === 1
+                ? `${selectedCurrencies[0]} ${selectedTotal.toFixed(2)}`
+                : selectedTotal.toFixed(2);
+        }
+
+        let feedbackMessage = '';
+        if (selectedRows.length === 0) {
+            feedbackMessage = 'Please select at least one supplier payable.';
+        } else if (selectedCurrencies.length > 1) {
+            feedbackMessage = 'Please select payable rows with the same currency.';
+        } else if (enteredAmount > selectedTotal) {
+            feedbackMessage = 'Payment exceeds selected supplier payable. Reduce the amount or use Prepaid Supplier Payment.';
+        }
+
+        if (simplePostpaidFeedback) {
+            simplePostpaidFeedback.textContent = feedbackMessage;
+            simplePostpaidFeedback.hidden = feedbackMessage === '';
+        }
+
+        if (simplePostpaidSubmit) {
+            simplePostpaidSubmit.disabled = feedbackMessage !== '';
+        }
+    }
+
     function openGlobalPrepaidSupplierModal() {
         if (!globalPrepaidSupplierModal) {
             return;
@@ -5248,6 +5311,18 @@ document.addEventListener('DOMContentLoaded', () => {
     supplierSettlementCloseButtons.forEach((button) => {
         button.addEventListener('click', closeSupplierSettlementModal);
     });
+
+    simplePostpaidSelectors.forEach((input) => {
+        input.addEventListener('change', updateSimplePostpaidSupplierForm);
+    });
+
+    if (simplePostpaidAmountInput) {
+        simplePostpaidAmountInput.addEventListener('input', updateSimplePostpaidSupplierForm);
+    }
+
+    if (simplePostpaidForm) {
+        updateSimplePostpaidSupplierForm();
+    }
 
     globalPrepaidSupplierOpenButtons.forEach((button) => {
         button.addEventListener('click', openGlobalPrepaidSupplierModal);

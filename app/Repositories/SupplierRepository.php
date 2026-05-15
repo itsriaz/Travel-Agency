@@ -338,6 +338,43 @@ final class SupplierRepository extends BaseRepository
         return $statement->fetchAll() ?: [];
     }
 
+    public function openObligationsForSettlement(array $obligationIds, string $bookingReference): array
+    {
+        $ids = array_values(array_unique(array_map('intval', $obligationIds)));
+        if ($ids === []) {
+            return [];
+        }
+
+        $placeholders = implode(', ', array_fill(0, count($ids), '?'));
+        $statement = $this->db->prepare(
+            "SELECT
+                o.id,
+                o.supplier_id,
+                o.booking_reference,
+                o.service_line_reference,
+                o.currency,
+                o.gross_amount,
+                o.advance_applied_amount,
+                o.net_payable_amount,
+                o.due_date,
+                o.status,
+                o.remarks,
+                s.name AS supplier_name,
+                s.supplier_mode
+             FROM supplier_obligations o
+             INNER JOIN suppliers s ON s.id = o.supplier_id
+             WHERE o.booking_reference = ?
+               AND o.id IN ({$placeholders})
+               AND o.status IN ('open', 'partially_covered')
+               AND o.net_payable_amount > 0
+             ORDER BY o.due_date IS NULL, o.due_date ASC, o.service_line_reference ASC, o.id ASC
+             FOR UPDATE"
+        );
+        $statement->execute(array_merge([$bookingReference], $ids));
+
+        return $statement->fetchAll() ?: [];
+    }
+
     public function createSupplierPayment(array $data): int
     {
         return $this->transaction(function () use ($data): int {
@@ -514,31 +551,35 @@ final class SupplierRepository extends BaseRepository
 
             $updatePayment = $this->db->prepare(
                 'UPDATE supplier_payments
-                 SET allocated_amount = allocated_amount + :allocated_amount,
-                     unallocated_amount = GREATEST(0, paid_amount - (allocated_amount + :allocated_amount)),
+                 SET allocated_amount = allocated_amount + :payment_allocated_amount,
+                     unallocated_amount = GREATEST(0, paid_amount - (allocated_amount + :payment_unallocated_delta)),
                      status = CASE
-                         WHEN paid_amount - (allocated_amount + :allocated_amount) <= 0 THEN "fully_allocated"
+                         WHEN paid_amount - (allocated_amount + :payment_status_delta) <= 0 THEN "fully_allocated"
                          ELSE "partially_allocated"
                      END
                  WHERE id = :payment_id'
             );
             $updatePayment->execute([
-                'allocated_amount' => $paymentConsumedAmount,
+                'payment_allocated_amount' => $paymentConsumedAmount,
+                'payment_unallocated_delta' => $paymentConsumedAmount,
+                'payment_status_delta' => $paymentConsumedAmount,
                 'payment_id' => $paymentId,
             ]);
 
             $updateObligation = $this->db->prepare(
                 'UPDATE supplier_obligations
-                 SET net_payable_amount = GREATEST(0, net_payable_amount - :allocated_amount),
+                 SET net_payable_amount = GREATEST(0, net_payable_amount - :obligation_allocated_amount),
                      status = CASE
-                         WHEN net_payable_amount - :allocated_amount <= 0 AND advance_applied_amount > 0 THEN "covered_by_advance"
-                         WHEN net_payable_amount - :allocated_amount <= 0 THEN "paid"
+                         WHEN net_payable_amount - :obligation_status_advance_amount <= 0 AND advance_applied_amount > 0 THEN "covered_by_advance"
+                         WHEN net_payable_amount - :obligation_status_paid_amount <= 0 THEN "paid"
                          ELSE "partially_covered"
                      END
                  WHERE id = :obligation_id'
             );
             $updateObligation->execute([
-                'allocated_amount' => $applicableAmount,
+                'obligation_allocated_amount' => $applicableAmount,
+                'obligation_status_advance_amount' => $applicableAmount,
+                'obligation_status_paid_amount' => $applicableAmount,
                 'obligation_id' => $obligationId,
             ]);
 

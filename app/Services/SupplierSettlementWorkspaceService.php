@@ -51,6 +51,209 @@ final class SupplierSettlementWorkspaceService extends Service
         ];
     }
 
+    public function recordSimplePostpaidSupplierPayment(array $input, int $actorUserId, array $accessibleBranchIds): array
+    {
+        $booking = $this->loadBooking((int) ($input['booking_id'] ?? 0), $accessibleBranchIds);
+        $selectedObligationIds = $this->normalizedSelectedObligationIds($input['simple_supplier_obligation_id'] ?? []);
+        if ($selectedObligationIds === []) {
+            throw new RuntimeException('Please select at least one supplier payable.');
+        }
+
+        /** @var \PDO $db */
+        $db = $this->app->get('db');
+        $repository = new SupplierRepository($this->app);
+        $accounting = new AccountingRepository($this->app);
+
+        $startedTransaction = ! $db->inTransaction();
+        if ($startedTransaction) {
+            $db->beginTransaction();
+        }
+
+        try {
+            $result = (function () use (
+                $booking,
+                $selectedObligationIds,
+                $input,
+                $actorUserId,
+                $repository,
+                $accounting
+            ): array {
+                $obligations = $repository->openObligationsForSettlement(
+                    $selectedObligationIds,
+                    (string) $booking['booking_reference']
+                );
+
+                if (count($obligations) !== count($selectedObligationIds)) {
+                    throw new RuntimeException('One or more selected supplier payable rows are no longer available.');
+                }
+
+                $currencies = array_values(array_unique(array_map(
+                    static fn (array $row): string => (string) ($row['currency'] ?? ''),
+                    $obligations
+                )));
+                if (count($currencies) !== 1) {
+                    throw new RuntimeException('Please select payable rows with the same currency.');
+                }
+
+                $selectedCurrency = (string) $currencies[0];
+                $postedCurrency = $this->normalizeCurrency((string) ($input['supplier_payment_currency'] ?? $selectedCurrency));
+                if ($postedCurrency !== $selectedCurrency) {
+                    throw new RuntimeException('Payment currency must match the selected supplier payable currency.');
+                }
+
+                $paidAmount = $this->positiveMoney($input['supplier_paid_amount'] ?? 0, 'Supplier paid amount');
+                $selectedOutstandingTotal = round(array_sum(array_map(
+                    static fn (array $row): float => (float) ($row['net_payable_amount'] ?? 0),
+                    $obligations
+                )), 2);
+
+                if ($paidAmount > $selectedOutstandingTotal) {
+                    throw new RuntimeException('Payment exceeds selected supplier payable. Reduce the amount or use Prepaid Supplier Payment.');
+                }
+
+                $paymentPayload = [
+                    'payment_date' => $this->normalizeDate((string) ($input['supplier_payment_date'] ?? ''), 'Supplier payment date'),
+                    'currency' => $selectedCurrency,
+                    'payment_method' => $this->normalizeMethod((string) ($input['supplier_payment_method'] ?? 'cash')),
+                    'reference_number' => $this->optionalText($input['supplier_reference_number'] ?? null, 100),
+                    'bank_card_detail' => $this->optionalText($input['supplier_bank_card_detail'] ?? null, 190),
+                    'charges_amount' => 0.0,
+                    'status' => 'paid',
+                    'exchange_rate_to_booking' => null,
+                    'remarks' => $this->optionalText($input['supplier_payment_remarks'] ?? null, 4000),
+                ];
+
+                $remainingAmount = $paidAmount;
+                $allocationPlans = [];
+                $allocatedAmount = 0.00;
+
+                foreach ($obligations as $obligation) {
+                    if ($remainingAmount <= 0) {
+                        break;
+                    }
+
+                    $obligationBalance = round((float) ($obligation['net_payable_amount'] ?? 0), 2);
+                    if ($obligationBalance <= 0) {
+                        continue;
+                    }
+
+                    $allocationAmount = min($remainingAmount, $obligationBalance);
+                    if ($allocationAmount <= 0) {
+                        continue;
+                    }
+
+                    $allocationPlans[] = [
+                        'supplier_id' => (int) $obligation['supplier_id'],
+                        'obligation_id' => (int) $obligation['id'],
+                        'service_line_reference' => (string) ($obligation['service_line_reference'] ?? ''),
+                        'amount' => $allocationAmount,
+                    ];
+
+                    $remainingAmount = round($remainingAmount - $allocationAmount, 2);
+                    $allocatedAmount = round($allocatedAmount + $allocationAmount, 2);
+                }
+
+                if ($remainingAmount > 0) {
+                    throw new RuntimeException('Selected supplier payable changed before allocation could complete. Please review and try again.');
+                }
+
+                $allocationsBySupplier = [];
+                foreach ($allocationPlans as $plan) {
+                    $supplierId = (int) $plan['supplier_id'];
+                    if (! isset($allocationsBySupplier[$supplierId])) {
+                        $allocationsBySupplier[$supplierId] = [];
+                    }
+
+                    $allocationsBySupplier[$supplierId][] = $plan;
+                }
+
+                $paymentCount = 0;
+                $allocationCount = 0;
+                $payments = [];
+
+                foreach ($allocationsBySupplier as $supplierId => $supplierPlans) {
+                    $supplierAllocatedAmount = round(array_sum(array_map(
+                        static fn (array $plan): float => (float) $plan['amount'],
+                        $supplierPlans
+                    )), 2);
+                    if ($supplierAllocatedAmount <= 0) {
+                        continue;
+                    }
+
+                    $paymentNo = $repository->nextSupplierPaymentNumber();
+                    $paymentId = $repository->createSupplierPayment(array_merge($paymentPayload, [
+                        'supplier_id' => $supplierId,
+                        'branch_id' => (int) $booking['branch_id'],
+                        'booking_reference' => (string) $booking['booking_reference'],
+                        'payment_no' => $paymentNo,
+                        'paid_amount' => $supplierAllocatedAmount,
+                        'actor_user_id' => $actorUserId,
+                    ]));
+
+                    $accounting->postSupplierPaymentRecorded([
+                        'branch_id' => (int) $booking['branch_id'],
+                        'booking_reference' => (string) $booking['booking_reference'],
+                        'payment_no' => $paymentNo,
+                        'paid_amount' => $supplierAllocatedAmount,
+                        'charges_amount' => 0,
+                        'payment_method' => $paymentPayload['payment_method'],
+                        'entry_date' => $paymentPayload['payment_date'],
+                        'currency' => $paymentPayload['currency'],
+                        'actor_user_id' => $actorUserId,
+                    ]);
+
+                    foreach ($supplierPlans as $plan) {
+                        $allocationId = $repository->allocateSupplierPayment(
+                            $paymentId,
+                            (int) $plan['obligation_id'],
+                            (float) $plan['amount'],
+                            null,
+                            'Simple postpaid auto-allocation',
+                            $actorUserId
+                        );
+
+                        $accounting->postSupplierPaymentAllocation([
+                            'branch_id' => (int) $booking['branch_id'],
+                            'booking_reference' => (string) $booking['booking_reference'],
+                            'source_reference' => $paymentNo . '-ALLOC-' . $allocationId,
+                            'service_line_reference' => $plan['service_line_reference'] !== '' ? $plan['service_line_reference'] : null,
+                            'supplier_obligation_id' => (int) $plan['obligation_id'],
+                            'allocated_amount' => (float) $plan['amount'],
+                            'entry_date' => $paymentPayload['payment_date'],
+                            'currency' => $selectedCurrency,
+                            'actor_user_id' => $actorUserId,
+                        ]);
+                        $allocationCount++;
+                    }
+
+                    $payments[] = $repository->findSupplierPaymentById($paymentId);
+                    $paymentCount++;
+                }
+
+                return [
+                    'payments' => $payments,
+                    'booking_id' => (int) $booking['id'],
+                    'payment_count' => $paymentCount,
+                    'allocation_count' => $allocationCount,
+                    'allocated_amount' => $allocatedAmount,
+                    'currency' => $selectedCurrency,
+                ];
+            })();
+
+            if ($startedTransaction && $db->inTransaction()) {
+                $db->commit();
+            }
+
+            return $result;
+        } catch (\Throwable $exception) {
+            if ($startedTransaction && $db->inTransaction()) {
+                $db->rollBack();
+            }
+
+            throw $exception;
+        }
+    }
+
     public function allocateSupplierPayment(array $input, int $actorUserId, array $accessibleBranchIds): array
     {
         $booking = $this->loadBooking((int) ($input['booking_id'] ?? 0), $accessibleBranchIds);
@@ -316,6 +519,20 @@ final class SupplierSettlementWorkspaceService extends Service
         }
 
         return $lines;
+    }
+
+    private function normalizedSelectedObligationIds(mixed $value): array
+    {
+        if (! is_array($value)) {
+            return [];
+        }
+
+        $ids = array_values(array_unique(array_filter(array_map(
+            static fn ($item): int => (int) $item,
+            $value
+        ), static fn (int $id): bool => $id > 0)));
+
+        return $ids;
     }
 
     private function normalizeCurrency(string $value): string

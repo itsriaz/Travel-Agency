@@ -817,7 +817,7 @@ $supplierAdvanceBalanceTotals = $sumByCurrency($supplierFoundation['advances'] ?
 
     <section id="dock-panel-suppliers" class="customer-picker-modal" data-supplier-settlement-modal hidden aria-hidden="true">
         <div class="customer-picker-modal__backdrop" data-supplier-settlement-close></div>
-        <div class="customer-picker-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="supplier-settlement-title">
+        <div class="customer-picker-modal__dialog postpaid-supplier-settlement-modal" role="dialog" aria-modal="true" aria-labelledby="supplier-settlement-title">
             <header class="customer-picker-modal__header">
                 <div>
                     <strong id="supplier-settlement-title">Postpaid Supplier Settlement</strong>
@@ -877,51 +877,98 @@ $supplierAdvanceBalanceTotals = $sumByCurrency($supplierFoundation['advances'] ?
                         </table>
                     </article>
                     <article>
-                        <h3>Record Supplier Payment</h3>
-                        <form method="post" action="<?= e(url('/workspace/suppliers/payments/save')) ?>">
+                        <h3>Pay Outstanding Supplier Balance</h3>
+                        <form method="post" action="<?= e(url('/workspace/suppliers/payments/simple-save')) ?>" data-simple-postpaid-form>
                             <?= \App\Helpers\Csrf::input() ?>
                             <input type="hidden" name="booking_id" value="<?= e((string) $workspaceBooking['id']) ?>">
+                            <input type="hidden" name="supplier_payment_currency" value="" data-simple-postpaid-currency-input>
                             <div class="station-form-grid station-form-grid--6 station-form-grid--inline">
-                                <label class="station-field span-2"><span>Supplier</span><input type="text" name="supplier_name" list="service-supplier-options" value=""></label>
+                                <label class="station-field span-3"><span>Selected Supplier(s)</span><input type="text" value="" data-simple-postpaid-supplier-display readonly placeholder="Select payable rows"></label>
                                 <label class="station-field span-2"><span>Date</span><input type="date" name="supplier_payment_date" value="<?= e(date('Y-m-d')) ?>"></label>
-                                <label class="station-field span-2"><span>Currency</span><select name="supplier_payment_currency"><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>"><?= e($currencyOption) ?></option><?php endforeach; ?></select></label>
-                                <label class="station-field span-2"><span>Amount</span><input type="number" step="0.01" name="supplier_paid_amount" value="0.00"></label>
+                                <label class="station-field span-1"><span>Currency</span><input type="text" value="" data-simple-postpaid-currency-display readonly placeholder="--"></label>
+                                <label class="station-field span-2"><span>Amount</span><input type="number" step="0.01" name="supplier_paid_amount" value="0.00" data-simple-postpaid-amount></label>
                                 <label class="station-field span-2"><span>Method</span><select name="supplier_payment_method"><?php foreach (['cash' => 'Cash', 'bank_transfer' => 'Bank Transfer', 'debit_card' => 'Debit Card', 'credit_card' => 'Credit Card'] as $paymentMethodValue => $paymentMethodLabel): ?><option value="<?= e($paymentMethodValue) ?>"><?= e($paymentMethodLabel) ?></option><?php endforeach; ?></select></label>
-                                <label class="station-field span-2"><span>Status</span><select name="supplier_payment_status"><option value="paid">Paid</option><option value="void">Void</option></select></label>
-                                <label class="station-field span-3"><span>Reference</span><input type="text" name="supplier_reference_number" value=""></label>
+                                <label class="station-field span-2"><span>Reference</span><input type="text" name="supplier_reference_number" value=""></label>
                                 <label class="station-field span-3"><span>Bank / Card Detail</span><input type="text" name="supplier_bank_card_detail" value=""></label>
-                                <label class="station-field span-2"><span>Charges</span><input type="number" step="0.01" name="supplier_charges_amount" value="0.00"></label>
-                                <label class="station-field span-4"><span>Remarks</span><input type="text" name="supplier_payment_remarks" value=""></label>
+                                <label class="station-field span-3"><span>Remarks</span><input type="text" name="supplier_payment_remarks" value=""></label>
                             </div>
-                        <div class="station-command-buttons top-gap"><button class="btn btn-primary btn-sm" type="submit" data-booking-gated-control <?= $workspaceBooking['id'] > 0 ? '' : 'disabled' ?>>Save Supplier Payment</button></div>
-                        </form>
-                    </article>
-                    <article>
-                        <h3>Allocate Supplier Payment</h3>
-                        <form method="post" action="<?= e(url('/workspace/suppliers/payments/allocate')) ?>">
-                            <?= \App\Helpers\Csrf::input() ?>
-                            <input type="hidden" name="booking_id" value="<?= e((string) $workspaceBooking['id']) ?>">
-                            <div class="station-form-grid station-form-grid--6 station-form-grid--inline">
-                                <label class="station-field span-4"><span>Unallocated Payment</span><select name="supplier_payment_id"><?php foreach (($supplierFoundation['allocatablePayments'] ?? []) as $allocatablePayment): ?><option value="<?= e((string) ($allocatablePayment['id'] ?? 0)) ?>"><?= e((string) (($allocatablePayment['paymentNo'] ?? '') . ' / ' . ($allocatablePayment['supplier'] ?? '') . ' / ' . ($allocatablePayment['currency'] ?? '') . ' ' . $formatMoney((float) ($allocatablePayment['unallocatedAmount'] ?? 0)))) ?></option><?php endforeach; ?></select></label>
+                            <div class="supplier-simple-payment-summary top-gap">
+                                <span>Selected outstanding total:</span>
+                                <strong data-simple-postpaid-total>0.00</strong>
                             </div>
+                            <div class="supplier-simple-payment-feedback top-gap" data-simple-postpaid-feedback hidden></div>
                             <table class="legacy-table top-gap">
-                                <thead><tr><th>Supplier</th><th>Svc Line</th><th>Curr.</th><th>Balance</th><th>Allocate</th><th>Note</th></tr></thead>
+                                <thead><tr><th>Select</th><th>Supplier</th><th>Svc Line</th><th>Curr.</th><th>Due</th><th>Outstanding</th></tr></thead>
                                 <tbody>
                                 <?php foreach (($supplierFoundation['openObligations'] ?? []) as $openObligation): ?>
                                     <tr>
+                                        <td><input type="checkbox" name="simple_supplier_obligation_id[]" value="<?= e((string) ($openObligation['id'] ?? 0)) ?>" data-simple-postpaid-select data-supplier-id="<?= e((string) ($openObligation['supplierId'] ?? 0)) ?>" data-supplier-name="<?= e((string) ($openObligation['supplier'] ?? '')) ?>" data-currency="<?= e((string) ($openObligation['currency'] ?? '')) ?>" data-balance="<?= e((string) number_format((float) ($openObligation['netPayableAmount'] ?? 0), 2, '.', '')) ?>"></td>
                                         <td><?= e((string) ($openObligation['supplier'] ?? '')) ?></td>
                                         <td><?= e((string) ($openObligation['serviceLineReference'] ?? '')) ?></td>
                                         <td><?= e((string) ($openObligation['currency'] ?? '')) ?></td>
+                                        <td><?= e((string) ($openObligation['dueDate'] ?? '')) ?></td>
                                         <td><?= e($formatMoney((float) ($openObligation['netPayableAmount'] ?? 0))) ?></td>
-                                        <td><input type="hidden" name="supplier_allocation_obligation_id[]" value="<?= e((string) ($openObligation['id'] ?? 0)) ?>"><input type="number" step="0.01" name="supplier_allocation_amount[]" value="0.00"></td>
-                                        <td><input type="text" name="supplier_allocation_note[]" value=""></td>
                                     </tr>
                                 <?php endforeach; ?>
-                                <?php if (($supplierFoundation['openObligations'] ?? []) === []): ?><tr><td colspan="6" class="empty-cell">No open supplier obligations to allocate.</td></tr><?php endif; ?>
+                                <?php if (($supplierFoundation['openObligations'] ?? []) === []): ?><tr><td colspan="6" class="empty-cell">No open supplier obligations to settle.</td></tr><?php endif; ?>
                                 </tbody>
                             </table>
-                        <div class="station-command-buttons top-gap"><button class="btn btn-sm" type="submit" data-booking-gated-control <?= $workspaceBooking['id'] > 0 ? '' : 'disabled' ?>>Allocate Supplier Payment</button></div>
+                            <div class="station-command-buttons top-gap"><button class="btn btn-primary btn-sm" type="submit" data-simple-postpaid-submit data-booking-gated-control <?= $workspaceBooking['id'] > 0 ? '' : 'disabled' ?>>Save Payment</button></div>
                         </form>
+                    </article>
+                    <article>
+                        <details class="supplier-dashboard-advanced">
+                            <summary>Advanced: Manual Allocation</summary>
+                            <div class="supplier-dashboard-advanced__body">
+                                <article>
+                                    <h3>Record Supplier Payment</h3>
+                                    <form method="post" action="<?= e(url('/workspace/suppliers/payments/save')) ?>">
+                                        <?= \App\Helpers\Csrf::input() ?>
+                                        <input type="hidden" name="booking_id" value="<?= e((string) $workspaceBooking['id']) ?>">
+                                        <div class="station-form-grid station-form-grid--6 station-form-grid--inline">
+                                            <label class="station-field span-2"><span>Supplier</span><input type="text" name="supplier_name" list="service-supplier-options" value=""></label>
+                                            <label class="station-field span-2"><span>Date</span><input type="date" name="supplier_payment_date" value="<?= e(date('Y-m-d')) ?>"></label>
+                                            <label class="station-field span-2"><span>Currency</span><select name="supplier_payment_currency"><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>"><?= e($currencyOption) ?></option><?php endforeach; ?></select></label>
+                                            <label class="station-field span-2"><span>Amount</span><input type="number" step="0.01" name="supplier_paid_amount" value="0.00"></label>
+                                            <label class="station-field span-2"><span>Method</span><select name="supplier_payment_method"><?php foreach (['cash' => 'Cash', 'bank_transfer' => 'Bank Transfer', 'debit_card' => 'Debit Card', 'credit_card' => 'Credit Card'] as $paymentMethodValue => $paymentMethodLabel): ?><option value="<?= e($paymentMethodValue) ?>"><?= e($paymentMethodLabel) ?></option><?php endforeach; ?></select></label>
+                                            <label class="station-field span-2"><span>Status</span><select name="supplier_payment_status"><option value="paid">Paid</option><option value="void">Void</option></select></label>
+                                            <label class="station-field span-3"><span>Reference</span><input type="text" name="supplier_reference_number" value=""></label>
+                                            <label class="station-field span-3"><span>Bank / Card Detail</span><input type="text" name="supplier_bank_card_detail" value=""></label>
+                                            <label class="station-field span-2"><span>Charges</span><input type="number" step="0.01" name="supplier_charges_amount" value="0.00"></label>
+                                            <label class="station-field span-4"><span>Remarks</span><input type="text" name="supplier_payment_remarks" value=""></label>
+                                        </div>
+                                    <div class="station-command-buttons top-gap"><button class="btn btn-sm" type="submit" data-booking-gated-control <?= $workspaceBooking['id'] > 0 ? '' : 'disabled' ?>>Save Manual Supplier Payment</button></div>
+                                    </form>
+                                </article>
+                                <article>
+                                    <h3>Allocate Supplier Payment</h3>
+                                    <form method="post" action="<?= e(url('/workspace/suppliers/payments/allocate')) ?>">
+                                        <?= \App\Helpers\Csrf::input() ?>
+                                        <input type="hidden" name="booking_id" value="<?= e((string) $workspaceBooking['id']) ?>">
+                                        <div class="station-form-grid station-form-grid--6 station-form-grid--inline">
+                                            <label class="station-field span-4"><span>Unallocated Payment</span><select name="supplier_payment_id"><?php foreach (($supplierFoundation['allocatablePayments'] ?? []) as $allocatablePayment): ?><option value="<?= e((string) ($allocatablePayment['id'] ?? 0)) ?>"><?= e((string) (($allocatablePayment['paymentNo'] ?? '') . ' / ' . ($allocatablePayment['supplier'] ?? '') . ' / ' . ($allocatablePayment['currency'] ?? '') . ' ' . $formatMoney((float) ($allocatablePayment['unallocatedAmount'] ?? 0)))) ?></option><?php endforeach; ?></select></label>
+                                        </div>
+                                        <table class="legacy-table top-gap">
+                                            <thead><tr><th>Supplier</th><th>Svc Line</th><th>Curr.</th><th>Balance</th><th>Allocate</th><th>Note</th></tr></thead>
+                                            <tbody>
+                                            <?php foreach (($supplierFoundation['openObligations'] ?? []) as $openObligation): ?>
+                                                <tr>
+                                                    <td><?= e((string) ($openObligation['supplier'] ?? '')) ?></td>
+                                                    <td><?= e((string) ($openObligation['serviceLineReference'] ?? '')) ?></td>
+                                                    <td><?= e((string) ($openObligation['currency'] ?? '')) ?></td>
+                                                    <td><?= e($formatMoney((float) ($openObligation['netPayableAmount'] ?? 0))) ?></td>
+                                                    <td><input type="hidden" name="supplier_allocation_obligation_id[]" value="<?= e((string) ($openObligation['id'] ?? 0)) ?>"><input type="number" step="0.01" name="supplier_allocation_amount[]" value="0.00"></td>
+                                                    <td><input type="text" name="supplier_allocation_note[]" value=""></td>
+                                                </tr>
+                                            <?php endforeach; ?>
+                                            <?php if (($supplierFoundation['openObligations'] ?? []) === []): ?><tr><td colspan="6" class="empty-cell">No open supplier obligations to allocate.</td></tr><?php endif; ?>
+                                            </tbody>
+                                        </table>
+                                    <div class="station-command-buttons top-gap"><button class="btn btn-sm" type="submit" data-booking-gated-control <?= $workspaceBooking['id'] > 0 ? '' : 'disabled' ?>>Allocate Supplier Payment</button></div>
+                                    </form>
+                                </article>
+                            </div>
+                        </details>
                     </article>
                     <article>
                         <h3>Supplier Payments</h3>

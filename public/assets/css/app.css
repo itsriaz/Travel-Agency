@@ -1939,6 +1939,16 @@ textarea:focus {
     padding: 20px 22px 24px;
 }
 
+.postpaid-supplier-settlement-modal {
+    display: flex;
+    flex-direction: column;
+}
+
+.postpaid-supplier-settlement-modal .customer-picker-modal__body {
+    overflow-y: auto;
+    min-height: 0;
+}
+
 .global-prepaid-supplier-modal {
     width: min(900px, calc(100vw - 32px));
 }
@@ -1947,6 +1957,42 @@ textarea:focus {
     margin: 8px 0 12px;
     color: #54708c;
     font-size: 0.82rem;
+}
+
+.supplier-simple-payment-summary {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    color: #12314c;
+    font-size: 0.88rem;
+}
+
+.supplier-simple-payment-feedback {
+    padding: 8px 10px;
+    border: 1px solid #e7c7c7;
+    border-radius: 6px;
+    background: #fff6f6;
+    color: #a12626;
+    font-size: 0.83rem;
+}
+
+.supplier-dashboard-advanced {
+    border: 1px solid #d6e2ef;
+    border-radius: 8px;
+    background: #f8fbfe;
+    padding: 10px 12px;
+}
+
+.supplier-dashboard-advanced summary {
+    cursor: pointer;
+    color: #12314c;
+    font-weight: 700;
+}
+
+.supplier-dashboard-advanced__body {
+    display: grid;
+    gap: 12px;
+    margin-top: 12px;
 }
 
 .customer-picker-table tbody tr {

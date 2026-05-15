@@ -667,6 +667,33 @@ final class WorkspaceController extends BaseController
         }
     }
 
+    public function saveSimplePostpaidSupplierPayment(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+
+        try {
+            $result = (new SupplierSettlementWorkspaceService($this->app))->recordSimplePostpaidSupplierPayment(
+                $_POST,
+                (int) Auth::id(),
+                Authorization::accessibleBranchIds()
+            );
+            $paymentLabel = (int) ($result['payment_count'] ?? 1) > 1 ? 'Supplier payments' : 'Supplier payment';
+            Flash::success(
+                $paymentLabel . ' saved and allocated to selected payable(s). Allocated '
+                . (string) ($result['currency'] ?? 'PKR')
+                . ' '
+                . number_format((float) ($result['allocated_amount'] ?? 0), 2)
+                . ' to '
+                . (int) ($result['allocation_count'] ?? 0)
+                . ' payable item(s).'
+            );
+            $this->redirect('/workspace?booking_id=' . (int) $result['booking_id'] . '#dock-panel-suppliers');
+        } catch (RuntimeException $exception) {
+            Flash::error($exception->getMessage());
+            $this->redirect('/workspace?booking_id=' . (int) ($_POST['booking_id'] ?? 0) . '#dock-panel-suppliers');
+        }
+    }
+
     public function allocateSupplierPayment(): never
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);
