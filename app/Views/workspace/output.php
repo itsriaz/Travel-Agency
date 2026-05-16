@@ -241,6 +241,67 @@ $remainingCustomerBalanceSource = is_array($customerPaymentFoundation['summary']
 $remainingCustomerBalanceTotals = $nonZeroCurrencyTotals($remainingCustomerBalanceSource);
 $selectedReceiptId = (int) ($selectedReceipt['id'] ?? 0);
 $selectedReceiptNo = (string) ($selectedReceipt['receiptNo'] ?? '');
+$receiptOriginalPaymentRowsByKey = [];
+
+$registerReceiptOriginalPayment = static function (array $receiptRow) use (&$receiptOriginalPaymentRowsByKey): void {
+    $receiptId = (int) ($receiptRow['id'] ?? $receiptRow['receiptId'] ?? 0);
+    $receiptNo = trim((string) ($receiptRow['receiptNo'] ?? $receiptRow['receipt_no'] ?? ''));
+    $currency = trim((string) ($receiptRow['currency'] ?? $receiptRow['paymentCurrency'] ?? ''));
+    $receivedAmount = (float) ($receiptRow['receivedAmount'] ?? $receiptRow['received_amount'] ?? 0);
+
+    if (($receiptId <= 0 && $receiptNo === '') || $currency === '' || abs($receivedAmount) <= 0.005) {
+        return;
+    }
+
+    $payload = [
+        'currency' => $currency,
+        'receivedAmount' => $receivedAmount,
+    ];
+
+    if ($receiptId > 0) {
+        $receiptOriginalPaymentRowsByKey['id:' . $receiptId] = $payload;
+    }
+
+    if ($receiptNo !== '') {
+        $receiptOriginalPaymentRowsByKey['no:' . $receiptNo] = $payload;
+    }
+};
+
+foreach (($customerPaymentFoundation['receipts'] ?? []) as $receiptRow) {
+    $registerReceiptOriginalPayment($receiptRow);
+}
+
+if ($selectedReceipt !== null) {
+    $registerReceiptOriginalPayment($selectedReceipt);
+}
+
+$getOriginalReceiptPaymentDisplay = static function (array $historyRow) use ($receiptOriginalPaymentRowsByKey, $receiptCurrency, $formatMoney): string {
+    $historyReceiptId = (int) ($historyRow['receiptId'] ?? $historyRow['id'] ?? 0);
+    $historyReceiptNo = trim((string) ($historyRow['receiptNo'] ?? $historyRow['receipt_no'] ?? ''));
+
+    $originalPayment = null;
+
+    if ($historyReceiptId > 0 && isset($receiptOriginalPaymentRowsByKey['id:' . $historyReceiptId])) {
+        $originalPayment = $receiptOriginalPaymentRowsByKey['id:' . $historyReceiptId];
+    } elseif ($historyReceiptNo !== '' && isset($receiptOriginalPaymentRowsByKey['no:' . $historyReceiptNo])) {
+        $originalPayment = $receiptOriginalPaymentRowsByKey['no:' . $historyReceiptNo];
+    }
+
+    if (is_array($originalPayment)) {
+        return (string) $originalPayment['currency'] . ' ' . $formatMoney((float) $originalPayment['receivedAmount']);
+    }
+
+    $fallbackCurrency = (string) ($historyRow['paymentCurrency'] ?? $historyRow['currency'] ?? $receiptCurrency);
+    $fallbackAmount = (float) (
+        $historyRow['paymentAmountConsumed']
+        ?? $historyRow['receivedAmount']
+        ?? $historyRow['allocatedAmount']
+        ?? $historyRow['receivableAmountAllocated']
+        ?? 0
+    );
+
+    return $fallbackCurrency . ' ' . $formatMoney($fallbackAmount);
+};
 $receiptAllocations = array_values(array_filter(
     $customerPaymentFoundation['allocations'] ?? [],
     static fn (array $allocation): bool => (int) ($allocation['receiptId'] ?? 0) === $selectedReceiptId
@@ -506,8 +567,7 @@ openReceivables: <?= e(json_encode($receiptDebug['openReceivables'], JSON_PRETTY
                 <section class="receipt-card">
                     <h2 style="margin:0 0 12px;">Invoice Payment History</h2>
                     <table class="output-table receipt-table">
-                        <thead><tr><th>Receipt No.</th><th>Receipt Date</th><th>Payment Currency</th><th>Allocated to This Invoice</th><th>Current Receipt</th></tr></thead>
-                        <tbody>
+                        <thead><tr><th>Receipt No.</th><th>Receipt Date</th><th>Payment Received</th><th>Invoice Payment</th><th>Current Receipt</th></tr></thead>                        <tbody>
                         <?php if ($invoicePaymentHistoryRows === []): ?>
                             <tr><td colspan="5">No payment history is available for this invoice yet.</td></tr>
                         <?php endif; ?>
@@ -517,12 +577,12 @@ openReceivables: <?= e(json_encode($receiptDebug['openReceivables'], JSON_PRETTY
                             $historyAmount = (float) ($historyRow['receivableAmountAllocated'] ?? $historyRow['allocatedAmount'] ?? 0);
                             ?>
                             <tr>
-                                <td><?= e((string) ($historyRow['receiptNo'] ?? '')) ?></td>
-                                <td><?= e((string) ($historyRow['receiptDate'] ?? '')) ?></td>
-                                <td><?= e((string) ($historyRow['paymentCurrency'] ?? $receiptCurrency)) ?></td>
-                                <td><?= e($historyCurrency) ?> <?= e($formatMoney($historyAmount)) ?></td>
-                                <td><?= e((int) ($historyRow['receiptId'] ?? 0) === $selectedReceiptId ? 'Current Receipt' : 'Previous Payment') ?></td>
-                            </tr>
+    <td><?= e((string) ($historyRow['receiptNo'] ?? '')) ?></td>
+    <td><?= e((string) ($historyRow['receiptDate'] ?? '')) ?></td>
+    <td><?= e($getOriginalReceiptPaymentDisplay($historyRow)) ?></td>
+    <td><?= e($historyCurrency) ?> <?= e($formatMoney($historyAmount)) ?></td>
+    <td><?= e($isSelectedReceiptHistoryRow($historyRow) ? 'Current Receipt' : 'Previous Payment') ?></td>
+</tr>
                         <?php endforeach; ?>
                         </tbody>
                     </table>
