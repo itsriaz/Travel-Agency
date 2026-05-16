@@ -321,6 +321,39 @@ foreach ($currentBookingReceiptAllocations as $allocation) {
     $currentInvoicePaidByReceiptTotals[$currency] = ($currentInvoicePaidByReceiptTotals[$currency] ?? 0.0)
         + (float) ($allocation['receivableAmountAllocated'] ?? $allocation['allocatedAmount'] ?? 0);
 }
+$previousBalancePaidByReceiptTotals = [];
+$previousBalanceAllocationRows = [];
+
+foreach ($receiptAllocations as $allocation) {
+    $allocationBookingReference = (string) ($allocation['bookingReference'] ?? '');
+    if ($allocationBookingReference === '' || $allocationBookingReference === $bookingReference) {
+        continue;
+    }
+
+    $currency = (string) ($allocation['receivableCurrency'] ?? $allocation['currency'] ?? $receiptCurrency);
+    if ($currency === '') {
+        continue;
+    }
+
+    $amount = (float) ($allocation['receivableAmountAllocated'] ?? $allocation['allocatedAmount'] ?? 0);
+    if (abs($amount) <= 0.005) {
+        continue;
+    }
+
+    $previousBalancePaidByReceiptTotals[$currency] = ($previousBalancePaidByReceiptTotals[$currency] ?? 0.0) + $amount;
+    $previousBalanceAllocationRows[] = $allocation;
+}
+
+$previousBalancePaidByReceiptDisplay = $nonZeroCurrencyTotals($previousBalancePaidByReceiptTotals);
+
+$previousBalanceBeforeReceiptTotals = $remainingCustomerBalanceTotals;
+foreach ($previousBalancePaidByReceiptTotals as $currency => $amount) {
+    $previousBalanceBeforeReceiptTotals[$currency] = round(
+        (float) ($previousBalanceBeforeReceiptTotals[$currency] ?? 0) + (float) $amount,
+        2
+    );
+}
+$previousBalanceBeforeReceiptDisplay = $nonZeroCurrencyTotals($previousBalanceBeforeReceiptTotals);
 $receiptAllocationTotals = [];
 foreach ($receiptAllocations as $allocation) {
     $currency = (string) ($allocation['paymentCurrency'] ?? $allocation['receivableCurrency'] ?? $allocation['currency'] ?? '');
@@ -500,17 +533,26 @@ $totalPaidAgainstInvoiceDisplay = $nonZeroCurrencyTotals($totalPaidAgainstInvoic
                 </section>
 
                 <section class="receipt-card receipt-card--finance">
-                    <div class="receipt-finance-strip">
-                        <div>
-                            <span>Payment Received</span>
-                            <strong><?= e($receiptCurrency) ?> <?= e($formatMoney((float) ($selectedReceipt['receivedAmount'] ?? 0))) ?></strong>
-                        </div>
-                        <div>
-                            <span>Credit / Return</span>
-                            <strong><?= e($receiptCurrency) ?> <?= e($formatMoney($receiptUnallocatedAmount)) ?></strong>
-                        </div>
-                    </div>
-                    <?php if ($currentInvoiceAmountDisplay !== [] || $currentInvoicePaidByReceiptTotals !== [] || $currentInvoiceBalanceDisplay !== []): ?>
+<div class="receipt-finance-strip">
+    <div>
+        <span>Payment Received</span>
+        <strong><?= e($receiptCurrency) ?> <?= e($formatMoney((float) ($selectedReceipt['receivedAmount'] ?? 0))) ?></strong>
+    </div>
+   
+    <?php if ($previousBalancePaidByReceiptDisplay !== []): ?>
+        <?php if ($previousBalancePaidByReceiptDisplay !== []): ?>
+    <div>
+        <span>Paid Against Previous Balance</span>
+        <strong><?= e($formatCurrencyTotals($previousBalancePaidByReceiptDisplay)) ?></strong>
+    </div>
+<?php endif; ?>
+    <?php endif; ?>
+    <div>
+        <span>Credit / Return TO CUSTOMER</span>
+        <strong><?= e($receiptCurrency) ?> <?= e($formatMoney($receiptUnallocatedAmount)) ?></strong>
+    </div>
+</div>
+        <?php if ($currentInvoiceAmountDisplay !== [] || $currentInvoicePaidByReceiptTotals !== [] || $currentInvoiceBalanceDisplay !== []): ?>
                         <div class="receipt-due-line" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-top:12px;">
                             <div>
                                 <span>Current Invoice No.</span>
@@ -527,7 +569,7 @@ $totalPaidAgainstInvoiceDisplay = $nonZeroCurrencyTotals($totalPaidAgainstInvoic
     </div>
 <?php endif; ?>
                             <div>
-                                <span>Current Payment</span>
+                                <span>Current Invoice Payment</span>
                                 <strong><?= e($formatCurrencyTotals($currentInvoicePaidByReceiptTotals !== [] ? $currentInvoicePaidByReceiptTotals : [$receiptCurrency => 0])) ?></strong>
                             </div>
                             <div>
@@ -540,12 +582,12 @@ $totalPaidAgainstInvoiceDisplay = $nonZeroCurrencyTotals($totalPaidAgainstInvoic
                                 <span>Invoice Balance</span>
                                 <strong><?= e($formatCurrencyTotals($currentInvoiceBalanceDisplay !== [] ? $currentInvoiceBalanceDisplay : [$receiptCurrency => 0])) ?></strong>
                             </div>
-                            <?php if ($dueDateForReceipt !== ''): ?>
-                                <div>
-                                    <span>Due Date</span>
-                                    <strong><?= e($dueDateForReceipt) ?></strong>
-                                </div>
-                            <?php endif; ?>
+<?php if ($dueDateForReceipt !== '' && $currentInvoiceBalanceDisplay !== []): ?>
+    <div>
+        <span>Due Date</span>
+        <strong><?= e($dueDateForReceipt) ?></strong>
+    </div>
+<?php endif; ?>
                         </div>
                     <?php endif; ?>
                     <?php if ($showOutputDebug): ?>

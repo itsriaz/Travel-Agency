@@ -511,31 +511,87 @@ final class CustomerReceiptWorkspaceService extends Service
             'booking_date' => (string) ($booking['booking_date'] ?? ''),
         ];
 
-        $openReceivables = $leadTravelerId > 0
-            ? $paymentRepository->openReceivablesForLeadTraveler(
-                $leadTravelerId,
-                $accessibleBranchIds,
-                $currentBookingContext,
-                $receiptCurrency
-            )
-            : $paymentRepository->openReceivablesForBooking((string) $booking['booking_reference']);
+       $currentBookingOpenReceivables = $leadTravelerId > 0
+    ? $paymentRepository->openReceivablesForLeadTraveler(
+        $leadTravelerId,
+        $accessibleBranchIds,
+        $currentBookingContext,
+        $receiptCurrency
+    )
+    : $paymentRepository->openReceivablesForBooking((string) $booking['booking_reference']);
 
-        $currentBookingId = (int) ($booking['id'] ?? 0);
-        $currentBookingReference = (string) ($booking['booking_reference'] ?? '');
-        $currentBookingReceivables = [];
-        $olderReceivables = [];
-        foreach ($openReceivables as $receivable) {
-            $isCurrentBookingReceivable = ((int) ($receivable['booking_id'] ?? 0) === $currentBookingId)
-                || ((string) ($receivable['booking_reference'] ?? '') === $currentBookingReference);
+$allCustomerOpenReceivables = $leadTravelerId > 0
+    ? $paymentRepository->openReceivablesForLeadTraveler(
+        $leadTravelerId,
+        $accessibleBranchIds,
+        [],
+        $receiptCurrency
+    )
+    : $currentBookingOpenReceivables;
 
-            if ($isCurrentBookingReceivable) {
-                $currentBookingReceivables[] = $receivable;
-                continue;
-            }
+$currentBookingId = (int) ($booking['id'] ?? 0);
+$currentBookingReference = (string) ($booking['booking_reference'] ?? '');
+$currentBookingReceivablesById = [];
+$otherReceivablesById = [];
 
-            $olderReceivables[] = $receivable;
+foreach (array_merge($currentBookingOpenReceivables, $allCustomerOpenReceivables) as $receivable) {
+    $receivableId = (int) ($receivable['id'] ?? 0);
+    if ($receivableId <= 0) {
+        continue;
+    }
+
+    if ((string) ($receivable['currency'] ?? '') !== $receiptCurrency) {
+        continue;
+    }
+
+    $isCurrentBookingReceivable = ((int) ($receivable['booking_id'] ?? 0) === $currentBookingId)
+        || ((string) ($receivable['booking_reference'] ?? '') === $currentBookingReference);
+
+    if ($isCurrentBookingReceivable) {
+        $currentBookingReceivablesById[$receivableId] = $receivable;
+        continue;
+    }
+
+    $otherReceivablesById[$receivableId] = $receivable;
+}
+
+$currentBookingReceivables = array_values($currentBookingReceivablesById);
+$otherReceivables = array_values($otherReceivablesById);
+
+usort($otherReceivables, static function (array $left, array $right): int {
+    $leftDueDate = (string) ($left['due_date'] ?? '');
+    $rightDueDate = (string) ($right['due_date'] ?? '');
+
+    if ($leftDueDate !== $rightDueDate) {
+        if ($leftDueDate === '') {
+            return 1;
         }
-        $openReceivables = array_values(array_merge($currentBookingReceivables, $olderReceivables));
+
+        if ($rightDueDate === '') {
+            return -1;
+        }
+
+        return strcmp($leftDueDate, $rightDueDate);
+    }
+
+    $leftBookingDate = (string) ($left['booking_date'] ?? '');
+    $rightBookingDate = (string) ($right['booking_date'] ?? '');
+
+    if ($leftBookingDate !== $rightBookingDate) {
+        return strcmp($leftBookingDate, $rightBookingDate);
+    }
+
+    $leftBookingId = (int) ($left['booking_id'] ?? 0);
+    $rightBookingId = (int) ($right['booking_id'] ?? 0);
+
+    if ($leftBookingId !== $rightBookingId) {
+        return $leftBookingId <=> $rightBookingId;
+    }
+
+    return (int) ($left['id'] ?? 0) <=> (int) ($right['id'] ?? 0);
+});
+
+$openReceivables = array_values(array_merge($currentBookingReceivables, $otherReceivables));
 
         foreach ($openReceivables as $receivable) {
             if (in_array((int) ($receivable['id'] ?? 0), $skipReceivableIds, true)) {
@@ -571,7 +627,9 @@ final class CustomerReceiptWorkspaceService extends Service
                 'rate_to_currency' => $receiptCurrency,
                 'exchange_rate' => 1.0,
                 'exchange_rate_effective_date' => $receiptDate,
-                'allocation_note' => 'Auto allocated from workspace quick receive.',
+                'allocation_note' => $isCurrentBookingReceivable
+    ? 'Auto allocated to current invoice from workspace quick receive.'
+    : 'Remaining amount from receipt ' . $receiptNo . ' for invoice ' . (string) ($booking['booking_reference'] ?? '') . ' applied to previous/open invoice ' . (string) ($receivable['booking_reference'] ?? '') . '.',
                 'actor_user_id' => $actorUserId,
             ]);
             $allocationId = (int) ($allocationResult['allocation_id'] ?? 0);
