@@ -696,18 +696,105 @@ final class SupplierRepository extends BaseRepository
         return $statement->fetchAll() ?: [];
     }
 
+    public function traceAvailableSupplierAdvances(int $supplierId, int $branchId, string $currency): array
+    {
+        $normalizedCurrency = strtoupper(trim($currency));
+
+        $summaryStatement = $this->db->prepare(
+            'SELECT
+                COUNT(*) AS advance_row_count,
+                COALESCE(SUM(available_amount), 0) AS total_available_amount
+             FROM supplier_advances
+             WHERE supplier_id = :supplier_id
+               AND branch_id = :branch_id
+               AND currency = :currency
+               AND available_amount > 0'
+        );
+        $summaryStatement->execute([
+            'supplier_id' => $supplierId,
+            'branch_id' => $branchId,
+            'currency' => $normalizedCurrency,
+        ]);
+        $summary = $summaryStatement->fetch() ?: [];
+
+        $firstAdvanceStatement = $this->db->prepare(
+            'SELECT id, available_amount
+             FROM supplier_advances
+             WHERE supplier_id = :supplier_id
+               AND branch_id = :branch_id
+               AND currency = :currency
+               AND available_amount > 0
+             ORDER BY received_at ASC, id ASC
+             LIMIT 1'
+        );
+        $firstAdvanceStatement->execute([
+            'supplier_id' => $supplierId,
+            'branch_id' => $branchId,
+            'currency' => $normalizedCurrency,
+        ]);
+        $firstAdvance = $firstAdvanceStatement->fetch() ?: [];
+
+        return [
+            'supplier_id' => $supplierId,
+            'branch_id' => $branchId,
+            'currency' => $normalizedCurrency,
+            'advance_row_count' => (int) ($summary['advance_row_count'] ?? 0),
+            'total_available_amount' => round((float) ($summary['total_available_amount'] ?? 0), 2),
+            'first_advance_id' => (int) ($firstAdvance['id'] ?? 0),
+            'first_advance_available_amount' => round((float) ($firstAdvance['available_amount'] ?? 0), 2),
+            'fifo_order' => 'received_at ASC, id ASC',
+        ];
+    }
+
     public function syncObligation(array $data): ?array
     {
         return $this->transaction(function () use ($data): ?array {
             $grossAmount = round((float) $data['gross_amount'], 2);
+            $traceId = $this->supplierAdvanceTraceId();
+            $this->supplierAdvanceTraceLog('syncObligation', 'method_entered', [
+                'trace_id' => $traceId,
+                'booking_id' => null,
+                'booking_service_id' => null,
+                'supplier_name' => null,
+                'supplier_id' => isset($data['supplier_id']) ? (int) $data['supplier_id'] : null,
+                'branch_id' => isset($data['branch_id']) ? (int) $data['branch_id'] : null,
+                'currency' => (string) ($data['currency'] ?? ''),
+                'purchase_cost' => $grossAmount,
+                'booking_reference' => (string) ($data['booking_reference'] ?? ''),
+                'service_line_reference' => (string) ($data['service_line_reference'] ?? ''),
+                'action' => 'sync_obligation_called',
+            ]);
             $existing = $this->findObligationByServiceLine(
                 (string) $data['booking_reference'],
                 (string) ($data['service_line_reference'] ?? ''),
                 (string) ($data['obligation_group'] ?? 'service_cost')
             );
+            $this->supplierAdvanceTraceLog('syncObligation', 'existing_obligation_lookup', [
+                'trace_id' => $traceId,
+                'supplier_id' => isset($data['supplier_id']) ? (int) $data['supplier_id'] : null,
+                'branch_id' => isset($data['branch_id']) ? (int) $data['branch_id'] : null,
+                'currency' => (string) ($data['currency'] ?? ''),
+                'purchase_cost' => $grossAmount,
+                'booking_reference' => (string) ($data['booking_reference'] ?? ''),
+                'service_line_reference' => (string) ($data['service_line_reference'] ?? ''),
+                'obligation_id' => (int) ($existing['id'] ?? 0) > 0 ? (int) $existing['id'] : null,
+                'action' => $existing === null ? 'not_found' : 'found',
+                'reason' => $existing === null ? 'future_path_can_create_new_obligation' : 'future_path_would_update_existing_obligation',
+            ]);
 
             if ($existing === null) {
                 if (($data['supplier_id'] ?? null) === null || $grossAmount <= 0) {
+                    $this->supplierAdvanceTraceLog('syncObligation', 'create_skipped', [
+                        'trace_id' => $traceId,
+                        'supplier_id' => isset($data['supplier_id']) ? (int) $data['supplier_id'] : null,
+                        'branch_id' => isset($data['branch_id']) ? (int) $data['branch_id'] : null,
+                        'currency' => (string) ($data['currency'] ?? ''),
+                        'purchase_cost' => $grossAmount,
+                        'booking_reference' => (string) ($data['booking_reference'] ?? ''),
+                        'service_line_reference' => (string) ($data['service_line_reference'] ?? ''),
+                        'action' => 'return_null',
+                        'reason' => ($data['supplier_id'] ?? null) === null ? 'supplier_id_missing' : 'gross_amount_lte_zero',
+                    ]);
                     return null;
                 }
 
@@ -771,6 +858,18 @@ final class SupplierRepository extends BaseRepository
             }
 
             if (($data['supplier_id'] ?? null) === null || $grossAmount <= 0) {
+                $this->supplierAdvanceTraceLog('syncObligation', 'existing_obligation_cancelled', [
+                    'trace_id' => $traceId,
+                    'supplier_id' => isset($existing['supplier_id']) ? (int) $existing['supplier_id'] : null,
+                    'branch_id' => isset($existing['branch_id']) ? (int) $existing['branch_id'] : null,
+                    'currency' => (string) ($existing['currency'] ?? ''),
+                    'purchase_cost' => $grossAmount,
+                    'booking_reference' => (string) ($data['booking_reference'] ?? ''),
+                    'service_line_reference' => (string) ($data['service_line_reference'] ?? ''),
+                    'obligation_id' => (int) ($existing['id'] ?? 0),
+                    'action' => 'updated',
+                    'reason' => ($data['supplier_id'] ?? null) === null ? 'supplier_removed' : 'gross_amount_lte_zero',
+                ]);
                 $statement = $this->db->prepare(
                     'UPDATE supplier_obligations
                      SET gross_amount = 0,
@@ -921,16 +1020,18 @@ final class SupplierRepository extends BaseRepository
 
             $updateObligation = $this->db->prepare(
                 'UPDATE supplier_obligations
-                 SET advance_applied_amount = advance_applied_amount + :applied_amount,
-                     net_payable_amount = GREATEST(0, gross_amount - (advance_applied_amount + :applied_amount)),
+                 SET advance_applied_amount = advance_applied_amount + :advance_applied_increment,
+                     net_payable_amount = GREATEST(0, gross_amount - (advance_applied_amount + :net_payable_reduction)),
                      status = CASE
-                         WHEN gross_amount - (advance_applied_amount + :applied_amount) <= 0 THEN "covered_by_advance"
+                         WHEN gross_amount - (advance_applied_amount + :status_reduction_amount) <= 0 THEN "covered_by_advance"
                          ELSE "partially_covered"
                      END
                  WHERE id = :obligation_id'
             );
             $updateObligation->execute([
-                'applied_amount' => $applicableAmount,
+                'advance_applied_increment' => $applicableAmount,
+                'net_payable_reduction' => $applicableAmount,
+                'status_reduction_amount' => $applicableAmount,
                 'obligation_id' => $obligationId,
             ]);
 
@@ -957,6 +1058,206 @@ final class SupplierRepository extends BaseRepository
                 'supplier_obligation_id' => $obligationId,
                 'applied_amount' => $applicableAmount,
             ]);
+        });
+    }
+
+    public function autoApplyAvailableAdvanceToObligation(int $obligationId, ?int $actorUserId = null): array
+    {
+        return $this->transaction(function () use ($obligationId, $actorUserId): array {
+            $traceId = $this->supplierAdvanceTraceId();
+            $obligationStatement = $this->db->prepare(
+                'SELECT id, supplier_id, branch_id, booking_reference, service_line_reference, currency,
+                        gross_amount, advance_applied_amount, net_payable_amount, status
+                 FROM supplier_obligations
+                 WHERE id = :obligation_id
+                 FOR UPDATE'
+            );
+            $obligationStatement->execute(['obligation_id' => $obligationId]);
+            $obligation = $obligationStatement->fetch();
+
+            if ($obligation === false) {
+                throw new \RuntimeException('Supplier obligation not found for auto advance application.');
+            }
+
+            $supplierId = (int) ($obligation['supplier_id'] ?? 0);
+            $branchId = (int) ($obligation['branch_id'] ?? 0);
+            $remainingAmount = round((float) ($obligation['net_payable_amount'] ?? 0), 2);
+
+            $this->supplierAdvanceTraceLog('autoApplyAvailableAdvanceToObligation', 'method_entered', [
+                'trace_id' => $traceId,
+                'supplier_id' => $supplierId > 0 ? $supplierId : null,
+                'branch_id' => $branchId > 0 ? $branchId : null,
+                'currency' => (string) ($obligation['currency'] ?? ''),
+                'purchase_cost' => $remainingAmount,
+                'booking_reference' => (string) ($obligation['booking_reference'] ?? ''),
+                'service_line_reference' => (string) ($obligation['service_line_reference'] ?? ''),
+                'obligation_id' => $obligationId,
+                'action' => 'auto_apply_entered',
+                'reason' => 'currency_ignored_for_auto_apply',
+            ]);
+
+            if ($supplierId <= 0 || $branchId <= 0 || $remainingAmount <= 0) {
+                $this->supplierAdvanceTraceLog('autoApplyAvailableAdvanceToObligation', 'auto_apply_skipped', [
+                    'trace_id' => $traceId,
+                    'supplier_id' => $supplierId > 0 ? $supplierId : null,
+                    'branch_id' => $branchId > 0 ? $branchId : null,
+                    'currency' => (string) ($obligation['currency'] ?? ''),
+                    'purchase_cost' => $remainingAmount,
+                    'obligation_id' => $obligationId,
+                    'action' => 'applied_amount=0',
+                    'reason' => $supplierId <= 0 ? 'supplier_id_missing' : ($branchId <= 0 ? 'branch_id_missing' : 'net_payable_amount_lte_zero'),
+                ]);
+
+                return [
+                    'applied_amount' => 0.0,
+                    'advance_row_count' => 0,
+                    'application_count' => 0,
+                    'applications' => [],
+                    'obligation' => $obligation,
+                ];
+            }
+
+            $advanceStatement = $this->db->prepare(
+                'SELECT id, supplier_id, branch_id, currency, available_amount, received_at
+                 FROM supplier_advances
+                 WHERE supplier_id = :supplier_id
+                   AND branch_id = :branch_id
+                   AND available_amount > 0
+                 ORDER BY received_at ASC, id ASC
+                 FOR UPDATE'
+            );
+            $advanceStatement->execute([
+                'supplier_id' => $supplierId,
+                'branch_id' => $branchId,
+            ]);
+            $advanceRows = $advanceStatement->fetchAll() ?: [];
+
+            $this->supplierAdvanceTraceLog('autoApplyAvailableAdvanceToObligation', 'advance_rows_loaded', [
+                'trace_id' => $traceId,
+                'supplier_id' => $supplierId,
+                'branch_id' => $branchId,
+                'currency' => (string) ($obligation['currency'] ?? ''),
+                'purchase_cost' => $remainingAmount,
+                'obligation_id' => $obligationId,
+                'action' => 'advance_rows_loaded',
+                'advance_row_count' => count($advanceRows),
+                'matching_advance_total' => round(array_reduce($advanceRows, static fn (float $carry, array $row): float => $carry + (float) ($row['available_amount'] ?? 0), 0.0), 2),
+                'reason' => 'supplier_and_branch_match_only',
+            ]);
+
+            $applications = [];
+            $totalApplied = 0.0;
+
+            $updateAdvance = $this->db->prepare(
+                'UPDATE supplier_advances
+                 SET available_amount = GREATEST(0, available_amount - :applied_amount)
+                 WHERE id = :advance_id'
+            );
+            $updateObligation = $this->db->prepare(
+                'UPDATE supplier_obligations
+                 SET advance_applied_amount = advance_applied_amount + :advance_applied_increment,
+                     net_payable_amount = GREATEST(0, net_payable_amount - :net_payable_reduction),
+                     status = CASE
+                         WHEN GREATEST(0, net_payable_amount - :status_reduction_amount) <= 0 THEN "covered_by_advance"
+                         ELSE "partially_covered"
+                     END
+                 WHERE id = :obligation_id'
+            );
+            $insertApplication = $this->db->prepare(
+                'INSERT INTO supplier_advance_applications (
+                    supplier_advance_id, supplier_obligation_id, applied_amount, created_by_user_id
+                 ) VALUES (
+                    :supplier_advance_id, :supplier_obligation_id, :applied_amount, :created_by_user_id
+                 )
+                 ON DUPLICATE KEY UPDATE
+                    applied_amount = applied_amount + VALUES(applied_amount),
+                    created_by_user_id = VALUES(created_by_user_id)'
+            );
+
+            foreach ($advanceRows as $advanceRow) {
+                if ($remainingAmount <= 0) {
+                    break;
+                }
+
+                $availableAmount = round((float) ($advanceRow['available_amount'] ?? 0), 2);
+                $appliedAmount = min($remainingAmount, $availableAmount);
+
+                if ($appliedAmount <= 0) {
+                    continue;
+                }
+
+                $updateAdvance->execute([
+                    'applied_amount' => $appliedAmount,
+                    'advance_id' => (int) $advanceRow['id'],
+                ]);
+                $updateObligation->execute([
+                    'advance_applied_increment' => $appliedAmount,
+                    'net_payable_reduction' => $appliedAmount,
+                    'status_reduction_amount' => $appliedAmount,
+                    'obligation_id' => $obligationId,
+                ]);
+                $insertApplication->execute([
+                    'supplier_advance_id' => (int) $advanceRow['id'],
+                    'supplier_obligation_id' => $obligationId,
+                    'applied_amount' => $appliedAmount,
+                    'created_by_user_id' => $actorUserId,
+                ]);
+
+                AuditLog::record($this->app, 'supplier.advance.applied', [
+                    'user_id' => $actorUserId,
+                    'supplier_advance_id' => (int) $advanceRow['id'],
+                    'supplier_obligation_id' => $obligationId,
+                    'applied_amount' => $appliedAmount,
+                ]);
+
+                $remainingAmount = round($remainingAmount - $appliedAmount, 2);
+                $totalApplied = round($totalApplied + $appliedAmount, 2);
+                $applications[] = [
+                    'advance_id' => (int) $advanceRow['id'],
+                    'advance_currency' => (string) ($advanceRow['currency'] ?? ''),
+                    'applied_amount' => $appliedAmount,
+                    'available_before' => $availableAmount,
+                    'available_after' => round($availableAmount - $appliedAmount, 2),
+                ];
+
+                $this->supplierAdvanceTraceLog('autoApplyAvailableAdvanceToObligation', 'advance_row_applied', [
+                    'trace_id' => $traceId,
+                    'supplier_id' => $supplierId,
+                    'branch_id' => $branchId,
+                    'currency' => (string) ($obligation['currency'] ?? ''),
+                    'purchase_cost' => $remainingAmount,
+                    'obligation_id' => $obligationId,
+                    'advance_id' => (int) $advanceRow['id'],
+                    'action' => 'advance_row_applied',
+                    'applied_amount' => $appliedAmount,
+                    'available_amount_before' => $availableAmount,
+                    'available_amount_after' => round($availableAmount - $appliedAmount, 2),
+                    'reason' => 'currency_ignored_for_auto_apply',
+                ]);
+            }
+
+            $updatedObligation = $this->findObligationById($obligationId) ?? $obligation;
+            $this->supplierAdvanceTraceLog('autoApplyAvailableAdvanceToObligation', 'auto_apply_completed', [
+                'trace_id' => $traceId,
+                'supplier_id' => $supplierId,
+                'branch_id' => $branchId,
+                'currency' => (string) ($updatedObligation['currency'] ?? ''),
+                'purchase_cost' => round((float) ($updatedObligation['net_payable_amount'] ?? 0), 2),
+                'obligation_id' => $obligationId,
+                'action' => 'auto_apply_completed',
+                'applied_amount' => $totalApplied,
+                'advance_applied_amount' => round((float) ($updatedObligation['advance_applied_amount'] ?? 0), 2),
+                'status' => (string) ($updatedObligation['status'] ?? ''),
+                'reason' => $totalApplied > 0 ? 'supplier_advance_applied' : 'no_available_advance_amount',
+            ]);
+
+            return [
+                'applied_amount' => $totalApplied,
+                'advance_row_count' => count($advanceRows),
+                'application_count' => count($applications),
+                'applications' => $applications,
+                'obligation' => $updatedObligation,
+            ];
         });
     }
 
@@ -1049,5 +1350,62 @@ final class SupplierRepository extends BaseRepository
         $statement->execute(['booking_reference' => $bookingReference]);
 
         return $statement->fetchAll() ?: [];
+    }
+
+    private function supplierAdvanceTraceId(): string
+    {
+        $traceId = (string) ($_SERVER['SUPPLIER_ADVANCE_TRACE_V2_ID'] ?? '');
+        if ($traceId !== '') {
+            return $traceId;
+        }
+
+        $traceId = 'svc-' . date('YmdHis') . '-' . substr((string) microtime(true), -6);
+        $_SERVER['SUPPLIER_ADVANCE_TRACE_V2_ID'] = $traceId;
+
+        return $traceId;
+    }
+
+    private function supplierAdvanceTraceLog(string $method, string $step, array $context): void
+    {
+        $parts = [
+            'timestamp=' . date('Y-m-d H:i:s'),
+            'trace_id=' . ($context['trace_id'] ?? $this->supplierAdvanceTraceId()),
+            'method=SupplierRepository::' . $method,
+            'step=' . $step,
+        ];
+
+        foreach ($context as $key => $value) {
+            if ($key === 'trace_id' || $value === null || $value === '') {
+                continue;
+            }
+
+            if (is_bool($value)) {
+                $value = $value ? 'true' : 'false';
+            }
+
+            $parts[] = $key . '=' . str_replace(["\r", "\n"], [' ', ' '], (string) $value);
+        }
+
+        $line = '[SUPPLIER_ADVANCE_TRACE_V2] ' . implode('; ', $parts);
+        $this->writeSupplierAdvanceTraceLine($line);
+        error_log($line);
+    }
+
+    private function writeSupplierAdvanceTraceLine(string $line): void
+    {
+        $logDirectory = dirname(__DIR__, 2) . '/storage/logs';
+        $logFile = $logDirectory . '/supplier_advance_trace_v2.log';
+
+        try {
+            if (! is_dir($logDirectory) && ! @mkdir($logDirectory, 0777, true) && ! is_dir($logDirectory)) {
+                throw new \RuntimeException('Unable to create trace log directory.');
+            }
+
+            if (@file_put_contents($logFile, $line . PHP_EOL, FILE_APPEND | LOCK_EX) === false) {
+                throw new \RuntimeException('Unable to append trace log line.');
+            }
+        } catch (\Throwable $exception) {
+            error_log('[SUPPLIER_ADVANCE_TRACE_V2] file_log_error; method=SupplierRepository::writeSupplierAdvanceTraceLine; message=' . str_replace(["\r", "\n"], [' ', ' '], $exception->getMessage()));
+        }
     }
 }

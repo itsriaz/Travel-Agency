@@ -480,6 +480,7 @@ final class WorkspaceController extends BaseController
     public function autosaveService(): never
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);
+        $traceId = $this->startSupplierAdvanceTrace('autosaveService', $_POST);
 
         try {
             $accessibleBranchIds = Authorization::accessibleBranchIds();
@@ -497,6 +498,23 @@ final class WorkspaceController extends BaseController
                 (int) Auth::id(),
                 $accessibleBranchIds
             );
+            $savedServiceId = (int) (($result['service']['id'] ?? 0));
+            $savedService = $savedServiceId > 0
+                ? (new BookingServiceRepository($this->app))->findServiceById($savedServiceId)
+                : null;
+            $this->supplierAdvanceTraceLog('WorkspaceController::autosaveService', 'booking_service_save_result', [
+                'trace_id' => $traceId,
+                'booking_id' => (int) ($result['booking_id'] ?? ($_POST['booking_id'] ?? 0)),
+                'booking_service_id' => $savedServiceId,
+                'supplier_name' => (string) ($savedService['supplier_name_snapshot'] ?? $savedService['supplier_name'] ?? ($_POST['supplier_name'] ?? '')),
+                'supplier_id' => isset($savedService['supplier_id']) ? (int) $savedService['supplier_id'] : null,
+                'branch_id' => isset($savedService['branch_id']) ? (int) $savedService['branch_id'] : (int) ($_POST['branch_id'] ?? 0),
+                'currency' => (string) ($savedService['currency'] ?? ($_POST['currency'] ?? '')),
+                'purchase_cost' => isset($savedService['purchase_cost']) ? round((float) $savedService['purchase_cost'], 2) : round((float) ($_POST['purchase_cost'] ?? 0), 2),
+                'sale_price' => isset($savedService['sale_price']) ? round((float) $savedService['sale_price'], 2) : round((float) ($_POST['sale_price'] ?? 0), 2),
+                'action' => (string) ($result['action'] ?? ''),
+                'reason' => (string) ($result['action'] ?? '') === 'created' ? 'new_service' : 'updated_service',
+            ]);
             $snapshot = $this->workspaceAutosaveSnapshot((int) $result['booking_id'], $accessibleBranchIds);
             $savedService = $snapshot['serviceDirectory'][(int) (($result['service']['id'] ?? 0))] ?? null;
             $paymentEligible = $savedService !== null
@@ -601,6 +619,7 @@ final class WorkspaceController extends BaseController
     public function saveService(): never
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);
+        $traceId = $this->startSupplierAdvanceTrace('saveService', $_POST);
 
         try {
             $accessibleBranchIds = Authorization::accessibleBranchIds();
@@ -624,6 +643,23 @@ final class WorkspaceController extends BaseController
                 (int) Auth::id(),
                 $accessibleBranchIds
             );
+            $savedServiceId = (int) (($result['service']['id'] ?? 0));
+            $savedService = $savedServiceId > 0
+                ? (new BookingServiceRepository($this->app))->findServiceById($savedServiceId)
+                : null;
+            $this->supplierAdvanceTraceLog('WorkspaceController::saveService', 'booking_service_save_result', [
+                'trace_id' => $traceId,
+                'booking_id' => (int) ($result['booking_id'] ?? ($_POST['booking_id'] ?? 0)),
+                'booking_service_id' => $savedServiceId,
+                'supplier_name' => (string) ($savedService['supplier_name_snapshot'] ?? $savedService['supplier_name'] ?? ($_POST['supplier_name'] ?? '')),
+                'supplier_id' => isset($savedService['supplier_id']) ? (int) $savedService['supplier_id'] : null,
+                'branch_id' => isset($savedService['branch_id']) ? (int) $savedService['branch_id'] : (int) ($_POST['branch_id'] ?? 0),
+                'currency' => (string) ($savedService['currency'] ?? ($_POST['currency'] ?? '')),
+                'purchase_cost' => isset($savedService['purchase_cost']) ? round((float) $savedService['purchase_cost'], 2) : round((float) ($_POST['purchase_cost'] ?? 0), 2),
+                'sale_price' => isset($savedService['sale_price']) ? round((float) $savedService['sale_price'], 2) : round((float) ($_POST['sale_price'] ?? 0), 2),
+                'action' => (string) ($result['action'] ?? ''),
+                'reason' => (string) ($result['action'] ?? '') === 'created' ? 'new_service' : 'updated_service',
+            ]);
             $serviceDebug['serviceResult'] = $result['debug'] ?? [];
 
             $bookingRepository = new BookingRepository($this->app);
@@ -1488,5 +1524,79 @@ final class WorkspaceController extends BaseController
             'notes' => (string) ($traveler['notes'] ?? ''),
             'previous_balance_totals' => $previousBalanceTotals,
         ];
+    }
+
+    private function startSupplierAdvanceTrace(string $method, array $payload): string
+    {
+        $traceId = 'svc-' . date('YmdHis') . '-' . str_replace('.', '', (string) microtime(true)) . '-' . mt_rand(1000, 9999);
+        $_SERVER['SUPPLIER_ADVANCE_TRACE_V2_ID'] = $traceId;
+
+        $this->supplierAdvanceTraceLog('WorkspaceController::' . $method, 'request_entry', [
+            'trace_id' => $traceId,
+            'request_method' => (string) ($_SERVER['REQUEST_METHOD'] ?? ''),
+            'booking_id' => (int) ($payload['booking_id'] ?? 0),
+            'booking_service_id' => (int) ($payload['service_id'] ?? 0),
+            'supplier_name' => (string) ($payload['supplier_name'] ?? ''),
+            'supplier_id' => null,
+            'branch_id' => (int) ($payload['branch_id'] ?? 0),
+            'currency' => (string) ($payload['currency'] ?? ''),
+            'purchase_cost' => round((float) ($payload['purchase_cost'] ?? 0), 2),
+            'mkt_fare' => round((float) ($payload['sale_price'] ?? 0), 2),
+            'action' => 'request_reached_controller',
+        ]);
+
+        return $traceId;
+    }
+
+    private function supplierAdvanceTraceLog(string $method, string $step, array $context): void
+    {
+        try {
+            $parts = [
+                'timestamp=' . date('Y-m-d H:i:s'),
+                'trace_id=' . ($context['trace_id'] ?? ($_SERVER['SUPPLIER_ADVANCE_TRACE_V2_ID'] ?? '')),
+                'method=' . $method,
+                'step=' . $step,
+            ];
+
+            foreach ($context as $key => $value) {
+                if ($key === 'trace_id') {
+                    continue;
+                }
+
+                if ($value === null || $value === '') {
+                    continue;
+                }
+
+                if (is_bool($value)) {
+                    $value = $value ? 'true' : 'false';
+                }
+
+                $parts[] = $key . '=' . str_replace(["\r", "\n"], [' ', ' '], (string) $value);
+            }
+
+            $line = '[SUPPLIER_ADVANCE_TRACE_V2] ' . implode('; ', $parts);
+            $this->writeSupplierAdvanceTraceLine($line);
+            error_log($line);
+        } catch (Throwable $exception) {
+            error_log('[SUPPLIER_ADVANCE_TRACE_V2] trace_error; method=' . $method . '; step=' . $step . '; message=' . str_replace(["\r", "\n"], [' ', ' '], $exception->getMessage()));
+        }
+    }
+
+    private function writeSupplierAdvanceTraceLine(string $line): void
+    {
+        $logDirectory = dirname(__DIR__, 2) . '/storage/logs';
+        $logFile = $logDirectory . '/supplier_advance_trace_v2.log';
+
+        try {
+            if (! is_dir($logDirectory) && ! @mkdir($logDirectory, 0777, true) && ! is_dir($logDirectory)) {
+                throw new RuntimeException('Unable to create trace log directory.');
+            }
+
+            if (@file_put_contents($logFile, $line . PHP_EOL, FILE_APPEND | LOCK_EX) === false) {
+                throw new RuntimeException('Unable to append trace log line.');
+            }
+        } catch (Throwable $exception) {
+            error_log('[SUPPLIER_ADVANCE_TRACE_V2] file_log_error; method=WorkspaceController::writeSupplierAdvanceTraceLine; message=' . str_replace(["\r", "\n"], [' ', ' '], $exception->getMessage()));
+        }
     }
 }
