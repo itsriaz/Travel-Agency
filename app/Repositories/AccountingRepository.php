@@ -273,6 +273,40 @@ final class AccountingRepository extends BaseRepository
         ]);
     }
 
+    public function postSupplierAdvanceApplicationAdjusted(array $data): int
+    {
+        $amount = abs((float) $data['adjustment_amount']);
+        $isIncrease = (float) $data['adjustment_amount'] >= 0;
+
+        return $this->postJournalEntry([
+            'branch_id' => $data['branch_id'],
+            'booking_reference' => $data['booking_reference'],
+            'source_type' => 'supplier_advance_adjusted',
+            'source_reference' => $data['source_reference'] ?? null,
+            'entry_date' => $data['entry_date'],
+            'currency' => $data['currency'],
+            'narration' => $data['narration'] ?? 'Supplier advance application adjusted against payable',
+            'actor_user_id' => $data['actor_user_id'] ?? null,
+        ], [
+            [
+                'account_code' => 'AP_CONTROL',
+                'service_line_reference' => $data['service_line_reference'] ?? null,
+                'supplier_obligation_id' => $data['supplier_obligation_id'] ?? null,
+                'line_description' => 'Accounts payable adjusted by supplier advance reconciliation',
+                'debit_amount' => $isIncrease ? $amount : 0,
+                'credit_amount' => $isIncrease ? 0 : $amount,
+            ],
+            [
+                'account_code' => 'SUPPLIER_ADVANCES',
+                'service_line_reference' => $data['service_line_reference'] ?? null,
+                'supplier_obligation_id' => $data['supplier_obligation_id'] ?? null,
+                'line_description' => 'Supplier advance reconciliation adjustment',
+                'debit_amount' => $isIncrease ? 0 : $amount,
+                'credit_amount' => $isIncrease ? $amount : 0,
+            ],
+        ]);
+    }
+
     public function postSupplierPaymentRecorded(array $data): int
     {
         $chargesAmount = (float) ($data['charges_amount'] ?? 0);
@@ -547,6 +581,7 @@ final class AccountingRepository extends BaseRepository
             'customer_receipt_allocated' => 'Customer Receipt Allocated',
             'supplier_advance_recorded' => 'Supplier Advance Recorded',
             'supplier_advance_applied' => 'Supplier Advance Applied',
+            'supplier_advance_adjusted' => 'Supplier Advance Adjusted',
             'supplier_payment_recorded' => 'Supplier Payment Recorded',
             'supplier_payment_allocated' => 'Supplier Payment Allocated',
             default => ucwords(str_replace('_', ' ', $sourceType)),

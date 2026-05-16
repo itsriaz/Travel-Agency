@@ -174,40 +174,54 @@ final class CommercialObligationSyncService extends Service
         $branchId = (int) ($service['branch_id'] ?? 0);
         $currency = (string) ($service['currency'] ?? '');
         $autoAdvanceApplication = null;
-        if ($obligationId > 0 && $obligationAction === 'created' && $payableAmount > 0 && $supplierId > 0 && $branchId > 0) {
+        if ($obligationId > 0) {
             $this->supplierAdvanceTraceLog('syncForServiceId', 'auto_apply_start', [
                 'trace_id' => $traceId,
                 'booking_id' => (int) ($service['booking_id'] ?? 0),
                 'booking_service_id' => (int) ($service['id'] ?? 0),
                 'supplier_name' => (string) ($service['supplier_name_snapshot'] ?? $service['supplier_name'] ?? ''),
-                'supplier_id' => $supplierId,
-                'branch_id' => $branchId,
+                'supplier_id' => $supplierId > 0 ? $supplierId : null,
+                'branch_id' => $branchId > 0 ? $branchId : null,
                 'currency' => (string) ($service['currency'] ?? ''),
                 'purchase_cost' => $payableAmount,
                 'obligation_id' => $obligationId,
                 'action' => 'calling_auto_apply',
-                'reason' => 'created_obligation_trigger',
+                'reason' => $obligationAction === 'created' ? 'created_obligation_trigger' : 'updated_obligation_reconcile_trigger',
             ]);
 
             // This is supplier advance application against supplier payable, not a customer payment.
             $autoAdvanceApplication = $supplierRepository->autoApplyAvailableAdvanceToObligation($obligationId, $actorUserId);
-            $appliedAmount = round((float) ($autoAdvanceApplication['applied_amount'] ?? 0), 2);
-            if ($appliedAmount > 0) {
+            $appliedAmountDelta = round((float) ($autoAdvanceApplication['applied_amount_delta'] ?? 0), 2);
+            if ($appliedAmountDelta !== 0.0) {
                 $updatedObligation = is_array($autoAdvanceApplication['obligation'] ?? null)
                     ? $autoAdvanceApplication['obligation']
                     : $obligationRecord;
 
-                $accountingRepository->postSupplierAdvanceApplication([
-                    'branch_id' => (int) ($service['branch_id'] ?? 0),
-                    'booking_reference' => (string) ($booking['booking_reference'] ?? ''),
-                    'source_reference' => (string) ($service['line_reference'] ?? ''),
-                    'service_line_reference' => (string) ($service['line_reference'] ?? ''),
-                    'supplier_obligation_id' => $obligationId,
-                    'amount' => $appliedAmount,
-                    'entry_date' => $entryDate,
-                    'currency' => (string) ($updatedObligation['currency'] ?? $service['currency'] ?? ''),
-                    'actor_user_id' => $actorUserId,
-                ]);
+                if ($appliedAmountDelta > 0) {
+                    $accountingRepository->postSupplierAdvanceApplication([
+                        'branch_id' => (int) ($service['branch_id'] ?? 0),
+                        'booking_reference' => (string) ($booking['booking_reference'] ?? ''),
+                        'source_reference' => (string) ($service['line_reference'] ?? ''),
+                        'service_line_reference' => (string) ($service['line_reference'] ?? ''),
+                        'supplier_obligation_id' => $obligationId,
+                        'amount' => $appliedAmountDelta,
+                        'entry_date' => $entryDate,
+                        'currency' => (string) ($updatedObligation['currency'] ?? $service['currency'] ?? ''),
+                        'actor_user_id' => $actorUserId,
+                    ]);
+                } else {
+                    $accountingRepository->postSupplierAdvanceApplicationAdjusted([
+                        'branch_id' => (int) ($service['branch_id'] ?? 0),
+                        'booking_reference' => (string) ($booking['booking_reference'] ?? ''),
+                        'source_reference' => (string) ($service['line_reference'] ?? ''),
+                        'service_line_reference' => (string) ($service['line_reference'] ?? ''),
+                        'supplier_obligation_id' => $obligationId,
+                        'adjustment_amount' => $appliedAmountDelta,
+                        'entry_date' => $entryDate,
+                        'currency' => (string) ($updatedObligation['currency'] ?? $service['currency'] ?? ''),
+                        'actor_user_id' => $actorUserId,
+                    ]);
+                }
 
                 $obligationRecord = $updatedObligation;
                 $this->supplierAdvanceTraceLog('syncForServiceId', 'auto_apply_result', [
@@ -220,11 +234,13 @@ final class CommercialObligationSyncService extends Service
                     'currency' => (string) ($updatedObligation['currency'] ?? $service['currency'] ?? ''),
                     'purchase_cost' => round((float) ($updatedObligation['net_payable_amount'] ?? 0), 2),
                     'obligation_id' => $obligationId,
-                    'action' => 'advance_applied',
-                    'applied_amount' => $appliedAmount,
+                    'action' => 'advance_reconciled',
+                    'applied_amount_delta' => $appliedAmountDelta,
                     'advance_applied_amount' => round((float) ($updatedObligation['advance_applied_amount'] ?? 0), 2),
                     'status' => (string) ($updatedObligation['status'] ?? ''),
-                    'reason' => 'supplier_advance_application_posted',
+                    'reason' => $appliedAmountDelta > 0
+                        ? 'supplier_advance_application_posted'
+                        : 'supplier_advance_reversal_posted',
                 ]);
             }
         }
@@ -246,9 +262,6 @@ final class CommercialObligationSyncService extends Service
         } elseif ($obligationId <= 0) {
             $eligibleForFutureDeduction = false;
             $eligibilityReason = 'obligation_id_not_available';
-        } elseif ($obligationAction !== 'created') {
-            $eligibleForFutureDeduction = false;
-            $eligibilityReason = $obligationAction === 'updated' ? 'obligation_already_existed' : 'obligation_not_created';
         }
 
         if (! $eligibleForFutureDeduction) {
@@ -354,8 +367,8 @@ final class CommercialObligationSyncService extends Service
             'advance_row_count' => $advanceCount,
             'matching_advance_total' => $advanceTotal,
             'eligible_for_future_deduction' => $eligibleForFutureDeduction,
-            'reason' => ($autoAdvanceApplication !== null && (float) ($autoAdvanceApplication['applied_amount'] ?? 0) > 0)
-                ? 'advance_applied_on_created_obligation'
+            'reason' => ($autoAdvanceApplication !== null && (float) ($autoAdvanceApplication['applied_amount_delta'] ?? 0) !== 0.0)
+                ? 'advance_reconciled_on_current_save'
                 : $eligibilityReason,
         ]);
 

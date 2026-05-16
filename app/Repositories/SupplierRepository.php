@@ -853,9 +853,6 @@ final class SupplierRepository extends BaseRepository
             }
 
             $advanceAppliedAmount = round((float) ($existing['advance_applied_amount'] ?? 0), 2);
-            if ($grossAmount < $advanceAppliedAmount) {
-                throw new \RuntimeException('Supplier obligation cannot be reduced below already applied supplier advance.');
-            }
 
             if (($data['supplier_id'] ?? null) === null || $grossAmount <= 0) {
                 $this->supplierAdvanceTraceLog('syncObligation', 'existing_obligation_cancelled', [
@@ -1081,87 +1078,120 @@ final class SupplierRepository extends BaseRepository
 
             $supplierId = (int) ($obligation['supplier_id'] ?? 0);
             $branchId = (int) ($obligation['branch_id'] ?? 0);
-            $remainingAmount = round((float) ($obligation['net_payable_amount'] ?? 0), 2);
+            $grossAmount = round((float) ($obligation['gross_amount'] ?? 0), 2);
 
             $this->supplierAdvanceTraceLog('autoApplyAvailableAdvanceToObligation', 'method_entered', [
                 'trace_id' => $traceId,
                 'supplier_id' => $supplierId > 0 ? $supplierId : null,
                 'branch_id' => $branchId > 0 ? $branchId : null,
                 'currency' => (string) ($obligation['currency'] ?? ''),
-                'purchase_cost' => $remainingAmount,
+                'purchase_cost' => $grossAmount,
                 'booking_reference' => (string) ($obligation['booking_reference'] ?? ''),
                 'service_line_reference' => (string) ($obligation['service_line_reference'] ?? ''),
                 'obligation_id' => $obligationId,
-                'action' => 'auto_apply_entered',
+                'action' => 'reconcile_entered',
                 'reason' => 'currency_ignored_for_auto_apply',
             ]);
 
-            if ($supplierId <= 0 || $branchId <= 0 || $remainingAmount <= 0) {
-                $this->supplierAdvanceTraceLog('autoApplyAvailableAdvanceToObligation', 'auto_apply_skipped', [
-                    'trace_id' => $traceId,
-                    'supplier_id' => $supplierId > 0 ? $supplierId : null,
-                    'branch_id' => $branchId > 0 ? $branchId : null,
-                    'currency' => (string) ($obligation['currency'] ?? ''),
-                    'purchase_cost' => $remainingAmount,
-                    'obligation_id' => $obligationId,
-                    'action' => 'applied_amount=0',
-                    'reason' => $supplierId <= 0 ? 'supplier_id_missing' : ($branchId <= 0 ? 'branch_id_missing' : 'net_payable_amount_lte_zero'),
-                ]);
-
-                return [
-                    'applied_amount' => 0.0,
-                    'advance_row_count' => 0,
-                    'application_count' => 0,
-                    'applications' => [],
-                    'obligation' => $obligation,
-                ];
-            }
+            $applicationStatement = $this->db->prepare(
+                'SELECT
+                    aa.id AS application_id,
+                    aa.supplier_advance_id,
+                    aa.applied_amount,
+                    a.supplier_id,
+                    a.branch_id,
+                    a.currency,
+                    a.available_amount,
+                    a.received_at
+                 FROM supplier_advance_applications aa
+                 INNER JOIN supplier_advances a ON a.id = aa.supplier_advance_id
+                 WHERE aa.supplier_obligation_id = :obligation_id
+                 ORDER BY a.received_at ASC, a.id ASC
+                 FOR UPDATE'
+            );
+            $applicationStatement->execute(['obligation_id' => $obligationId]);
+            $applicationRows = $applicationStatement->fetchAll() ?: [];
+            $startingAppliedAmount = round(array_reduce(
+                $applicationRows,
+                static fn (float $carry, array $row): float => $carry + (float) ($row['applied_amount'] ?? 0),
+                0.0
+            ), 2);
 
             $advanceStatement = $this->db->prepare(
                 'SELECT id, supplier_id, branch_id, currency, available_amount, received_at
                  FROM supplier_advances
                  WHERE supplier_id = :supplier_id
                    AND branch_id = :branch_id
-                   AND available_amount > 0
                  ORDER BY received_at ASC, id ASC
                  FOR UPDATE'
             );
-            $advanceStatement->execute([
-                'supplier_id' => $supplierId,
-                'branch_id' => $branchId,
-            ]);
-            $advanceRows = $advanceStatement->fetchAll() ?: [];
+            $advanceRows = [];
+            if ($supplierId > 0 && $branchId > 0) {
+                $advanceStatement->execute([
+                    'supplier_id' => $supplierId,
+                    'branch_id' => $branchId,
+                ]);
+                $advanceRows = $advanceStatement->fetchAll() ?: [];
+            }
 
             $this->supplierAdvanceTraceLog('autoApplyAvailableAdvanceToObligation', 'advance_rows_loaded', [
                 'trace_id' => $traceId,
-                'supplier_id' => $supplierId,
-                'branch_id' => $branchId,
+                'supplier_id' => $supplierId > 0 ? $supplierId : null,
+                'branch_id' => $branchId > 0 ? $branchId : null,
                 'currency' => (string) ($obligation['currency'] ?? ''),
-                'purchase_cost' => $remainingAmount,
+                'purchase_cost' => $grossAmount,
                 'obligation_id' => $obligationId,
                 'action' => 'advance_rows_loaded',
-                'advance_row_count' => count($advanceRows),
+                'advance_row_count' => count(array_filter(
+                    $advanceRows,
+                    static fn (array $row): bool => round((float) ($row['available_amount'] ?? 0), 2) > 0
+                )),
                 'matching_advance_total' => round(array_reduce($advanceRows, static fn (float $carry, array $row): float => $carry + (float) ($row['available_amount'] ?? 0), 0.0), 2),
                 'reason' => 'supplier_and_branch_match_only',
             ]);
 
-            $applications = [];
-            $totalApplied = 0.0;
+            $advanceRowsById = [];
+            foreach ($advanceRows as $advanceRow) {
+                $advanceRowsById[(int) $advanceRow['id']] = $advanceRow;
+            }
 
-            $updateAdvance = $this->db->prepare(
+            $matchingAppliedAmount = 0.0;
+            foreach ($applicationRows as $applicationRow) {
+                $matchesCurrentSupplierAndBranch = (int) ($applicationRow['supplier_id'] ?? 0) === $supplierId
+                    && (int) ($applicationRow['branch_id'] ?? 0) === $branchId;
+                if ($matchesCurrentSupplierAndBranch) {
+                    $matchingAppliedAmount = round($matchingAppliedAmount + (float) ($applicationRow['applied_amount'] ?? 0), 2);
+                }
+            }
+
+            $matchingAvailableAmount = round(array_reduce(
+                $advanceRows,
+                static fn (float $carry, array $row): float => $carry + max(0, (float) ($row['available_amount'] ?? 0)),
+                0.0
+            ), 2);
+            $desiredAppliedAmount = ($supplierId > 0 && $branchId > 0 && $grossAmount > 0)
+                ? round(min($grossAmount, $matchingAvailableAmount + $matchingAppliedAmount), 2)
+                : 0.0;
+
+            $increaseAdvance = $this->db->prepare(
+                'UPDATE supplier_advances
+                 SET available_amount = available_amount + :returned_amount
+                 WHERE id = :advance_id'
+            );
+            $decreaseAdvance = $this->db->prepare(
                 'UPDATE supplier_advances
                  SET available_amount = GREATEST(0, available_amount - :applied_amount)
                  WHERE id = :advance_id'
             );
-            $updateObligation = $this->db->prepare(
-                'UPDATE supplier_obligations
-                 SET advance_applied_amount = advance_applied_amount + :advance_applied_increment,
-                     net_payable_amount = GREATEST(0, net_payable_amount - :net_payable_reduction),
-                     status = CASE
-                         WHEN GREATEST(0, net_payable_amount - :status_reduction_amount) <= 0 THEN "covered_by_advance"
-                         ELSE "partially_covered"
-                     END
-                 WHERE id = :obligation_id'
+            $updateApplicationAmount = $this->db->prepare(
+                'UPDATE supplier_advance_applications
+                 SET applied_amount = :applied_amount,
+                     created_by_user_id = :created_by_user_id
+                 WHERE id = :application_id'
+            );
+            $deleteApplication = $this->db->prepare(
+                'DELETE FROM supplier_advance_applications
+                 WHERE id = :application_id'
             );
             $insertApplication = $this->db->prepare(
                 'INSERT INTO supplier_advance_applications (
@@ -1173,31 +1203,104 @@ final class SupplierRepository extends BaseRepository
                     applied_amount = applied_amount + VALUES(applied_amount),
                     created_by_user_id = VALUES(created_by_user_id)'
             );
+            $updateObligation = $this->db->prepare(
+                'UPDATE supplier_obligations
+                 SET advance_applied_amount = :advance_applied_amount,
+                     net_payable_amount = :net_payable_amount,
+                     status = :status
+                 WHERE id = :obligation_id'
+            );
 
-            foreach ($advanceRows as $advanceRow) {
-                if ($remainingAmount <= 0) {
+            $applications = [];
+            $currentAppliedAmount = $startingAppliedAmount;
+
+            $rowsToUnapply = array_reverse($applicationRows);
+            foreach ($rowsToUnapply as $applicationRow) {
+                $matchesCurrentSupplierAndBranch = (int) ($applicationRow['supplier_id'] ?? 0) === $supplierId
+                    && (int) ($applicationRow['branch_id'] ?? 0) === $branchId;
+                $applicationAmount = round((float) ($applicationRow['applied_amount'] ?? 0), 2);
+                if ($applicationAmount <= 0) {
+                    continue;
+                }
+
+                $mustUnapplyAll = ! $matchesCurrentSupplierAndBranch;
+                $excessAmount = round(max(0, $currentAppliedAmount - $desiredAppliedAmount), 2);
+                if (! $mustUnapplyAll && $excessAmount <= 0) {
+                    continue;
+                }
+
+                $returnAmount = $mustUnapplyAll ? $applicationAmount : min($applicationAmount, $excessAmount);
+                if ($returnAmount <= 0) {
+                    continue;
+                }
+
+                $increaseAdvance->execute([
+                    'returned_amount' => $returnAmount,
+                    'advance_id' => (int) $applicationRow['supplier_advance_id'],
+                ]);
+
+                $remainingApplicationAmount = round($applicationAmount - $returnAmount, 2);
+                if ($remainingApplicationAmount > 0) {
+                    $updateApplicationAmount->execute([
+                        'applied_amount' => $remainingApplicationAmount,
+                        'created_by_user_id' => $actorUserId,
+                        'application_id' => (int) $applicationRow['application_id'],
+                    ]);
+                } else {
+                    $deleteApplication->execute([
+                        'application_id' => (int) $applicationRow['application_id'],
+                    ]);
+                }
+
+                $currentAppliedAmount = round($currentAppliedAmount - $returnAmount, 2);
+                if (isset($advanceRowsById[(int) $applicationRow['supplier_advance_id']])) {
+                    $advanceRowsById[(int) $applicationRow['supplier_advance_id']]['available_amount'] = round(
+                        (float) ($advanceRowsById[(int) $applicationRow['supplier_advance_id']]['available_amount'] ?? 0) + $returnAmount,
+                        2
+                    );
+                }
+
+                AuditLog::record($this->app, 'supplier.advance.reconciled', [
+                    'user_id' => $actorUserId,
+                    'supplier_advance_id' => (int) $applicationRow['supplier_advance_id'],
+                    'supplier_obligation_id' => $obligationId,
+                    'returned_amount' => $returnAmount,
+                    'reason' => $mustUnapplyAll ? 'supplier_or_branch_changed' : 'obligation_amount_reduced',
+                ]);
+
+                $this->supplierAdvanceTraceLog('autoApplyAvailableAdvanceToObligation', 'advance_row_unapplied', [
+                    'trace_id' => $traceId,
+                    'supplier_id' => $supplierId > 0 ? $supplierId : null,
+                    'branch_id' => $branchId > 0 ? $branchId : null,
+                    'currency' => (string) ($obligation['currency'] ?? ''),
+                    'purchase_cost' => $grossAmount,
+                    'obligation_id' => $obligationId,
+                    'advance_id' => (int) $applicationRow['supplier_advance_id'],
+                    'action' => 'advance_row_unapplied',
+                    'returned_amount' => $returnAmount,
+                    'remaining_application_amount' => $remainingApplicationAmount,
+                    'reason' => $mustUnapplyAll ? 'supplier_or_branch_changed' : 'obligation_amount_reduced',
+                ]);
+            }
+
+            $remainingToApply = round(max(0, $desiredAppliedAmount - $currentAppliedAmount), 2);
+            foreach ($advanceRowsById as $advanceId => $advanceRow) {
+                if ($remainingToApply <= 0) {
                     break;
                 }
 
                 $availableAmount = round((float) ($advanceRow['available_amount'] ?? 0), 2);
-                $appliedAmount = min($remainingAmount, $availableAmount);
-
+                $appliedAmount = min($remainingToApply, $availableAmount);
                 if ($appliedAmount <= 0) {
                     continue;
                 }
 
-                $updateAdvance->execute([
+                $decreaseAdvance->execute([
                     'applied_amount' => $appliedAmount,
-                    'advance_id' => (int) $advanceRow['id'],
-                ]);
-                $updateObligation->execute([
-                    'advance_applied_increment' => $appliedAmount,
-                    'net_payable_reduction' => $appliedAmount,
-                    'status_reduction_amount' => $appliedAmount,
-                    'obligation_id' => $obligationId,
+                    'advance_id' => $advanceId,
                 ]);
                 $insertApplication->execute([
-                    'supplier_advance_id' => (int) $advanceRow['id'],
+                    'supplier_advance_id' => $advanceId,
                     'supplier_obligation_id' => $obligationId,
                     'applied_amount' => $appliedAmount,
                     'created_by_user_id' => $actorUserId,
@@ -1205,15 +1308,16 @@ final class SupplierRepository extends BaseRepository
 
                 AuditLog::record($this->app, 'supplier.advance.applied', [
                     'user_id' => $actorUserId,
-                    'supplier_advance_id' => (int) $advanceRow['id'],
+                    'supplier_advance_id' => $advanceId,
                     'supplier_obligation_id' => $obligationId,
                     'applied_amount' => $appliedAmount,
                 ]);
 
-                $remainingAmount = round($remainingAmount - $appliedAmount, 2);
-                $totalApplied = round($totalApplied + $appliedAmount, 2);
+                $remainingToApply = round($remainingToApply - $appliedAmount, 2);
+                $currentAppliedAmount = round($currentAppliedAmount + $appliedAmount, 2);
+                $advanceRowsById[$advanceId]['available_amount'] = round($availableAmount - $appliedAmount, 2);
                 $applications[] = [
-                    'advance_id' => (int) $advanceRow['id'],
+                    'advance_id' => $advanceId,
                     'advance_currency' => (string) ($advanceRow['currency'] ?? ''),
                     'applied_amount' => $appliedAmount,
                     'available_before' => $availableAmount,
@@ -1222,38 +1326,57 @@ final class SupplierRepository extends BaseRepository
 
                 $this->supplierAdvanceTraceLog('autoApplyAvailableAdvanceToObligation', 'advance_row_applied', [
                     'trace_id' => $traceId,
-                    'supplier_id' => $supplierId,
-                    'branch_id' => $branchId,
+                    'supplier_id' => $supplierId > 0 ? $supplierId : null,
+                    'branch_id' => $branchId > 0 ? $branchId : null,
                     'currency' => (string) ($obligation['currency'] ?? ''),
-                    'purchase_cost' => $remainingAmount,
+                    'purchase_cost' => $grossAmount,
                     'obligation_id' => $obligationId,
-                    'advance_id' => (int) $advanceRow['id'],
+                    'advance_id' => $advanceId,
                     'action' => 'advance_row_applied',
                     'applied_amount' => $appliedAmount,
                     'available_amount_before' => $availableAmount,
                     'available_amount_after' => round($availableAmount - $appliedAmount, 2),
-                    'reason' => 'currency_ignored_for_auto_apply',
+                    'reason' => 'reconciled_to_latest_payable',
                 ]);
             }
+
+            $finalAppliedAmount = round($currentAppliedAmount, 2);
+            $finalNetPayableAmount = round(max(0, $grossAmount - $finalAppliedAmount), 2);
+            $finalStatus = $grossAmount <= 0
+                ? 'cancelled'
+                : ($finalNetPayableAmount <= 0
+                    ? ($finalAppliedAmount > 0 ? 'covered_by_advance' : 'open')
+                    : ($finalAppliedAmount > 0 ? 'partially_covered' : 'open'));
+
+            $updateObligation->execute([
+                'advance_applied_amount' => $finalAppliedAmount,
+                'net_payable_amount' => $finalNetPayableAmount,
+                'status' => $finalStatus,
+                'obligation_id' => $obligationId,
+            ]);
 
             $updatedObligation = $this->findObligationById($obligationId) ?? $obligation;
             $this->supplierAdvanceTraceLog('autoApplyAvailableAdvanceToObligation', 'auto_apply_completed', [
                 'trace_id' => $traceId,
-                'supplier_id' => $supplierId,
-                'branch_id' => $branchId,
+                'supplier_id' => $supplierId > 0 ? $supplierId : null,
+                'branch_id' => $branchId > 0 ? $branchId : null,
                 'currency' => (string) ($updatedObligation['currency'] ?? ''),
                 'purchase_cost' => round((float) ($updatedObligation['net_payable_amount'] ?? 0), 2),
                 'obligation_id' => $obligationId,
-                'action' => 'auto_apply_completed',
-                'applied_amount' => $totalApplied,
+                'action' => 'reconcile_completed',
+                'applied_amount_delta' => round($finalAppliedAmount - $startingAppliedAmount, 2),
                 'advance_applied_amount' => round((float) ($updatedObligation['advance_applied_amount'] ?? 0), 2),
                 'status' => (string) ($updatedObligation['status'] ?? ''),
-                'reason' => $totalApplied > 0 ? 'supplier_advance_applied' : 'no_available_advance_amount',
+                'reason' => 'supplier_advance_reconciled_to_current_payable',
             ]);
 
             return [
-                'applied_amount' => $totalApplied,
-                'advance_row_count' => count($advanceRows),
+                'applied_amount' => $finalAppliedAmount,
+                'applied_amount_delta' => round($finalAppliedAmount - $startingAppliedAmount, 2),
+                'advance_row_count' => count(array_filter(
+                    $advanceRowsById,
+                    static fn (array $row): bool => round((float) ($row['available_amount'] ?? 0), 2) > 0
+                )),
                 'application_count' => count($applications),
                 'applications' => $applications,
                 'obligation' => $updatedObligation,
