@@ -278,9 +278,21 @@ $invoicePaymentHistoryRows = array_values(array_filter(
     $customerPaymentFoundation['invoicePaymentHistory'] ?? [],
     static fn (array $allocation): bool => (string) ($allocation['bookingReference'] ?? '') === $bookingReference
 ));
+$isSelectedReceiptHistoryRow = static function (array $historyRow) use ($selectedReceiptId, $selectedReceiptNo): bool {
+    $historyReceiptId = (int) ($historyRow['receiptId'] ?? 0);
+    $historyReceiptNo = trim((string) ($historyRow['receiptNo'] ?? ''));
+
+    if ($selectedReceiptId > 0 && $historyReceiptId > 0) {
+        return $historyReceiptId === $selectedReceiptId;
+    }
+
+    return $selectedReceiptNo !== '' && $historyReceiptNo !== '' && $historyReceiptNo === $selectedReceiptNo;
+};
+
 $previousInvoicePaymentsTotals = [];
 $currentInvoicePaymentHistoryTotals = [];
 $totalPaidAgainstInvoiceTotals = [];
+
 foreach ($invoicePaymentHistoryRows as $historyRow) {
     $currency = (string) ($historyRow['receivableCurrency'] ?? $historyRow['currency'] ?? '');
     if ($currency === '') {
@@ -289,12 +301,14 @@ foreach ($invoicePaymentHistoryRows as $historyRow) {
 
     $paidAmount = (float) ($historyRow['receivableAmountAllocated'] ?? $historyRow['allocatedAmount'] ?? 0);
     $totalPaidAgainstInvoiceTotals[$currency] = ($totalPaidAgainstInvoiceTotals[$currency] ?? 0.0) + $paidAmount;
-    if ((int) ($historyRow['receiptId'] ?? 0) === $selectedReceiptId) {
+
+    if ($isSelectedReceiptHistoryRow($historyRow)) {
         $currentInvoicePaymentHistoryTotals[$currency] = ($currentInvoicePaymentHistoryTotals[$currency] ?? 0.0) + $paidAmount;
     } else {
         $previousInvoicePaymentsTotals[$currency] = ($previousInvoicePaymentsTotals[$currency] ?? 0.0) + $paidAmount;
     }
 }
+
 $previousInvoicePaymentsDisplay = $nonZeroCurrencyTotals($previousInvoicePaymentsTotals);
 $currentInvoicePaymentHistoryDisplay = $nonZeroCurrencyTotals($currentInvoicePaymentHistoryTotals);
 $totalPaidAgainstInvoiceDisplay = $nonZeroCurrencyTotals($totalPaidAgainstInvoiceTotals);
@@ -436,7 +450,7 @@ $totalPaidAgainstInvoiceDisplay = $nonZeroCurrencyTotals($totalPaidAgainstInvoic
                         </div>
                     </div>
                     <?php if ($currentInvoiceAmountDisplay !== [] || $currentInvoicePaidByReceiptTotals !== [] || $currentInvoiceBalanceDisplay !== []): ?>
-                        <div class="receipt-due-line" style="display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin-top:12px;">
+                        <div class="receipt-due-line" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-top:12px;">
                             <div>
                                 <span>Current Invoice No.</span>
                                 <strong><?= e($bookingReference !== '' ? $bookingReference : 'N/A') ?></strong>
@@ -445,12 +459,14 @@ $totalPaidAgainstInvoiceDisplay = $nonZeroCurrencyTotals($totalPaidAgainstInvoic
                                 <span>Current Invoice Amount</span>
                                 <strong><?= e($formatCurrencyTotals($currentInvoiceAmountDisplay !== [] ? $currentInvoiceAmountDisplay : $invoiceReceivableTotals)) ?></strong>
                             </div>
+                           <?php if ($previousInvoicePaymentsDisplay !== []): ?>
+    <div>
+        <span>Previous Payments</span>
+        <strong><?= e($formatCurrencyTotals($previousInvoicePaymentsDisplay)) ?></strong>
+    </div>
+<?php endif; ?>
                             <div>
-                                <span>Previous Payments</span>
-                                <strong><?= e($formatCurrencyTotals($previousInvoicePaymentsDisplay !== [] ? $previousInvoicePaymentsDisplay : [$receiptCurrency => 0])) ?></strong>
-                            </div>
-                            <div>
-                                <span>This Payment</span>
+                                <span>Current Payment</span>
                                 <strong><?= e($formatCurrencyTotals($currentInvoicePaidByReceiptTotals !== [] ? $currentInvoicePaidByReceiptTotals : [$receiptCurrency => 0])) ?></strong>
                             </div>
                             <div>
