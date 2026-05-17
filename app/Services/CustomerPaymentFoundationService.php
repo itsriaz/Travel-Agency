@@ -43,6 +43,7 @@ final class CustomerPaymentFoundationService extends Service
 
         $receipts = array_map(
             static function (array $row): array {
+                $statusRaw = (string) ($row['status'] ?? '');
                 return [
                     'id' => (int) ($row['id'] ?? 0),
                     'receiptNo' => (string) $row['receipt_no'],
@@ -55,8 +56,15 @@ final class CustomerPaymentFoundationService extends Service
                     'referenceNumber' => (string) ($row['reference_number'] ?? ''),
                     'bankCardDetail' => (string) ($row['bank_card_detail'] ?? ''),
                     'chargesAmount' => (float) ($row['charges_amount'] ?? 0),
-                    'status' => ucwords(str_replace('_', ' ', (string) $row['status'])),
+                    'status' => ucwords(str_replace('_', ' ', $statusRaw)),
+                    'statusRaw' => $statusRaw,
                     'exchangeRateToBooking' => (float) ($row['exchange_rate_to_booking'] ?? 0),
+                    'remarks' => (string) ($row['remarks'] ?? ''),
+                    'voidReason' => (string) ($row['void_reason'] ?? ''),
+                    'voidedByUserId' => (int) ($row['voided_by_user_id'] ?? 0),
+                    'voidedAt' => (string) ($row['voided_at'] ?? ''),
+                    'reversalReference' => (string) ($row['reversal_reference'] ?? ''),
+                    'reversalJournalEntryId' => (int) ($row['reversal_journal_entry_id'] ?? 0),
                 ];
             },
             $repository->receiptHistory($bookingReference)

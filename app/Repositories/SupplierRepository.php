@@ -8,6 +8,19 @@ use App\Helpers\AuditLog;
 
 final class SupplierRepository extends BaseRepository
 {
+    private function supplierPaymentVoidMetadataSelect(string $alias = ''): string
+    {
+        $prefix = $alias !== '' ? $alias . '.' : '';
+
+        return implode(",\n                ", [
+            $this->columnExists('supplier_payments', 'void_reason') ? $prefix . 'void_reason' : 'NULL AS void_reason',
+            $this->columnExists('supplier_payments', 'voided_by_user_id') ? $prefix . 'voided_by_user_id' : 'NULL AS voided_by_user_id',
+            $this->columnExists('supplier_payments', 'voided_at') ? $prefix . 'voided_at' : 'NULL AS voided_at',
+            $this->columnExists('supplier_payments', 'reversal_reference') ? $prefix . 'reversal_reference' : 'NULL AS reversal_reference',
+            $this->columnExists('supplier_payments', 'reversal_journal_entry_id') ? $prefix . 'reversal_journal_entry_id' : 'NULL AS reversal_journal_entry_id',
+        ]);
+    }
+
     public function nextSupplierCode(): string
     {
         return $this->transaction(function (): string {
@@ -450,7 +463,8 @@ final class SupplierRepository extends BaseRepository
         $statement = $this->db->prepare(
             'SELECT id, supplier_id, branch_id, booking_reference, payment_no, payment_date, currency,
                     paid_amount, allocated_amount, unallocated_amount, payment_method, reference_number, bank_card_detail,
-                    charges_amount, status, exchange_rate_to_booking, remarks
+                    charges_amount, status, exchange_rate_to_booking, remarks,
+                    ' . $this->supplierPaymentVoidMetadataSelect() . '
              FROM supplier_payments
              WHERE id = :id
              LIMIT 1'
@@ -478,6 +492,8 @@ final class SupplierRepository extends BaseRepository
                 p.charges_amount,
                 p.status,
                 p.exchange_rate_to_booking,
+                p.remarks,
+                ' . $this->supplierPaymentVoidMetadataSelect('p') . ',
                 s.name AS supplier_name
              FROM supplier_payments p
              INNER JOIN suppliers s ON s.id = p.supplier_id

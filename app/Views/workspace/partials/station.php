@@ -1,6 +1,14 @@
 <?php
 
 $activeService = $serviceLines[0] ?? [];
+$formatStatusLabel = static function (?string $status): string {
+    $normalized = str_replace(' ', '_', mb_strtolower(trim((string) $status)));
+    if ($normalized === 'void') {
+        return 'VOID';
+    }
+
+    return ucwords(str_replace('_', ' ', $normalized));
+};
 $invoiceDueDate = trim((string) ($workspaceBooking['dueDate'] ?? ''));
 if ($invoiceDueDate === '') {
     foreach (($customerPaymentFoundation['openReceivables'] ?? []) as $receivableRow) {
@@ -729,7 +737,7 @@ Kept here in case manual service save is needed again later.
                             <tbody data-payment-history-receipts-body>
                             <?php foreach ($customerPaymentFoundation['receipts'] ?? [] as $receiptRow): ?>
                                 <?php $receiptPrintUrl = $workspaceBooking['id'] > 0 ? url('/workspace/output?booking_id=' . $workspaceBooking['id'] . '&doc=customer_receipt&receipt_id=' . (int) ($receiptRow['id'] ?? 0)) : ''; ?>
-                                <tr><td><?= e((string) $receiptRow['receiptNo']) ?></td><td><?= e((string) $receiptRow['receiptDate']) ?></td><td><?= e((string) $receiptRow['currency']) ?></td><td><?= e($formatMoney((float) $receiptRow['receivedAmount'])) ?></td><td><?= e($formatMoney((float) $receiptRow['allocatedAmount'])) ?></td><td><?= e($formatMoney((float) $receiptRow['unallocatedAmount'])) ?></td><td><?= e(ucwords(str_replace('_', ' ', (string) $receiptRow['paymentMethod']))) ?></td><td><?= e((string) $receiptRow['status']) ?></td><td><?php if ($receiptPrintUrl !== ''): ?><a href="<?= e($receiptPrintUrl) ?>" target="_blank" rel="noopener">Print</a><?php else: ?>-<?php endif; ?></td></tr>
+                                <tr><td><?= e((string) $receiptRow['receiptNo']) ?></td><td><?= e((string) $receiptRow['receiptDate']) ?></td><td><?= e((string) $receiptRow['currency']) ?></td><td><?= e($formatMoney((float) $receiptRow['receivedAmount'])) ?></td><td><?= e($formatMoney((float) $receiptRow['allocatedAmount'])) ?></td><td><?= e($formatMoney((float) $receiptRow['unallocatedAmount'])) ?></td><td><?= e(ucwords(str_replace('_', ' ', (string) $receiptRow['paymentMethod']))) ?></td><td><?= e($formatStatusLabel((string) ($receiptRow['statusRaw'] ?? $receiptRow['status'] ?? ''))) ?></td><td><?php if ($receiptPrintUrl !== ''): ?><a href="<?= e($receiptPrintUrl) ?>" target="_blank" rel="noopener">Print</a><?php else: ?>-<?php endif; ?></td></tr>
                             <?php endforeach; ?>
                             <?php if (($customerPaymentFoundation['receipts'] ?? []) === []): ?><tr><td colspan="9" class="empty-cell">No receipts recorded yet.</td></tr><?php endif; ?>
                             </tbody>
@@ -1021,7 +1029,7 @@ Kept here in case manual service save is needed again later.
                                     <td><?= e($formatMoney((float) ($paymentRow['paidAmount'] ?? 0))) ?></td>
                                     <td><?= e($formatMoney((float) ($paymentRow['allocatedAmount'] ?? 0))) ?></td>
                                     <td><?= e($formatMoney((float) ($paymentRow['unallocatedAmount'] ?? 0))) ?></td>
-                                    <td><?= e((string) ($paymentRow['status'] ?? '')) ?></td>
+                                    <td><?= e($formatStatusLabel((string) ($paymentRow['statusRaw'] ?? $paymentRow['status'] ?? ''))) ?></td>
                                 </tr>
                             <?php endforeach; ?>
                             <?php if (($supplierFoundation['payments'] ?? []) === []): ?><tr><td colspan="8" class="empty-cell">No supplier payments recorded for this invoice yet.</td></tr><?php endif; ?>

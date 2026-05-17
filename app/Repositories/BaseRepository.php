@@ -10,6 +10,8 @@ use PDO;
 abstract class BaseRepository
 {
     protected PDO $db;
+    /** @var array<string, bool> */
+    private array $columnExistsCache = [];
 
     public function __construct(protected readonly App $app)
     {
@@ -54,5 +56,31 @@ abstract class BaseRepository
         ]);
 
         return $statement->fetchColumn() !== false;
+    }
+
+    protected function columnExists(string $tableName, string $columnName): bool
+    {
+        $cacheKey = $tableName . '.' . $columnName;
+        if (array_key_exists($cacheKey, $this->columnExistsCache)) {
+            return $this->columnExistsCache[$cacheKey];
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT 1
+             FROM information_schema.columns
+             WHERE table_schema = DATABASE()
+               AND table_name = :table_name
+               AND column_name = :column_name
+             LIMIT 1'
+        );
+        $statement->execute([
+            'table_name' => $tableName,
+            'column_name' => $columnName,
+        ]);
+
+        $exists = $statement->fetchColumn() !== false;
+        $this->columnExistsCache[$cacheKey] = $exists;
+
+        return $exists;
     }
 }

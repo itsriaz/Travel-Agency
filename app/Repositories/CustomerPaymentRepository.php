@@ -8,12 +8,26 @@ use App\Helpers\AuditLog;
 
 final class CustomerPaymentRepository extends BaseRepository
 {
+    private function customerReceiptVoidMetadataSelect(string $alias = ''): string
+    {
+        $prefix = $alias !== '' ? $alias . '.' : '';
+
+        return implode(",\n                    ", [
+            $this->columnExists('customer_receipts', 'void_reason') ? $prefix . 'void_reason' : 'NULL AS void_reason',
+            $this->columnExists('customer_receipts', 'voided_by_user_id') ? $prefix . 'voided_by_user_id' : 'NULL AS voided_by_user_id',
+            $this->columnExists('customer_receipts', 'voided_at') ? $prefix . 'voided_at' : 'NULL AS voided_at',
+            $this->columnExists('customer_receipts', 'reversal_reference') ? $prefix . 'reversal_reference' : 'NULL AS reversal_reference',
+            $this->columnExists('customer_receipts', 'reversal_journal_entry_id') ? $prefix . 'reversal_journal_entry_id' : 'NULL AS reversal_journal_entry_id',
+        ]);
+    }
+
     public function findReceiptById(int $receiptId): ?array
     {
         $statement = $this->db->prepare(
             'SELECT id, branch_id, booking_reference, receipt_no, receipt_date, currency, received_amount, allocated_amount,
                     unallocated_amount, payment_method, reference_number, bank_card_detail, charges_amount, status,
-                    exchange_rate_to_booking, remarks
+                    exchange_rate_to_booking, remarks,
+                    ' . $this->customerReceiptVoidMetadataSelect() . '
              FROM customer_receipts
              WHERE id = :id
              LIMIT 1'
@@ -847,7 +861,9 @@ final class CustomerPaymentRepository extends BaseRepository
                 bank_card_detail,
                 charges_amount,
                 status,
-                exchange_rate_to_booking
+                exchange_rate_to_booking,
+                remarks,
+                ' . $this->customerReceiptVoidMetadataSelect() . '
              FROM customer_receipts
              WHERE booking_reference = :booking_reference
              ORDER BY receipt_date DESC, id DESC'

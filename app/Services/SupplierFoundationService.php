@@ -118,6 +118,7 @@ final class SupplierFoundationService extends Service
         $paymentRows = $repository->supplierPaymentHistory($bookingReference);
         $payments = array_map(
             static function (array $row): array {
+                $statusRaw = (string) ($row['status'] ?? 'paid');
                 return [
                     'id' => (int) $row['id'],
                     'paymentNo' => (string) $row['payment_no'],
@@ -128,9 +129,16 @@ final class SupplierFoundationService extends Service
                     'allocatedAmount' => (float) ($row['allocated_amount'] ?? 0),
                     'unallocatedAmount' => (float) ($row['unallocated_amount'] ?? 0),
                     'paymentMethod' => (string) $row['payment_method'],
-                    'status' => ucwords(str_replace('_', ' ', (string) ($row['status'] ?? 'paid'))),
+                    'status' => ucwords(str_replace('_', ' ', $statusRaw)),
+                    'statusRaw' => $statusRaw,
                     'referenceNumber' => (string) ($row['reference_number'] ?? ''),
                     'exchangeRateToBooking' => (float) ($row['exchange_rate_to_booking'] ?? 0),
+                    'remarks' => (string) ($row['remarks'] ?? ''),
+                    'voidReason' => (string) ($row['void_reason'] ?? ''),
+                    'voidedByUserId' => (int) ($row['voided_by_user_id'] ?? 0),
+                    'voidedAt' => (string) ($row['voided_at'] ?? ''),
+                    'reversalReference' => (string) ($row['reversal_reference'] ?? ''),
+                    'reversalJournalEntryId' => (int) ($row['reversal_journal_entry_id'] ?? 0),
                 ];
             },
             $paymentRows

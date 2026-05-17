@@ -28,6 +28,14 @@ $formatCurrencyTotals = static function (array $totals) use ($formatMoney): stri
 
     return implode(' / ', $parts);
 };
+$formatStatusLabel = static function (?string $status): string {
+    $normalized = str_replace(' ', '_', mb_strtolower(trim((string) $status)));
+    if ($normalized === 'void') {
+        return 'VOID';
+    }
+
+    return ucwords(str_replace('_', ' ', $normalized));
+};
 $leadTravelerName = trim((string) ($booking['lead_traveler_name'] ?? ''));
 $customerName = $leadTravelerName !== '' ? $leadTravelerName : trim((string) ($booking['party_label'] ?? 'Booking Party'));
 $bookingReference = (string) ($booking['booking_reference'] ?? '');
@@ -52,6 +60,10 @@ if ($serviceTypeLabels !== []) {
 $receiptRemarks = trim((string) ($selectedReceipt['remarks'] ?? ''));
 $receiptReference = trim((string) ($selectedReceipt['referenceNumber'] ?? ''));
 $receiptBankCard = trim((string) ($selectedReceipt['bankCardDetail'] ?? ''));
+$selectedReceiptStatusRaw = str_replace(' ', '_', mb_strtolower(trim((string) ($selectedReceipt['statusRaw'] ?? $selectedReceipt['status'] ?? ''))));
+$selectedReceiptIsVoid = $selectedReceiptStatusRaw === 'void';
+$selectedReceiptVoidReason = trim((string) ($selectedReceipt['voidReason'] ?? ''));
+$selectedReceiptVoidedAt = trim((string) ($selectedReceipt['voidedAt'] ?? ''));
 $receiptAgainst = trim($receiptRemarks !== '' ? $receiptRemarks : $serviceSummary);
 $receivedBy = trim((string) ($booking['updated_by_name'] ?? $booking['created_by_name'] ?? 'Authorized Staff'));
 $passportNumber = trim((string) ($booking['passport_number'] ?? ''));
@@ -81,6 +93,10 @@ $customerCreditTotals = is_array($customerPaymentFoundation['summary']['customer
     : [];
 $supplierOutstandingTotals = is_array($summary['supplierOutstanding'] ?? null) ? $summary['supplierOutstanding'] : [];
 $supplierPaidTotals = is_array($summary['supplierPaid'] ?? null) ? $summary['supplierPaid'] : [];
+$selectedSupplierPaymentStatusRaw = str_replace(' ', '_', mb_strtolower(trim((string) ($selectedSupplierPayment['statusRaw'] ?? $selectedSupplierPayment['status'] ?? ''))));
+$selectedSupplierPaymentIsVoid = $selectedSupplierPaymentStatusRaw === 'void';
+$selectedSupplierPaymentVoidReason = trim((string) ($selectedSupplierPayment['voidReason'] ?? ''));
+$selectedSupplierPaymentVoidedAt = trim((string) ($selectedSupplierPayment['voidedAt'] ?? ''));
 $invoiceServiceSummary = $serviceSummary;
 $documentAudienceNote = match ($outputType) {
     'invoice' => 'Customer-facing invoice generated from the current saved booking services.',
@@ -506,10 +522,29 @@ $totalPaidAgainstInvoiceDisplay = $nonZeroCurrencyTotals($totalPaidAgainstInvoic
                         <div class="receipt-sheet__meta"><?= e((string) ($branchBranding['tagline'] ?? 'Travel Agency Operations')) ?></div>
                     </div>
                     <div class="receipt-sheet__title-wrap">
-                        <div class="receipt-sheet__title">Customer Payment Receipt</div>
+                        <div class="receipt-sheet__title">
+                            Customer Payment Receipt
+                            <?php if ($selectedReceiptIsVoid): ?>
+                                <span style="display:inline-block;margin-left:10px;padding:4px 10px;border:1px solid #8b0000;border-radius:999px;background:#fff0f0;color:#8b0000;font-size:12px;font-weight:700;letter-spacing:0.08em;">VOID</span>
+                            <?php endif; ?>
+                        </div>
                         <div class="receipt-sheet__subtitle">Payment acknowledgment for travel services</div>
                     </div>
                 </header>
+
+                <?php if ($selectedReceiptIsVoid): ?>
+                    <section class="receipt-card" style="border-color:#8b0000;background:#fff7f7;">
+                        <div class="receipt-card__grid">
+                            <div><span>Status</span><strong>VOID</strong></div>
+                            <?php if ($selectedReceiptVoidedAt !== ''): ?>
+                                <div><span>Voided At</span><strong><?= e($selectedReceiptVoidedAt) ?></strong></div>
+                            <?php endif; ?>
+                            <?php if ($selectedReceiptVoidReason !== ''): ?>
+                                <div style="grid-column:1 / -1;"><span>Void Reason</span><strong><?= e($selectedReceiptVoidReason) ?></strong></div>
+                            <?php endif; ?>
+                        </div>
+                    </section>
+                <?php endif; ?>
 
                 <section class="receipt-card">
                     <div class="receipt-card__grid">
@@ -722,7 +757,12 @@ openReceivables: <?= e(json_encode($receiptDebug['openReceivables'], JSON_PRETTY
 
         <?php if ($outputType === 'supplier_voucher' && $selectedSupplierPayment !== null): ?>
             <section class="output-block">
-                <h2>Supplier Payment Voucher</h2>
+                <h2>
+                    Supplier Payment Voucher
+                    <?php if ($selectedSupplierPaymentIsVoid): ?>
+                        <span style="display:inline-block;margin-left:10px;padding:4px 10px;border:1px solid #8b0000;border-radius:999px;background:#fff0f0;color:#8b0000;font-size:12px;font-weight:700;letter-spacing:0.08em;vertical-align:middle;">VOID</span>
+                    <?php endif; ?>
+                </h2>
                 <div class="output-kv-grid">
                     <div><span>Voucher No.</span><strong><?= e((string) ($selectedSupplierPayment['paymentNo'] ?? '')) ?></strong></div>
                     <div><span>Voucher Date</span><strong><?= e((string) ($selectedSupplierPayment['paymentDate'] ?? '')) ?></strong></div>
@@ -733,11 +773,22 @@ openReceivables: <?= e(json_encode($receiptDebug['openReceivables'], JSON_PRETTY
                     <div><span>Open Supplier Credit</span><strong><?= e($formatMoney((float) ($selectedSupplierPayment['unallocatedAmount'] ?? 0))) ?></strong></div>
                     <div><span>Payment Method</span><strong><?= e(ucwords(str_replace('_', ' ', (string) ($selectedSupplierPayment['paymentMethod'] ?? '')))) ?></strong></div>
                     <div><span>Reference No.</span><strong><?= e((string) (($selectedSupplierPayment['referenceNumber'] ?? '') !== '' ? $selectedSupplierPayment['referenceNumber'] : 'N/A')) ?></strong></div>
-                    <div><span>Status</span><strong><?= e((string) ($selectedSupplierPayment['status'] ?? '')) ?></strong></div>
+                    <div><span>Status</span><strong><?= e($formatStatusLabel((string) ($selectedSupplierPayment['statusRaw'] ?? $selectedSupplierPayment['status'] ?? ''))) ?></strong></div>
                     <?php if ((float) ($selectedSupplierPayment['exchangeRateToBooking'] ?? 0) > 0): ?>
                         <div><span>Exchange Rate</span><strong><?= e(number_format((float) $selectedSupplierPayment['exchangeRateToBooking'], 8)) ?></strong></div>
                     <?php endif; ?>
                 </div>
+                <?php if ($selectedSupplierPaymentIsVoid): ?>
+                    <div class="output-kv-grid" style="margin-top:14px;padding:14px;border:1px solid #8b0000;background:#fff7f7;">
+                        <div><span>Status</span><strong>VOID</strong></div>
+                        <?php if ($selectedSupplierPaymentVoidedAt !== ''): ?>
+                            <div><span>Voided At</span><strong><?= e($selectedSupplierPaymentVoidedAt) ?></strong></div>
+                        <?php endif; ?>
+                        <?php if ($selectedSupplierPaymentVoidReason !== ''): ?>
+                            <div style="grid-column:1 / -1;"><span>Void Reason</span><strong><?= e($selectedSupplierPaymentVoidReason) ?></strong></div>
+                        <?php endif; ?>
+                    </div>
+                <?php endif; ?>
             </section>
             <section class="output-block">
                 <h2>Applied Supplier Payables</h2>
@@ -815,7 +866,7 @@ openReceivables: <?= e(json_encode($receiptDebug['openReceivables'], JSON_PRETTY
                             <td><?= e($formatMoney((float) ($receipt['allocatedAmount'] ?? 0))) ?></td>
                             <td><?= e($formatMoney((float) ($receipt['unallocatedAmount'] ?? 0))) ?></td>
                             <td><?= e(ucwords(str_replace('_', ' ', (string) ($receipt['paymentMethod'] ?? '')))) ?></td>
-                            <td><?= e((string) ($receipt['status'] ?? '')) ?></td>
+                            <td><?= e($formatStatusLabel((string) ($receipt['statusRaw'] ?? $receipt['status'] ?? ''))) ?></td>
                         </tr>
                     <?php endforeach; ?>
                     </tbody>
