@@ -668,7 +668,7 @@ openReceivables: <?= e(json_encode($receiptDebug['openReceivables'], JSON_PRETTY
                 <section class="receipt-card">
                     <h2 style="margin:0 0 12px;">Details</h2>
                     <table class="output-table receipt-table">
-                        <thead><tr><th>#</th><th>Invoice No.</th><th>Service</th><th>Passenger</th><th>Type</th><th>Currency</th><th>Amount</th><th>Balance</th></tr></thead>
+                        <thead><tr><th>#</th><th>Invoice No.</th><th>Service</th><th>Passenger</th><th>Type</th><th>Currency</th><th>Amount</th><th>Balance After Allocation</th></tr></thead>
                         <tbody>
                         <?php if ($receiptAllocations === []): ?>
                             <tr><td colspan="8">No allocation rows were posted for this receipt yet.</td></tr>
@@ -677,9 +677,10 @@ openReceivables: <?= e(json_encode($receiptDebug['openReceivables'], JSON_PRETTY
                             <?php
                             $allocationCurrency = (string) ($allocation['receivableCurrency'] ?? $allocation['currency'] ?? $receiptCurrency);
                             $allocationAmount = (float) ($allocation['receivableAmountAllocated'] ?? $allocation['allocatedAmount'] ?? 0);
-                            $remainingAmount = (float) ($allocation['currentOutstandingAmount'] ?? 0);
+                            $remainingAmount = (float) ($allocation['remainingAfterAllocation'] ?? 0);
                             $allocationType = (string) ($allocation['allocationType'] ?? 'Allocated');
                             $allocationPassenger = trim((string) ($allocation['passengerName'] ?? ''));
+                            $allocationReceiptStatusRaw = str_replace(' ', '_', mb_strtolower(trim((string) ($allocation['receiptStatusRaw'] ?? ''))));
                             ?>
                             <tr>
                                 <td><?= e((string) ($index + 1)) ?></td>
@@ -689,7 +690,7 @@ openReceivables: <?= e(json_encode($receiptDebug['openReceivables'], JSON_PRETTY
                                 <td><?= e($allocationType === 'Previous Outstanding' ? 'Previous Balance' : ($allocationType === 'Customer Credit / Unallocated' ? 'Customer Credit' : $allocationType)) ?></td>
                                 <td><?= e($allocationCurrency) ?></td>
                                 <td><?= e($allocationCurrency) ?> <?= e($formatMoney($allocationAmount)) ?></td>
-                                <td><?= e($allocationCurrency) ?> <?= e($formatMoney($remainingAmount)) ?></td>
+                                <td><?php if ($allocationReceiptStatusRaw === 'void'): ?>VOIDED<?php else: ?><?= e($allocationCurrency) ?> <?= e($formatMoney($remainingAmount)) ?><?php endif; ?></td>
                             </tr>
                         <?php endforeach; ?>
                         </tbody>
@@ -875,7 +876,7 @@ openReceivables: <?= e(json_encode($receiptDebug['openReceivables'], JSON_PRETTY
             <section class="output-block">
                 <h2>Receipt Allocation Details</h2>
                 <table class="output-table">
-                    <thead><tr><th>Receipt</th><th>Allocated At</th><th>Allocation Type</th><th>Booking / Invoice No.</th><th>Service Line</th><th>Service Type</th><th>Passenger</th><th>Currency</th><th>Allocated</th><th>Current Remaining Balance</th></tr></thead>
+                    <thead><tr><th>Receipt</th><th>Allocated At</th><th>Allocation Type</th><th>Booking / Invoice No.</th><th>Service Line</th><th>Service Type</th><th>Passenger</th><th>Currency</th><th>Allocated</th><th>Remaining After This Allocation</th></tr></thead>
                     <tbody>
                     <?php if (($customerPaymentFoundation['allocations'] ?? []) === []): ?>
                         <tr><td colspan="10">No receipt allocation rows are available for this booking yet.</td></tr>
@@ -884,6 +885,7 @@ openReceivables: <?= e(json_encode($receiptDebug['openReceivables'], JSON_PRETTY
                         <?php
                         $allocationCurrency = (string) ($allocation['receivableCurrency'] ?? $allocation['currency'] ?? 'PKR');
                         $allocationPassenger = trim((string) ($allocation['passengerName'] ?? ''));
+                        $allocationReceiptStatusRaw = str_replace(' ', '_', mb_strtolower(trim((string) ($allocation['receiptStatusRaw'] ?? ''))));
                         ?>
                         <tr>
                             <td><?= e((string) ($allocation['receiptNo'] ?? '')) ?></td>
@@ -895,7 +897,7 @@ openReceivables: <?= e(json_encode($receiptDebug['openReceivables'], JSON_PRETTY
                             <td><?= e($allocationPassenger !== '' ? $allocationPassenger : $customerName) ?></td>
                             <td><?= e($allocationCurrency) ?></td>
                             <td><?= e($allocationCurrency) ?> <?= e($formatMoney((float) ($allocation['receivableAmountAllocated'] ?? $allocation['allocatedAmount'] ?? 0))) ?></td>
-                            <td><?= e($allocationCurrency) ?> <?= e($formatMoney((float) ($allocation['currentOutstandingAmount'] ?? 0))) ?></td>
+                            <td><?php if ($allocationReceiptStatusRaw === 'void'): ?>VOIDED<?php else: ?><?= e($allocationCurrency) ?> <?= e($formatMoney((float) ($allocation['remainingAfterAllocation'] ?? 0))) ?><?php endif; ?></td>
                         </tr>
                     <?php endforeach; ?>
                     </tbody>

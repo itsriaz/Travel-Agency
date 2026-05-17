@@ -792,6 +792,24 @@ final class WorkspaceController extends BaseController
         }
     }
 
+    public function voidReceipt(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+
+        try {
+            $result = (new CustomerReceiptWorkspaceService($this->app))->voidReceipt(
+                $_POST,
+                (int) Auth::id(),
+                Authorization::accessibleBranchIds()
+            );
+            Flash::success('Customer receipt voided successfully.');
+            $this->redirect('/workspace?booking_id=' . (int) $result['booking_id'] . '#dock-panel-payments');
+        } catch (RuntimeException $exception) {
+            Flash::error($exception->getMessage());
+            $this->redirect('/workspace?booking_id=' . (int) ($_POST['booking_id'] ?? 0) . '#dock-panel-payments');
+        }
+    }
+
     public function saveSupplierPayment(): never
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);

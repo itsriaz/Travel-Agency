@@ -87,6 +87,8 @@ final class CustomerPaymentFoundationService extends Service
                     'receiptId' => (int) ($row['receipt_id'] ?? 0),
                     'receiptNo' => (string) $row['receipt_no'],
                     'receiptDate' => (string) ($row['receipt_date'] ?? ''),
+                    'receiptStatusRaw' => (string) ($row['receipt_status'] ?? ''),
+                    'receiptStatus' => ucwords(str_replace('_', ' ', (string) ($row['receipt_status'] ?? ''))),
                     'bookingReference' => $receivableBookingReference,
                     'receivableItemId' => (int) ($row['receivable_item_id'] ?? 0),
                     'serviceLineReference' => (string) ($row['service_line_reference'] ?? ''),
@@ -106,6 +108,7 @@ final class CustomerPaymentFoundationService extends Service
                     'allocationPercent' => $dueAmount > 0 ? round(($allocatedAmount / $dueAmount) * 100, 2) : 0.00,
                     'allocationTrail' => (string) ($row['allocation_note'] ?? ''),
                     'allocatedAt' => (string) ($row['allocated_at'] ?? ''),
+                    'remainingAfterAllocation' => (float) ($row['remaining_after_allocation'] ?? 0),
                     'currentOutstandingAmount' => (float) ($row['outstanding_amount'] ?? 0),
                     'currentDueAmount' => $dueAmount,
                     'receivableStatus' => ucwords(str_replace('_', ' ', (string) ($row['status'] ?? 'open'))),
@@ -139,6 +142,11 @@ final class CustomerPaymentFoundationService extends Service
         }
         foreach ($allocations as $allocationRow) {
             if ((string) ($allocationRow['bookingReference'] ?? '') !== $bookingReference) {
+                continue;
+            }
+
+            $receiptStatusRaw = str_replace(' ', '_', mb_strtolower(trim((string) ($allocationRow['receiptStatusRaw'] ?? ''))));
+            if ($receiptStatusRaw === 'void') {
                 continue;
             }
 
@@ -290,6 +298,7 @@ final class CustomerPaymentFoundationService extends Service
                     'receivableAmountAllocated' => (float) (($row['receivable_amount_allocated'] ?? null) !== null ? $row['receivable_amount_allocated'] : $allocatedAmount),
                     'paymentCurrency' => (string) (($row['payment_currency'] ?? '') !== '' ? $row['payment_currency'] : ($row['receipt_currency'] ?? $row['currency'] ?? '')),
                     'paymentAmountConsumed' => (float) (($row['payment_amount_consumed'] ?? null) !== null ? $row['payment_amount_consumed'] : $allocatedAmount),
+                    'remainingAfterAllocation' => (float) ($row['remaining_after_allocation'] ?? 0),
                     'currentOutstandingAmount' => (float) ($row['outstanding_amount'] ?? 0),
                     'currentDueAmount' => $dueAmount,
                     'receivableStatus' => ucwords(str_replace('_', ' ', (string) ($row['status'] ?? 'open'))),

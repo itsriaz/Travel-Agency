@@ -1034,19 +1034,35 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const renderPaymentHistoryModal = () => {
         if (paymentHistorySummary instanceof HTMLElement) {
-            paymentHistorySummary.innerHTML = `Outstanding Balance:<strong>${formatCurrencyTotalsInline(customerOutstandingByCurrency())}</strong>`;
+            const invoiceSnapshot = currentInvoiceSnapshot();
+            paymentHistorySummary.innerHTML = `Current Invoice Total:<strong>${escapeHtml(formatCurrencyAmount(invoiceSnapshot.invoiceCurrency || 'PKR', invoiceSnapshot.invoiceAmount || 0))}</strong><span style="margin-left:12px;">Outstanding:<strong>${escapeHtml(formatCurrencyAmount(invoiceSnapshot.invoiceCurrency || 'PKR', invoiceSnapshot.invoiceBalance || 0))}</strong></span>`;
         }
 
         if (paymentHistoryReceiptsBody instanceof HTMLElement) {
             if (paymentReceipts.length === 0) {
-                paymentHistoryReceiptsBody.innerHTML = '<tr><td colspan="9" class="empty-cell">No receipts recorded yet.</td></tr>';
+                paymentHistoryReceiptsBody.innerHTML = '<tr><td colspan="10" class="empty-cell">No receipts recorded yet.</td></tr>';
             } else {
+                const csrfField = paymentForm?.elements?.namedItem('_token');
+                const csrfToken = csrfField instanceof HTMLInputElement ? csrfField.value.trim() : '';
                 paymentHistoryReceiptsBody.innerHTML = paymentReceipts.map((receipt) => {
                     const receiptId = Number.parseInt(String(receipt?.id || 0), 10) || 0;
                     const bookingId = currentBookingId();
+                    const statusRaw = String(receipt?.statusRaw || receipt?.status || '').trim().toLowerCase().replace(/\s+/g, '_');
+                    const statusLabel = statusRaw === 'void'
+                        ? 'VOID'
+                        : String(receipt?.status || '').trim();
                     const printUrl = receiptId > 0 && bookingId > 0
                         ? buildWorkspacePathUrl(`workspace/output?booking_id=${bookingId}&doc=customer_receipt&receipt_id=${receiptId}`)
                         : '';
+                    const voidActionHtml = statusRaw !== 'void' && receiptId > 0 && bookingId > 0 && csrfToken !== ''
+                        ? `<form method="post" action="${escapeHtml(buildWorkspacePathUrl('workspace/payments/receipts/void'))}" onsubmit="return confirm('Void this receipt and reverse its allocations?');" style="display:grid;gap:6px;min-width:150px;">
+                            <input type="hidden" name="_token" value="${escapeHtml(csrfToken)}">
+                            <input type="hidden" name="booking_id" value="${bookingId}">
+                            <input type="hidden" name="customer_receipt_id" value="${receiptId}">
+                            <input type="text" name="void_reason" value="" placeholder="Void reason" minlength="5" maxlength="1000" required>
+                            <button class="btn btn-sm" type="submit">Void</button>
+                        </form>`
+                        : '-';
                     return `<tr>
                         <td>${escapeHtml(String(receipt?.receiptNo || ''))}</td>
                         <td>${escapeHtml(String(receipt?.receiptDate || ''))}</td>
@@ -1055,8 +1071,9 @@ document.addEventListener('DOMContentLoaded', () => {
                         <td>${escapeHtml(formatMoney(toNumber(receipt?.allocatedAmount || 0)))}</td>
                         <td>${escapeHtml(formatMoney(toNumber(receipt?.unallocatedAmount || 0)))}</td>
                         <td>${escapeHtml(String(receipt?.paymentMethod || ''))}</td>
-                        <td>${escapeHtml(String(receipt?.status || ''))}</td>
+                        <td>${escapeHtml(statusLabel)}</td>
                         <td>${printUrl !== '' ? `<a href="${escapeHtml(printUrl)}" target="_blank" rel="noopener">Print</a>` : '-'}</td>
+                        <td>${voidActionHtml}</td>
                     </tr>`;
                 }).join('');
             }
@@ -1069,6 +1086,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 paymentHistoryAllocationsBody.innerHTML = paymentAllocations.map((allocation) => {
                     const currency = String(allocation?.receivableCurrency || allocation?.currency || 'PKR');
                     const passenger = String(allocation?.passengerName || '').trim();
+                    const receiptStatusRaw = String(allocation?.receiptStatusRaw || '').trim().toLowerCase().replace(/\s+/g, '_');
+                    const remainingCell = receiptStatusRaw === 'void'
+                        ? 'VOIDED'
+                        : escapeHtml(formatCurrencyAmount(currency, toNumber(allocation?.remainingAfterAllocation || 0)));
                     return `<tr>
                         <td>${escapeHtml(String(allocation?.allocatedAt || ''))}</td>
                         <td>${escapeHtml(String(allocation?.receiptNo || ''))}</td>
@@ -1078,7 +1099,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         <td>${escapeHtml(String(allocation?.serviceType || 'Service'))}</td>
                         <td>${escapeHtml(passenger !== '' ? passenger : 'Customer')}</td>
                         <td>${escapeHtml(formatCurrencyAmount(currency, toNumber(allocation?.receivableAmountAllocated ?? allocation?.allocatedAmount ?? 0)))}</td>
-                        <td>${escapeHtml(formatCurrencyAmount(currency, toNumber(allocation?.currentOutstandingAmount || 0)))}</td>
+                        <td>${remainingCell}</td>
                         <td>${escapeHtml(String(allocation?.allocationTrail || ''))}</td>
                     </tr>`;
                 }).join('');

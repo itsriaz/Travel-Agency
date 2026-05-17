@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Repositories;
 
 use App\Helpers\AuditLog;
+use RuntimeException;
 
 final class CustomerPaymentRepository extends BaseRepository
 {
@@ -19,6 +20,33 @@ final class CustomerPaymentRepository extends BaseRepository
             $this->columnExists('customer_receipts', 'reversal_reference') ? $prefix . 'reversal_reference' : 'NULL AS reversal_reference',
             $this->columnExists('customer_receipts', 'reversal_journal_entry_id') ? $prefix . 'reversal_journal_entry_id' : 'NULL AS reversal_journal_entry_id',
         ]);
+    }
+
+    private function receivableAllocationAmountExpression(string $alias = 'a'): string
+    {
+        $prefix = $alias !== '' ? $alias . '.' : '';
+
+        return $this->columnExists('customer_receipt_allocations', 'receivable_amount_allocated')
+            ? 'COALESCE(' . $prefix . 'receivable_amount_allocated, ' . $prefix . 'allocated_amount)'
+            : $prefix . 'allocated_amount';
+    }
+
+    private function receivableRemainingAfterAllocationExpression(string $allocationAlias = 'a', string $receivableAlias = 'i'): string
+    {
+        $amountExpression = $this->receivableAllocationAmountExpression('a2');
+
+        return 'GREATEST(
+                    0,
+                    ' . $receivableAlias . '.due_amount - (
+                        SELECT COALESCE(SUM(' . $amountExpression . '), 0)
+                        FROM customer_receipt_allocations a2
+                        WHERE a2.customer_receivable_item_id = ' . $allocationAlias . '.customer_receivable_item_id
+                          AND (
+                              a2.allocated_at < ' . $allocationAlias . '.allocated_at
+                              OR (a2.allocated_at = ' . $allocationAlias . '.allocated_at AND a2.id <= ' . $allocationAlias . '.id)
+                          )
+                    )
+                )';
     }
 
     public function findReceiptById(int $receiptId): ?array
@@ -36,6 +64,165 @@ final class CustomerPaymentRepository extends BaseRepository
         $row = $statement->fetch();
 
         return $row !== false ? $row : null;
+    }
+
+    public function voidReceipt(
+        int $receiptId,
+        string $voidReason,
+        int $actorUserId,
+        string $reversalReference,
+        ?int $reversalJournalEntryId = null
+    ): array {
+        return $this->transaction(function () use ($receiptId, $voidReason, $actorUserId, $reversalReference, $reversalJournalEntryId): array {
+            $receiptStatement = $this->db->prepare(
+                'SELECT id, branch_id, booking_reference, receipt_no, receipt_date, currency, received_amount, allocated_amount,
+                        unallocated_amount, status, reversal_journal_entry_id
+                 FROM customer_receipts
+                 WHERE id = :receipt_id
+                 FOR UPDATE'
+            );
+            $receiptStatement->execute(['receipt_id' => $receiptId]);
+            $receipt = $receiptStatement->fetch();
+
+            if ($receipt === false) {
+                throw new RuntimeException('The selected receipt could not be found.');
+            }
+
+            $status = str_replace(' ', '_', mb_strtolower(trim((string) ($receipt['status'] ?? ''))));
+            if ($status === 'void') {
+                throw new RuntimeException('This receipt is already void.');
+            }
+
+            if ((int) ($receipt['reversal_journal_entry_id'] ?? 0) > 0 && $reversalJournalEntryId === null) {
+                throw new RuntimeException('This receipt already has a reversal journal recorded.');
+            }
+
+            $receivableAmountExpression = $this->columnExists('customer_receipt_allocations', 'receivable_amount_allocated')
+                ? 'COALESCE(a.receivable_amount_allocated, a.allocated_amount)'
+                : 'a.allocated_amount';
+            $paymentAmountExpression = $this->columnExists('customer_receipt_allocations', 'payment_amount_consumed')
+                ? 'COALESCE(a.payment_amount_consumed, a.allocated_amount)'
+                : 'a.allocated_amount';
+
+            $allocationStatement = $this->db->prepare(
+                'SELECT
+                    a.id AS allocation_id,
+                    a.customer_receivable_item_id,
+                    a.allocated_amount,
+                    ' . $receivableAmountExpression . ' AS receivable_amount_reversed,
+                    ' . $paymentAmountExpression . ' AS payment_amount_reversed,
+                    i.due_amount,
+                    i.allocated_amount AS receivable_allocated_amount,
+                    i.outstanding_amount AS receivable_outstanding_amount
+                 FROM customer_receipt_allocations a
+                 INNER JOIN customer_receivable_items i ON i.id = a.customer_receivable_item_id
+                 WHERE a.customer_receipt_id = :receipt_id
+                 ORDER BY a.id ASC
+                 FOR UPDATE'
+            );
+            $allocationStatement->execute(['receipt_id' => $receiptId]);
+            $allocations = $allocationStatement->fetchAll() ?: [];
+
+            $updateReceivableStatement = $this->db->prepare(
+                'UPDATE customer_receivable_items
+                 SET allocated_amount = :allocated_amount,
+                     outstanding_amount = :outstanding_amount,
+                     status = :status
+                 WHERE id = :receivable_id'
+            );
+
+            $affectedReceivableItemIds = [];
+            $allocationCountReversed = 0;
+            $totalReceivableAmountReversed = 0.0;
+            $totalPaymentAmountReversed = 0.0;
+
+            foreach ($allocations as $allocation) {
+                $receivableId = (int) ($allocation['customer_receivable_item_id'] ?? 0);
+                if ($receivableId <= 0) {
+                    continue;
+                }
+
+                $dueAmount = round((float) ($allocation['due_amount'] ?? 0), 2);
+                $currentAllocatedAmount = round((float) ($allocation['receivable_allocated_amount'] ?? 0), 2);
+                $currentOutstandingAmount = round((float) ($allocation['receivable_outstanding_amount'] ?? 0), 2);
+                $receivableAmountReversed = round((float) ($allocation['receivable_amount_reversed'] ?? $allocation['allocated_amount'] ?? 0), 2);
+                $paymentAmountReversed = round((float) ($allocation['payment_amount_reversed'] ?? $allocation['allocated_amount'] ?? 0), 2);
+
+                if ($receivableAmountReversed <= 0) {
+                    continue;
+                }
+
+                $newAllocatedAmount = round(max($currentAllocatedAmount - $receivableAmountReversed, 0), 2);
+                $newOutstandingAmount = round(min($currentOutstandingAmount + $receivableAmountReversed, $dueAmount), 2);
+
+                $newStatus = 'open';
+                if ($newOutstandingAmount <= 0.005) {
+                    $newStatus = 'paid';
+                } elseif ($newAllocatedAmount > 0.005 && $newOutstandingAmount > 0.005) {
+                    $newStatus = 'partially_paid';
+                }
+
+                $updateReceivableStatement->execute([
+                    'allocated_amount' => $newAllocatedAmount,
+                    'outstanding_amount' => $newOutstandingAmount,
+                    'status' => $newStatus,
+                    'receivable_id' => $receivableId,
+                ]);
+
+                $affectedReceivableItemIds[] = $receivableId;
+                $allocationCountReversed++;
+                $totalReceivableAmountReversed += $receivableAmountReversed;
+                $totalPaymentAmountReversed += max($paymentAmountReversed, 0);
+            }
+
+            $updateReceiptStatement = $this->db->prepare(
+                'UPDATE customer_receipts
+                 SET status = "void",
+                     void_reason = :void_reason,
+                     voided_by_user_id = :voided_by_user_id,
+                     voided_at = NOW(),
+                     reversal_reference = :reversal_reference,
+                     reversal_journal_entry_id = :reversal_journal_entry_id,
+                     unallocated_amount = 0
+                 WHERE id = :receipt_id'
+            );
+            $updateReceiptStatement->execute([
+                'void_reason' => $voidReason,
+                'voided_by_user_id' => $actorUserId,
+                'reversal_reference' => $reversalReference,
+                'reversal_journal_entry_id' => $reversalJournalEntryId,
+                'receipt_id' => $receiptId,
+            ]);
+
+            return [
+                'receipt_id' => (int) $receipt['id'],
+                'branch_id' => (int) ($receipt['branch_id'] ?? 0),
+                'booking_reference' => (string) ($receipt['booking_reference'] ?? ''),
+                'receipt_no' => (string) ($receipt['receipt_no'] ?? ''),
+                'receipt_date' => (string) ($receipt['receipt_date'] ?? ''),
+                'currency' => (string) ($receipt['currency'] ?? 'PKR'),
+                'received_amount' => round((float) ($receipt['received_amount'] ?? 0), 2),
+                'allocated_amount' => round((float) ($receipt['allocated_amount'] ?? 0), 2),
+                'reversal_reference' => $reversalReference,
+                'allocation_count_reversed' => $allocationCountReversed,
+                'total_receivable_amount_reversed' => round($totalReceivableAmountReversed, 2),
+                'total_payment_amount_reversed' => round($totalPaymentAmountReversed, 2),
+                'affected_receivable_item_ids' => array_values(array_unique($affectedReceivableItemIds)),
+            ];
+        });
+    }
+
+    public function attachReceiptReversalJournalEntry(int $receiptId, int $journalEntryId): void
+    {
+        $statement = $this->db->prepare(
+            'UPDATE customer_receipts
+             SET reversal_journal_entry_id = :journal_entry_id
+             WHERE id = :receipt_id'
+        );
+        $statement->execute([
+            'journal_entry_id' => $journalEntryId,
+            'receipt_id' => $receiptId,
+        ]);
     }
 
     public function openReceivablesForBooking(string $bookingReference): array
@@ -875,6 +1062,9 @@ final class CustomerPaymentRepository extends BaseRepository
 
     public function allocationHistory(string $bookingReference): array
     {
+        $receivableAmountExpression = $this->receivableAllocationAmountExpression('a');
+        $remainingAfterAllocationExpression = $this->receivableRemainingAfterAllocationExpression('a', 'i');
+
         $statement = $this->db->prepare(
             'SELECT
                 a.id AS allocation_id,
@@ -893,12 +1083,15 @@ final class CustomerPaymentRepository extends BaseRepository
                 r.id AS receipt_id,
                 r.receipt_no,
                 r.receipt_date,
+                r.status AS receipt_status,
                 i.id AS receivable_item_id,
                 i.booking_reference AS receivable_booking_reference,
                 i.service_line_reference,
                 i.currency,
                 i.due_amount,
                 i.outstanding_amount,
+                ' . $receivableAmountExpression . ' AS receivable_amount_applied,
+                ' . $remainingAfterAllocationExpression . ' AS remaining_after_allocation,
                 i.status,
                 bs.service_type,
                 COALESCE(t.full_name, bs.passenger_name_snapshot, \'\') AS passenger_name
@@ -927,6 +1120,8 @@ final class CustomerPaymentRepository extends BaseRepository
         }
 
         $placeholders = implode(', ', array_fill(0, count($receivableItemIds), '?'));
+        $receivableAmountExpression = $this->receivableAllocationAmountExpression('a');
+        $remainingAfterAllocationExpression = $this->receivableRemainingAfterAllocationExpression('a', 'i');
         $statement = $this->db->prepare(
             "SELECT
                 a.id AS allocation_id,
@@ -953,6 +1148,8 @@ final class CustomerPaymentRepository extends BaseRepository
                 i.currency,
                 i.due_amount,
                 i.outstanding_amount,
+                {$receivableAmountExpression} AS receivable_amount_applied,
+                {$remainingAfterAllocationExpression} AS remaining_after_allocation,
                 i.status,
                 bs.service_type,
                 COALESCE(t.full_name, bs.passenger_name_snapshot, '') AS passenger_name

@@ -468,6 +468,78 @@ final class AccountingRepository extends BaseRepository
         ]);
     }
 
+    public function postCustomerReceiptVoidReversal(array $data): ?int
+    {
+        $statement = $this->db->prepare(
+            'SELECT
+                je.id AS journal_entry_id,
+                je.branch_id,
+                je.booking_reference,
+                je.currency,
+                coa.code AS account_code,
+                jel.service_line_reference,
+                jel.customer_receivable_item_id,
+                jel.customer_receipt_id,
+                jel.line_description,
+                jel.debit_amount,
+                jel.credit_amount
+             FROM journal_entries je
+             INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+             INNER JOIN chart_of_accounts coa ON coa.id = jel.account_id
+             WHERE jel.customer_receipt_id = :customer_receipt_id
+               AND je.source_type IN ("customer_receipt_recorded", "customer_receipt_allocated")
+             ORDER BY je.id ASC, jel.id ASC'
+        );
+        $statement->execute([
+            'customer_receipt_id' => $data['customer_receipt_id'],
+        ]);
+        $rows = $statement->fetchAll() ?: [];
+
+        if ($rows === []) {
+            return null;
+        }
+
+        $lines = [];
+        foreach ($rows as $row) {
+            $debitAmount = round((float) ($row['debit_amount'] ?? 0), 2);
+            $creditAmount = round((float) ($row['credit_amount'] ?? 0), 2);
+            if ($debitAmount <= 0 && $creditAmount <= 0) {
+                continue;
+            }
+
+            $lines[] = [
+                'account_code' => (string) ($row['account_code'] ?? ''),
+                'service_line_reference' => ($row['service_line_reference'] ?? null) !== null && (string) ($row['service_line_reference'] ?? '') !== ''
+                    ? (string) $row['service_line_reference']
+                    : null,
+                'customer_receivable_item_id' => (int) ($row['customer_receivable_item_id'] ?? 0) > 0
+                    ? (int) $row['customer_receivable_item_id']
+                    : null,
+                'customer_receipt_id' => (int) ($row['customer_receipt_id'] ?? 0) > 0
+                    ? (int) $row['customer_receipt_id']
+                    : null,
+                'line_description' => 'Receipt void reversal: ' . (string) ($row['line_description'] ?? ''),
+                'debit_amount' => $creditAmount,
+                'credit_amount' => $debitAmount,
+            ];
+        }
+
+        if ($lines === []) {
+            return null;
+        }
+
+        return $this->postJournalEntry([
+            'branch_id' => $data['branch_id'],
+            'booking_reference' => $data['booking_reference'],
+            'source_type' => 'customer_receipt_void_reversed',
+            'source_reference' => $data['source_reference'] ?? null,
+            'entry_date' => $data['entry_date'],
+            'currency' => $data['currency'],
+            'narration' => $data['narration'] ?? 'Customer receipt void reversal',
+            'actor_user_id' => $data['actor_user_id'] ?? null,
+        ], $lines);
+    }
+
     public function ledgerSnapshotByBookingReference(string $bookingReference): array
     {
         $statement = $this->db->prepare(
@@ -579,6 +651,7 @@ final class AccountingRepository extends BaseRepository
             'supplier_payable_adjusted' => 'Supplier Payable Adjusted',
             'customer_receipt_recorded' => 'Customer Receipt Recorded',
             'customer_receipt_allocated' => 'Customer Receipt Allocated',
+            'customer_receipt_void_reversed' => 'Customer Receipt Void Reversed',
             'supplier_advance_recorded' => 'Supplier Advance Recorded',
             'supplier_advance_applied' => 'Supplier Advance Applied',
             'supplier_advance_adjusted' => 'Supplier Advance Adjusted',

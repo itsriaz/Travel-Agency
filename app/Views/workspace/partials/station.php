@@ -723,37 +723,39 @@ Kept here in case manual service save is needed again later.
             </header>
             <div class="customer-picker-modal__body">
                 <div class="workspace-feedback workspace-feedback--inline" data-payment-history-summary style="display:block;margin-bottom:12px;">
-                    Outstanding Balance:
-                    <strong><?= e($formatCurrencyTotals(array_filter(
-                        (array) ($customerPaymentFoundation['summary']['fullCustomerOutstanding'] ?? []),
-                        static fn ($amount): bool => abs((float) $amount) > 0.005
-                    ) ?: ['PKR' => 0])) ?></strong>
+                    Current Invoice Total:
+                    <strong><?= e($currentInvoiceAmount) ?></strong>
+                    <span style="margin-left:12px;">Outstanding:
+                        <strong><?= e($currentInvoiceBalance) ?></strong>
+                    </span>
                 </div>
                 <div class="legacy-modal-grid">
                     <article>
                         <h3>Receipt History</h3>
                         <table class="legacy-table">
-                            <thead><tr><th>Receipt</th><th>Date</th><th>Curr.</th><th>Payment Received</th><th>Applied</th><th>Credit / Return</th><th>Method</th><th>Status</th><th>Print</th></tr></thead>
+                            <thead><tr><th>Receipt</th><th>Date</th><th>Curr.</th><th>Payment Received</th><th>Applied</th><th>Credit / Return</th><th>Method</th><th>Status</th><th>Print</th><th>Void</th></tr></thead>
                             <tbody data-payment-history-receipts-body>
                             <?php foreach ($customerPaymentFoundation['receipts'] ?? [] as $receiptRow): ?>
                                 <?php $receiptPrintUrl = $workspaceBooking['id'] > 0 ? url('/workspace/output?booking_id=' . $workspaceBooking['id'] . '&doc=customer_receipt&receipt_id=' . (int) ($receiptRow['id'] ?? 0)) : ''; ?>
-                                <tr><td><?= e((string) $receiptRow['receiptNo']) ?></td><td><?= e((string) $receiptRow['receiptDate']) ?></td><td><?= e((string) $receiptRow['currency']) ?></td><td><?= e($formatMoney((float) $receiptRow['receivedAmount'])) ?></td><td><?= e($formatMoney((float) $receiptRow['allocatedAmount'])) ?></td><td><?= e($formatMoney((float) $receiptRow['unallocatedAmount'])) ?></td><td><?= e(ucwords(str_replace('_', ' ', (string) $receiptRow['paymentMethod']))) ?></td><td><?= e($formatStatusLabel((string) ($receiptRow['statusRaw'] ?? $receiptRow['status'] ?? ''))) ?></td><td><?php if ($receiptPrintUrl !== ''): ?><a href="<?= e($receiptPrintUrl) ?>" target="_blank" rel="noopener">Print</a><?php else: ?>-<?php endif; ?></td></tr>
+                                <?php $receiptStatusRaw = str_replace(' ', '_', mb_strtolower(trim((string) ($receiptRow['statusRaw'] ?? $receiptRow['status'] ?? '')))); ?>
+                                <tr><td><?= e((string) $receiptRow['receiptNo']) ?></td><td><?= e((string) $receiptRow['receiptDate']) ?></td><td><?= e((string) $receiptRow['currency']) ?></td><td><?= e($formatMoney((float) $receiptRow['receivedAmount'])) ?></td><td><?= e($formatMoney((float) $receiptRow['allocatedAmount'])) ?></td><td><?= e($formatMoney((float) $receiptRow['unallocatedAmount'])) ?></td><td><?= e(ucwords(str_replace('_', ' ', (string) $receiptRow['paymentMethod']))) ?></td><td><?= e($formatStatusLabel((string) ($receiptRow['statusRaw'] ?? $receiptRow['status'] ?? ''))) ?></td><td><?php if ($receiptPrintUrl !== ''): ?><a href="<?= e($receiptPrintUrl) ?>" target="_blank" rel="noopener">Print</a><?php else: ?>-<?php endif; ?></td><td><?php if ($receiptStatusRaw !== 'void'): ?><form method="post" action="<?= e(url('/workspace/payments/receipts/void')) ?>" onsubmit="return confirm('Void this receipt and reverse its allocations?');" style="display:grid;gap:6px;min-width:150px;"><?= \App\Helpers\Csrf::input() ?><input type="hidden" name="booking_id" value="<?= e((string) ($workspaceBooking['id'] ?? 0)) ?>"><input type="hidden" name="customer_receipt_id" value="<?= e((string) ($receiptRow['id'] ?? 0)) ?>"><input type="text" name="void_reason" value="" placeholder="Void reason" minlength="5" maxlength="1000" required><button class="btn btn-sm" type="submit">Void</button></form><?php else: ?>-<?php endif; ?></td></tr>
                             <?php endforeach; ?>
-                            <?php if (($customerPaymentFoundation['receipts'] ?? []) === []): ?><tr><td colspan="9" class="empty-cell">No receipts recorded yet.</td></tr><?php endif; ?>
+                            <?php if (($customerPaymentFoundation['receipts'] ?? []) === []): ?><tr><td colspan="10" class="empty-cell">No receipts recorded yet.</td></tr><?php endif; ?>
                             </tbody>
                         </table>
                     </article>
                     <article>
                         <h3>Allocation History</h3>
                         <table class="legacy-table">
-                            <thead><tr><th>Allocated At</th><th>Receipt</th><th>Type</th><th>Booking</th><th>Svc Line</th><th>Service</th><th>Passenger</th><th>Allocated</th><th>Remaining</th><th>Trail</th></tr></thead>
+                            <thead><tr><th>Allocated At</th><th>Receipt</th><th>Type</th><th>Booking</th><th>Svc Line</th><th>Service</th><th>Passenger</th><th>Allocated</th><th>Remaining After This Allocation</th><th>Trail</th></tr></thead>
                             <tbody data-payment-history-allocations-body>
                             <?php foreach ($customerPaymentFoundation['allocations'] ?? [] as $allocationRow): ?>
                                 <?php
                                 $allocationCurrency = (string) ($allocationRow['receivableCurrency'] ?? $allocationRow['currency'] ?? 'PKR');
                                 $allocationPassenger = trim((string) ($allocationRow['passengerName'] ?? ''));
+                                $allocationReceiptStatusRaw = str_replace(' ', '_', mb_strtolower(trim((string) ($allocationRow['receiptStatusRaw'] ?? ''))));
                                 ?>
-                                  <tr><td><?= e((string) $allocationRow['allocatedAt']) ?></td><td><?= e((string) $allocationRow['receiptNo']) ?></td><td><?= e((string) (($allocationRow['allocationType'] ?? 'Allocated') === 'Previous Outstanding' ? 'Previous Balance' : (($allocationRow['allocationType'] ?? 'Allocated') === 'Customer Credit / Unallocated' ? 'Customer Credit' : ($allocationRow['allocationType'] ?? 'Allocated')))) ?></td><td><?= e((string) ($allocationRow['bookingReference'] ?? 'N/A')) ?></td><td><?= e((string) (($allocationRow['serviceLineReference'] ?? '') !== '' ? $allocationRow['serviceLineReference'] : 'N/A')) ?></td><td><?= e((string) ($allocationRow['serviceType'] ?? 'Service')) ?></td><td><?= e($allocationPassenger !== '' ? $allocationPassenger : $workspaceBooking['leadTravelerName']) ?></td><td><?= e($allocationCurrency) ?> <?= e($formatMoney((float) ($allocationRow['receivableAmountAllocated'] ?? $allocationRow['allocatedAmount'] ?? 0))) ?></td><td><?= e($allocationCurrency) ?> <?= e($formatMoney((float) ($allocationRow['currentOutstandingAmount'] ?? 0))) ?></td><td><?= e((string) $allocationRow['allocationTrail']) ?></td></tr>
+                                  <tr><td><?= e((string) $allocationRow['allocatedAt']) ?></td><td><?= e((string) $allocationRow['receiptNo']) ?></td><td><?= e((string) (($allocationRow['allocationType'] ?? 'Allocated') === 'Previous Outstanding' ? 'Previous Balance' : (($allocationRow['allocationType'] ?? 'Allocated') === 'Customer Credit / Unallocated' ? 'Customer Credit' : ($allocationRow['allocationType'] ?? 'Allocated')))) ?></td><td><?= e((string) ($allocationRow['bookingReference'] ?? 'N/A')) ?></td><td><?= e((string) (($allocationRow['serviceLineReference'] ?? '') !== '' ? $allocationRow['serviceLineReference'] : 'N/A')) ?></td><td><?= e((string) ($allocationRow['serviceType'] ?? 'Service')) ?></td><td><?= e($allocationPassenger !== '' ? $allocationPassenger : $workspaceBooking['leadTravelerName']) ?></td><td><?= e($allocationCurrency) ?> <?= e($formatMoney((float) ($allocationRow['receivableAmountAllocated'] ?? $allocationRow['allocatedAmount'] ?? 0))) ?></td><td><?php if ($allocationReceiptStatusRaw === 'void'): ?>VOIDED<?php else: ?><?= e($allocationCurrency) ?> <?= e($formatMoney((float) ($allocationRow['remainingAfterAllocation'] ?? 0))) ?><?php endif; ?></td><td><?= e((string) $allocationRow['allocationTrail']) ?></td></tr>
                             <?php endforeach; ?>
                             <?php if (($customerPaymentFoundation['allocations'] ?? []) === []): ?><tr><td colspan="10" class="empty-cell">No allocations posted yet.</td></tr><?php endif; ?>
                             </tbody>

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+use App\Helpers\AuditLog;
 use App\Repositories\AccountingRepository;
 use App\Repositories\BookingRepository;
 use App\Repositories\CustomerPaymentRepository;
@@ -185,6 +186,116 @@ final class CustomerReceiptWorkspaceService extends Service
             'booking_id' => $bookingId,
             'allocation_count' => $allocationCount,
         ];
+    }
+
+    public function voidReceipt(array $input, int $actorUserId, array $accessibleBranchIds): array
+    {
+        $bookingId = (int) ($input['booking_id'] ?? 0);
+        $receiptId = (int) ($input['customer_receipt_id'] ?? 0);
+        $voidReason = $this->requiredVoidReason($input['void_reason'] ?? null);
+
+        $bookingRepository = new BookingRepository($this->app);
+        if (! $bookingRepository->bookingExistsInBranches($bookingId, $accessibleBranchIds)) {
+            throw new RuntimeException('You cannot void receipts for a booking outside your accessible branches.');
+        }
+
+        $booking = $bookingRepository->findBookingById($bookingId);
+        if ($booking === null) {
+            throw new RuntimeException('The selected booking could not be loaded.');
+        }
+
+        if ($receiptId <= 0) {
+            throw new RuntimeException('Select a valid receipt to void.');
+        }
+
+        $paymentRepository = new CustomerPaymentRepository($this->app);
+        $receipt = $paymentRepository->findReceiptById($receiptId);
+        if ($receipt === null) {
+            throw new RuntimeException('The selected receipt could not be found.');
+        }
+
+        if (! in_array((int) ($receipt['branch_id'] ?? 0), $accessibleBranchIds, true)) {
+            throw new RuntimeException('You cannot void a receipt outside your accessible branches.');
+        }
+
+        if ((string) ($receipt['booking_reference'] ?? '') !== (string) ($booking['booking_reference'] ?? '')) {
+            throw new RuntimeException('The selected receipt does not belong to this booking.');
+        }
+
+        $receiptStatus = str_replace(' ', '_', mb_strtolower(trim((string) ($receipt['status'] ?? ''))));
+        if ($receiptStatus === 'void') {
+            throw new RuntimeException('This receipt is already void.');
+        }
+
+        /** @var PDO $db */
+        $db = $this->app->get('db');
+        $startedTransaction = false;
+
+        if (! $db->inTransaction()) {
+            $db->beginTransaction();
+            $startedTransaction = true;
+        }
+
+        try {
+            $reversalReference = 'VOID-' . (string) ($receipt['receipt_no'] ?? ('R-' . $receiptId));
+            $voidResult = $paymentRepository->voidReceipt(
+                $receiptId,
+                $voidReason,
+                $actorUserId,
+                $reversalReference,
+                null
+            );
+
+            $accountingRepository = new AccountingRepository($this->app);
+            $reversalJournalEntryId = $accountingRepository->postCustomerReceiptVoidReversal([
+                'branch_id' => (int) ($voidResult['branch_id'] ?? (int) ($booking['branch_id'] ?? 0)),
+                'booking_reference' => (string) ($voidResult['booking_reference'] ?? (string) ($booking['booking_reference'] ?? '')),
+                'customer_receipt_id' => $receiptId,
+                'source_reference' => $reversalReference,
+                'entry_date' => date('Y-m-d'),
+                'currency' => (string) ($voidResult['currency'] ?? (string) ($receipt['currency'] ?? 'PKR')),
+                'narration' => 'Customer receipt void reversal for ' . (string) ($voidResult['receipt_no'] ?? $receiptId),
+                'actor_user_id' => $actorUserId,
+            ]);
+
+            if ($reversalJournalEntryId !== null && $reversalJournalEntryId > 0) {
+                $paymentRepository->attachReceiptReversalJournalEntry($receiptId, $reversalJournalEntryId);
+            }
+
+            AuditLog::record($this->app, 'customer.receipt.voided', [
+                'user_id' => $actorUserId,
+                'customer_receipt_id' => $receiptId,
+                'receipt_no' => (string) ($voidResult['receipt_no'] ?? ''),
+                'booking_reference' => (string) ($voidResult['booking_reference'] ?? ''),
+                'void_reason' => $voidReason,
+                'reversal_reference' => $reversalReference,
+                'reversal_journal_entry_id' => $reversalJournalEntryId,
+                'allocation_count_reversed' => (int) ($voidResult['allocation_count_reversed'] ?? 0),
+                'total_receivable_amount_reversed' => (float) ($voidResult['total_receivable_amount_reversed'] ?? 0),
+                'total_payment_amount_reversed' => (float) ($voidResult['total_payment_amount_reversed'] ?? 0),
+                'affected_receivable_item_ids' => $voidResult['affected_receivable_item_ids'] ?? [],
+            ]);
+
+            if ($startedTransaction && $db->inTransaction()) {
+                $db->commit();
+            }
+
+            return [
+                'booking_id' => $bookingId,
+                'receipt_id' => $receiptId,
+                'reversal_journal_entry_id' => $reversalJournalEntryId,
+            ];
+        } catch (\Throwable $exception) {
+            if ($startedTransaction && $db->inTransaction()) {
+                $db->rollBack();
+            }
+
+            if ($exception instanceof RuntimeException) {
+                throw $exception;
+            }
+
+            throw new RuntimeException('Customer receipt could not be voided.', 0, $exception);
+        }
     }
 
     private function validatedReceiptPayload(array $input): array
@@ -795,6 +906,24 @@ $openReceivables = array_values(array_merge($currentBookingReceivables, $otherRe
 
         if (mb_strlen($text) > $maxLength) {
             throw new RuntimeException('One of the receipt values exceeds the allowed length.');
+        }
+
+        return $text;
+    }
+
+    private function requiredVoidReason(mixed $value): string
+    {
+        $text = trim((string) $value);
+        if ($text === '') {
+            throw new RuntimeException('Void reason is required.');
+        }
+
+        if (mb_strlen($text) < 5) {
+            throw new RuntimeException('Void reason must be at least 5 characters.');
+        }
+
+        if (mb_strlen($text) > 1000) {
+            throw new RuntimeException('Void reason cannot exceed 1000 characters.');
         }
 
         return $text;
