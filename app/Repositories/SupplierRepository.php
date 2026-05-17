@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Repositories;
 
 use App\Helpers\AuditLog;
+use RuntimeException;
 
 final class SupplierRepository extends BaseRepository
 {
@@ -473,6 +474,169 @@ final class SupplierRepository extends BaseRepository
         $row = $statement->fetch();
 
         return $row !== false ? $row : null;
+    }
+
+    public function voidSupplierPayment(
+        int $paymentId,
+        string $voidReason,
+        int $actorUserId,
+        string $reversalReference,
+        ?int $reversalJournalEntryId = null
+    ): array {
+        return $this->transaction(function () use ($paymentId, $voidReason, $actorUserId, $reversalReference, $reversalJournalEntryId): array {
+            $paymentStatement = $this->db->prepare(
+                'SELECT id, supplier_id, branch_id, booking_reference, payment_no, payment_date, currency,
+                        paid_amount, allocated_amount, unallocated_amount, status, reversal_journal_entry_id
+                 FROM supplier_payments
+                 WHERE id = :payment_id
+                 FOR UPDATE'
+            );
+            $paymentStatement->execute(['payment_id' => $paymentId]);
+            $payment = $paymentStatement->fetch();
+
+            if ($payment === false) {
+                throw new RuntimeException('The selected supplier payment could not be found.');
+            }
+
+            $status = str_replace(' ', '_', mb_strtolower(trim((string) ($payment['status'] ?? ''))));
+            if ($status === 'void') {
+                throw new RuntimeException('This supplier payment is already void.');
+            }
+
+            if ((int) ($payment['reversal_journal_entry_id'] ?? 0) > 0 && $reversalJournalEntryId === null) {
+                throw new RuntimeException('This supplier payment already has a reversal journal recorded.');
+            }
+
+            $allocationStatement = $this->db->prepare(
+                'SELECT
+                    a.id AS allocation_id,
+                    a.supplier_obligation_id,
+                    a.allocated_amount,
+                    o.gross_amount,
+                    o.advance_applied_amount,
+                    o.net_payable_amount,
+                    o.status AS obligation_status
+                 FROM supplier_payment_allocations a
+                 INNER JOIN supplier_obligations o ON o.id = a.supplier_obligation_id
+                 WHERE a.supplier_payment_id = :payment_id
+                 ORDER BY a.id ASC
+                 FOR UPDATE'
+            );
+            $allocationStatement->execute(['payment_id' => $paymentId]);
+            $allocations = $allocationStatement->fetchAll() ?: [];
+
+            $affectedObligationIds = array_values(array_unique(array_map(
+                static fn (array $row): int => (int) ($row['supplier_obligation_id'] ?? 0),
+                $allocations
+            )));
+            $affectedObligationIds = array_values(array_filter($affectedObligationIds, static fn (int $id): bool => $id > 0));
+
+            $activeAllocationTotals = [];
+            if ($affectedObligationIds !== []) {
+                $placeholders = implode(', ', array_fill(0, count($affectedObligationIds), '?'));
+                $activeAllocationStatement = $this->db->prepare(
+                    "SELECT
+                        a.supplier_obligation_id,
+                        COALESCE(SUM(a.allocated_amount), 0) AS total_allocated_amount
+                     FROM supplier_payment_allocations a
+                     INNER JOIN supplier_payments p ON p.id = a.supplier_payment_id
+                     WHERE a.supplier_obligation_id IN ({$placeholders})
+                       AND p.id <> ?
+                       AND p.status <> 'void'
+                     GROUP BY a.supplier_obligation_id"
+                );
+                $activeAllocationStatement->execute(array_merge($affectedObligationIds, [$paymentId]));
+                foreach ($activeAllocationStatement->fetchAll() ?: [] as $row) {
+                    $activeAllocationTotals[(int) ($row['supplier_obligation_id'] ?? 0)] = round((float) ($row['total_allocated_amount'] ?? 0), 2);
+                }
+            }
+
+            $updateObligationStatement = $this->db->prepare(
+                'UPDATE supplier_obligations
+                 SET net_payable_amount = :net_payable_amount,
+                     status = :status
+                 WHERE id = :obligation_id'
+            );
+
+            $allocationCountReversed = 0;
+            $totalAllocatedAmountReversed = 0.0;
+
+            foreach ($allocations as $allocation) {
+                $obligationId = (int) ($allocation['supplier_obligation_id'] ?? 0);
+                if ($obligationId <= 0) {
+                    continue;
+                }
+
+                $reversedAmount = round((float) ($allocation['allocated_amount'] ?? 0), 2);
+                if ($reversedAmount <= 0) {
+                    continue;
+                }
+
+                $grossAmount = round((float) ($allocation['gross_amount'] ?? 0), 2);
+                $advanceAppliedAmount = round((float) ($allocation['advance_applied_amount'] ?? 0), 2);
+                $currentNetPayableAmount = round((float) ($allocation['net_payable_amount'] ?? 0), 2);
+                $originalPayableBasis = round(max(0, $grossAmount - $advanceAppliedAmount), 2);
+                $restoredNetPayableAmount = round($currentNetPayableAmount + $reversedAmount, 2);
+                if ($originalPayableBasis > 0) {
+                    $restoredNetPayableAmount = round(min($restoredNetPayableAmount, $originalPayableBasis), 2);
+                }
+
+                $remainingAllocatedAmount = round((float) ($activeAllocationTotals[$obligationId] ?? 0), 2);
+                if ($restoredNetPayableAmount <= 0.005) {
+                    $newStatus = $advanceAppliedAmount > 0.005 && $remainingAllocatedAmount <= 0.005
+                        ? 'covered_by_advance'
+                        : 'paid';
+                } elseif ($remainingAllocatedAmount > 0.005) {
+                    $newStatus = 'partially_covered';
+                } else {
+                    $newStatus = 'open';
+                }
+
+                $updateObligationStatement->execute([
+                    'net_payable_amount' => $restoredNetPayableAmount,
+                    'status' => $newStatus,
+                    'obligation_id' => $obligationId,
+                ]);
+
+                $allocationCountReversed++;
+                $totalAllocatedAmountReversed += $reversedAmount;
+            }
+
+            $updatePaymentStatement = $this->db->prepare(
+                'UPDATE supplier_payments
+                 SET status = "void",
+                     void_reason = :void_reason,
+                     voided_by_user_id = :voided_by_user_id,
+                     voided_at = NOW(),
+                     reversal_reference = :reversal_reference,
+                     reversal_journal_entry_id = :reversal_journal_entry_id,
+                     unallocated_amount = 0
+                 WHERE id = :payment_id'
+            );
+            $updatePaymentStatement->execute([
+                'void_reason' => $voidReason,
+                'voided_by_user_id' => $actorUserId,
+                'reversal_reference' => $reversalReference,
+                'reversal_journal_entry_id' => $reversalJournalEntryId,
+                'payment_id' => $paymentId,
+            ]);
+
+            return [
+                'supplier_payment_id' => (int) $payment['id'],
+                'supplier_id' => (int) ($payment['supplier_id'] ?? 0),
+                'branch_id' => (int) ($payment['branch_id'] ?? 0),
+                'booking_reference' => (string) ($payment['booking_reference'] ?? ''),
+                'payment_no' => (string) ($payment['payment_no'] ?? ''),
+                'payment_date' => (string) ($payment['payment_date'] ?? ''),
+                'currency' => (string) ($payment['currency'] ?? 'PKR'),
+                'paid_amount' => round((float) ($payment['paid_amount'] ?? 0), 2),
+                'allocated_amount' => round((float) ($payment['allocated_amount'] ?? 0), 2),
+                'reversal_reference' => $reversalReference,
+                'allocation_count_reversed' => $allocationCountReversed,
+                'total_allocated_amount_reversed' => round($totalAllocatedAmountReversed, 2),
+                'affected_supplier_obligation_ids' => $affectedObligationIds,
+            ];
+        });
     }
 
     public function supplierPaymentHistory(string $bookingReference): array

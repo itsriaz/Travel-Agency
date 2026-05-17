@@ -1020,9 +1020,15 @@ Kept here in case manual service save is needed again later.
                     <article>
                         <h3>Supplier Payments</h3>
                         <table class="legacy-table">
-                            <thead><tr><th>Payment No.</th><th>Supplier</th><th>Date</th><th>Curr.</th><th>Paid</th><th>Allocated</th><th>Open</th><th>Status</th></tr></thead>
+                            <thead><tr><th>Payment No.</th><th>Supplier</th><th>Date</th><th>Curr.</th><th>Paid</th><th>Allocated</th><th>Open</th><th>Status</th><th>Print</th><th>Void</th></tr></thead>
                             <tbody>
                             <?php foreach (($supplierFoundation['payments'] ?? []) as $paymentRow): ?>
+                                <?php
+                                $supplierPaymentStatusRaw = str_replace(' ', '_', mb_strtolower(trim((string) ($paymentRow['statusRaw'] ?? $paymentRow['status'] ?? ''))));
+                                $supplierPaymentPrintUrl = $workspaceBooking['id'] > 0
+                                    ? url('/workspace/output?booking_id=' . $workspaceBooking['id'] . '&doc=supplier_voucher&supplier_payment_id=' . (int) ($paymentRow['id'] ?? 0))
+                                    : '';
+                                ?>
                                 <tr>
                                     <td><?= e((string) ($paymentRow['paymentNo'] ?? '')) ?></td>
                                     <td><?= e((string) ($paymentRow['supplier'] ?? '')) ?></td>
@@ -1032,9 +1038,11 @@ Kept here in case manual service save is needed again later.
                                     <td><?= e($formatMoney((float) ($paymentRow['allocatedAmount'] ?? 0))) ?></td>
                                     <td><?= e($formatMoney((float) ($paymentRow['unallocatedAmount'] ?? 0))) ?></td>
                                     <td><?= e($formatStatusLabel((string) ($paymentRow['statusRaw'] ?? $paymentRow['status'] ?? ''))) ?></td>
+                                    <td><?php if ($supplierPaymentPrintUrl !== ''): ?><a href="<?= e($supplierPaymentPrintUrl) ?>" target="_blank" rel="noopener">Print</a><?php else: ?>-<?php endif; ?></td>
+                                    <td><?php if ($supplierPaymentStatusRaw !== 'void'): ?><form method="post" action="<?= e(url('/workspace/suppliers/payments/void')) ?>" onsubmit="return confirm('Void this supplier payment and reverse its allocations?');" style="display:grid;gap:6px;min-width:150px;"><?= \App\Helpers\Csrf::input() ?><input type="hidden" name="booking_id" value="<?= e((string) ($workspaceBooking['id'] ?? 0)) ?>"><input type="hidden" name="supplier_payment_id" value="<?= e((string) ($paymentRow['id'] ?? 0)) ?>"><input type="text" name="void_reason" value="" placeholder="Void reason" minlength="5" maxlength="1000" required><button class="btn btn-sm" type="submit">Void</button></form><?php else: ?>-<?php endif; ?></td>
                                 </tr>
                             <?php endforeach; ?>
-                            <?php if (($supplierFoundation['payments'] ?? []) === []): ?><tr><td colspan="8" class="empty-cell">No supplier payments recorded for this invoice yet.</td></tr><?php endif; ?>
+                            <?php if (($supplierFoundation['payments'] ?? []) === []): ?><tr><td colspan="10" class="empty-cell">No supplier payments recorded for this invoice yet.</td></tr><?php endif; ?>
                             </tbody>
                         </table>
                     </article>
@@ -1070,6 +1078,7 @@ Kept here in case manual service save is needed again later.
                             </div>
                             <div class="station-command-buttons top-gap">
                                 <button class="btn btn-primary btn-sm" type="submit">Save Prepaid Supplier Payment</button>
+                                <a class="btn btn-sm" href="<?= e(url('/reports?report=supplier_prepaid_payments')) ?>" target="_blank" rel="noopener">View All Prepaid Payments</a>
                             </div>
                         </form>
                     </article>

@@ -17,6 +17,9 @@ final class ReportService extends Service
         'cash_flow' => 'Cash Flow / Cash Movement',
         'management_summary' => 'Management Summary',
         'prepaid_supplier_ledger' => 'Prepaid Supplier Ledger',
+        'supplier_postpaid_payments' => 'Supplier Payments - Postpaid',
+        'supplier_prepaid_payments' => 'Supplier Payments - Prepaid',
+        'supplier_all_payments' => 'Supplier Payments - All',
         'receivable_aging' => 'Receivable Aging',
         'payable_aging' => 'Payable Aging',
         'service_profit' => 'Service Profit',
@@ -125,6 +128,86 @@ final class ReportService extends Service
                     ['key' => 'advance_uses_count', 'label' => 'Advance Uses'],
                     ['key' => 'last_advance_date', 'label' => 'Last Advance Date'],
                     ['key' => 'last_used_date', 'label' => 'Last Used Date'],
+                ];
+                break;
+
+            case 'supplier_postpaid_payments':
+                $reportData = $repository->supplierPostpaidPayments(
+                    $filters['branchScopeIds'],
+                    $filters['dateFrom'],
+                    $filters['dateTo'],
+                    $filters['currency']
+                );
+                [$rows, $summaryCards] = $this->supplierPostpaidPaymentsReport($reportData);
+                $columns = [
+                    ['key' => 'branch_name', 'label' => 'Branch'],
+                    ['key' => 'booking_reference', 'label' => 'Booking'],
+                    ['key' => 'payment_no', 'label' => 'Payment No.'],
+                    ['key' => 'payment_date', 'label' => 'Payment Date'],
+                    ['key' => 'supplier_name', 'label' => 'Supplier'],
+                    ['key' => 'currency', 'label' => 'Currency'],
+                    ['key' => 'paid_amount', 'label' => 'Paid Amount'],
+                    ['key' => 'allocated_amount', 'label' => 'Allocated'],
+                    ['key' => 'unallocated_amount', 'label' => 'Open'],
+                    ['key' => 'charges_amount', 'label' => 'Charges'],
+                    ['key' => 'payment_method', 'label' => 'Method'],
+                    ['key' => 'status', 'label' => 'Status'],
+                    ['key' => 'reference_number', 'label' => 'Reference'],
+                    ['key' => 'remarks', 'label' => 'Remarks'],
+                ];
+                break;
+
+            case 'supplier_prepaid_payments':
+                $reportData = $repository->supplierPrepaidPayments(
+                    $filters['branchScopeIds'],
+                    $filters['dateFrom'],
+                    $filters['dateTo'],
+                    $filters['currency']
+                );
+                [$rows, $summaryCards] = $this->supplierPrepaidPaymentsReport($reportData);
+                $columns = [
+                    ['key' => 'branch_name', 'label' => 'Branch'],
+                    ['key' => 'payment_date', 'label' => 'Payment Date'],
+                    ['key' => 'supplier_name', 'label' => 'Supplier'],
+                    ['key' => 'currency', 'label' => 'Currency'],
+                    ['key' => 'deposit_amount', 'label' => 'Advance Paid'],
+                    ['key' => 'used_amount', 'label' => 'Advance Used'],
+                    ['key' => 'available_amount', 'label' => 'Available Balance'],
+                    ['key' => 'status', 'label' => 'Status'],
+                    ['key' => 'reference_no', 'label' => 'Reference'],
+                    ['key' => 'remarks', 'label' => 'Remarks'],
+                ];
+                break;
+
+            case 'supplier_all_payments':
+                $postpaidData = $repository->supplierPostpaidPayments(
+                    $filters['branchScopeIds'],
+                    $filters['dateFrom'],
+                    $filters['dateTo'],
+                    $filters['currency']
+                );
+                $prepaidData = $repository->supplierPrepaidPayments(
+                    $filters['branchScopeIds'],
+                    $filters['dateFrom'],
+                    $filters['dateTo'],
+                    $filters['currency']
+                );
+                [$rows, $summaryCards] = $this->supplierAllPaymentsReport($postpaidData, $prepaidData);
+                $columns = [
+                    ['key' => 'payment_type', 'label' => 'Type'],
+                    ['key' => 'branch_name', 'label' => 'Branch'],
+                    ['key' => 'booking_reference', 'label' => 'Booking'],
+                    ['key' => 'payment_no', 'label' => 'Payment No. / Advance Ref'],
+                    ['key' => 'payment_date', 'label' => 'Payment Date'],
+                    ['key' => 'supplier_name', 'label' => 'Supplier'],
+                    ['key' => 'currency', 'label' => 'Currency'],
+                    ['key' => 'gross_amount', 'label' => 'Amount Paid'],
+                    ['key' => 'used_or_allocated_amount', 'label' => 'Used / Allocated'],
+                    ['key' => 'balance_amount', 'label' => 'Open / Available'],
+                    ['key' => 'payment_method', 'label' => 'Method'],
+                    ['key' => 'status', 'label' => 'Status'],
+                    ['key' => 'reference_number', 'label' => 'Reference'],
+                    ['key' => 'remarks', 'label' => 'Remarks'],
                 ];
                 break;
 
@@ -663,6 +746,167 @@ final class ReportService extends Service
             $this->currencySummaryCards('Advance Paid', $paidTotals),
             $this->currencySummaryCards('Advance Used', $usedTotals),
             $this->currencySummaryCards('Advance Balance', $balanceTotals)
+        )];
+    }
+
+    private function supplierPostpaidPaymentsReport(array $rows): array
+    {
+        $paidTotals = [];
+        $allocatedTotals = [];
+        $openTotals = [];
+        $reportRows = [];
+
+        foreach ($rows as $row) {
+            $currency = (string) ($row['currency'] ?? 'PKR');
+            $paid = (float) ($row['paid_amount'] ?? 0);
+            $allocated = (float) ($row['allocated_amount'] ?? 0);
+            $open = (float) ($row['unallocated_amount'] ?? 0);
+
+            $reportRows[] = [
+                'branch_name' => (string) ($row['branch_name'] ?? ''),
+                'booking_reference' => (string) ($row['booking_reference'] ?? ''),
+                'payment_no' => (string) ($row['payment_no'] ?? ''),
+                'payment_date' => (string) ($row['payment_date'] ?? ''),
+                'supplier_name' => (string) ($row['supplier_name'] ?? 'Supplier'),
+                'currency' => $currency,
+                'paid_amount' => $this->money($paid),
+                'allocated_amount' => $this->money($allocated),
+                'unallocated_amount' => $this->money($open),
+                'charges_amount' => $this->money((float) ($row['charges_amount'] ?? 0)),
+                'payment_method' => ucwords(str_replace('_', ' ', (string) ($row['payment_method'] ?? ''))),
+                'status' => ucwords(str_replace('_', ' ', (string) ($row['status'] ?? 'paid'))),
+                'reference_number' => (string) (($row['reference_number'] ?? '') !== '' ? $row['reference_number'] : 'N/A'),
+                'remarks' => (string) (($row['remarks'] ?? '') !== '' ? $row['remarks'] : ''),
+            ];
+
+            $paidTotals[$currency] = ($paidTotals[$currency] ?? 0.0) + $paid;
+            $allocatedTotals[$currency] = ($allocatedTotals[$currency] ?? 0.0) + $allocated;
+            $openTotals[$currency] = ($openTotals[$currency] ?? 0.0) + $open;
+        }
+
+        return [$reportRows, array_merge(
+            $this->currencySummaryCards('Postpaid Paid', $paidTotals),
+            $this->currencySummaryCards('Postpaid Allocated', $allocatedTotals),
+            $this->currencySummaryCards('Postpaid Open', $openTotals)
+        )];
+    }
+
+    private function supplierPrepaidPaymentsReport(array $rows): array
+    {
+        $depositTotals = [];
+        $usedTotals = [];
+        $availableTotals = [];
+        $reportRows = [];
+
+        foreach ($rows as $row) {
+            $currency = (string) ($row['currency'] ?? 'PKR');
+            $deposit = (float) ($row['deposit_amount'] ?? 0);
+            $used = (float) ($row['used_amount'] ?? 0);
+            $available = (float) ($row['available_amount'] ?? 0);
+
+            $reportRows[] = [
+                'branch_name' => (string) ($row['branch_name'] ?? ''),
+                'payment_date' => (string) ($row['payment_date'] ?? ''),
+                'supplier_name' => (string) ($row['supplier_name'] ?? 'Supplier'),
+                'currency' => $currency,
+                'deposit_amount' => $this->money($deposit),
+                'used_amount' => $this->money($used),
+                'available_amount' => $this->money($available),
+                'status' => ucwords(str_replace('_', ' ', (string) ($row['status'] ?? 'available'))),
+                'reference_no' => (string) (($row['reference_no'] ?? '') !== '' ? $row['reference_no'] : 'N/A'),
+                'remarks' => (string) (($row['remarks'] ?? '') !== '' ? $row['remarks'] : ''),
+            ];
+
+            $depositTotals[$currency] = ($depositTotals[$currency] ?? 0.0) + $deposit;
+            $usedTotals[$currency] = ($usedTotals[$currency] ?? 0.0) + $used;
+            $availableTotals[$currency] = ($availableTotals[$currency] ?? 0.0) + $available;
+        }
+
+        return [$reportRows, array_merge(
+            $this->currencySummaryCards('Prepaid Deposits', $depositTotals),
+            $this->currencySummaryCards('Prepaid Used', $usedTotals),
+            $this->currencySummaryCards('Prepaid Available', $availableTotals)
+        )];
+    }
+
+    private function supplierAllPaymentsReport(array $postpaidRows, array $prepaidRows): array
+    {
+        $grossTotals = [];
+        $usedTotals = [];
+        $balanceTotals = [];
+        $reportRows = [];
+
+        foreach ($postpaidRows as $row) {
+            $currency = (string) ($row['currency'] ?? 'PKR');
+            $gross = (float) ($row['paid_amount'] ?? 0);
+            $used = (float) ($row['allocated_amount'] ?? 0);
+            $balance = (float) ($row['unallocated_amount'] ?? 0);
+
+            $reportRows[] = [
+                'payment_type' => 'Postpaid',
+                'branch_name' => (string) ($row['branch_name'] ?? ''),
+                'booking_reference' => (string) ($row['booking_reference'] ?? ''),
+                'payment_no' => (string) ($row['payment_no'] ?? ''),
+                'payment_date' => (string) ($row['payment_date'] ?? ''),
+                'supplier_name' => (string) ($row['supplier_name'] ?? 'Supplier'),
+                'currency' => $currency,
+                'gross_amount' => $this->money($gross),
+                'used_or_allocated_amount' => $this->money($used),
+                'balance_amount' => $this->money($balance),
+                'payment_method' => ucwords(str_replace('_', ' ', (string) ($row['payment_method'] ?? ''))),
+                'status' => ucwords(str_replace('_', ' ', (string) ($row['status'] ?? 'paid'))),
+                'reference_number' => (string) (($row['reference_number'] ?? '') !== '' ? $row['reference_number'] : 'N/A'),
+                'remarks' => (string) (($row['remarks'] ?? '') !== '' ? $row['remarks'] : ''),
+            ];
+
+            $grossTotals[$currency] = ($grossTotals[$currency] ?? 0.0) + $gross;
+            $usedTotals[$currency] = ($usedTotals[$currency] ?? 0.0) + $used;
+            $balanceTotals[$currency] = ($balanceTotals[$currency] ?? 0.0) + $balance;
+        }
+
+        foreach ($prepaidRows as $row) {
+            $currency = (string) ($row['currency'] ?? 'PKR');
+            $gross = (float) ($row['deposit_amount'] ?? 0);
+            $used = (float) ($row['used_amount'] ?? 0);
+            $balance = (float) ($row['available_amount'] ?? 0);
+            $referenceValue = trim((string) ($row['reference_no'] ?? ''));
+
+            $reportRows[] = [
+                'payment_type' => 'Prepaid',
+                'branch_name' => (string) ($row['branch_name'] ?? ''),
+                'booking_reference' => '-',
+                'payment_no' => $referenceValue !== '' ? $referenceValue : ('ADV-' . (string) ($row['id'] ?? '')),
+                'payment_date' => (string) ($row['payment_date'] ?? ''),
+                'supplier_name' => (string) ($row['supplier_name'] ?? 'Supplier'),
+                'currency' => $currency,
+                'gross_amount' => $this->money($gross),
+                'used_or_allocated_amount' => $this->money($used),
+                'balance_amount' => $this->money($balance),
+                'payment_method' => 'Advance Deposit',
+                'status' => ucwords(str_replace('_', ' ', (string) ($row['status'] ?? 'available'))),
+                'reference_number' => $referenceValue !== '' ? $referenceValue : 'N/A',
+                'remarks' => (string) (($row['remarks'] ?? '') !== '' ? $row['remarks'] : ''),
+            ];
+
+            $grossTotals[$currency] = ($grossTotals[$currency] ?? 0.0) + $gross;
+            $usedTotals[$currency] = ($usedTotals[$currency] ?? 0.0) + $used;
+            $balanceTotals[$currency] = ($balanceTotals[$currency] ?? 0.0) + $balance;
+        }
+
+        usort($reportRows, static function (array $left, array $right): int {
+            $leftDate = (string) ($left['payment_date'] ?? '');
+            $rightDate = (string) ($right['payment_date'] ?? '');
+            if ($leftDate !== $rightDate) {
+                return strcmp($rightDate, $leftDate);
+            }
+
+            return strcmp((string) ($right['payment_no'] ?? ''), (string) ($left['payment_no'] ?? ''));
+        });
+
+        return [$reportRows, array_merge(
+            $this->currencySummaryCards('All Supplier Paid', $grossTotals),
+            $this->currencySummaryCards('All Supplier Used', $usedTotals),
+            $this->currencySummaryCards('All Supplier Balance', $balanceTotals)
         )];
     }
 

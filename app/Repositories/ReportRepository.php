@@ -213,6 +213,84 @@ final class ReportRepository extends BaseRepository
         ];
     }
 
+    public function supplierPostpaidPayments(array $branchIds, ?string $dateFrom, ?string $dateTo, string $currency = ''): array
+    {
+        [$clause, $params] = $this->branchScope($branchIds);
+        $dateParams = $params;
+        $window = $this->bookingDateWindow('sp.payment_date', $dateFrom, $dateTo, $dateParams);
+        $currencyFilter = strtoupper(trim($currency));
+        $currencySql = '';
+        if ($currencyFilter !== '') {
+            $currencySql = ' AND sp.currency = :currency_filter';
+            $dateParams['currency_filter'] = $currencyFilter;
+        }
+
+        return $this->fetchRows(
+            'SELECT
+                sp.id,
+                sp.branch_id,
+                br.name AS branch_name,
+                sp.booking_reference,
+                sp.payment_no,
+                sp.payment_date,
+                sp.currency,
+                s.name AS supplier_name,
+                sp.paid_amount,
+                sp.allocated_amount,
+                sp.unallocated_amount,
+                sp.charges_amount,
+                sp.payment_method,
+                sp.status,
+                sp.reference_number,
+                sp.remarks
+             FROM supplier_payments sp
+             INNER JOIN branches br ON br.id = sp.branch_id
+             INNER JOIN suppliers s ON s.id = sp.supplier_id
+             WHERE sp.branch_id ' . $clause . $window . $currencySql . '
+             ORDER BY sp.payment_date DESC, sp.id DESC',
+            $dateParams
+        );
+    }
+
+    public function supplierPrepaidPayments(array $branchIds, ?string $dateFrom, ?string $dateTo, string $currency = ''): array
+    {
+        [$clause, $params] = $this->branchScope($branchIds);
+        $dateParams = $params;
+        $window = $this->bookingDateWindow('a.received_at', $dateFrom, $dateTo, $dateParams);
+        $currencyFilter = strtoupper(trim($currency));
+        $currencySql = '';
+        if ($currencyFilter !== '') {
+            $currencySql = ' AND a.currency = :currency_filter';
+            $dateParams['currency_filter'] = $currencyFilter;
+        }
+
+        return $this->fetchRows(
+            'SELECT
+                a.id,
+                a.branch_id,
+                br.name AS branch_name,
+                s.name AS supplier_name,
+                a.currency,
+                a.received_at AS payment_date,
+                a.deposit_amount,
+                (a.deposit_amount - a.available_amount) AS used_amount,
+                a.available_amount,
+                a.reference_no,
+                a.remarks,
+                CASE
+                    WHEN a.available_amount <= 0.005 THEN "fully_used"
+                    WHEN a.available_amount + 0.005 < a.deposit_amount THEN "partially_used"
+                    ELSE "available"
+                END AS status
+             FROM supplier_advances a
+             INNER JOIN branches br ON br.id = a.branch_id
+             INNER JOIN suppliers s ON s.id = a.supplier_id
+             WHERE a.branch_id ' . $clause . $window . $currencySql . '
+             ORDER BY a.received_at DESC, a.id DESC',
+            $dateParams
+        );
+    }
+
     public function prepaidSupplierLedgerSummary(
         array $branchIds,
         ?string $dateFrom,

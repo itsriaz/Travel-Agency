@@ -873,6 +873,24 @@ final class WorkspaceController extends BaseController
         }
     }
 
+    public function voidSupplierPayment(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+
+        try {
+            $result = (new SupplierSettlementWorkspaceService($this->app))->voidSupplierPayment(
+                $_POST,
+                (int) Auth::id(),
+                Authorization::accessibleBranchIds()
+            );
+            Flash::success('Supplier payment voided successfully.');
+            $this->redirect('/workspace?booking_id=' . (int) $result['booking_id'] . '#dock-panel-suppliers');
+        } catch (RuntimeException $exception) {
+            Flash::error($exception->getMessage());
+            $this->redirect('/workspace?booking_id=' . (int) ($_POST['booking_id'] ?? 0) . '#dock-panel-suppliers');
+        }
+    }
+
     public function saveSupplierAdvance(): never
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);

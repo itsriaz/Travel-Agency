@@ -72,6 +72,17 @@ if ($selectedReport === 'receivable_aging') {
         . ' | Currency: ' . $currencyLabel
         . ' | Balance view: ' . $balanceViewLabel
         . ' | Shows prepaid supplier advances, used/spent amounts, and remaining supplier advance balances grouped by supplier, branch, and currency.';
+} elseif (in_array($selectedReport, ['supplier_postpaid_payments', 'supplier_prepaid_payments', 'supplier_all_payments'], true)) {
+    $currencyLabel = $selectedCurrency !== '' ? $selectedCurrency : 'All currencies';
+    $scopeLabel = match ($selectedReport) {
+        'supplier_postpaid_payments' => 'Postpaid supplier payment register',
+        'supplier_prepaid_payments' => 'Prepaid supplier payment register',
+        default => 'Combined supplier payment register',
+    };
+    $reportContextLine = 'Period: ' . $reportPeriodLabel
+        . ' | Branch: ' . $selectedBranchLabel
+        . ' | Currency: ' . $currencyLabel
+        . ' | Scope: ' . $scopeLabel;
 } else {
     $dateBasisLabel = in_array($selectedReport, ['management_summary', 'branch_performance'], true)
         ? 'Booking/service activity uses booking date. Receipts use receipt date. Supplier payments use payment date.'

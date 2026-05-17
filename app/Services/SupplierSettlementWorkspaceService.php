@@ -4,9 +4,11 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+use App\Helpers\AuditLog;
 use App\Repositories\AccountingRepository;
 use App\Repositories\BookingRepository;
 use App\Repositories\SupplierRepository;
+use PDO;
 use RuntimeException;
 
 final class SupplierSettlementWorkspaceService extends Service
@@ -308,6 +310,92 @@ final class SupplierSettlementWorkspaceService extends Service
         ];
     }
 
+    public function voidSupplierPayment(array $input, int $actorUserId, array $accessibleBranchIds): array
+    {
+        $booking = $this->loadBooking((int) ($input['booking_id'] ?? 0), $accessibleBranchIds);
+        $paymentId = (int) ($input['supplier_payment_id'] ?? 0);
+        $voidReason = $this->requiredVoidReason($input['void_reason'] ?? null);
+
+        if ($paymentId <= 0) {
+            throw new RuntimeException('Select a valid supplier payment to void.');
+        }
+
+        $repository = new SupplierRepository($this->app);
+        $payment = $repository->findSupplierPaymentById($paymentId);
+        if ($payment === null) {
+            throw new RuntimeException('The selected supplier payment could not be found.');
+        }
+
+        if (! in_array((int) ($payment['branch_id'] ?? 0), $accessibleBranchIds, true)) {
+            throw new RuntimeException('You cannot void a supplier payment outside your accessible branches.');
+        }
+
+        if ((string) ($payment['booking_reference'] ?? '') !== (string) ($booking['booking_reference'] ?? '')) {
+            throw new RuntimeException('The selected supplier payment does not belong to this booking.');
+        }
+
+        $paymentStatus = str_replace(' ', '_', mb_strtolower(trim((string) ($payment['status'] ?? ''))));
+        if ($paymentStatus === 'void') {
+            throw new RuntimeException('This supplier payment is already void.');
+        }
+
+        /** @var PDO $db */
+        $db = $this->app->get('db');
+        $startedTransaction = false;
+
+        if (! $db->inTransaction()) {
+            $db->beginTransaction();
+            $startedTransaction = true;
+        }
+
+        try {
+            $reversalReference = 'VOID-' . (string) ($payment['payment_no'] ?? ('P-' . $paymentId));
+            $voidResult = $repository->voidSupplierPayment(
+                $paymentId,
+                $voidReason,
+                $actorUserId,
+                $reversalReference,
+                null
+            );
+
+            AuditLog::record($this->app, 'supplier.payment.voided', [
+                'user_id' => $actorUserId,
+                'supplier_payment_id' => $paymentId,
+                'payment_no' => (string) ($voidResult['payment_no'] ?? ''),
+                'booking_reference' => (string) ($voidResult['booking_reference'] ?? ''),
+                'supplier_id' => (int) ($voidResult['supplier_id'] ?? 0),
+                'void_reason' => $voidReason,
+                'reversal_reference' => $reversalReference,
+                'reversal_journal_entry_id' => null,
+                'allocation_count_reversed' => (int) ($voidResult['allocation_count_reversed'] ?? 0),
+                'total_allocated_amount_reversed' => (float) ($voidResult['total_allocated_amount_reversed'] ?? 0),
+                'affected_supplier_obligation_ids' => $voidResult['affected_supplier_obligation_ids'] ?? [],
+                'accounting_reversal_skipped' => true,
+                'accounting_reversal_skip_reason' => 'journal_entry_lines does not store supplier_payment_id; reversal not posted automatically',
+            ]);
+
+            if ($startedTransaction && $db->inTransaction()) {
+                $db->commit();
+            }
+
+            return [
+                'booking_id' => (int) $booking['id'],
+                'supplier_payment_id' => $paymentId,
+                'reversal_journal_entry_id' => null,
+            ];
+        } catch (\Throwable $exception) {
+            if ($startedTransaction && $db->inTransaction()) {
+                $db->rollBack();
+            }
+
+            if ($exception instanceof RuntimeException) {
+                throw $exception;
+            }
+
+            throw new RuntimeException('Supplier payment could not be voided.', 0, $exception);
+        }
+    }
+
     public function recordSupplierAdvance(array $input, int $actorUserId, array $accessibleBranchIds): array
     {
         $booking = $this->loadBooking((int) ($input['booking_id'] ?? 0), $accessibleBranchIds);
@@ -605,6 +693,24 @@ final class SupplierSettlementWorkspaceService extends Service
         }
 
         return round((float) $value, 2);
+    }
+
+    private function requiredVoidReason(mixed $value): string
+    {
+        $reason = trim((string) $value);
+        if ($reason === '') {
+            throw new RuntimeException('Void reason is required.');
+        }
+
+        if (mb_strlen($reason) < 5) {
+            throw new RuntimeException('Void reason must be at least 5 characters.');
+        }
+
+        if (mb_strlen($reason) > 1000) {
+            throw new RuntimeException('Void reason may not exceed 1000 characters.');
+        }
+
+        return $reason;
     }
 
     private function optionalText(mixed $value, int $maxLength): ?string
