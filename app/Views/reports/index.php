@@ -339,6 +339,10 @@ $exportQuery = http_build_query([
                                     >
                                         <?= e((string) ($row[$column['key']] ?? '')) ?>
                                     </a>
+                                <?php elseif ((string) ($row[(string) ($column['key'] ?? '') . '_href'] ?? '') !== ''): ?>
+                                    <a class="report-booking-link" href="<?= e((string) $row[(string) $column['key'] . '_href']) ?>">
+                                        <?= e((string) ($row[$column['key']] ?? '')) ?>
+                                    </a>
                                 <?php else: ?>
                                     <?= e((string) ($row[$column['key']] ?? '')) ?>
                                 <?php endif; ?>

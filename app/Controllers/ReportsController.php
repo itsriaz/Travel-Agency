@@ -7,6 +7,7 @@ namespace App\Controllers;
 use App\Helpers\Authorization;
 use App\Helpers\Auth;
 use App\Helpers\Flash;
+use App\Repositories\ReportRepository;
 use App\Services\ReportService;
 use RuntimeException;
 
@@ -67,5 +68,27 @@ final class ReportsController extends BaseController
 
         fclose($stream);
         exit;
+    }
+
+    public function supplierPrepaidReceipt(): string
+    {
+        $advanceId = (int) ($_GET['supplier_advance_id'] ?? 0);
+        if ($advanceId <= 0) {
+            Flash::error('Please select a valid prepaid supplier payment receipt.');
+            $this->redirect('/reports?report=supplier_prepaid_payments');
+        }
+
+        $repository = new ReportRepository($this->app);
+        $receipt = $repository->supplierPrepaidPaymentReceipt($advanceId, Authorization::accessibleBranchIds());
+        if ($receipt === null) {
+            Flash::error('The selected prepaid supplier payment receipt could not be found.');
+            $this->redirect('/reports?report=supplier_prepaid_payments');
+        }
+
+        return $this->view('reports/supplier_prepaid_receipt', [
+            'user' => Auth::user(),
+            'receipt' => $receipt,
+            'pageTitle' => 'Prepaid Supplier Payment Receipt',
+        ]);
     }
 }

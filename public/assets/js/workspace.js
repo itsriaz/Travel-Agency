@@ -5295,6 +5295,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
+        const availableRows = simplePostpaidSelectors.length;
         const selectedRows = simplePostpaidSelectors.filter((input) => input.checked);
         const selectedSuppliers = Array.from(new Set(selectedRows.map((input) => String(input.dataset.supplierName || '')))).filter(Boolean);
         const selectedCurrencies = Array.from(new Set(selectedRows.map((input) => String(input.dataset.currency || '')))).filter(Boolean);
@@ -5326,7 +5327,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         let feedbackMessage = '';
-        if (selectedRows.length === 0) {
+        if (availableRows === 0) {
+            feedbackMessage = 'No open supplier payable is available to settle.';
+        } else if (selectedRows.length === 0) {
             feedbackMessage = 'Please select at least one supplier payable.';
         } else if (selectedCurrencies.length > 1) {
             feedbackMessage = 'Please select payable rows with the same currency.';
@@ -5336,11 +5339,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (simplePostpaidFeedback) {
             simplePostpaidFeedback.textContent = feedbackMessage;
-            simplePostpaidFeedback.hidden = feedbackMessage === '';
-        }
-
-        if (simplePostpaidSubmit) {
-            simplePostpaidSubmit.disabled = feedbackMessage !== '';
         }
     }
 
@@ -5467,6 +5465,31 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (simplePostpaidForm) {
+        simplePostpaidForm.addEventListener('submit', (event) => {
+            const availableRows = simplePostpaidSelectors.length;
+            const selectedRows = simplePostpaidSelectors.filter((input) => input.checked);
+            const selectedCurrencies = Array.from(new Set(selectedRows.map((input) => String(input.dataset.currency || '')))).filter(Boolean);
+            const selectedTotal = selectedRows.reduce((sum, input) => sum + Number(input.dataset.balance || 0), 0);
+            const enteredAmount = Number(simplePostpaidAmountInput ? simplePostpaidAmountInput.value || 0 : 0);
+
+            let feedbackMessage = '';
+            if (availableRows === 0) {
+                feedbackMessage = 'No open supplier payable is available to settle.';
+            } else if (selectedRows.length === 0) {
+                feedbackMessage = 'Please select at least one supplier payable.';
+            } else if (selectedCurrencies.length > 1) {
+                feedbackMessage = 'Please select payable rows with the same currency.';
+            } else if (enteredAmount > selectedTotal) {
+                feedbackMessage = 'Payment exceeds selected supplier payable. Reduce the amount or use Prepaid Supplier Payment.';
+            }
+
+            if (feedbackMessage !== '') {
+                event.preventDefault();
+                if (simplePostpaidFeedback) {
+                    simplePostpaidFeedback.textContent = feedbackMessage;
+                }
+            }
+        });
         updateSimplePostpaidSupplierForm();
     }
 

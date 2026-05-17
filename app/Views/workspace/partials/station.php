@@ -929,21 +929,6 @@ Kept here in case manual service save is needed again later.
                             <?= \App\Helpers\Csrf::input() ?>
                             <input type="hidden" name="booking_id" value="<?= e((string) $workspaceBooking['id']) ?>">
                             <input type="hidden" name="supplier_payment_currency" value="" data-simple-postpaid-currency-input>
-                            <div class="station-form-grid station-form-grid--6 station-form-grid--inline">
-                                <label class="station-field span-3"><span>Selected Supplier(s)</span><input type="text" value="" data-simple-postpaid-supplier-display readonly placeholder="Select payable rows"></label>
-                                <label class="station-field span-2"><span>Date</span><input type="date" name="supplier_payment_date" value="<?= e(date('Y-m-d')) ?>"></label>
-                                <label class="station-field span-1"><span>Currency</span><input type="text" value="" data-simple-postpaid-currency-display readonly placeholder="--"></label>
-                                <label class="station-field span-2"><span>Amount</span><input type="number" step="0.01" name="supplier_paid_amount" value="0.00" data-simple-postpaid-amount></label>
-                                <label class="station-field span-2"><span>Method</span><select name="supplier_payment_method"><?php foreach (['cash' => 'Cash', 'bank_transfer' => 'Bank Transfer', 'debit_card' => 'Debit Card', 'credit_card' => 'Credit Card'] as $paymentMethodValue => $paymentMethodLabel): ?><option value="<?= e($paymentMethodValue) ?>"><?= e($paymentMethodLabel) ?></option><?php endforeach; ?></select></label>
-                                <label class="station-field span-2"><span>Reference</span><input type="text" name="supplier_reference_number" value=""></label>
-                                <label class="station-field span-3"><span>Bank / Card Detail</span><input type="text" name="supplier_bank_card_detail" value=""></label>
-                                <label class="station-field span-3"><span>Remarks</span><input type="text" name="supplier_payment_remarks" value=""></label>
-                            </div>
-                            <div class="supplier-simple-payment-summary top-gap">
-                                <span>Selected outstanding total:</span>
-                                <strong data-simple-postpaid-total>0.00</strong>
-                            </div>
-                            <div class="supplier-simple-payment-feedback top-gap" data-simple-postpaid-feedback hidden></div>
                             <table class="legacy-table top-gap">
                                 <thead><tr><th>Select</th><th>Supplier</th><th>Svc Line</th><th>Curr.</th><th>Due</th><th>Outstanding</th></tr></thead>
                                 <tbody>
@@ -960,6 +945,21 @@ Kept here in case manual service save is needed again later.
                                 <?php if (($supplierFoundation['openObligations'] ?? []) === []): ?><tr><td colspan="6" class="empty-cell">No open supplier obligations to settle.</td></tr><?php endif; ?>
                                 </tbody>
                             </table>
+                            <div class="supplier-simple-payment-feedback top-gap" data-simple-postpaid-feedback><?= ($supplierFoundation['openObligations'] ?? []) === [] ? 'No open supplier payable is available to settle.' : 'Please select at least one supplier payable.' ?></div>
+                            <div class="station-form-grid station-form-grid--6 station-form-grid--inline">
+                                <label class="station-field span-3"><span>Selected Supplier(s)</span><input type="text" value="" data-simple-postpaid-supplier-display readonly placeholder="Select payable rows"></label>
+                                <label class="station-field span-2"><span>Date</span><input type="date" name="supplier_payment_date" value="<?= e(date('Y-m-d')) ?>"></label>
+                                <label class="station-field span-1"><span>Currency</span><input type="text" value="" data-simple-postpaid-currency-display readonly placeholder="--"></label>
+                                <label class="station-field span-2"><span>Amount</span><input type="number" step="0.01" name="supplier_paid_amount" value="0.00" data-simple-postpaid-amount></label>
+                                <label class="station-field span-2"><span>Method</span><select name="supplier_payment_method"><?php foreach (['cash' => 'Cash', 'bank_transfer' => 'Bank Transfer', 'debit_card' => 'Debit Card', 'credit_card' => 'Credit Card'] as $paymentMethodValue => $paymentMethodLabel): ?><option value="<?= e($paymentMethodValue) ?>"><?= e($paymentMethodLabel) ?></option><?php endforeach; ?></select></label>
+                                <label class="station-field span-2"><span>Reference</span><input type="text" name="supplier_reference_number" value=""></label>
+                                <label class="station-field span-3"><span>Bank / Card Detail</span><input type="text" name="supplier_bank_card_detail" value=""></label>
+                                <label class="station-field span-3"><span>Remarks</span><input type="text" name="supplier_payment_remarks" value=""></label>
+                            </div>
+                            <div class="supplier-simple-payment-summary top-gap">
+                                <span>Selected outstanding total:</span>
+                                <strong data-simple-postpaid-total>0.00</strong>
+                            </div>
                             <div class="station-command-buttons top-gap"><button class="btn btn-primary btn-sm" type="submit" data-simple-postpaid-submit data-booking-gated-control <?= $workspaceBooking['id'] > 0 ? '' : 'disabled' ?>>Save Payment</button></div>
                         </form>
                     </article>

@@ -228,6 +228,7 @@ final class ReportRepository extends BaseRepository
         return $this->fetchRows(
             'SELECT
                 sp.id,
+                COALESCE(b.id, 0) AS booking_id,
                 sp.branch_id,
                 br.name AS branch_name,
                 sp.booking_reference,
@@ -244,6 +245,7 @@ final class ReportRepository extends BaseRepository
                 sp.reference_number,
                 sp.remarks
              FROM supplier_payments sp
+             LEFT JOIN bookings b ON b.booking_reference = sp.booking_reference
              INNER JOIN branches br ON br.id = sp.branch_id
              INNER JOIN suppliers s ON s.id = sp.supplier_id
              WHERE sp.branch_id ' . $clause . $window . $currencySql . '
@@ -289,6 +291,42 @@ final class ReportRepository extends BaseRepository
              ORDER BY a.received_at DESC, a.id DESC',
             $dateParams
         );
+    }
+
+    public function supplierPrepaidPaymentReceipt(int $advanceId, array $branchIds): ?array
+    {
+        [$clause, $params] = $this->branchScope($branchIds);
+        $params['advance_id'] = $advanceId;
+
+        $statement = $this->db->prepare(
+            'SELECT
+                a.id,
+                a.branch_id,
+                br.name AS branch_name,
+                s.name AS supplier_name,
+                a.currency,
+                a.received_at AS payment_date,
+                a.deposit_amount,
+                (a.deposit_amount - a.available_amount) AS used_amount,
+                a.available_amount,
+                a.reference_no,
+                a.remarks,
+                CASE
+                    WHEN a.available_amount <= 0.005 THEN "fully_used"
+                    WHEN a.available_amount + 0.005 < a.deposit_amount THEN "partially_used"
+                    ELSE "available"
+                END AS status
+             FROM supplier_advances a
+             INNER JOIN branches br ON br.id = a.branch_id
+             INNER JOIN suppliers s ON s.id = a.supplier_id
+             WHERE a.id = :advance_id
+               AND a.branch_id ' . $clause . '
+             LIMIT 1'
+        );
+        $statement->execute($params);
+        $row = $statement->fetch();
+
+        return is_array($row) ? $row : null;
     }
 
     public function prepaidSupplierLedgerSummary(

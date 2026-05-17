@@ -174,6 +174,7 @@ final class ReportService extends Service
                     ['key' => 'used_amount', 'label' => 'Advance Used'],
                     ['key' => 'available_amount', 'label' => 'Available Balance'],
                     ['key' => 'status', 'label' => 'Status'],
+                    ['key' => 'advance_no', 'label' => 'Advance No.'],
                     ['key' => 'reference_no', 'label' => 'Reference'],
                     ['key' => 'remarks', 'label' => 'Remarks'],
                 ];
@@ -763,9 +764,14 @@ final class ReportService extends Service
             $open = (float) ($row['unallocated_amount'] ?? 0);
 
             $reportRows[] = [
+                'booking_id' => (int) ($row['booking_id'] ?? 0),
+                'supplier_payment_id' => (int) ($row['id'] ?? 0),
                 'branch_name' => (string) ($row['branch_name'] ?? ''),
                 'booking_reference' => (string) ($row['booking_reference'] ?? ''),
                 'payment_no' => (string) ($row['payment_no'] ?? ''),
+                'payment_no_href' => (int) ($row['booking_id'] ?? 0) > 0 && (int) ($row['id'] ?? 0) > 0
+                    ? url('/workspace/output?booking_id=' . (int) $row['booking_id'] . '&doc=supplier_voucher&supplier_payment_id=' . (int) $row['id'])
+                    : '',
                 'payment_date' => (string) ($row['payment_date'] ?? ''),
                 'supplier_name' => (string) ($row['supplier_name'] ?? 'Supplier'),
                 'currency' => $currency,
@@ -805,6 +811,7 @@ final class ReportService extends Service
             $available = (float) ($row['available_amount'] ?? 0);
 
             $reportRows[] = [
+                'supplier_advance_id' => (int) ($row['id'] ?? 0),
                 'branch_name' => (string) ($row['branch_name'] ?? ''),
                 'payment_date' => (string) ($row['payment_date'] ?? ''),
                 'supplier_name' => (string) ($row['supplier_name'] ?? 'Supplier'),
@@ -813,6 +820,10 @@ final class ReportService extends Service
                 'used_amount' => $this->money($used),
                 'available_amount' => $this->money($available),
                 'status' => ucwords(str_replace('_', ' ', (string) ($row['status'] ?? 'available'))),
+                'advance_no' => 'SADV-' . str_pad((string) ((int) ($row['id'] ?? 0)), 3, '0', STR_PAD_LEFT),
+                'advance_no_href' => (int) ($row['id'] ?? 0) > 0
+                    ? url('/reports/supplier-prepaid-receipt?supplier_advance_id=' . (int) $row['id'])
+                    : '',
                 'reference_no' => (string) (($row['reference_no'] ?? '') !== '' ? $row['reference_no'] : 'N/A'),
                 'remarks' => (string) (($row['remarks'] ?? '') !== '' ? $row['remarks'] : ''),
             ];
@@ -844,9 +855,14 @@ final class ReportService extends Service
 
             $reportRows[] = [
                 'payment_type' => 'Postpaid',
+                'booking_id' => (int) ($row['booking_id'] ?? 0),
+                'supplier_payment_id' => (int) ($row['id'] ?? 0),
                 'branch_name' => (string) ($row['branch_name'] ?? ''),
                 'booking_reference' => (string) ($row['booking_reference'] ?? ''),
                 'payment_no' => (string) ($row['payment_no'] ?? ''),
+                'payment_no_href' => (int) ($row['booking_id'] ?? 0) > 0 && (int) ($row['id'] ?? 0) > 0
+                    ? url('/workspace/output?booking_id=' . (int) $row['booking_id'] . '&doc=supplier_voucher&supplier_payment_id=' . (int) $row['id'])
+                    : '',
                 'payment_date' => (string) ($row['payment_date'] ?? ''),
                 'supplier_name' => (string) ($row['supplier_name'] ?? 'Supplier'),
                 'currency' => $currency,
@@ -873,9 +889,13 @@ final class ReportService extends Service
 
             $reportRows[] = [
                 'payment_type' => 'Prepaid',
+                'supplier_advance_id' => (int) ($row['id'] ?? 0),
                 'branch_name' => (string) ($row['branch_name'] ?? ''),
                 'booking_reference' => '-',
-                'payment_no' => $referenceValue !== '' ? $referenceValue : ('ADV-' . (string) ($row['id'] ?? '')),
+                'payment_no' => 'SADV-' . str_pad((string) ((int) ($row['id'] ?? 0)), 3, '0', STR_PAD_LEFT),
+                'payment_no_href' => (int) ($row['id'] ?? 0) > 0
+                    ? url('/reports/supplier-prepaid-receipt?supplier_advance_id=' . (int) $row['id'])
+                    : '',
                 'payment_date' => (string) ($row['payment_date'] ?? ''),
                 'supplier_name' => (string) ($row['supplier_name'] ?? 'Supplier'),
                 'currency' => $currency,
