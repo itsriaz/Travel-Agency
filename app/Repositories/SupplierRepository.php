@@ -143,6 +143,83 @@ final class SupplierRepository extends BaseRepository
         return $row !== false ? $row : null;
     }
 
+    public function supplierHistoryFinderResults(string $query, array $accessibleBranchIds, int $limit = 50): array
+    {
+        $trimmed = trim($query);
+        if ($trimmed === '' || $accessibleBranchIds === []) {
+            return [];
+        }
+
+        $placeholders = implode(', ', array_fill(0, count($accessibleBranchIds), '?'));
+        $sql = "
+            SELECT
+                b.id AS booking_id,
+                b.booking_reference,
+                b.booking_date,
+                br.name AS branch_name,
+                s.id AS supplier_id,
+                s.code AS supplier_code,
+                s.name AS supplier_name,
+                seed.currency,
+                COALESCE(ob.total_gross_amount, 0) AS total_gross_amount,
+                COALESCE(pay.total_paid_amount, 0) AS total_paid_amount,
+                COALESCE(ob.total_balance_amount, 0) AS total_balance_amount,
+                COALESCE(ob.latest_due_date, '') AS due_date
+            FROM (
+                SELECT supplier_id, booking_reference, currency
+                FROM supplier_obligations
+                UNION
+                SELECT supplier_id, booking_reference, currency
+                FROM supplier_payments
+                WHERE status <> 'void'
+            ) seed
+            INNER JOIN suppliers s ON s.id = seed.supplier_id
+            INNER JOIN bookings b ON b.booking_reference = seed.booking_reference
+            INNER JOIN branches br ON br.id = b.branch_id
+            LEFT JOIN (
+                SELECT
+                    supplier_id,
+                    booking_reference,
+                    currency,
+                    SUM(gross_amount) AS total_gross_amount,
+                    SUM(net_payable_amount) AS total_balance_amount,
+                    MAX(COALESCE(due_date, '')) AS latest_due_date
+                FROM supplier_obligations
+                GROUP BY supplier_id, booking_reference, currency
+            ) ob ON ob.supplier_id = seed.supplier_id
+                AND ob.booking_reference = seed.booking_reference
+                AND ob.currency = seed.currency
+            LEFT JOIN (
+                SELECT
+                    supplier_id,
+                    booking_reference,
+                    currency,
+                    SUM(paid_amount) AS total_paid_amount
+                FROM supplier_payments
+                WHERE status <> 'void'
+                GROUP BY supplier_id, booking_reference, currency
+            ) pay ON pay.supplier_id = seed.supplier_id
+                AND pay.booking_reference = seed.booking_reference
+                AND pay.currency = seed.currency
+            WHERE b.branch_id IN ({$placeholders})
+              AND (
+                    s.name LIKE ?
+                 OR s.code LIKE ?
+                 OR seed.booking_reference LIKE ?
+              )
+            ORDER BY s.name ASC, b.booking_date DESC, seed.booking_reference DESC, seed.currency ASC
+            LIMIT {$limit}
+        ";
+
+        $statement = $this->db->prepare($sql);
+        $statement->execute(array_merge(
+            array_map('intval', $accessibleBranchIds),
+            ['%' . $trimmed . '%', '%' . $trimmed . '%', '%' . $trimmed . '%']
+        ));
+
+        return $statement->fetchAll() ?: [];
+    }
+
     public function findSupplierById(int $supplierId): ?array
     {
         $statement = $this->db->prepare(
@@ -474,6 +551,31 @@ final class SupplierRepository extends BaseRepository
         $row = $statement->fetch();
 
         return $row !== false ? $row : null;
+    }
+
+    public function updateSupplierPaymentMetadata(int $paymentId, array $data, int $actorUserId): void
+    {
+        $statement = $this->db->prepare(
+            'UPDATE supplier_payments
+             SET reference_number = :reference_number,
+                 bank_card_detail = :bank_card_detail,
+                 remarks = :remarks
+             WHERE id = :payment_id'
+        );
+        $statement->execute([
+            'reference_number' => $data['reference_number'] ?? null,
+            'bank_card_detail' => $data['bank_card_detail'] ?? null,
+            'remarks' => $data['remarks'] ?? null,
+            'payment_id' => $paymentId,
+        ]);
+
+        AuditLog::record($this->app, 'supplier.payment.metadata_updated', [
+            'user_id' => $actorUserId,
+            'supplier_payment_id' => $paymentId,
+            'reference_number' => $data['reference_number'] ?? null,
+            'bank_card_detail' => $data['bank_card_detail'] ?? null,
+            'remarks' => $data['remarks'] ?? null,
+        ]);
     }
 
     public function voidSupplierPayment(

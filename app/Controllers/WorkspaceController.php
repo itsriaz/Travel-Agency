@@ -125,6 +125,36 @@ final class WorkspaceController extends BaseController
             $accessibleBranchIds,
             $currentBookingContext
         );
+        $recreateReceiptId = isset($_GET['recreate_receipt_id']) ? (int) $_GET['recreate_receipt_id'] : 0;
+        $recreateSupplierPaymentId = isset($_GET['recreate_supplier_payment_id']) ? (int) $_GET['recreate_supplier_payment_id'] : 0;
+        $receiptRecreateDraft = null;
+        if ($recreateReceiptId > 0) {
+            foreach (($customerPaymentFoundation['receipts'] ?? []) as $receiptRow) {
+                if ((int) ($receiptRow['id'] ?? 0) !== $recreateReceiptId) {
+                    continue;
+                }
+
+                if ((string) ($receiptRow['statusRaw'] ?? '') === 'void') {
+                    $receiptRecreateDraft = $receiptRow;
+                }
+
+                break;
+            }
+        }
+        $supplierPaymentRecreateDraft = null;
+        if ($recreateSupplierPaymentId > 0) {
+            foreach (($supplierFoundation['payments'] ?? []) as $paymentRow) {
+                if ((int) ($paymentRow['id'] ?? 0) !== $recreateSupplierPaymentId) {
+                    continue;
+                }
+
+                if ((string) ($paymentRow['statusRaw'] ?? '') === 'void') {
+                    $supplierPaymentRecreateDraft = $paymentRow;
+                }
+
+                break;
+            }
+        }
         $accountingFoundation = (new AccountingFoundationService($this->app))->buildWorkspacePreview(
             $bookingReference !== '' ? $bookingReference : null,
             $this->serviceLinePreview($serviceState['services']),
@@ -159,6 +189,8 @@ final class WorkspaceController extends BaseController
             'pageScript' => 'assets/js/workspace.js',
             'supplierFoundation' => $supplierFoundation,
             'customerPaymentFoundation' => $customerPaymentFoundation,
+            'receiptRecreateDraft' => $receiptRecreateDraft,
+            'supplierPaymentRecreateDraft' => $supplierPaymentRecreateDraft,
             'accountingFoundation' => $accountingFoundation,
             'branchOptions' => $workspaceState['branchOptions'],
             'bookingSearchResults' => $workspaceState['searchResults'],
@@ -306,6 +338,67 @@ final class WorkspaceController extends BaseController
             'selected_customer' => $selectedCustomer,
             'open_invoices' => $openInvoices,
             'message' => $selectionMessage,
+        ]);
+    }
+
+    public function supplierHistoryFinder(): never
+    {
+        $accessibleBranchIds = Authorization::accessibleBranchIds();
+        $query = trim((string) ($_GET['q'] ?? ''));
+
+        $rows = (new \App\Repositories\SupplierRepository($this->app))
+            ->supplierHistoryFinderResults($query, $accessibleBranchIds, 50);
+
+        $results = array_map(
+            static function (array $row): array {
+                $bookingId = (int) ($row['booking_id'] ?? 0);
+                $grossAmount = round((float) ($row['total_gross_amount'] ?? 0), 2);
+                $paidAmount = round((float) ($row['total_paid_amount'] ?? 0), 2);
+                $balanceAmount = round((float) ($row['total_balance_amount'] ?? 0), 2);
+                $status = 'Recorded';
+
+                if ($balanceAmount <= 0.005 && $paidAmount > 0.005) {
+                    $status = 'Settled';
+                } elseif ($balanceAmount > 0.005 && $paidAmount > 0.005) {
+                    $status = 'Partially Paid';
+                } elseif ($balanceAmount > 0.005) {
+                    $status = 'Open';
+                }
+
+                return [
+                    'booking_id' => $bookingId,
+                    'booking_reference' => (string) ($row['booking_reference'] ?? ''),
+                    'booking_date' => (string) ($row['booking_date'] ?? ''),
+                    'branch_name' => (string) ($row['branch_name'] ?? ''),
+                    'supplier_id' => (int) ($row['supplier_id'] ?? 0),
+                    'supplier_name' => (string) ($row['supplier_name'] ?? ''),
+                    'supplier_code' => (string) ($row['supplier_code'] ?? ''),
+                    'currency' => (string) ($row['currency'] ?? 'PKR'),
+                    'total_gross_amount' => $grossAmount,
+                    'total_paid_amount' => $paidAmount,
+                    'total_balance_amount' => $balanceAmount,
+                    'due_date' => (string) ($row['due_date'] ?? ''),
+                    'status' => $status,
+                    'open_url' => $bookingId > 0
+                        ? url('/workspace?booking_id=' . $bookingId . '#dock-panel-suppliers')
+                        : '#',
+                ];
+            },
+            $rows
+        );
+
+        $message = '';
+        if ($query !== '') {
+            $message = $results === []
+                ? 'No supplier payment history matched this search.'
+                : 'Select Open History to jump into the booking supplier payment workspace.';
+        }
+
+        $this->jsonResponse([
+            'ok' => true,
+            'query' => $query,
+            'results' => $results,
+            'message' => $message,
         ]);
     }
 
@@ -810,6 +903,24 @@ final class WorkspaceController extends BaseController
         }
     }
 
+    public function updateReceiptMetadata(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+
+        try {
+            $result = (new CustomerReceiptWorkspaceService($this->app))->updateReceiptMetadata(
+                $_POST,
+                (int) Auth::id(),
+                Authorization::accessibleBranchIds()
+            );
+            Flash::success('Customer receipt notes updated successfully.');
+            $this->redirect('/workspace?booking_id=' . (int) $result['booking_id'] . '#dock-panel-payments');
+        } catch (RuntimeException $exception) {
+            Flash::error($exception->getMessage());
+            $this->redirect('/workspace?booking_id=' . (int) ($_POST['booking_id'] ?? 0) . '#dock-panel-payments');
+        }
+    }
+
     public function saveSupplierPayment(): never
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);
@@ -848,6 +959,24 @@ final class WorkspaceController extends BaseController
                 . (int) ($result['allocation_count'] ?? 0)
                 . ' payable item(s).'
             );
+            $this->redirect('/workspace?booking_id=' . (int) $result['booking_id'] . '#dock-panel-suppliers');
+        } catch (RuntimeException $exception) {
+            Flash::error($exception->getMessage());
+            $this->redirect('/workspace?booking_id=' . (int) ($_POST['booking_id'] ?? 0) . '#dock-panel-suppliers');
+        }
+    }
+
+    public function updateSupplierPaymentMetadata(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+
+        try {
+            $result = (new SupplierSettlementWorkspaceService($this->app))->updateSupplierPaymentMetadata(
+                $_POST,
+                (int) Auth::id(),
+                Authorization::accessibleBranchIds()
+            );
+            Flash::success('Supplier payment notes updated successfully.');
             $this->redirect('/workspace?booking_id=' . (int) $result['booking_id'] . '#dock-panel-suppliers');
         } catch (RuntimeException $exception) {
             Flash::error($exception->getMessage());

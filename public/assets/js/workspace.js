@@ -39,6 +39,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const customerDuesCustomersBody = station.querySelector('[data-customer-dues-customers-body]');
     const customerDuesInvoicesBody = station.querySelector('[data-customer-dues-invoices-body]');
     const customerDuesSelectedSummary = station.querySelector('[data-customer-dues-selected-summary]');
+    const supplierHistoryModal = station.querySelector('[data-supplier-history-modal]');
+    const supplierHistoryCloseButtons = Array.from(station.querySelectorAll('[data-supplier-history-close]'));
+    const supplierHistorySearchInput = station.querySelector('[data-supplier-history-search]');
+    const supplierHistoryFeedback = station.querySelector('[data-supplier-history-feedback]');
+    const supplierHistoryResultsBody = station.querySelector('[data-supplier-history-results-body]');
     const supplierSettlementModal = station.querySelector('[data-supplier-settlement-modal]');
     const supplierSettlementCloseButtons = Array.from(station.querySelectorAll('[data-supplier-settlement-close]'));
     const simplePostpaidForm = station.querySelector('[data-simple-postpaid-form]');
@@ -489,6 +494,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 case 'customer-dues-finder':
                     openCustomerDuesModal();
                     break;
+                case 'supplier-history-finder':
+                    openSupplierHistoryModal();
+                    break;
                 case 'add-service':
                     resetServiceLine();
                     showFeedback('New service row ready. Enter details in the service band.');
@@ -536,6 +544,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (event.key === 'Escape') {
             closeCustomerPicker();
             closeCustomerDuesModal();
+            closeSupplierHistoryModal();
             closeNewCustomerModal();
             closePaymentHistoryModal();
             closeSupplierSettlementModal();
@@ -1040,7 +1049,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (paymentHistoryReceiptsBody instanceof HTMLElement) {
             if (paymentReceipts.length === 0) {
-                paymentHistoryReceiptsBody.innerHTML = '<tr><td colspan="10" class="empty-cell">No receipts recorded yet.</td></tr>';
+                paymentHistoryReceiptsBody.innerHTML = '<tr><td colspan="12" class="empty-cell">No receipts recorded yet.</td></tr>';
             } else {
                 const csrfField = paymentForm?.elements?.namedItem('_token');
                 const csrfToken = csrfField instanceof HTMLInputElement ? csrfField.value.trim() : '';
@@ -1054,6 +1063,17 @@ document.addEventListener('DOMContentLoaded', () => {
                     const printUrl = receiptId > 0 && bookingId > 0
                         ? buildWorkspacePathUrl(`workspace/output?booking_id=${bookingId}&doc=customer_receipt&receipt_id=${receiptId}`)
                         : '';
+                    const metadataActionHtml = receiptId > 0 && bookingId > 0 && csrfToken !== ''
+                        ? `<form method="post" action="${escapeHtml(buildWorkspacePathUrl('workspace/payments/receipts/metadata-save'))}" style="display:grid;gap:6px;min-width:190px;">
+                            <input type="hidden" name="_token" value="${escapeHtml(csrfToken)}">
+                            <input type="hidden" name="booking_id" value="${bookingId}">
+                            <input type="hidden" name="customer_receipt_id" value="${receiptId}">
+                            <input type="text" name="receipt_reference_number" value="${escapeHtml(String(receipt?.referenceNumber || ''))}" placeholder="Payment reference" maxlength="100">
+                            <input type="text" name="receipt_bank_card_detail" value="${escapeHtml(String(receipt?.bankCardDetail || ''))}" placeholder="Bank / Payment details" maxlength="190">
+                            <input type="text" name="receipt_remarks" value="${escapeHtml(String(receipt?.remarks || ''))}" placeholder="Remarks / note" maxlength="4000">
+                            <button class="btn btn-sm" type="submit">Save Notes</button>
+                        </form>`
+                        : '-';
                     const voidActionHtml = statusRaw !== 'void' && receiptId > 0 && bookingId > 0 && csrfToken !== ''
                         ? `<form method="post" action="${escapeHtml(buildWorkspacePathUrl('workspace/payments/receipts/void'))}" onsubmit="return confirm('Void this receipt and reverse its allocations?');" style="display:grid;gap:6px;min-width:150px;">
                             <input type="hidden" name="_token" value="${escapeHtml(csrfToken)}">
@@ -1062,6 +1082,9 @@ document.addEventListener('DOMContentLoaded', () => {
                             <input type="text" name="void_reason" value="" placeholder="Void reason" minlength="5" maxlength="1000" required>
                             <button class="btn btn-sm" type="submit">Void</button>
                         </form>`
+                        : '-';
+                    const recreateActionHtml = statusRaw === 'void' && receiptId > 0 && bookingId > 0
+                        ? `<a class="btn btn-sm" href="${escapeHtml(buildWorkspacePathUrl(`workspace?booking_id=${bookingId}&recreate_receipt_id=${receiptId}#dock-panel-payments`))}">Recreate</a>`
                         : '-';
                     return `<tr>
                         <td>${escapeHtml(String(receipt?.receiptNo || ''))}</td>
@@ -1073,7 +1096,9 @@ document.addEventListener('DOMContentLoaded', () => {
                         <td>${escapeHtml(String(receipt?.paymentMethod || ''))}</td>
                         <td>${escapeHtml(statusLabel)}</td>
                         <td>${printUrl !== '' ? `<a href="${escapeHtml(printUrl)}" target="_blank" rel="noopener">Print</a>` : '-'}</td>
+                        <td>${metadataActionHtml}</td>
                         <td>${voidActionHtml}</td>
+                        <td>${recreateActionHtml}</td>
                     </tr>`;
                 }).join('');
             }
@@ -2545,6 +2570,21 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    supplierHistoryCloseButtons.forEach((button) => {
+        button.addEventListener('click', () => closeSupplierHistoryModal());
+    });
+
+    if (supplierHistorySearchInput) {
+        let supplierHistorySearchTimer = 0;
+        supplierHistorySearchInput.addEventListener('input', () => {
+            const nextQuery = String(supplierHistorySearchInput.value || '');
+            window.clearTimeout(supplierHistorySearchTimer);
+            supplierHistorySearchTimer = window.setTimeout(() => {
+                void loadSupplierHistoryFinder({ query: nextQuery });
+            }, 220);
+        });
+    }
+
     const fillValue = (field, value) => {
         if (field) {
             field.value = value ?? '';
@@ -2714,6 +2754,12 @@ document.addEventListener('DOMContentLoaded', () => {
         openInvoices: [],
         requestToken: 0,
     };
+    const supplierHistoryFinderUrl = String(supplierHistoryModal?.dataset.supplierHistoryUrl || '').trim();
+    let supplierHistoryFinderState = {
+        query: '',
+        results: [],
+        requestToken: 0,
+    };
     const normalizeCustomerDuesQuery = (value) => String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
     const formatAllocationTypeLabel = (value) => {
         if (String(value || '') === 'Previous Outstanding') {
@@ -2775,6 +2821,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const serviceSubmitButton = station.querySelector('[data-service-submit]');
     const serviceDeactivateId = station.querySelector('[data-service-deactivate-id]');
     const serviceDeactivateButton = station.querySelector('[data-service-deactivate-button]');
+    const lossAmountPanel = station.querySelector('[data-loss-amount-panel]');
     const lossReasonPanel = station.querySelector('[data-loss-reason-panel]');
     const chips = Array.from(station.querySelectorAll('.service-type-chip'));
     const serviceFields = {
@@ -3107,6 +3154,27 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         return true;
+    };
+
+    const hasRequiredLossReason = ({ focus = false, announce = false } = {}) => {
+        if (!(serviceFields.lossReason instanceof HTMLTextAreaElement) || serviceFields.lossReason.disabled) {
+            return true;
+        }
+
+        if (serviceFields.lossReason.value.trim() !== '') {
+            return true;
+        }
+
+        if (announce) {
+            showFeedback('Loss reason is required when Final Sale Amount is below Fr+Tx.');
+            setAutosaveStatus('failed', 'Loss reason required');
+        }
+
+        if (focus) {
+            serviceFields.lossReason.focus();
+        }
+
+        return false;
     };
 
     const scheduleSelectAll = (field) => {
@@ -3571,6 +3639,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
         serviceProfit.textContent = formatMoney(profit);
         serviceProfit.style.color = profit < 0 ? '#a23737' : '#0a4d73';
+        if (lossAmountPanel) {
+            lossAmountPanel.hidden = !hasLoss;
+        }
         if (lossReasonPanel) {
             lossReasonPanel.hidden = !hasLoss;
         }
@@ -4079,6 +4150,11 @@ document.addEventListener('DOMContentLoaded', () => {
             syncAutoBookingFields();
             syncServiceTravelerIdFromName();
 
+            if (!hasRequiredLossReason({ focus: true, announce: true })) {
+                event.preventDefault();
+                return;
+            }
+
             const bookingIdField = serviceForm.elements.namedItem('booking_id');
             const bookingId = bookingIdField instanceof HTMLInputElement ? Number.parseInt(bookingIdField.value || '0', 10) : 0;
             if (bookingId > 0) {
@@ -4574,6 +4650,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (!serviceAutosaveReady()) {
+            return Promise.resolve(null);
+        }
+
+        if (!hasRequiredLossReason({ focus: true, announce: true })) {
             return Promise.resolve(null);
         }
 
@@ -5124,6 +5204,109 @@ document.addEventListener('DOMContentLoaded', () => {
         customerDuesFeedback.hidden = !visible || String(message || '').trim() === '';
     };
 
+    const setSupplierHistoryFeedback = (message, visible = true) => {
+        if (!(supplierHistoryFeedback instanceof HTMLElement)) {
+            return;
+        }
+
+        supplierHistoryFeedback.textContent = message || '';
+        supplierHistoryFeedback.hidden = !visible || String(message || '').trim() === '';
+    };
+
+    const renderSupplierHistoryFinder = () => {
+        if (!(supplierHistoryResultsBody instanceof HTMLElement)) {
+            return;
+        }
+
+        if (normalizeCustomerDuesQuery(supplierHistoryFinderState.query) === '') {
+            supplierHistoryResultsBody.innerHTML = '<tr><td colspan="11" class="empty-cell">Search a supplier or booking to load supplier payment history.</td></tr>';
+            return;
+        }
+
+        if (!Array.isArray(supplierHistoryFinderState.results) || supplierHistoryFinderState.results.length === 0) {
+            supplierHistoryResultsBody.innerHTML = '<tr><td colspan="11" class="empty-cell">No supplier payment history matched this search.</td></tr>';
+            return;
+        }
+
+        supplierHistoryResultsBody.innerHTML = supplierHistoryFinderState.results.map((row) => `<tr>
+            <td>${escapeHtml(String(row?.supplier_name || ''))}</td>
+            <td>${escapeHtml(String(row?.booking_reference || ''))}</td>
+            <td>${escapeHtml(String(row?.booking_date || ''))}</td>
+            <td>${escapeHtml(String(row?.branch_name || ''))}</td>
+            <td>${escapeHtml(String(row?.currency || 'PKR'))}</td>
+            <td>${escapeHtml(formatMoney(toNumber(row?.total_gross_amount || 0)))}</td>
+            <td>${escapeHtml(formatMoney(toNumber(row?.total_paid_amount || 0)))}</td>
+            <td>${escapeHtml(formatMoney(toNumber(row?.total_balance_amount || 0)))}</td>
+            <td>${escapeHtml(String(row?.due_date || ''))}</td>
+            <td>${escapeHtml(String(row?.status || 'Recorded'))}</td>
+            <td><a class="btn btn-sm" href="${escapeHtml(String(row?.open_url || '#'))}">Open History</a></td>
+        </tr>`).join('');
+    };
+
+    const loadSupplierHistoryFinder = async ({ query = supplierHistoryFinderState.query } = {}) => {
+        if (supplierHistoryFinderUrl === '') {
+            setSupplierHistoryFeedback('Supplier payment finder route is unavailable.');
+            return;
+        }
+
+        const requestToken = Date.now();
+        supplierHistoryFinderState.requestToken = requestToken;
+        supplierHistoryFinderState.query = String(query || '');
+
+        if (normalizeCustomerDuesQuery(supplierHistoryFinderState.query) === '') {
+            supplierHistoryFinderState = {
+                ...supplierHistoryFinderState,
+                results: [],
+                requestToken,
+            };
+            renderSupplierHistoryFinder();
+            setSupplierHistoryFeedback('Search a supplier name, supplier code, or booking reference to reopen supplier payment history.');
+            return;
+        }
+
+        setSupplierHistoryFeedback('Loading supplier payment history…');
+
+        try {
+            const url = new URL(supplierHistoryFinderUrl, window.location.origin);
+            url.searchParams.set('q', supplierHistoryFinderState.query.trim());
+
+            const response = await fetch(url.toString(), {
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest',
+                },
+                credentials: 'same-origin',
+            });
+            const payload = await response.json().catch(() => ({ ok: false, message: 'The server returned an invalid supplier payment finder response.' }));
+            if (supplierHistoryFinderState.requestToken !== requestToken) {
+                return;
+            }
+
+            if (!response.ok || payload.ok === false) {
+                throw new Error(String(payload.message || 'Supplier payment finder could not be loaded.'));
+            }
+
+            supplierHistoryFinderState = {
+                ...supplierHistoryFinderState,
+                query: String(payload.query || supplierHistoryFinderState.query || ''),
+                results: Array.isArray(payload.results) ? payload.results : [],
+                requestToken,
+            };
+            renderSupplierHistoryFinder();
+            setSupplierHistoryFeedback(
+                String(payload.message || '').trim() !== ''
+                    ? String(payload.message || '')
+                    : 'Select Open History to jump into the booking supplier payment workspace.',
+                true
+            );
+        } catch (error) {
+            if (supplierHistoryFinderState.requestToken !== requestToken) {
+                return;
+            }
+            renderSupplierHistoryFinder();
+            setSupplierHistoryFeedback(error instanceof Error ? error.message : 'Supplier payment finder could not be loaded.');
+        }
+    };
+
     const renderCustomerDuesFinder = () => {
         if (customerDuesSelectedSummary instanceof HTMLElement) {
             const selectedCustomer = customerDuesFinderState.selectedCustomer;
@@ -5269,6 +5452,32 @@ document.addEventListener('DOMContentLoaded', () => {
 
         customerDuesModal.hidden = true;
         customerDuesModal.setAttribute('aria-hidden', 'true');
+    }
+
+    function openSupplierHistoryModal() {
+        if (!supplierHistoryModal) {
+            return;
+        }
+
+        supplierHistoryModal.hidden = false;
+        supplierHistoryModal.setAttribute('aria-hidden', 'false');
+        renderSupplierHistoryFinder();
+        void loadSupplierHistoryFinder({
+            query: supplierHistorySearchInput?.value || supplierHistoryFinderState.query,
+        });
+        window.setTimeout(() => {
+            supplierHistorySearchInput?.focus();
+            supplierHistorySearchInput?.select();
+        }, 40);
+    }
+
+    function closeSupplierHistoryModal() {
+        if (!supplierHistoryModal) {
+            return;
+        }
+
+        supplierHistoryModal.hidden = true;
+        supplierHistoryModal.setAttribute('aria-hidden', 'true');
     }
 
     function openSupplierSettlementModal() {

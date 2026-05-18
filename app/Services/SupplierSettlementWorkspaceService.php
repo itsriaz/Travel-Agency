@@ -19,6 +19,8 @@ final class SupplierSettlementWorkspaceService extends Service
 
     public function recordSupplierPayment(array $input, int $actorUserId, array $accessibleBranchIds): array
     {
+        $this->assertNoPostedSupplierPaymentEditAttempt($input);
+
         $booking = $this->loadBooking((int) ($input['booking_id'] ?? 0), $accessibleBranchIds);
         $supplier = $this->resolveSupplier($input, $accessibleBranchIds);
         $payload = $this->validatedPaymentPayload($input);
@@ -55,6 +57,8 @@ final class SupplierSettlementWorkspaceService extends Service
 
     public function recordSimplePostpaidSupplierPayment(array $input, int $actorUserId, array $accessibleBranchIds): array
     {
+        $this->assertNoPostedSupplierPaymentEditAttempt($input);
+
         $booking = $this->loadBooking((int) ($input['booking_id'] ?? 0), $accessibleBranchIds);
         $selectedObligationIds = $this->normalizedSelectedObligationIds($input['simple_supplier_obligation_id'] ?? []);
         if ($selectedObligationIds === []) {
@@ -396,6 +400,45 @@ final class SupplierSettlementWorkspaceService extends Service
         }
     }
 
+    public function updateSupplierPaymentMetadata(array $input, int $actorUserId, array $accessibleBranchIds): array
+    {
+        $booking = $this->loadBooking((int) ($input['booking_id'] ?? 0), $accessibleBranchIds);
+        $paymentId = (int) ($input['supplier_payment_id'] ?? 0);
+
+        if ($paymentId <= 0) {
+            throw new RuntimeException('Select a valid supplier payment to update.');
+        }
+
+        $repository = new SupplierRepository($this->app);
+        $payment = $repository->findSupplierPaymentById($paymentId);
+        if ($payment === null) {
+            throw new RuntimeException('The selected supplier payment could not be found.');
+        }
+
+        if (! in_array((int) ($payment['branch_id'] ?? 0), $accessibleBranchIds, true)) {
+            throw new RuntimeException('You cannot update a supplier payment outside your accessible branches.');
+        }
+
+        if ((string) ($payment['booking_reference'] ?? '') !== (string) ($booking['booking_reference'] ?? '')) {
+            throw new RuntimeException('The selected supplier payment does not belong to this booking.');
+        }
+
+        $referenceNumber = $this->optionalText($input['supplier_reference_number'] ?? null, 100);
+        $bankCardDetail = $this->optionalText($input['supplier_bank_card_detail'] ?? null, 190);
+        $remarks = $this->optionalText($input['supplier_payment_remarks'] ?? null, 4000);
+
+        $repository->updateSupplierPaymentMetadata($paymentId, [
+            'reference_number' => $referenceNumber,
+            'bank_card_detail' => $bankCardDetail,
+            'remarks' => $remarks,
+        ], $actorUserId);
+
+        return [
+            'payment' => $repository->findSupplierPaymentById($paymentId),
+            'booking_id' => (int) $booking['id'],
+        ];
+    }
+
     public function recordSupplierAdvance(array $input, int $actorUserId, array $accessibleBranchIds): array
     {
         $booking = $this->loadBooking((int) ($input['booking_id'] ?? 0), $accessibleBranchIds);
@@ -562,6 +605,24 @@ final class SupplierSettlementWorkspaceService extends Service
         $supplierBranchId = (int) ($supplier['branch_id'] ?? 0);
         if ($supplierBranchId > 0 && $supplierBranchId !== $branchId) {
             throw new RuntimeException('The selected supplier is not available for the chosen branch.');
+        }
+    }
+
+    private function assertNoPostedSupplierPaymentEditAttempt(array $input): void
+    {
+        $existingPaymentId = max(
+            (int) ($input['supplier_payment_id'] ?? 0),
+            (int) ($input['payment_id'] ?? 0)
+        );
+        if ($existingPaymentId > 0) {
+            $existingPayment = (new SupplierRepository($this->app))->findSupplierPaymentById($existingPaymentId);
+            if ($existingPayment !== null) {
+                throw new RuntimeException('Saved supplier payment financial values cannot be edited. Void the payment and create a new one.');
+            }
+        }
+
+        if (trim((string) ($input['payment_no'] ?? '')) !== '') {
+            throw new RuntimeException('Supplier payment number is system-generated. Saved supplier payment financial values cannot be edited here. Void the payment and create a new one.');
         }
     }
 

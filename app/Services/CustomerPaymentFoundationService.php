@@ -286,6 +286,8 @@ final class CustomerPaymentFoundationService extends Service
                     'receiptId' => (int) ($row['receipt_id'] ?? 0),
                     'receiptNo' => (string) ($row['receipt_no'] ?? ''),
                     'receiptDate' => (string) ($row['receipt_date'] ?? ''),
+                    'receiptStatusRaw' => (string) ($row['receipt_status'] ?? ''),
+                    'receiptStatus' => ucwords(str_replace('_', ' ', (string) ($row['receipt_status'] ?? ''))),
                     'receiptBookingReference' => (string) ($row['receipt_booking_reference'] ?? ''),
                     'bookingReference' => $receivableBookingReference,
                     'receivableItemId' => (int) ($row['receivable_item_id'] ?? 0),

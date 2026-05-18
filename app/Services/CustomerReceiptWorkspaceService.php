@@ -20,6 +20,8 @@ final class CustomerReceiptWorkspaceService extends Service
 
     public function saveReceipt(array $input, int $actorUserId, array $accessibleBranchIds): array
     {
+        $this->assertNoPostedReceiptEditAttempt($input);
+
         if (($input['settlement_mode'] ?? 'normal') === 'exchange') {
             return $this->saveExchangeSettlement($input, $actorUserId, $accessibleBranchIds);
         }
@@ -115,6 +117,24 @@ final class CustomerReceiptWorkspaceService extends Service
             }
 
             throw new RuntimeException('Customer receipt could not be saved.', 0, $exception);
+        }
+    }
+
+    private function assertNoPostedReceiptEditAttempt(array $input): void
+    {
+        $existingReceiptId = max(
+            (int) ($input['customer_receipt_id'] ?? 0),
+            (int) ($input['receipt_id'] ?? 0)
+        );
+        if ($existingReceiptId > 0) {
+            $existingReceipt = (new CustomerPaymentRepository($this->app))->findReceiptById($existingReceiptId);
+            if ($existingReceipt !== null) {
+                throw new RuntimeException('Saved customer receipt financial values cannot be edited. Void the receipt and create a new one.');
+            }
+        }
+
+        if (trim((string) ($input['receipt_no'] ?? '')) !== '') {
+            throw new RuntimeException('Receipt number is system-generated. Saved customer receipt financial values cannot be edited here. Void the receipt and create a new one.');
         }
     }
 
@@ -296,6 +316,55 @@ final class CustomerReceiptWorkspaceService extends Service
 
             throw new RuntimeException('Customer receipt could not be voided.', 0, $exception);
         }
+    }
+
+    public function updateReceiptMetadata(array $input, int $actorUserId, array $accessibleBranchIds): array
+    {
+        $bookingId = (int) ($input['booking_id'] ?? 0);
+        $receiptId = (int) ($input['customer_receipt_id'] ?? 0);
+
+        $bookingRepository = new BookingRepository($this->app);
+        if (! $bookingRepository->bookingExistsInBranches($bookingId, $accessibleBranchIds)) {
+            throw new RuntimeException('You cannot update receipt notes for a booking outside your accessible branches.');
+        }
+
+        $booking = $bookingRepository->findBookingById($bookingId);
+        if ($booking === null) {
+            throw new RuntimeException('The selected booking could not be loaded.');
+        }
+
+        if ($receiptId <= 0) {
+            throw new RuntimeException('Select a valid receipt to update.');
+        }
+
+        $repository = new CustomerPaymentRepository($this->app);
+        $receipt = $repository->findReceiptById($receiptId);
+        if ($receipt === null) {
+            throw new RuntimeException('The selected receipt could not be found.');
+        }
+
+        if (! in_array((int) ($receipt['branch_id'] ?? 0), $accessibleBranchIds, true)) {
+            throw new RuntimeException('You cannot update a receipt outside your accessible branches.');
+        }
+
+        if ((string) ($receipt['booking_reference'] ?? '') !== (string) ($booking['booking_reference'] ?? '')) {
+            throw new RuntimeException('The selected receipt does not belong to this booking.');
+        }
+
+        $referenceNumber = $this->optionalText($input['receipt_reference_number'] ?? null, 100);
+        $bankCardDetail = $this->optionalText($input['receipt_bank_card_detail'] ?? null, 190);
+        $remarks = $this->optionalText($input['receipt_remarks'] ?? null, 4000);
+
+        $repository->updateReceiptMetadata($receiptId, [
+            'reference_number' => $referenceNumber,
+            'bank_card_detail' => $bankCardDetail,
+            'remarks' => $remarks,
+        ], $actorUserId);
+
+        return [
+            'receipt' => $repository->findReceiptById($receiptId),
+            'booking_id' => $bookingId,
+        ];
     }
 
     private function validatedReceiptPayload(array $input): array
@@ -739,8 +808,8 @@ $openReceivables = array_values(array_merge($currentBookingReceivables, $otherRe
                 'exchange_rate' => 1.0,
                 'exchange_rate_effective_date' => $receiptDate,
                 'allocation_note' => $isCurrentBookingReceivable
-    ? 'Auto allocated to current invoice from workspace quick receive.'
-    : 'Remaining amount from receipt ' . $receiptNo . ' for invoice ' . (string) ($booking['booking_reference'] ?? '') . ' applied to previous/open invoice ' . (string) ($receivable['booking_reference'] ?? '') . '.',
+    ? 'Automatically applied to current invoice.'
+    : 'Remaining amount from receipt ' . $receiptNo . ' for invoice ' . (string) ($booking['booking_reference'] ?? '') . ' applied to previous open invoice ' . (string) ($receivable['booking_reference'] ?? '') . '.',
                 'actor_user_id' => $actorUserId,
             ]);
             $allocationId = (int) ($allocationResult['allocation_id'] ?? 0);

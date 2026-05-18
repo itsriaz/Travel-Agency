@@ -132,6 +132,7 @@ final class SupplierFoundationService extends Service
                     'status' => ucwords(str_replace('_', ' ', $statusRaw)),
                     'statusRaw' => $statusRaw,
                     'referenceNumber' => (string) ($row['reference_number'] ?? ''),
+                    'bankCardDetail' => (string) ($row['bank_card_detail'] ?? ''),
                     'exchangeRateToBooking' => (float) ($row['exchange_rate_to_booking'] ?? 0),
                     'remarks' => (string) ($row['remarks'] ?? ''),
                     'voidReason' => (string) ($row['void_reason'] ?? ''),

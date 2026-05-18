@@ -386,7 +386,15 @@ $receiptTotalAllocated = (float) ($selectedReceipt['allocatedAmount'] ?? 0);
 $receiptUnallocatedAmount = (float) ($selectedReceipt['unallocatedAmount'] ?? 0);
 $invoicePaymentHistoryRows = array_values(array_filter(
     $customerPaymentFoundation['invoicePaymentHistory'] ?? [],
-    static fn (array $allocation): bool => (string) ($allocation['bookingReference'] ?? '') === $bookingReference
+    static function (array $allocation) use ($bookingReference): bool {
+        if ((string) ($allocation['bookingReference'] ?? '') !== $bookingReference) {
+            return false;
+        }
+
+        $receiptStatusRaw = str_replace(' ', '_', mb_strtolower(trim((string) ($allocation['receiptStatusRaw'] ?? ''))));
+
+        return $receiptStatusRaw !== 'void';
+    }
 ));
 $isSelectedReceiptHistoryRow = static function (array $historyRow) use ($selectedReceiptId, $selectedReceiptNo): bool {
     $historyReceiptId = (int) ($historyRow['receiptId'] ?? 0);
@@ -422,10 +430,17 @@ foreach ($invoicePaymentHistoryRows as $historyRow) {
 $previousInvoicePaymentsDisplay = $nonZeroCurrencyTotals($previousInvoicePaymentsTotals);
 $currentInvoicePaymentHistoryDisplay = $nonZeroCurrencyTotals($currentInvoicePaymentHistoryTotals);
 $totalPaidAgainstInvoiceDisplay = $nonZeroCurrencyTotals($totalPaidAgainstInvoiceTotals);
+$openSupplierHistoryUrl = null;
+if ($outputType === 'supplier_voucher' && (int) ($booking['id'] ?? 0) > 0) {
+    $openSupplierHistoryUrl = url('/workspace?booking_id=' . (int) $booking['id'] . '#dock-panel-suppliers');
+}
 ?>
 <main class="output-page">
     <div class="output-toolbar no-print">
         <a class="btn btn-sm" href="<?= e($backUrl) ?>">Back to Workspace</a>
+        <?php if ($openSupplierHistoryUrl !== null): ?>
+            <a class="btn btn-sm" href="<?= e($openSupplierHistoryUrl) ?>">Open Supplier History</a>
+        <?php endif; ?>
         <button class="btn btn-primary btn-sm" type="button" onclick="window.print()">Print</button>
     </div>
 

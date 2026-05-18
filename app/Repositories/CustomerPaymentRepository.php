@@ -225,6 +225,31 @@ final class CustomerPaymentRepository extends BaseRepository
         ]);
     }
 
+    public function updateReceiptMetadata(int $receiptId, array $data, int $actorUserId): void
+    {
+        $statement = $this->db->prepare(
+            'UPDATE customer_receipts
+             SET reference_number = :reference_number,
+                 bank_card_detail = :bank_card_detail,
+                 remarks = :remarks
+             WHERE id = :receipt_id'
+        );
+        $statement->execute([
+            'reference_number' => $data['reference_number'] ?? null,
+            'bank_card_detail' => $data['bank_card_detail'] ?? null,
+            'remarks' => $data['remarks'] ?? null,
+            'receipt_id' => $receiptId,
+        ]);
+
+        AuditLog::record($this->app, 'customer.receipt.metadata_updated', [
+            'user_id' => $actorUserId,
+            'customer_receipt_id' => $receiptId,
+            'reference_number' => $data['reference_number'] ?? null,
+            'bank_card_detail' => $data['bank_card_detail'] ?? null,
+            'remarks' => $data['remarks'] ?? null,
+        ]);
+    }
+
     public function openReceivablesForBooking(string $bookingReference): array
     {
         $statement = $this->db->prepare(
@@ -1142,6 +1167,7 @@ final class CustomerPaymentRepository extends BaseRepository
                 r.receipt_no,
                 r.receipt_date,
                 r.currency AS receipt_currency,
+                r.status AS receipt_status,
                 i.id AS receivable_item_id,
                 i.booking_reference AS receivable_booking_reference,
                 i.service_line_reference,
