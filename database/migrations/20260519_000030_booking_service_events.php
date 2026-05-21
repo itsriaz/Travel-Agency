@@ -1,0 +1,56 @@
+<?php
+
+declare(strict_types=1);
+
+return [
+    'up' => [
+        'CREATE TABLE IF NOT EXISTS booking_service_events (
+            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            branch_id INT UNSIGNED NOT NULL,
+            booking_id BIGINT UNSIGNED NOT NULL,
+            booking_service_id BIGINT UNSIGNED NOT NULL,
+            booking_reference VARCHAR(50) NOT NULL,
+            service_line_reference VARCHAR(50) NOT NULL,
+            event_type ENUM("issue", "cancel", "refund", "reissue") NOT NULL,
+            event_status ENUM("draft", "posted", "voided") NOT NULL DEFAULT "draft",
+            event_date DATE NOT NULL,
+            currency CHAR(3) NOT NULL,
+            original_ticket_number VARCHAR(50) NULL,
+            new_ticket_number VARCHAR(50) NULL,
+            original_pnr VARCHAR(50) NULL,
+            new_pnr VARCHAR(50) NULL,
+            fare_difference_amount DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+            penalty_amount DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+            service_fee_amount DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+            customer_refund_amount DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+            customer_credit_amount DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+            supplier_refund_amount DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+            supplier_credit_amount DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+            journal_entry_id BIGINT UNSIGNED NULL,
+            reason VARCHAR(255) NULL,
+            notes TEXT NULL,
+            payload_json JSON NULL,
+            created_by_user_id INT UNSIGNED NULL,
+            voided_by_user_id INT UNSIGNED NULL,
+            voided_at DATETIME NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            KEY idx_booking_service_events_branch (branch_id),
+            KEY idx_booking_service_events_booking (booking_id),
+            KEY idx_booking_service_events_service (booking_service_id),
+            KEY idx_booking_service_events_reference (booking_reference, service_line_reference),
+            KEY idx_booking_service_events_type_status (event_type, event_status),
+            KEY idx_booking_service_events_date (event_date),
+            KEY idx_booking_service_events_journal (journal_entry_id),
+            CONSTRAINT fk_booking_service_events_branch FOREIGN KEY (branch_id) REFERENCES branches (id),
+            CONSTRAINT fk_booking_service_events_booking FOREIGN KEY (booking_id) REFERENCES bookings (id) ON DELETE CASCADE,
+            CONSTRAINT fk_booking_service_events_service FOREIGN KEY (booking_service_id) REFERENCES booking_services (id) ON DELETE CASCADE,
+            CONSTRAINT fk_booking_service_events_journal FOREIGN KEY (journal_entry_id) REFERENCES journal_entries (id) ON DELETE SET NULL,
+            CONSTRAINT fk_booking_service_events_created_by FOREIGN KEY (created_by_user_id) REFERENCES users (id) ON DELETE SET NULL,
+            CONSTRAINT fk_booking_service_events_voided_by FOREIGN KEY (voided_by_user_id) REFERENCES users (id) ON DELETE SET NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci',
+    ],
+    'down' => [
+        'DROP TABLE IF EXISTS booking_service_events',
+    ],
+];

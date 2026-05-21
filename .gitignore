@@ -1,3 +1,36 @@
-
+## Browser / automation runtime profiles
+storage/chrome-headless-profile/
 storage/playwright-*/
 storage/playwright-recovery-profile/
+
+## Local environment and production secrets
+.env
+.env.*
+!.env.production.example
+launcher/launcher-config.json
+
+## Launcher dependencies and build artifacts
+launcher/node_modules/
+launcher/dist/
+launcher/*.exe
+launcher/*.blockmap
+
+## Composer local dependencies are installed during deployment
+vendor/
+
+## Local probe and scratch files
+storage/create_probe_session.php
+storage/recovery_probe.mjs
+storage/tmp_*.php
+
+## Runtime logs and PHP session artifacts
+storage/logs/*
+!storage/logs/.gitkeep
+storage/documents/*
+!storage/documents/.gitkeep
+storage/backups/*
+storage/**/*.log
+storage/**/sess_*
+
+## Local screenshots / ad hoc review artifacts
+backup code 2fa.png

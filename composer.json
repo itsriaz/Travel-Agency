@@ -6,5 +6,8 @@
         "php": "^8.2",
         "pragmarx/google2fa": "^8.0",
         "bacon/bacon-qr-code": "^2.0"
+    },
+    "scripts": {
+        "test:production": "php tests/production_readiness.php"
     }
 }

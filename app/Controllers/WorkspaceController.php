@@ -810,6 +810,78 @@ final class WorkspaceController extends BaseController
         }
     }
 
+    public function cancelService(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+
+        try {
+            $bookingId = (new ServiceWorkspaceService($this->app))->cancelService(
+                $_POST,
+                (int) Auth::id(),
+                Authorization::accessibleBranchIds()
+            );
+            Flash::success('Service cancellation recorded. Financial refund or penalty posting still needs the refund workflow.');
+            $this->redirect('/workspace?booking_id=' . $bookingId . '#dock-panel-services');
+        } catch (RuntimeException $exception) {
+            Flash::error($exception->getMessage());
+            $this->redirect('/workspace?booking_id=' . (int) ($_POST['booking_id'] ?? 0) . '#dock-panel-services');
+        }
+    }
+
+    public function refundService(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+
+        try {
+            $bookingId = (new ServiceWorkspaceService($this->app))->refundService(
+                $_POST,
+                (int) Auth::id(),
+                Authorization::accessibleBranchIds()
+            );
+            Flash::success('Service refund posted successfully.');
+            $this->redirect('/workspace?booking_id=' . $bookingId . '#dock-panel-services');
+        } catch (RuntimeException $exception) {
+            Flash::error($exception->getMessage());
+            $this->redirect('/workspace?booking_id=' . (int) ($_POST['booking_id'] ?? 0) . '#dock-panel-services');
+        }
+    }
+
+    public function settleCancellationFinancials(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+
+        try {
+            $bookingId = (new ServiceWorkspaceService($this->app))->settleCancellationFinancials(
+                $_POST,
+                (int) Auth::id(),
+                Authorization::accessibleBranchIds()
+            );
+            Flash::success('Cancellation financial adjustment posted successfully.');
+            $this->redirect('/workspace?booking_id=' . $bookingId . '#dock-panel-services');
+        } catch (RuntimeException $exception) {
+            Flash::error($exception->getMessage());
+            $this->redirect('/workspace?booking_id=' . (int) ($_POST['booking_id'] ?? 0) . '#dock-panel-services');
+        }
+    }
+
+    public function reissueService(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+
+        try {
+            $bookingId = (new ServiceWorkspaceService($this->app))->reissueService(
+                $_POST,
+                (int) Auth::id(),
+                Authorization::accessibleBranchIds()
+            );
+            Flash::success('Service reissue recorded successfully.');
+            $this->redirect('/workspace?booking_id=' . $bookingId . '#dock-panel-services');
+        } catch (RuntimeException $exception) {
+            Flash::error($exception->getMessage());
+            $this->redirect('/workspace?booking_id=' . (int) ($_POST['booking_id'] ?? 0) . '#dock-panel-services');
+        }
+    }
+
     public function saveReceipt(): never
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);
@@ -1646,6 +1718,50 @@ final class WorkspaceController extends BaseController
             'supplierCost' => (float) ($serviceRow['supplier_cost'] ?? 0),
             'saleAmount' => (float) ($serviceRow['sale_amount'] ?? 0),
             'ticketRemarks' => (string) ($serviceRow['ticket_remarks'] ?? ''),
+            'visaCountry' => (string) ($serviceRow['visa_country'] ?? ''),
+            'visaType' => (string) ($serviceRow['visa_type'] ?? ''),
+            'visaApplicationReference' => (string) ($serviceRow['visa_application_reference'] ?? ''),
+            'visaPassportNumber' => (string) ($serviceRow['visa_passport_number'] ?? ''),
+            'visaSubmissionDate' => (string) ($serviceRow['visa_submission_date'] ?? ''),
+            'visaIssueDate' => (string) ($serviceRow['visa_issue_date'] ?? ''),
+            'visaExpiryDate' => (string) ($serviceRow['visa_expiry_date'] ?? ''),
+            'visaStatus' => (string) ($serviceRow['visa_status'] ?? ''),
+            'visaRemarks' => (string) ($serviceRow['visa_remarks'] ?? ''),
+            'umrahPackageName' => (string) ($serviceRow['umrah_package_name'] ?? ''),
+            'umrahMofaReference' => (string) ($serviceRow['umrah_mofa_reference'] ?? ''),
+            'umrahDepartureDate' => (string) ($serviceRow['umrah_departure_date'] ?? ''),
+            'umrahReturnDate' => (string) ($serviceRow['umrah_return_date'] ?? ''),
+            'umrahHotelName' => (string) ($serviceRow['umrah_hotel_name'] ?? ''),
+            'umrahTransportNotes' => (string) ($serviceRow['umrah_transport_notes'] ?? ''),
+            'umrahRemarks' => (string) ($serviceRow['umrah_remarks'] ?? ''),
+            'hotelName' => (string) ($serviceRow['hotel_name'] ?? ''),
+            'hotelCity' => (string) ($serviceRow['hotel_city'] ?? ''),
+            'hotelConfirmationNumber' => (string) ($serviceRow['hotel_confirmation_number'] ?? ''),
+            'hotelCheckInDate' => (string) ($serviceRow['hotel_check_in_date'] ?? ''),
+            'hotelCheckOutDate' => (string) ($serviceRow['hotel_check_out_date'] ?? ''),
+            'hotelRoomType' => (string) ($serviceRow['hotel_room_type'] ?? ''),
+            'hotelGuestCount' => (int) ($serviceRow['hotel_guest_count'] ?? 0),
+            'hotelRemarks' => (string) ($serviceRow['hotel_remarks'] ?? ''),
+            'transportMode' => (string) ($serviceRow['transport_mode'] ?? ''),
+            'transportVehicleType' => (string) ($serviceRow['transport_vehicle_type'] ?? ''),
+            'transportPickupDate' => (string) ($serviceRow['transport_pickup_date'] ?? ''),
+            'transportPickupLocation' => (string) ($serviceRow['transport_pickup_location'] ?? ''),
+            'transportDropoffLocation' => (string) ($serviceRow['transport_dropoff_location'] ?? ''),
+            'transportDriverDetail' => (string) ($serviceRow['transport_driver_detail'] ?? ''),
+            'transportRouteNotes' => (string) ($serviceRow['transport_route_notes'] ?? ''),
+            'transportRemarks' => (string) ($serviceRow['transport_remarks'] ?? ''),
+            'tourName' => (string) ($serviceRow['tour_name'] ?? ''),
+            'tourDestination' => (string) ($serviceRow['tour_destination'] ?? ''),
+            'tourConfirmationNumber' => (string) ($serviceRow['tour_confirmation_number'] ?? ''),
+            'tourStartDate' => (string) ($serviceRow['tour_start_date'] ?? ''),
+            'tourEndDate' => (string) ($serviceRow['tour_end_date'] ?? ''),
+            'tourInclusions' => (string) ($serviceRow['tour_inclusions'] ?? ''),
+            'tourRemarks' => (string) ($serviceRow['tour_remarks'] ?? ''),
+            'otherLabel' => (string) ($serviceRow['other_label'] ?? ''),
+            'otherReferenceNumber' => (string) ($serviceRow['other_reference_number'] ?? ''),
+            'otherServiceDate' => (string) ($serviceRow['other_service_date'] ?? ''),
+            'otherProviderName' => (string) ($serviceRow['other_provider_name'] ?? ''),
+            'otherRemarks' => (string) ($serviceRow['other_remarks'] ?? ''),
             'isActive' => (int) ($serviceRow['is_active'] ?? 1),
             'profit' => $profit,
             'rowSpTotal' => $finalSalePrice,
@@ -1715,6 +1831,10 @@ final class WorkspaceController extends BaseController
 
     private function supplierAdvanceTraceLog(string $method, string $step, array $context): void
     {
+        if (! app_debug_tools_enabled()) {
+            return;
+        }
+
         try {
             $parts = [
                 'timestamp=' . date('Y-m-d H:i:s'),
@@ -1749,6 +1869,10 @@ final class WorkspaceController extends BaseController
 
     private function writeSupplierAdvanceTraceLine(string $line): void
     {
+        if (! app_debug_tools_enabled()) {
+            return;
+        }
+
         $logDirectory = dirname(__DIR__, 2) . '/storage/logs';
         $logFile = $logDirectory . '/supplier_advance_trace_v2.log';
 

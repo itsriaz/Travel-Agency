@@ -7,6 +7,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const feedback = station.querySelector('[data-workspace-feedback]');
     const quickSearch = station.querySelector('#workspace-search');
+    const quickSearchForm = station.querySelector('#workspace-search-form');
+    const quickSearchSubmit = station.querySelector('[data-workspace-search-submit]');
     const actionButtons = Array.from(station.querySelectorAll('[data-workspace-action]'));
     const invoiceForm = station.querySelector('.legacy-invoice-header');
     const serviceForm = station.querySelector('#legacy-service-form');
@@ -63,6 +65,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const supplierAdvanceSummary = station.querySelector('[data-supplier-advance-summary]');
     const supplierAdvanceMessage = station.querySelector('[data-supplier-advance-message]');
     const paymentForm = station.querySelector('.legacy-payment-strip');
+    const debugToolsEnabled = station.dataset.debugToolsEnabled === '1';
+    const canVoidFinancials = station.dataset.canVoidFinancials === '1';
     const commercialEditor = station.querySelector('[data-commercial-editor="active"]');
     const commercialLookup = (id, fallbackSelector = null) => {
         if (id) {
@@ -137,7 +141,7 @@ document.addEventListener('DOMContentLoaded', () => {
         Object.assign(commercialTrace, patch);
         renderCommercialDebug();
 
-        if (options.log !== false && typeof console !== 'undefined' && typeof console.debug === 'function') {
+        if (debugToolsEnabled && options.log !== false && typeof console !== 'undefined' && typeof console.debug === 'function') {
             console.debug('[commercial-debug]', patch);
         }
     };
@@ -153,16 +157,18 @@ document.addEventListener('DOMContentLoaded', () => {
             lastOverwriteSource: `${eventName}:${label}`,
         });
     };
-    window.addEventListener('error', (event) => {
-        updateCommercialTrace({
-            bootStatus: 'runtime-error',
-            lastEventFired: 'window.error',
-            firstFailurePoint: commercialTrace.firstFailurePoint === 'pending' || commercialTrace.firstFailurePoint === 'none yet'
-                ? `runtime error: ${event.message || 'unknown error'}`
-                : commercialTrace.firstFailurePoint,
-            lastOverwriteSource: `window.error @ ${event.filename || 'inline'}:${event.lineno || 0}`,
+    if (debugToolsEnabled) {
+        window.addEventListener('error', (event) => {
+            updateCommercialTrace({
+                bootStatus: 'runtime-error',
+                lastEventFired: 'window.error',
+                firstFailurePoint: commercialTrace.firstFailurePoint === 'pending' || commercialTrace.firstFailurePoint === 'none yet'
+                    ? `runtime error: ${event.message || 'unknown error'}`
+                    : commercialTrace.firstFailurePoint,
+                lastOverwriteSource: `window.error @ ${event.filename || 'inline'}:${event.lineno || 0}`,
+            });
         });
-    });
+    }
     renderCommercialDebug();
     const describeTarget = (target) => {
         if (!(target instanceof HTMLElement)) {
@@ -269,6 +275,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const paymentNewEntryButton = station.querySelector('[data-payment-action="new-payment"]');
     const paymentPrintReceiptButton = station.querySelector('[data-payment-action="print-receipt"]');
     const paymentLedgerLink = station.querySelector('[data-payment-action="customer-ledger"]');
+    const customerLedgerLinks = Array.from(station.querySelectorAll('[data-customer-ledger-link]'));
     const paymentReceiptDateInput = paymentForm?.elements?.namedItem('receipt_date') instanceof HTMLInputElement
         ? paymentForm.elements.namedItem('receipt_date')
         : null;
@@ -384,7 +391,7 @@ document.addEventListener('DOMContentLoaded', () => {
         window.clearTimeout(showFeedback.timerId);
         showFeedback.timerId = window.setTimeout(() => {
             feedback.classList.remove('is-visible');
-        }, 2600);
+        }, 4800);
     };
 
     const showExchangeFeedback = (message) => {
@@ -417,6 +424,25 @@ document.addEventListener('DOMContentLoaded', () => {
             if (field instanceof HTMLInputElement && field.type === 'text') {
                 field.select();
             }
+        }
+    };
+
+    const submitQuickSearch = () => {
+        if (!(quickSearchForm instanceof HTMLFormElement)) {
+            return;
+        }
+
+        const query = String(quickSearch?.value || '').trim();
+        if (quickSearch && query === '') {
+            quickSearch.focus();
+            showFeedback('Enter invoice number, customer, mobile, passport, PNR, or supplier first.');
+            return;
+        }
+
+        if (quickSearchSubmit instanceof HTMLButtonElement) {
+            quickSearchSubmit.click();
+        } else {
+            quickSearchForm.submit();
         }
     };
 
@@ -485,8 +511,23 @@ document.addEventListener('DOMContentLoaded', () => {
                     openNewCustomerModal();
                     break;
                 case 'search-booking':
-                    focusTarget('#workspace-search');
-                    showFeedback('Quick search is ready. Type booking no, traveler, mobile, passport, or supplier reference.');
+                    if (quickSearch && String(quickSearch.value || '').trim() !== '') {
+                        submitQuickSearch();
+                    } else {
+                        focusTarget('#workspace-search');
+                        showFeedback('Quick search is ready. Type booking no, traveler, mobile, passport, or supplier reference.');
+                    }
+                    break;
+                case 'edit-booking':
+                    if (currentBookingId() <= 0) {
+                        showFeedback('Open or save an invoice before editing.');
+                        break;
+                    }
+                    focusTarget('[data-customer-autocomplete-input]');
+                    showFeedback('Current invoice is editable. Update the fields and autosave will keep it current.');
+                    break;
+                case 'delete-booking':
+                    showFeedback('Delete is locked for production safety. Use void/cancel workflows so ledger history is preserved.');
                     break;
                 case 'add-traveler':
                     openCustomerPicker();
@@ -520,6 +561,14 @@ document.addEventListener('DOMContentLoaded', () => {
                         focusSelector: '[data-print-focus="preset"]',
                     });
                     break;
+                case 'invoice-status':
+                    focusTarget('select[name="booking_status"]');
+                    showFeedback('Invoice status is ready. Closed is allowed only after customer and supplier balances are clear.');
+                    break;
+                case 'detail-remarks':
+                    focusTarget('input[name="remarks"]');
+                    showFeedback('Invoice remarks are ready for detailed operational notes.');
+                    break;
                 case 'payment-history':
                     openPaymentHistoryModal();
                     break;
@@ -533,11 +582,21 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     if (quickSearch) {
-        quickSearch.addEventListener('keydown', (event) => {
-            if (event.key !== 'Enter') {
+        const handleQuickSearchEnter = (event) => {
+            const isEnter = event.key === 'Enter'
+                || event.code === 'Enter'
+                || event.code === 'NumpadEnter'
+                || event.keyCode === 13;
+            if (!isEnter) {
                 return;
             }
-        });
+
+            event.preventDefault();
+            submitQuickSearch();
+        };
+
+        quickSearch.addEventListener('keydown', handleQuickSearchEnter);
+        quickSearch.addEventListener('keypress', handleQuickSearchEnter);
     }
 
     document.addEventListener('keydown', (event) => {
@@ -1029,16 +1088,33 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     const updateCustomerLedgerTarget = (bookingId = currentBookingId()) => {
-        if (!(paymentLedgerLink instanceof HTMLAnchorElement)) {
+        if (customerLedgerLinks.length === 0 && !(paymentLedgerLink instanceof HTMLAnchorElement)) {
             return;
         }
 
         const normalizedBookingId = Number.parseInt(String(bookingId || 0), 10) || 0;
-        paymentLedgerLink.href = normalizedBookingId > 0
+        const ledgerUrl = normalizedBookingId > 0
             ? buildWorkspacePathUrl(`workspace/output?booking_id=${normalizedBookingId}&doc=account_statement`)
             : '#';
-        paymentLedgerLink.setAttribute('target', normalizedBookingId > 0 ? '_blank' : '');
-        paymentLedgerLink.setAttribute('rel', normalizedBookingId > 0 ? 'noopener' : '');
+
+        const links = customerLedgerLinks.length > 0
+            ? customerLedgerLinks
+            : [paymentLedgerLink].filter((link) => link instanceof HTMLAnchorElement);
+
+        links.forEach((link) => {
+            link.href = ledgerUrl;
+            link.classList.toggle('is-disabled', normalizedBookingId <= 0);
+            link.setAttribute('aria-disabled', normalizedBookingId > 0 ? 'false' : 'true');
+            if (normalizedBookingId > 0) {
+                link.setAttribute('target', '_blank');
+                link.setAttribute('rel', 'noopener');
+                link.removeAttribute('tabindex');
+            } else {
+                link.removeAttribute('target');
+                link.removeAttribute('rel');
+                link.tabIndex = -1;
+            }
+        });
     };
 
     const renderPaymentHistoryModal = () => {
@@ -1074,7 +1150,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             <button class="btn btn-sm" type="submit">Save Notes</button>
                         </form>`
                         : '-';
-                    const voidActionHtml = statusRaw !== 'void' && receiptId > 0 && bookingId > 0 && csrfToken !== ''
+                    const voidActionHtml = canVoidFinancials && statusRaw !== 'void' && receiptId > 0 && bookingId > 0 && csrfToken !== ''
                         ? `<form method="post" action="${escapeHtml(buildWorkspacePathUrl('workspace/payments/receipts/void'))}" onsubmit="return confirm('Void this receipt and reverse its allocations?');" style="display:grid;gap:6px;min-width:150px;">
                             <input type="hidden" name="_token" value="${escapeHtml(csrfToken)}">
                             <input type="hidden" name="booking_id" value="${bookingId}">
@@ -1838,115 +1914,119 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
-    window.debugWorkspaceCalc = () => {
-        const invoiceSnapshot = currentInvoiceSnapshot();
-        const invoiceCurrency = paymentCurrentInvoiceInput?.dataset.paymentCurrency || serviceFields.currency?.value || 'PKR';
-        const paymentCurrency = paymentCurrencySelect?.value || invoiceCurrency;
-        const taxTotal = currentServiceTaxTotal();
-        const airlinePayable = currentServicePayableAmount();
-        const suggestedFinalSalePrice = roundToTwo(defaultFinalSalePrice(airlinePayable));
-        const finalSaleRawValue = String(finalSalePriceInput?.value ?? '');
-        const finalSaleParsedValue = toNumber(finalSaleRawValue);
-        const manualOverride = finalSalePriceInput?.dataset.manualOverride === '1';
-        const staleZeroManualOverride = manualOverride
-            && finalSaleParsedValue <= 0.005
-            && suggestedFinalSalePrice > 0.005;
-        const openBalanceDetails = syncOpenBalanceDisplay(invoiceSnapshot.invoiceCurrency, invoiceSnapshot.invoiceBalance);
-        const balanceInPaymentCurrency = Math.max(toNumber(openBalanceDetails.openBalanceMap[paymentCurrency] || 0), 0);
+    if (debugToolsEnabled) {
+        window.debugWorkspaceCalc = () => {
+            const invoiceSnapshot = currentInvoiceSnapshot();
+            const invoiceCurrency = paymentCurrentInvoiceInput?.dataset.paymentCurrency || serviceFields.currency?.value || 'PKR';
+            const paymentCurrency = paymentCurrencySelect?.value || invoiceCurrency;
+            const taxTotal = currentServiceTaxTotal();
+            const airlinePayable = currentServicePayableAmount();
+            const suggestedFinalSalePrice = roundToTwo(defaultFinalSalePrice(airlinePayable));
+            const finalSaleRawValue = String(finalSalePriceInput?.value ?? '');
+            const finalSaleParsedValue = toNumber(finalSaleRawValue);
+            const manualOverride = finalSalePriceInput?.dataset.manualOverride === '1';
+            const staleZeroManualOverride = manualOverride
+                && finalSaleParsedValue <= 0.005
+                && suggestedFinalSalePrice > 0.005;
+            const openBalanceDetails = syncOpenBalanceDisplay(invoiceSnapshot.invoiceCurrency, invoiceSnapshot.invoiceBalance);
+            const balanceInPaymentCurrency = Math.max(toNumber(openBalanceDetails.openBalanceMap[paymentCurrency] || 0), 0);
 
-        const debugPayload = {
-            debugAvailable: true,
-            location: window.location.href,
-            serviceType: String(serviceTypeField?.value || ''),
-            isAirTicket: isAirTicketServiceType(),
-            selectors: {
-                sale: Boolean(serviceMetricInputs.sale),
-                tax: Boolean(serviceMetricInputs.tax),
-                vatInput: Boolean(serviceMetricInputs.vatInput),
-                spyi: Boolean(serviceMetricInputs.spyiAmount),
-                aqYrPk: Boolean(serviceMetricInputs.aqYrPkAmount),
-                yq: Boolean(serviceMetricInputs.yqAmount),
-                oth: Boolean(serviceMetricInputs.othAmount),
-                serviceCharge: Boolean(serviceMetricInputs.serviceCharge),
-                vatOutput: Boolean(serviceMetricInputs.vat),
-                discount: Boolean(serviceDiscountInput),
-                finalSale: Boolean(finalSalePriceInput),
-                airlinePayable: Boolean(airlinePayableField),
-                invoiceAmount: Boolean(paymentCurrentInvoiceInput),
-                invoiceBalance: Boolean(paymentCurrentBalanceInput),
-            },
-            rawValues: {
-                mktFare: String(serviceMetricInputs.sale?.value ?? ''),
-                taxes: String(serviceMetricInputs.tax?.value ?? ''),
-                vatInput: String(serviceMetricInputs.vatInput?.value ?? ''),
-                spyi: String(serviceMetricInputs.spyiAmount?.value ?? ''),
-                aqYrPk: String(serviceMetricInputs.aqYrPkAmount?.value ?? ''),
-                yq: String(serviceMetricInputs.yqAmount?.value ?? ''),
-                oth: String(serviceMetricInputs.othAmount?.value ?? ''),
-                serviceAmount: String(serviceMetricInputs.serviceCharge?.value ?? ''),
-                vatOutput: String(serviceMetricInputs.vat?.value ?? ''),
-                discountAmount: String(serviceDiscountInput?.value ?? ''),
-                purchaseCost: String(serviceMetricInputs.cost?.value ?? ''),
-                finalSaleAmount: finalSaleRawValue,
-                invoiceAmount: String(paymentCurrentInvoiceInput?.value ?? ''),
-                invoiceBalance: String(paymentCurrentBalanceInput?.value ?? ''),
-                paidOnThisInvoice: String(paymentAlreadyReceivedInput?.value ?? ''),
-            },
-            parsedValues: {
-                mktFare: toNumber(serviceMetricInputs.sale?.value),
-                taxes: toNumber(serviceMetricInputs.tax?.value),
-                vatInput: toNumber(serviceMetricInputs.vatInput?.value),
-                spyi: toNumber(serviceMetricInputs.spyiAmount?.value),
-                aqYrPk: toNumber(serviceMetricInputs.aqYrPkAmount?.value),
-                yq: toNumber(serviceMetricInputs.yqAmount?.value),
-                oth: toNumber(serviceMetricInputs.othAmount?.value),
-                serviceAmount: toNumber(serviceMetricInputs.serviceCharge?.value),
-                vatOutput: toNumber(serviceMetricInputs.vat?.value),
-                discountAmount: toNumber(serviceDiscountInput?.value),
-                purchaseCost: toNumber(serviceMetricInputs.cost?.value),
-                finalSaleAmount: finalSaleParsedValue,
-                paidOnThisInvoice: Math.max(readDisplayBackedAmount(
-                    paymentAlreadyReceivedInput,
-                    paymentAlreadyReceivedInput?.dataset.paymentPersistedReceived || 0
-                ), 0),
-            },
-            calculations: {
-                taxTotal,
-                frTx: airlinePayable,
-                finalSaleSuggested: suggestedFinalSalePrice,
-                fcReceivable: finalSaleParsedValue,
-                invoiceAmount: invoiceSnapshot.invoiceAmount,
-                invoiceBalance: invoiceSnapshot.invoiceBalance,
-                balanceInPaymentCurrency,
-                openBalanceMap: openBalanceDetails.openBalanceMap,
-            },
-            manualFinalSaleOverride: {
-                active: manualOverride,
-                staleZeroOverride: staleZeroManualOverride,
-                reason: manualOverride
-                    ? (staleZeroManualOverride ? 'stale zero override' : 'user edited final sale')
-                    : 'auto calculated',
-            },
-            eventBindings: {
-                listenerAttached: commercialTrace.listenerAttached,
-                lastEventFired: commercialTrace.lastEventFired,
-            },
-            autosave: {
-                lastOverwriteSource: commercialTrace.lastOverwriteSource,
-                lastFieldWritten: commercialTrace.lastFieldWritten,
-                autosavedReceivableAmount,
-                autosavedHasSavedService,
-                autosavedPaymentEligible,
-            },
-            commercialTrace: { ...commercialTrace },
+            const debugPayload = {
+                debugAvailable: true,
+                location: window.location.href,
+                serviceType: String(serviceTypeField?.value || ''),
+                isAirTicket: isAirTicketServiceType(),
+                selectors: {
+                    sale: Boolean(serviceMetricInputs.sale),
+                    tax: Boolean(serviceMetricInputs.tax),
+                    vatInput: Boolean(serviceMetricInputs.vatInput),
+                    spyi: Boolean(serviceMetricInputs.spyiAmount),
+                    aqYrPk: Boolean(serviceMetricInputs.aqYrPkAmount),
+                    yq: Boolean(serviceMetricInputs.yqAmount),
+                    oth: Boolean(serviceMetricInputs.othAmount),
+                    serviceCharge: Boolean(serviceMetricInputs.serviceCharge),
+                    vatOutput: Boolean(serviceMetricInputs.vat),
+                    discount: Boolean(serviceDiscountInput),
+                    finalSale: Boolean(finalSalePriceInput),
+                    airlinePayable: Boolean(airlinePayableField),
+                    invoiceAmount: Boolean(paymentCurrentInvoiceInput),
+                    invoiceBalance: Boolean(paymentCurrentBalanceInput),
+                },
+                rawValues: {
+                    mktFare: String(serviceMetricInputs.sale?.value ?? ''),
+                    taxes: String(serviceMetricInputs.tax?.value ?? ''),
+                    vatInput: String(serviceMetricInputs.vatInput?.value ?? ''),
+                    spyi: String(serviceMetricInputs.spyiAmount?.value ?? ''),
+                    aqYrPk: String(serviceMetricInputs.aqYrPkAmount?.value ?? ''),
+                    yq: String(serviceMetricInputs.yqAmount?.value ?? ''),
+                    oth: String(serviceMetricInputs.othAmount?.value ?? ''),
+                    serviceAmount: String(serviceMetricInputs.serviceCharge?.value ?? ''),
+                    vatOutput: String(serviceMetricInputs.vat?.value ?? ''),
+                    discountAmount: String(serviceDiscountInput?.value ?? ''),
+                    purchaseCost: String(serviceMetricInputs.cost?.value ?? ''),
+                    finalSaleAmount: finalSaleRawValue,
+                    invoiceAmount: String(paymentCurrentInvoiceInput?.value ?? ''),
+                    invoiceBalance: String(paymentCurrentBalanceInput?.value ?? ''),
+                    paidOnThisInvoice: String(paymentAlreadyReceivedInput?.value ?? ''),
+                },
+                parsedValues: {
+                    mktFare: toNumber(serviceMetricInputs.sale?.value),
+                    taxes: toNumber(serviceMetricInputs.tax?.value),
+                    vatInput: toNumber(serviceMetricInputs.vatInput?.value),
+                    spyi: toNumber(serviceMetricInputs.spyiAmount?.value),
+                    aqYrPk: toNumber(serviceMetricInputs.aqYrPkAmount?.value),
+                    yq: toNumber(serviceMetricInputs.yqAmount?.value),
+                    oth: toNumber(serviceMetricInputs.othAmount?.value),
+                    serviceAmount: toNumber(serviceMetricInputs.serviceCharge?.value),
+                    vatOutput: toNumber(serviceMetricInputs.vat?.value),
+                    discountAmount: toNumber(serviceDiscountInput?.value),
+                    purchaseCost: toNumber(serviceMetricInputs.cost?.value),
+                    finalSaleAmount: finalSaleParsedValue,
+                    paidOnThisInvoice: Math.max(readDisplayBackedAmount(
+                        paymentAlreadyReceivedInput,
+                        paymentAlreadyReceivedInput?.dataset.paymentPersistedReceived || 0
+                    ), 0),
+                },
+                calculations: {
+                    taxTotal,
+                    frTx: airlinePayable,
+                    finalSaleSuggested: suggestedFinalSalePrice,
+                    fcReceivable: finalSaleParsedValue,
+                    invoiceAmount: invoiceSnapshot.invoiceAmount,
+                    invoiceBalance: invoiceSnapshot.invoiceBalance,
+                    balanceInPaymentCurrency,
+                    openBalanceMap: openBalanceDetails.openBalanceMap,
+                },
+                manualFinalSaleOverride: {
+                    active: manualOverride,
+                    staleZeroOverride: staleZeroManualOverride,
+                    reason: manualOverride
+                        ? (staleZeroManualOverride ? 'stale zero override' : 'user edited final sale')
+                        : 'auto calculated',
+                },
+                eventBindings: {
+                    listenerAttached: commercialTrace.listenerAttached,
+                    lastEventFired: commercialTrace.lastEventFired,
+                },
+                autosave: {
+                    lastOverwriteSource: commercialTrace.lastOverwriteSource,
+                    lastFieldWritten: commercialTrace.lastFieldWritten,
+                    autosavedReceivableAmount,
+                    autosavedHasSavedService,
+                    autosavedPaymentEligible,
+                },
+                commercialTrace: { ...commercialTrace },
+            };
+
+            if (typeof console !== 'undefined' && typeof console.debug === 'function') {
+                console.debug('debugWorkspaceCalc', debugPayload);
+            }
+
+            return debugPayload;
         };
-
-        if (typeof console !== 'undefined' && typeof console.debug === 'function') {
-            console.debug('debugWorkspaceCalc', debugPayload);
-        }
-
-        return debugPayload;
-    };
+    } else {
+        window.debugWorkspaceCalc = undefined;
+    }
 
     const buildPaymentSubmitDebugState = () => ({
         saveButtonFound: Boolean(paymentPrimarySaveButton),
@@ -1965,14 +2045,18 @@ document.addEventListener('DOMContentLoaded', () => {
         lastBackendError: paymentSubmitDebug.lastBackendError,
     });
 
-    window.debugPaymentSubmit = () => {
-        const snapshot = buildPaymentSubmitDebugState();
-        Object.assign(paymentSubmitDebug, snapshot);
-        if (typeof console !== 'undefined' && typeof console.debug === 'function') {
-            console.debug('debugPaymentSubmit', paymentSubmitDebug);
-        }
-        return { ...paymentSubmitDebug };
-    };
+    if (debugToolsEnabled) {
+        window.debugPaymentSubmit = () => {
+            const snapshot = buildPaymentSubmitDebugState();
+            Object.assign(paymentSubmitDebug, snapshot);
+            if (typeof console !== 'undefined' && typeof console.debug === 'function') {
+                console.debug('debugPaymentSubmit', paymentSubmitDebug);
+            }
+            return { ...paymentSubmitDebug };
+        };
+    } else {
+        window.debugPaymentSubmit = undefined;
+    }
 
     if (quickReceiveInput && receivedNowInput) {
         quickReceiveInput.addEventListener('input', () => {
@@ -2626,6 +2710,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (control instanceof HTMLButtonElement || control instanceof HTMLInputElement || control instanceof HTMLSelectElement || control instanceof HTMLTextAreaElement) {
                     control.disabled = false;
                     control.dataset.workflowOriginalDisabled = '0';
+                } else if (control instanceof HTMLAnchorElement) {
+                    control.classList.remove('is-disabled');
+                    control.setAttribute('aria-disabled', 'false');
+                    control.removeAttribute('tabindex');
                 }
             });
         }
@@ -2817,10 +2905,29 @@ document.addEventListener('DOMContentLoaded', () => {
     const activeServiceReference = station.querySelector('[data-active-service-reference]');
     const activeServiceType = station.querySelector('[data-active-service-type]');
     const airTicketPanel = station.querySelector('[data-air-ticket-panel]');
+    const airOnlyFields = Array.from(station.querySelectorAll('[data-air-only]'));
+    const subtypePanels = Array.from(station.querySelectorAll('[data-service-subtype-panel]'));
+    const serviceRefLabel = station.querySelector('[data-service-ref-label]');
+    const serviceSecondRefLabel = station.querySelector('[data-service-second-ref-label]');
+    const serviceSupplierLabel = station.querySelector('[data-service-supplier-label]');
     const serviceResetButton = station.querySelector('[data-service-reset]');
     const serviceSubmitButton = station.querySelector('[data-service-submit]');
     const serviceDeactivateId = station.querySelector('[data-service-deactivate-id]');
     const serviceDeactivateButton = station.querySelector('[data-service-deactivate-button]');
+    const serviceCancelId = station.querySelector('[data-service-cancel-id]');
+    const serviceCancelButton = station.querySelector('[data-service-cancel-button]');
+    const serviceRefundId = station.querySelector('[data-service-refund-id]');
+    const serviceRefundButton = station.querySelector('[data-service-refund-button]');
+    const serviceSettlementId = station.querySelector('[data-service-settlement-id]');
+    const serviceSettlementButton = station.querySelector('[data-service-settlement-button]');
+    const serviceReissueId = station.querySelector('[data-service-reissue-id]');
+    const serviceReissueButton = station.querySelector('[data-service-reissue-button]');
+    const serviceEventBars = {
+        cancel: station.querySelector('[data-service-event-bar="cancel"]'),
+        refund: station.querySelector('[data-service-event-bar="refund"]'),
+        settlement: station.querySelector('[data-service-event-bar="settlement"]'),
+        reissue: station.querySelector('[data-service-event-bar="reissue"]'),
+    };
     const lossAmountPanel = station.querySelector('[data-loss-amount-panel]');
     const lossReasonPanel = station.querySelector('[data-loss-reason-panel]');
     const chips = Array.from(station.querySelectorAll('.service-type-chip'));
@@ -2986,6 +3093,52 @@ document.addEventListener('DOMContentLoaded', () => {
         saleAmount: station.querySelector('[data-ticket-metric="sale_amount"]'),
     };
     const ticketRouteDisplay = station.querySelector('[data-ticket-route-display]');
+    const subtypeFields = {
+        visaCountry: station.querySelector('[data-subtype-field="visaCountry"]'),
+        visaType: station.querySelector('[data-subtype-field="visaType"]'),
+        visaApplicationReference: station.querySelector('[data-subtype-field="visaApplicationReference"]'),
+        visaPassportNumber: station.querySelector('[data-subtype-field="visaPassportNumber"]'),
+        visaSubmissionDate: station.querySelector('[data-subtype-field="visaSubmissionDate"]'),
+        visaIssueDate: station.querySelector('[data-subtype-field="visaIssueDate"]'),
+        visaExpiryDate: station.querySelector('[data-subtype-field="visaExpiryDate"]'),
+        visaStatus: station.querySelector('[data-subtype-field="visaStatus"]'),
+        visaRemarks: station.querySelector('[data-subtype-field="visaRemarks"]'),
+        umrahPackageName: station.querySelector('[data-subtype-field="umrahPackageName"]'),
+        umrahMofaReference: station.querySelector('[data-subtype-field="umrahMofaReference"]'),
+        umrahDepartureDate: station.querySelector('[data-subtype-field="umrahDepartureDate"]'),
+        umrahReturnDate: station.querySelector('[data-subtype-field="umrahReturnDate"]'),
+        umrahHotelName: station.querySelector('[data-subtype-field="umrahHotelName"]'),
+        umrahTransportNotes: station.querySelector('[data-subtype-field="umrahTransportNotes"]'),
+        umrahRemarks: station.querySelector('[data-subtype-field="umrahRemarks"]'),
+        hotelName: station.querySelector('[data-subtype-field="hotelName"]'),
+        hotelCity: station.querySelector('[data-subtype-field="hotelCity"]'),
+        hotelConfirmationNumber: station.querySelector('[data-subtype-field="hotelConfirmationNumber"]'),
+        hotelCheckInDate: station.querySelector('[data-subtype-field="hotelCheckInDate"]'),
+        hotelCheckOutDate: station.querySelector('[data-subtype-field="hotelCheckOutDate"]'),
+        hotelRoomType: station.querySelector('[data-subtype-field="hotelRoomType"]'),
+        hotelGuestCount: station.querySelector('[data-subtype-field="hotelGuestCount"]'),
+        hotelRemarks: station.querySelector('[data-subtype-field="hotelRemarks"]'),
+        transportMode: station.querySelector('[data-subtype-field="transportMode"]'),
+        transportVehicleType: station.querySelector('[data-subtype-field="transportVehicleType"]'),
+        transportPickupDate: station.querySelector('[data-subtype-field="transportPickupDate"]'),
+        transportPickupLocation: station.querySelector('[data-subtype-field="transportPickupLocation"]'),
+        transportDropoffLocation: station.querySelector('[data-subtype-field="transportDropoffLocation"]'),
+        transportDriverDetail: station.querySelector('[data-subtype-field="transportDriverDetail"]'),
+        transportRouteNotes: station.querySelector('[data-subtype-field="transportRouteNotes"]'),
+        transportRemarks: station.querySelector('[data-subtype-field="transportRemarks"]'),
+        tourName: station.querySelector('[data-subtype-field="tourName"]'),
+        tourDestination: station.querySelector('[data-subtype-field="tourDestination"]'),
+        tourConfirmationNumber: station.querySelector('[data-subtype-field="tourConfirmationNumber"]'),
+        tourStartDate: station.querySelector('[data-subtype-field="tourStartDate"]'),
+        tourEndDate: station.querySelector('[data-subtype-field="tourEndDate"]'),
+        tourInclusions: station.querySelector('[data-subtype-field="tourInclusions"]'),
+        tourRemarks: station.querySelector('[data-subtype-field="tourRemarks"]'),
+        otherLabel: station.querySelector('[data-subtype-field="otherLabel"]'),
+        otherReferenceNumber: station.querySelector('[data-subtype-field="otherReferenceNumber"]'),
+        otherServiceDate: station.querySelector('[data-subtype-field="otherServiceDate"]'),
+        otherProviderName: station.querySelector('[data-subtype-field="otherProviderName"]'),
+        otherRemarks: station.querySelector('[data-subtype-field="otherRemarks"]'),
+    };
     const serviceScaffoldFields = [
         ticketMetricFields.fare,
         serviceMetricInputs.sale,
@@ -3070,6 +3223,50 @@ document.addEventListener('DOMContentLoaded', () => {
         ticketTax: toNumber(ticketMetricFields.tax?.value || 0),
         ticketVat: toNumber(ticketMetricFields.vat?.value || 0),
         ticketCommission: toNumber(ticketMetricFields.commission?.value || 0),
+        visaCountry: subtypeFields.visaCountry?.value || '',
+        visaType: subtypeFields.visaType?.value || '',
+        visaApplicationReference: subtypeFields.visaApplicationReference?.value || '',
+        visaPassportNumber: subtypeFields.visaPassportNumber?.value || '',
+        visaSubmissionDate: subtypeFields.visaSubmissionDate?.value || '',
+        visaIssueDate: subtypeFields.visaIssueDate?.value || '',
+        visaExpiryDate: subtypeFields.visaExpiryDate?.value || '',
+        visaStatus: subtypeFields.visaStatus?.value || '',
+        visaRemarks: subtypeFields.visaRemarks?.value || '',
+        umrahPackageName: subtypeFields.umrahPackageName?.value || '',
+        umrahMofaReference: subtypeFields.umrahMofaReference?.value || '',
+        umrahDepartureDate: subtypeFields.umrahDepartureDate?.value || '',
+        umrahReturnDate: subtypeFields.umrahReturnDate?.value || '',
+        umrahHotelName: subtypeFields.umrahHotelName?.value || '',
+        umrahTransportNotes: subtypeFields.umrahTransportNotes?.value || '',
+        umrahRemarks: subtypeFields.umrahRemarks?.value || '',
+        hotelName: subtypeFields.hotelName?.value || '',
+        hotelCity: subtypeFields.hotelCity?.value || '',
+        hotelConfirmationNumber: subtypeFields.hotelConfirmationNumber?.value || '',
+        hotelCheckInDate: subtypeFields.hotelCheckInDate?.value || '',
+        hotelCheckOutDate: subtypeFields.hotelCheckOutDate?.value || '',
+        hotelRoomType: subtypeFields.hotelRoomType?.value || '',
+        hotelGuestCount: toNumber(subtypeFields.hotelGuestCount?.value || 0),
+        hotelRemarks: subtypeFields.hotelRemarks?.value || '',
+        transportMode: subtypeFields.transportMode?.value || '',
+        transportVehicleType: subtypeFields.transportVehicleType?.value || '',
+        transportPickupDate: subtypeFields.transportPickupDate?.value || '',
+        transportPickupLocation: subtypeFields.transportPickupLocation?.value || '',
+        transportDropoffLocation: subtypeFields.transportDropoffLocation?.value || '',
+        transportDriverDetail: subtypeFields.transportDriverDetail?.value || '',
+        transportRouteNotes: subtypeFields.transportRouteNotes?.value || '',
+        transportRemarks: subtypeFields.transportRemarks?.value || '',
+        tourName: subtypeFields.tourName?.value || '',
+        tourDestination: subtypeFields.tourDestination?.value || '',
+        tourConfirmationNumber: subtypeFields.tourConfirmationNumber?.value || '',
+        tourStartDate: subtypeFields.tourStartDate?.value || '',
+        tourEndDate: subtypeFields.tourEndDate?.value || '',
+        tourInclusions: subtypeFields.tourInclusions?.value || '',
+        tourRemarks: subtypeFields.tourRemarks?.value || '',
+        otherLabel: subtypeFields.otherLabel?.value || '',
+        otherReferenceNumber: subtypeFields.otherReferenceNumber?.value || '',
+        otherServiceDate: subtypeFields.otherServiceDate?.value || '',
+        otherProviderName: subtypeFields.otherProviderName?.value || '',
+        otherRemarks: subtypeFields.otherRemarks?.value || '',
     });
 
     const primeScaffoldField = (field) => {
@@ -3284,6 +3481,11 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
+    const isDraftServiceLineActive = () => {
+        const serviceId = Number.parseInt(String(serviceFields.serviceId?.value || '0'), 10) || 0;
+        return serviceId <= 0;
+    };
+
     const currentServiceBranchId = () => {
         const bookingIdField = serviceForm?.elements?.namedItem('booking_id');
         const branchIdField = serviceForm?.elements?.namedItem('auto_branch_id');
@@ -3299,6 +3501,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const refreshSupplierAdvanceBalance = async () => {
         if (supplierAdvanceLookupUrl === '') {
+            hideSupplierAdvanceNote();
+            return;
+        }
+
+        if (!isDraftServiceLineActive()) {
             hideSupplierAdvanceNote();
             return;
         }
@@ -3374,6 +3581,63 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const isAirTicketServiceType = () => String(serviceTypeField?.value || '').trim().toLowerCase() === 'air ticket';
 
+    const fillSubtypeFieldsFromServiceLine = (serviceLine = {}) => {
+        Object.entries(subtypeFields).forEach(([key, field]) => {
+            fillValue(field, serviceLine[key] ?? '');
+        });
+    };
+
+    const clearSubtypeFields = () => {
+        Object.entries(subtypeFields).forEach(([key, field]) => {
+            fillValue(field, key === 'hotelGuestCount' ? 0 : '');
+        });
+    };
+
+    const serviceLineReferenceLabel = (serviceLine = {}) => {
+        const type = String(serviceLine.type || 'air ticket');
+        if (type === 'air ticket') {
+            return serviceLine.ticketNumber || serviceLine.lineNumber || 'SV-DRAFT';
+        }
+
+        return serviceLine.ticketNumber
+            || serviceLine.visaApplicationReference
+            || serviceLine.umrahMofaReference
+            || serviceLine.hotelConfirmationNumber
+            || serviceLine.tourConfirmationNumber
+            || serviceLine.otherReferenceNumber
+            || serviceLine.lineNumber
+            || 'SV-DRAFT';
+    };
+
+    const serviceLineDetailLabel = (serviceLine = {}) => {
+        const type = String(serviceLine.type || 'air ticket');
+        if (type === 'air ticket') {
+            return [serviceLine.sectorFrom || '', serviceLine.sectorTo || ''].filter(Boolean).join('-') || serviceLine.remarks || '';
+        }
+
+        if (type === 'visa') {
+            return [serviceLine.visaCountry || '', serviceLine.visaType || '', serviceLine.visaStatus || ''].filter(Boolean).join(' / ') || serviceLine.remarks || '';
+        }
+
+        if (type === 'umrah') {
+            return [serviceLine.umrahPackageName || '', serviceLine.umrahHotelName || ''].filter(Boolean).join(' / ') || serviceLine.remarks || '';
+        }
+
+        if (type === 'hotel') {
+            return [serviceLine.hotelName || '', serviceLine.hotelCity || ''].filter(Boolean).join(' / ') || serviceLine.remarks || '';
+        }
+
+        if (type === 'transport') {
+            return [serviceLine.transportPickupLocation || '', serviceLine.transportDropoffLocation || ''].filter(Boolean).join(' -> ') || serviceLine.transportRouteNotes || serviceLine.remarks || '';
+        }
+
+        if (type === 'tourism') {
+            return [serviceLine.tourName || '', serviceLine.tourDestination || ''].filter(Boolean).join(' / ') || serviceLine.remarks || '';
+        }
+
+        return [serviceLine.otherLabel || '', serviceLine.otherProviderName || ''].filter(Boolean).join(' / ') || serviceLine.remarks || '';
+    };
+
     const currentServicePayableAmount = () => {
         const isAirTicket = isAirTicketServiceType();
 
@@ -3432,6 +3696,24 @@ document.addEventListener('DOMContentLoaded', () => {
         const isAirTicket = serviceTypeField.value === 'air ticket';
         if (airTicketPanel) {
             airTicketPanel.style.display = isAirTicket ? 'block' : 'none';
+        }
+        airOnlyFields.forEach((field) => {
+            field.hidden = !isAirTicket;
+            field.setAttribute('aria-hidden', isAirTicket ? 'false' : 'true');
+        });
+        subtypePanels.forEach((panel) => {
+            const active = !isAirTicket && panel.dataset.serviceSubtypePanel === serviceTypeField.value;
+            panel.hidden = !active;
+            panel.setAttribute('aria-hidden', active ? 'false' : 'true');
+        });
+        if (serviceRefLabel) {
+            serviceRefLabel.textContent = isAirTicket ? 'Ticket No. / Ref No.' : 'Service Ref.';
+        }
+        if (serviceSecondRefLabel) {
+            serviceSecondRefLabel.textContent = isAirTicket ? 'PNR.#' : 'Secondary Ref.';
+        }
+        if (serviceSupplierLabel) {
+            serviceSupplierLabel.textContent = isAirTicket ? 'Tkt.Purchase From' : 'Supplier / Provider';
         }
         setActiveTypeChip(serviceTypeField.value);
         if (activeServiceType) {
@@ -3550,7 +3832,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const airlinePayable = currentServicePayableAmount();
         const otherPayable = 0;
         const currentManualOverride = finalSalePriceInput.dataset.manualOverride === '1';
-        const suggestedFinalSalePrice = defaultFinalSalePrice(airlinePayable);
+        const suggestedFinalSalePrice = defaultFinalSalePrice(isAirTicket ? airlinePayable : toNumber(serviceMetricInputs.sale?.value));
         updateCommercialTrace({
             lastMktFareRead: toNumber(serviceMetricInputs.sale?.value).toFixed(2),
             lastServAmountRead: toNumber(serviceMetricInputs.serviceCharge?.value).toFixed(2),
@@ -3683,6 +3965,28 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const updateServiceActionState = (serviceLine) => {
         const isPersisted = Number.parseInt(String(serviceLine.serviceId || 0), 10) > 0;
+        const status = String(serviceLine.status || serviceLine.displayStatus || '').trim().toLowerCase();
+        const type = String(serviceLine.type || '').trim().toLowerCase();
+
+        if (isPersisted) {
+            hideSupplierAdvanceNote();
+        }
+
+        if (serviceEventBars.cancel) {
+            serviceEventBars.cancel.hidden = !isPersisted || status === 'cancelled';
+        }
+
+        if (serviceEventBars.refund) {
+            serviceEventBars.refund.hidden = !isPersisted;
+        }
+
+        if (serviceEventBars.settlement) {
+            serviceEventBars.settlement.hidden = !isPersisted || status !== 'cancelled';
+        }
+
+        if (serviceEventBars.reissue) {
+            serviceEventBars.reissue.hidden = !isPersisted || type !== 'air ticket';
+        }
 
         if (serviceSubmitButton) {
             serviceSubmitButton.textContent = isPersisted ? 'Update Service' : (hasPersistedServices() ? 'Save New Service' : 'Save First Service');
@@ -3698,6 +4002,38 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (serviceDeactivateButton) {
             serviceDeactivateButton.disabled = !isPersisted;
+        }
+
+        if (serviceCancelId) {
+            serviceCancelId.value = isPersisted ? String(serviceLine.serviceId || '') : '';
+        }
+
+        if (serviceCancelButton) {
+            serviceCancelButton.disabled = !isPersisted || status === 'cancelled';
+        }
+
+        if (serviceRefundId) {
+            serviceRefundId.value = isPersisted ? String(serviceLine.serviceId || '') : '';
+        }
+
+        if (serviceRefundButton) {
+            serviceRefundButton.disabled = !isPersisted;
+        }
+
+        if (serviceSettlementId) {
+            serviceSettlementId.value = isPersisted ? String(serviceLine.serviceId || '') : '';
+        }
+
+        if (serviceSettlementButton) {
+            serviceSettlementButton.disabled = !isPersisted || status !== 'cancelled';
+        }
+
+        if (serviceReissueId) {
+            serviceReissueId.value = isPersisted ? String(serviceLine.serviceId || '') : '';
+        }
+
+        if (serviceReissueButton) {
+            serviceReissueButton.disabled = !isPersisted || type !== 'air ticket';
         }
     };
 
@@ -3763,6 +4099,7 @@ document.addEventListener('DOMContentLoaded', () => {
         fillValue(ticketMetricFields.commission, serviceLine.ticketCommission ?? 0);
         fillValue(ticketMetricFields.supplierCost, serviceLine.supplierCost ?? 0);
         fillValue(ticketMetricFields.saleAmount, serviceLine.saleAmount ?? 0);
+        fillSubtypeFieldsFromServiceLine(serviceLine);
         syncTicketCommercialMirrors();
         syncServiceCurrencyMirror();
         scheduleSupplierAdvanceBalanceRefresh(0);
@@ -3834,6 +4171,7 @@ document.addEventListener('DOMContentLoaded', () => {
         fillValue(ticketMetricFields.commission, 0);
         fillValue(ticketMetricFields.supplierCost, 0);
         fillValue(ticketMetricFields.saleAmount, 0);
+        clearSubtypeFields();
         syncTicketCommercialMirrors();
         syncServiceCurrencyMirror();
         scheduleSupplierAdvanceBalanceRefresh(0);
@@ -3860,8 +4198,8 @@ document.addEventListener('DOMContentLoaded', () => {
         serviceTableBody.innerHTML = '';
         serviceLines.forEach((serviceLine, serviceIndex) => {
             const row = document.createElement('tr');
-            const lineTicket = serviceLine.ticketNumber || serviceLine.lineNumber || 'SV-DRAFT';
-            const lineSector = [serviceLine.sectorFrom || '', serviceLine.sectorTo || ''].filter(Boolean).join('-');
+            const lineTicket = serviceLineReferenceLabel(serviceLine);
+            const lineSector = serviceLineDetailLabel(serviceLine);
             const lineFare = toNumber(serviceLine.fare) > 0.005 ? toNumber(serviceLine.fare) : toNumber(serviceLine.salePrice);
             const lineTaxes = toNumber(serviceLine.spyiAmount)
                 + toNumber(serviceLine.aqYrPkAmount)
@@ -4084,7 +4422,11 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     if (serviceTypeField) {
-        serviceTypeField.addEventListener('change', refreshSubtypeVisibility);
+        serviceTypeField.addEventListener('change', () => {
+            refreshSubtypeVisibility();
+            refreshProfit('change:service_type');
+            scheduleServiceAutosave();
+        });
     }
 
     if (serviceFields.currency) {
@@ -4220,6 +4562,50 @@ document.addEventListener('DOMContentLoaded', () => {
             'due_date',
             'service_status',
             'loss_reason',
+            'visa_country',
+            'visa_type',
+            'visa_application_reference',
+            'visa_passport_number',
+            'visa_submission_date',
+            'visa_issue_date',
+            'visa_expiry_date',
+            'visa_status',
+            'visa_remarks',
+            'umrah_package_name',
+            'umrah_mofa_reference',
+            'umrah_departure_date',
+            'umrah_return_date',
+            'umrah_hotel_name',
+            'umrah_transport_notes',
+            'umrah_remarks',
+            'hotel_name',
+            'hotel_city',
+            'hotel_confirmation_number',
+            'hotel_check_in_date',
+            'hotel_check_out_date',
+            'hotel_room_type',
+            'hotel_guest_count',
+            'hotel_remarks',
+            'transport_mode',
+            'transport_vehicle_type',
+            'transport_pickup_date',
+            'transport_pickup_location',
+            'transport_dropoff_location',
+            'transport_driver_detail',
+            'transport_route_notes',
+            'transport_remarks',
+            'tour_name',
+            'tour_destination',
+            'tour_confirmation_number',
+            'tour_start_date',
+            'tour_end_date',
+            'tour_inclusions',
+            'tour_remarks',
+            'other_label',
+            'other_reference_number',
+            'other_service_date',
+            'other_provider_name',
+            'other_remarks',
         ]);
 
         const isServiceAutosaveTarget = (target) => {
@@ -5725,7 +6111,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    if (serviceForm) {
+    if (serviceForm && isDraftServiceLineActive()) {
         scheduleSupplierAdvanceBalanceRefresh(0);
     }
 

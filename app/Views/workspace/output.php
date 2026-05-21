@@ -13,7 +13,7 @@ $outputType = (string) ($outputType ?? 'invoice');
 $outputTypeLabel = (string) ($outputTypeLabel ?? 'Operational Output');
 $generatedAt = (string) ($generatedAt ?? '');
 $backUrl = (string) ($backUrl ?? url('/workspace'));
-$showOutputDebug = config('app.debug', false) && (string) ($_GET['debug_ui'] ?? '') === '1';
+$showOutputDebug = app_debug_tools_enabled() && (string) ($_GET['debug_ui'] ?? '') === '1';
 
 $formatMoney = static fn (float $amount): string => number_format($amount, 2);
 $formatCurrencyTotals = static function (array $totals) use ($formatMoney): string {

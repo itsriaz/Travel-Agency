@@ -42,9 +42,9 @@ final class TrustedDeviceService extends Service
         setcookie(config('security.trusted_device.cookie_name', 'travel_ops_trusted_device'), $cookieValue, [
             'expires' => time() + ($validDays * 86400),
             'path' => '/',
-            'secure' => ! empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off',
+            'secure' => (bool) config('security.trusted_device.cookie_secure', $this->isSecureRequest()),
             'httponly' => true,
-            'samesite' => 'Lax',
+            'samesite' => $this->sameSiteValue((string) config('security.trusted_device.cookie_samesite', 'Lax')),
         ]);
 
         AuditLog::record($this->app, 'auth.trusted_device.created', [
@@ -127,9 +127,9 @@ final class TrustedDeviceService extends Service
         setcookie(config('security.trusted_device.cookie_name', 'travel_ops_trusted_device'), '', [
             'expires' => time() - 3600,
             'path' => '/',
-            'secure' => ! empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off',
+            'secure' => (bool) config('security.trusted_device.cookie_secure', $this->isSecureRequest()),
             'httponly' => true,
-            'samesite' => 'Lax',
+            'samesite' => $this->sameSiteValue((string) config('security.trusted_device.cookie_samesite', 'Lax')),
         ]);
     }
 
@@ -137,5 +137,20 @@ final class TrustedDeviceService extends Service
     {
         $agent = trim((string) ($_SERVER['HTTP_USER_AGENT'] ?? 'Unknown device'));
         return mb_substr($agent, 0, 120);
+    }
+
+    private function isSecureRequest(): bool
+    {
+        $https = (string) ($_SERVER['HTTPS'] ?? '');
+        $forwardedProto = mb_strtolower(trim((string) ($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '')));
+
+        return ($https !== '' && $https !== 'off') || $forwardedProto === 'https';
+    }
+
+    private function sameSiteValue(string $value): string
+    {
+        $normalized = ucfirst(mb_strtolower(trim($value)));
+
+        return in_array($normalized, ['Lax', 'Strict', 'None'], true) ? $normalized : 'Lax';
     }
 }

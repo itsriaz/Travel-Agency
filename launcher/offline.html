@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Travel Agency Operations - Offline</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="shell">
+    <section class="topbar">
+      <div>
+        <h1>Travel Agency Operations</h1>
+        <p id="server-label">Offline launcher</p>
+      </div>
+      <div class="actions">
+        <button id="open-online" type="button">Open Online</button>
+        <button id="refresh-cache" type="button">Refresh Cache</button>
+        <button id="sync-drafts" type="button">Sync Drafts</button>
+      </div>
+    </section>
+
+    <section class="status-grid">
+      <article>
+        <span>Connection</span>
+        <strong id="connection-status">Checking</strong>
+      </article>
+      <article>
+        <span>Cached At</span>
+        <strong id="cached-at">Never</strong>
+      </article>
+      <article>
+        <span>Pending Drafts</span>
+        <strong id="pending-count">0</strong>
+      </article>
+    </section>
+
+    <section class="notice">
+      <strong>Financial posting is online-only.</strong>
+      Receipts, allocations, supplier payments, advances, voids, reversals, and exchange-rate settlements are blocked while offline.
+    </section>
+
+    <section class="workspace">
+      <article class="panel">
+        <h2>Emergency Cache</h2>
+        <div class="tabs">
+          <button class="tab active" type="button" data-tab="bookings">Bookings</button>
+          <button class="tab" type="button" data-tab="travelers">Travelers</button>
+          <button class="tab" type="button" data-tab="dues">Customer Dues</button>
+          <button class="tab" type="button" data-tab="suppliers">Suppliers</button>
+        </div>
+        <input id="cache-search" type="search" placeholder="Search cached records">
+        <div id="cache-list" class="list"></div>
+      </article>
+
+      <article class="panel">
+        <h2>Offline Draft Queue</h2>
+        <div class="draft-tabs">
+          <button class="draft-tab active" type="button" data-draft="traveler">Traveler</button>
+          <button class="draft-tab" type="button" data-draft="booking">Booking</button>
+        </div>
+
+        <form id="traveler-form" class="draft-form">
+          <label>Branch ID <input name="traveler_branch_id" inputmode="numeric" required></label>
+          <label>First Name <input name="first_name" required maxlength="100"></label>
+          <label>Last Name <input name="last_name" maxlength="100"></label>
+          <label>Mobile <input name="mobile" maxlength="50"></label>
+          <label>Passport <input name="passport_number" maxlength="50"></label>
+          <label>Notes <textarea name="notes" maxlength="4000"></textarea></label>
+          <button type="submit">Queue Traveler Draft</button>
+        </form>
+
+        <form id="booking-form" class="draft-form hidden">
+          <label>Branch ID <input name="branch_id" inputmode="numeric" required></label>
+          <label>Booking Date <input name="booking_date" type="date" required></label>
+          <label>Lead Traveler / Party <input name="lead_traveler_name" required maxlength="190"></label>
+          <label>Contact Mobile <input name="contact_mobile" maxlength="50"></label>
+          <label>Passport <input name="passport_number" maxlength="50"></label>
+          <label>Departure Date <input name="departure_date" type="date"></label>
+          <label>Return Date <input name="return_date" type="date"></label>
+          <label>Remarks <textarea name="remarks" maxlength="4000"></textarea></label>
+          <button type="submit">Queue Booking Draft</button>
+        </form>
+
+        <div id="draft-list" class="draft-list"></div>
+      </article>
+    </section>
+  </main>
+  <script src="renderer.js"></script>
+</body>
+</html>

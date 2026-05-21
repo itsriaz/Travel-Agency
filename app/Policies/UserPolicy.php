@@ -8,6 +8,6 @@ final class UserPolicy extends Policy
 {
     public function accessDashboard(array $user): bool
     {
-        return in_array($user['role_code'] ?? '', ['super_admin', 'branch_user'], true);
+        return in_array($user['role_code'] ?? '', ['super_admin', 'branch_admin', 'employee'], true);
     }
 }

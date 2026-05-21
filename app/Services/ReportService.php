@@ -20,6 +20,10 @@ final class ReportService extends Service
         'supplier_postpaid_payments' => 'Supplier Payments - Postpaid',
         'supplier_prepaid_payments' => 'Supplier Payments - Prepaid',
         'supplier_all_payments' => 'Supplier Payments - All',
+        'unallocated_money' => 'Unallocated Money Trace',
+        'void_reversal_register' => 'Void / Reversal Register',
+        'finance_audit_trail' => 'Finance Audit Trail',
+        'accounting_integrity' => 'Accounting Integrity Checks',
         'receivable_aging' => 'Receivable Aging',
         'payable_aging' => 'Payable Aging',
         'service_profit' => 'Service Profit',
@@ -79,7 +83,9 @@ final class ReportService extends Service
                 $reportData = $repository->managementSummary($filters['branchScopeIds'], $filters['dateFrom'], $filters['dateTo']);
                 [$rows, $summaryCards] = $this->managementSummaryReport(
                     $reportData,
-                    $this->reportingRateMapForManagementSummary($reportData, $conversionDate)
+                    $this->reportingRateMapForManagementSummary($reportData, $conversionDate),
+                    $this->reportingRateMapForManagementSummary($reportData, $conversionDate, 'AED'),
+                    (int) $filters['branchId']
                 );
                 $columns = [
                     ['key' => 'branch_name', 'label' => 'Branch'],
@@ -209,6 +215,101 @@ final class ReportService extends Service
                     ['key' => 'status', 'label' => 'Status'],
                     ['key' => 'reference_number', 'label' => 'Reference'],
                     ['key' => 'remarks', 'label' => 'Remarks'],
+                ];
+                break;
+
+            case 'unallocated_money':
+                $reportData = $repository->unallocatedMoneyTrace(
+                    $filters['branchScopeIds'],
+                    $filters['dateFrom'],
+                    $filters['dateTo'],
+                    $filters['currency']
+                );
+                [$rows, $summaryCards] = $this->unallocatedMoneyTraceReport($reportData);
+                $columns = [
+                    ['key' => 'source_type', 'label' => 'Type'],
+                    ['key' => 'branch_name', 'label' => 'Branch'],
+                    ['key' => 'booking_reference', 'label' => 'Booking'],
+                    ['key' => 'document_no', 'label' => 'Receipt / Payment'],
+                    ['key' => 'document_date', 'label' => 'Date'],
+                    ['key' => 'counterparty_name', 'label' => 'Customer / Supplier'],
+                    ['key' => 'currency', 'label' => 'Currency'],
+                    ['key' => 'original_amount', 'label' => 'Original Amount'],
+                    ['key' => 'allocated_amount', 'label' => 'Allocated / Used'],
+                    ['key' => 'unallocated_amount', 'label' => 'Unallocated'],
+                    ['key' => 'age_days', 'label' => 'Age Days'],
+                    ['key' => 'status', 'label' => 'Status'],
+                    ['key' => 'reference_number', 'label' => 'Reference'],
+                    ['key' => 'remarks', 'label' => 'Remarks'],
+                ];
+                break;
+
+            case 'void_reversal_register':
+                $reportData = $repository->voidReversalRegister(
+                    $filters['branchScopeIds'],
+                    $filters['dateFrom'],
+                    $filters['dateTo'],
+                    $filters['currency']
+                );
+                [$rows, $summaryCards] = $this->voidReversalRegisterReport($reportData);
+                $columns = [
+                    ['key' => 'module', 'label' => 'Module'],
+                    ['key' => 'branch_name', 'label' => 'Branch'],
+                    ['key' => 'booking_reference', 'label' => 'Booking'],
+                    ['key' => 'document_no', 'label' => 'Receipt / Payment No.'],
+                    ['key' => 'counterparty_name', 'label' => 'Customer / Supplier'],
+                    ['key' => 'voided_at', 'label' => 'Voided At'],
+                    ['key' => 'currency', 'label' => 'Currency'],
+                    ['key' => 'original_amount', 'label' => 'Original Amount'],
+                    ['key' => 'reversed_amount', 'label' => 'Reversed Amount'],
+                    ['key' => 'allocation_count', 'label' => 'Allocations'],
+                    ['key' => 'voided_by_user', 'label' => 'Voided By'],
+                    ['key' => 'reversal_reference', 'label' => 'Reversal Reference'],
+                    ['key' => 'reversal_journal_entry_id', 'label' => 'Reversal Journal'],
+                    ['key' => 'void_reason', 'label' => 'Void Reason'],
+                ];
+                break;
+
+            case 'finance_audit_trail':
+                $reportData = $repository->financeAuditTrail(
+                    $filters['branchScopeIds'],
+                    $filters['dateFrom'],
+                    $filters['dateTo'],
+                    $filters['currency']
+                );
+                [$rows, $summaryCards] = $this->financeAuditTrailReport($reportData);
+                $columns = [
+                    ['key' => 'event_time', 'label' => 'Event Time'],
+                    ['key' => 'module', 'label' => 'Module'],
+                    ['key' => 'action', 'label' => 'Action'],
+                    ['key' => 'branch_name', 'label' => 'Branch'],
+                    ['key' => 'booking_reference', 'label' => 'Booking'],
+                    ['key' => 'document_no', 'label' => 'Receipt / Payment / Advance'],
+                    ['key' => 'counterparty_name', 'label' => 'Customer / Supplier'],
+                    ['key' => 'currency', 'label' => 'Currency'],
+                    ['key' => 'amount', 'label' => 'Amount'],
+                    ['key' => 'actor_name', 'label' => 'Actor'],
+                    ['key' => 'ip_address', 'label' => 'IP'],
+                    ['key' => 'event_name', 'label' => 'Event Key'],
+                    ['key' => 'detail_note', 'label' => 'Reason / Notes'],
+                ];
+                break;
+
+            case 'accounting_integrity':
+                [$rows, $summaryCards] = $this->accountingIntegrityReport(
+                    $repository->accountingIntegrityChecks($filters['branchScopeIds'])
+                );
+                $columns = [
+                    ['key' => 'severity', 'label' => 'Severity'],
+                    ['key' => 'check_name', 'label' => 'Check'],
+                    ['key' => 'branch_name', 'label' => 'Branch'],
+                    ['key' => 'booking_reference', 'label' => 'Booking'],
+                    ['key' => 'document_reference', 'label' => 'Document'],
+                    ['key' => 'currency', 'label' => 'Curr.'],
+                    ['key' => 'expected_amount', 'label' => 'Expected'],
+                    ['key' => 'actual_amount', 'label' => 'Actual'],
+                    ['key' => 'difference_amount', 'label' => 'Difference'],
+                    ['key' => 'detail_note', 'label' => 'Detail'],
                 ];
                 break;
 
@@ -930,6 +1031,250 @@ final class ReportService extends Service
         )];
     }
 
+    private function unallocatedMoneyTraceReport(array $rows): array
+    {
+        $openTotals = [];
+        $customerTotals = [];
+        $supplierTotals = [];
+        $reportRows = [];
+
+        foreach ($rows as $row) {
+            $currency = (string) ($row['currency'] ?? 'PKR');
+            $sourceKey = (string) ($row['source_key'] ?? '');
+            $bookingId = (int) ($row['booking_id'] ?? 0);
+            $entityId = (int) ($row['entity_id'] ?? 0);
+            $unallocated = (float) ($row['unallocated_amount'] ?? 0);
+            $documentNo = (string) ($row['document_no'] ?? '');
+
+            $documentHref = '';
+            if ($sourceKey === 'customer_receipt' && $bookingId > 0 && $entityId > 0) {
+                $documentHref = url('/workspace/output?booking_id=' . $bookingId . '&doc=customer_receipt&receipt_id=' . $entityId);
+            } elseif ($sourceKey === 'supplier_payment' && $bookingId > 0 && $entityId > 0) {
+                $documentHref = url('/workspace/output?booking_id=' . $bookingId . '&doc=supplier_voucher&supplier_payment_id=' . $entityId);
+            } elseif ($sourceKey === 'supplier_advance' && $entityId > 0) {
+                $documentHref = url('/reports/supplier-prepaid-receipt?supplier_advance_id=' . $entityId);
+            }
+
+            $bookingReference = trim((string) ($row['booking_reference'] ?? ''));
+            $workspaceHref = $bookingId > 0
+                ? url('/workspace?booking_id=' . $bookingId . ($sourceKey === 'supplier_payment' ? '#dock-panel-suppliers' : '#dock-panel-payments'))
+                : '';
+
+            $reportRows[] = [
+                'source_type' => (string) ($row['source_type'] ?? 'Unallocated'),
+                'branch_name' => (string) ($row['branch_name'] ?? ''),
+                'booking_reference' => $bookingReference !== '' ? $bookingReference : '-',
+                'booking_reference_href' => $workspaceHref,
+                'document_no' => $documentNo,
+                'document_no_href' => $documentHref,
+                'document_date' => (string) ($row['document_date'] ?? ''),
+                'counterparty_name' => (string) ($row['counterparty_name'] ?? ''),
+                'currency' => $currency,
+                'original_amount' => $this->money((float) ($row['original_amount'] ?? 0)),
+                'allocated_amount' => $this->money((float) ($row['allocated_amount'] ?? 0)),
+                'unallocated_amount' => $this->money($unallocated),
+                'age_days' => (string) max(0, (int) ($row['age_days'] ?? 0)),
+                'status' => ucwords(str_replace('_', ' ', (string) ($row['status'] ?? 'open'))),
+                'reference_number' => (string) (($row['reference_number'] ?? '') !== '' ? $row['reference_number'] : 'N/A'),
+                'remarks' => (string) (($row['remarks'] ?? '') !== '' ? $row['remarks'] : ''),
+            ];
+
+            $openTotals[$currency] = ($openTotals[$currency] ?? 0.0) + $unallocated;
+            if ($sourceKey === 'customer_receipt') {
+                $customerTotals[$currency] = ($customerTotals[$currency] ?? 0.0) + $unallocated;
+            } else {
+                $supplierTotals[$currency] = ($supplierTotals[$currency] ?? 0.0) + $unallocated;
+            }
+        }
+
+        return [$reportRows, array_merge(
+            $this->currencySummaryCards('Total Unallocated', $openTotals),
+            $this->currencySummaryCards('Customer Credit', $customerTotals),
+            $this->currencySummaryCards('Supplier Open Money', $supplierTotals)
+        )];
+    }
+
+    private function voidReversalRegisterReport(array $rows): array
+    {
+        $customerVoidCount = 0;
+        $supplierVoidCount = 0;
+        $journalLinkedCount = 0;
+        $originalTotals = [];
+        $reversedTotals = [];
+        $reportRows = [];
+
+        foreach ($rows as $row) {
+            $moduleKey = (string) ($row['module_key'] ?? '');
+            $currency = (string) ($row['currency'] ?? 'PKR');
+            $originalAmount = (float) ($row['original_amount'] ?? 0);
+            $reversedAmount = (float) ($row['reversed_amount'] ?? 0);
+            $bookingId = (int) ($row['booking_id'] ?? 0);
+            $entityId = (int) ($row['entity_id'] ?? 0);
+            $voidedAt = trim((string) ($row['voided_at'] ?? ''));
+
+            if ($moduleKey === 'customer_receipt') {
+                $customerVoidCount++;
+            } elseif ($moduleKey === 'supplier_payment') {
+                $supplierVoidCount++;
+            }
+
+            if ((int) ($row['reversal_journal_entry_id'] ?? 0) > 0) {
+                $journalLinkedCount++;
+            }
+
+            $reportRows[] = [
+                'module' => $moduleKey === 'customer_receipt' ? 'Customer Receipt' : 'Supplier Payment',
+                'branch_name' => (string) ($row['branch_name'] ?? ''),
+                'booking_reference' => (string) ($row['booking_reference'] ?? ''),
+                'booking_reference_href' => $bookingId > 0
+                    ? url('/workspace?booking_id=' . $bookingId . ($moduleKey === 'supplier_payment' ? '#dock-panel-suppliers' : '#dock-panel-payments'))
+                    : '',
+                'document_no' => (string) ($row['document_no'] ?? ''),
+                'document_no_href' => $bookingId > 0 && $entityId > 0
+                    ? ($moduleKey === 'customer_receipt'
+                        ? url('/workspace/output?booking_id=' . $bookingId . '&doc=customer_receipt&receipt_id=' . $entityId)
+                        : url('/workspace/output?booking_id=' . $bookingId . '&doc=supplier_voucher&supplier_payment_id=' . $entityId))
+                    : '',
+                'counterparty_name' => (string) ($row['counterparty_name'] ?? ''),
+                'voided_at' => $voidedAt !== '' ? $voidedAt : 'N/A',
+                'currency' => $currency,
+                'original_amount' => $this->money($originalAmount),
+                'reversed_amount' => $this->money($reversedAmount),
+                'allocation_count' => (string) ((int) ($row['allocation_count'] ?? 0)),
+                'voided_by_user' => (string) (($row['voided_by_user'] ?? '') !== '' ? $row['voided_by_user'] : 'Unknown User'),
+                'reversal_reference' => (string) (($row['reversal_reference'] ?? '') !== '' ? $row['reversal_reference'] : 'N/A'),
+                'reversal_journal_entry_id' => (string) ((int) ($row['reversal_journal_entry_id'] ?? 0) > 0 ? (int) $row['reversal_journal_entry_id'] : 'N/A'),
+                'void_reason' => (string) (($row['void_reason'] ?? '') !== '' ? $row['void_reason'] : 'N/A'),
+            ];
+
+            $originalTotals[$currency] = ($originalTotals[$currency] ?? 0.0) + $originalAmount;
+            $reversedTotals[$currency] = ($reversedTotals[$currency] ?? 0.0) + $reversedAmount;
+        }
+
+        usort($reportRows, static function (array $left, array $right): int {
+            return strcmp((string) ($right['voided_at'] ?? ''), (string) ($left['voided_at'] ?? ''));
+        });
+
+        return [$reportRows, array_merge(
+            [
+                ['label' => 'Customer Receipt Voids', 'value' => (string) $customerVoidCount],
+                ['label' => 'Supplier Payment Voids', 'value' => (string) $supplierVoidCount],
+                ['label' => 'Journal-Linked Reversals', 'value' => (string) $journalLinkedCount],
+            ],
+            $this->currencySummaryCards('Original Amount', $originalTotals),
+            $this->currencySummaryCards('Reversed Amount', $reversedTotals)
+        )];
+    }
+
+    private function financeAuditTrailReport(array $rows): array
+    {
+        $eventCount = 0;
+        $voidCount = 0;
+        $metadataEditCount = 0;
+        $allocationCount = 0;
+        $amountTotals = [];
+        $reportRows = [];
+
+        foreach ($rows as $row) {
+            $eventCount++;
+            $eventName = (string) ($row['event_name'] ?? '');
+            $module = (string) ($row['module_label'] ?? 'Finance');
+            $action = (string) ($row['action_label'] ?? 'Audit Event');
+            $currency = (string) (($row['currency'] ?? '') !== '' ? $row['currency'] : 'PKR');
+            $amountValue = (float) ($row['amount_value'] ?? 0);
+            $bookingId = (int) ($row['booking_id'] ?? 0);
+            $customerReceiptId = (int) ($row['customer_receipt_id'] ?? 0);
+            $supplierPaymentId = (int) ($row['supplier_payment_id'] ?? 0);
+            $supplierAdvanceId = (int) ($row['supplier_advance_id'] ?? 0);
+
+            if ($action === 'Void') {
+                $voidCount++;
+            } elseif ($action === 'Metadata Edit') {
+                $metadataEditCount++;
+            } elseif ($action === 'Allocation' || $action === 'Applied') {
+                $allocationCount++;
+            }
+
+            $documentHref = '';
+            if ($bookingId > 0 && $customerReceiptId > 0) {
+                $documentHref = url('/workspace/output?booking_id=' . $bookingId . '&doc=customer_receipt&receipt_id=' . $customerReceiptId);
+            } elseif ($bookingId > 0 && $supplierPaymentId > 0) {
+                $documentHref = url('/workspace/output?booking_id=' . $bookingId . '&doc=supplier_voucher&supplier_payment_id=' . $supplierPaymentId);
+            } elseif ($supplierAdvanceId > 0) {
+                $documentHref = url('/reports/supplier-prepaid-receipt?id=' . $supplierAdvanceId);
+            }
+
+            $reportRows[] = [
+                'event_time' => (string) (($row['created_at'] ?? '') !== '' ? $row['created_at'] : 'N/A'),
+                'module' => $module,
+                'action' => $action,
+                'branch_name' => (string) ($row['branch_name'] ?? ''),
+                'booking_reference' => (string) ($row['booking_reference'] ?? ''),
+                'booking_reference_href' => $bookingId > 0
+                    ? url('/workspace?booking_id=' . $bookingId . ($module === 'Supplier Payment' || $module === 'Supplier Advance' ? '#dock-panel-suppliers' : '#dock-panel-payments'))
+                    : '',
+                'document_no' => (string) (($row['document_no'] ?? '') !== '' ? $row['document_no'] : 'N/A'),
+                'document_no_href' => $documentHref,
+                'counterparty_name' => (string) (($row['counterparty_name'] ?? '') !== '' ? $row['counterparty_name'] : 'N/A'),
+                'currency' => $currency,
+                'amount' => $this->money($amountValue),
+                'actor_name' => (string) (($row['actor_name'] ?? '') !== '' ? $row['actor_name'] : 'Unknown User'),
+                'ip_address' => (string) (($row['ip_address'] ?? '') !== '' ? $row['ip_address'] : 'N/A'),
+                'event_name' => $eventName,
+                'detail_note' => (string) (($row['detail_note'] ?? '') !== '' ? $row['detail_note'] : 'N/A'),
+            ];
+
+            $amountTotals[$currency] = ($amountTotals[$currency] ?? 0.0) + $amountValue;
+        }
+
+        return [$reportRows, array_merge(
+            [
+                ['label' => 'Finance Audit Events', 'value' => (string) $eventCount],
+                ['label' => 'Void Events', 'value' => (string) $voidCount],
+                ['label' => 'Metadata Edits', 'value' => (string) $metadataEditCount],
+                ['label' => 'Allocations / Applied', 'value' => (string) $allocationCount],
+            ],
+            $this->currencySummaryCards('Event Amount Total', $amountTotals)
+        )];
+    }
+
+    private function accountingIntegrityReport(array $rows): array
+    {
+        $reportRows = [];
+        $severityCounts = [];
+
+        foreach ($rows as $row) {
+            $severity = strtoupper((string) ($row['severity'] ?? 'REVIEW'));
+            $severityCounts[$severity] = ($severityCounts[$severity] ?? 0) + 1;
+
+            $reportRows[] = [
+                'severity' => $severity,
+                'check_name' => (string) ($row['check_name'] ?? ''),
+                'branch_name' => (string) (($row['branch_name'] ?? '') !== '' ? $row['branch_name'] : 'N/A'),
+                'booking_reference' => (string) (($row['booking_reference'] ?? '') !== '' ? $row['booking_reference'] : 'N/A'),
+                'document_reference' => (string) (($row['document_reference'] ?? '') !== '' ? $row['document_reference'] : 'N/A'),
+                'currency' => (string) (($row['currency'] ?? '') !== '' ? $row['currency'] : 'N/A'),
+                'expected_amount' => is_numeric($row['expected_amount'] ?? null) ? $this->money((float) $row['expected_amount']) : 'N/A',
+                'actual_amount' => is_numeric($row['actual_amount'] ?? null) ? $this->money((float) $row['actual_amount']) : 'N/A',
+                'difference_amount' => is_numeric($row['difference_amount'] ?? null) ? $this->money((float) $row['difference_amount']) : 'N/A',
+                'detail_note' => (string) ($row['detail_note'] ?? ''),
+            ];
+        }
+
+        $summaryCards = [
+            ['label' => 'Integrity Issues', 'value' => (string) count($reportRows)],
+        ];
+        foreach ($severityCounts as $severity => $count) {
+            $summaryCards[] = ['label' => $severity, 'value' => (string) $count];
+        }
+
+        if (count($reportRows) === 0) {
+            $summaryCards[] = ['label' => 'Status', 'value' => 'Clear'];
+        }
+
+        return [$reportRows, $summaryCards];
+    }
+
     private function receivableAgingReport(array $rows, array $pkrRates): array
     {
         $summary = [];
@@ -1347,7 +1692,7 @@ final class ReportService extends Service
         return [array_values($rows), $summaryCards];
     }
 
-    private function managementSummaryReport(array $data, array $pkrRates): array
+    private function managementSummaryReport(array $data, array $pkrRates, array $aedRates, int $selectedBranchId = 0): array
     {
         $rows = [];
         foreach (($data['serviceTypes'] ?? []) as $serviceTypeRow) {
@@ -1358,6 +1703,7 @@ final class ReportService extends Service
             $profit = (float) ($serviceTypeRow['total_profit'] ?? 0);
             $rows[$key] = [
                 'branch_name' => (string) ($serviceTypeRow['branch_name'] ?? ''),
+                'branch_base_currency' => (string) ($serviceTypeRow['branch_base_currency'] ?? $currency),
                 'service_type' => ucwords((string) ($serviceTypeRow['service_type'] ?? 'service')),
                 'currency' => $currency,
                 'service_count' => (string) ((int) ($serviceTypeRow['service_count'] ?? 0)),
@@ -1389,6 +1735,7 @@ final class ReportService extends Service
             $branchTotals[$key] = [
                 'branch_name' => (string) ($branchRow['branch_name'] ?? ''),
                 'currency' => (string) ($branchRow['currency'] ?? 'PKR'),
+                'branch_base_currency' => (string) ($branchRow['branch_base_currency'] ?? $branchRow['currency'] ?? 'PKR'),
                 'received' => 0.0,
                 'supplier_paid' => 0.0,
                 'customer_outstanding' => 0.0,
@@ -1402,6 +1749,7 @@ final class ReportService extends Service
                 $branchTotals[$key] = [
                     'branch_name' => (string) ($row['branch_name'] ?? ''),
                     'currency' => (string) ($row['currency'] ?? 'PKR'),
+                    'branch_base_currency' => (string) ($row['branch_base_currency'] ?? $row['currency'] ?? 'PKR'),
                     'received' => 0.0,
                     'supplier_paid' => 0.0,
                     'customer_outstanding' => 0.0,
@@ -1417,6 +1765,7 @@ final class ReportService extends Service
                 $branchTotals[$key] = [
                     'branch_name' => (string) ($row['branch_name'] ?? ''),
                     'currency' => (string) ($row['currency'] ?? 'PKR'),
+                    'branch_base_currency' => (string) ($row['branch_base_currency'] ?? $row['currency'] ?? 'PKR'),
                     'received' => 0.0,
                     'supplier_paid' => 0.0,
                     'customer_outstanding' => 0.0,
@@ -1432,6 +1781,7 @@ final class ReportService extends Service
                 $branchTotals[$key] = [
                     'branch_name' => (string) ($row['branch_name'] ?? ''),
                     'currency' => (string) ($row['currency'] ?? 'PKR'),
+                    'branch_base_currency' => (string) ($row['branch_base_currency'] ?? $row['currency'] ?? 'PKR'),
                     'received' => 0.0,
                     'supplier_paid' => 0.0,
                     'customer_outstanding' => 0.0,
@@ -1447,6 +1797,7 @@ final class ReportService extends Service
                 $branchTotals[$key] = [
                     'branch_name' => (string) ($row['branch_name'] ?? ''),
                     'currency' => (string) ($row['currency'] ?? 'PKR'),
+                    'branch_base_currency' => (string) ($row['branch_base_currency'] ?? $row['currency'] ?? 'PKR'),
                     'received' => 0.0,
                     'supplier_paid' => 0.0,
                     'customer_outstanding' => 0.0,
@@ -1462,6 +1813,7 @@ final class ReportService extends Service
                 $branchTotals[$key] = [
                     'branch_name' => (string) ($row['branch_name'] ?? ''),
                     'currency' => (string) ($row['currency'] ?? 'PKR'),
+                    'branch_base_currency' => (string) ($row['branch_base_currency'] ?? $row['currency'] ?? 'PKR'),
                     'received' => 0.0,
                     'supplier_paid' => 0.0,
                     'customer_outstanding' => 0.0,
@@ -1509,6 +1861,7 @@ final class ReportService extends Service
             $expenses = (float) ($metrics['expenses'] ?? 0);
             $rows[$branchCurrencyKey . '|admin'] = [
                 'branch_name' => (string) ($metrics['branch_name'] ?? ''),
+                'branch_base_currency' => (string) ($metrics['branch_base_currency'] ?? $currency),
                 'service_type' => 'Admin / No Sales',
                 'currency' => $currency,
                 'service_count' => '0',
@@ -1534,22 +1887,32 @@ final class ReportService extends Service
             ];
         }
 
-        $summaryCards = [
-            ['label' => 'Total Sales / Receivable', 'value' => $this->formatSummaryCurrencyMap($rows, 'total_receivable')],
-            ['label' => 'Total Received', 'value' => $this->formatSummaryCurrencyMap($rows, 'total_received')],
-            ['label' => 'Total Outstanding', 'value' => $this->formatSummaryCurrencyMap($rows, 'customer_outstanding')],
-            ['label' => 'Total Supplier Payable', 'value' => $this->formatSummaryCurrencyMap($rows, 'total_payable')],
-            ['label' => 'Total Supplier Paid', 'value' => $this->formatSummaryCurrencyMap($rows, 'total_supplier_paid')],
-            ['label' => 'Total Supplier Balance', 'value' => $this->formatSummaryCurrencyMap($rows, 'supplier_outstanding')],
-            ['label' => 'Gross Profit', 'value' => $this->formatSummaryCurrencyMap($rows, 'profit_snapshot')],
-            ['label' => 'Total Expenses', 'value' => $this->formatSummaryCurrencyMap($rows, 'total_expenses')],
-            ['label' => 'Net Profit', 'value' => $this->formatSummaryCurrencyMap($rows, 'net_profit')],
-            ['label' => 'Consolidated Sales / PKR', 'value' => 'PKR ' . $this->money($this->sumPkrMetric($rows, 'pkr_total_receivable'))],
-            ['label' => 'Consolidated Received / PKR', 'value' => 'PKR ' . $this->money($this->sumPkrMetric($rows, 'pkr_total_received'))],
-            ['label' => 'Consolidated Gross Profit / PKR', 'value' => 'PKR ' . $this->money($this->sumPkrMetric($rows, 'pkr_profit_snapshot'))],
-            ['label' => 'Consolidated Expenses / PKR', 'value' => 'PKR ' . $this->money($this->sumPkrMetric($rows, 'pkr_total_expenses'))],
-            ['label' => 'Consolidated Net Profit / PKR', 'value' => 'PKR ' . $this->money($this->sumPkrMetric($rows, 'pkr_net_profit'))],
-        ];
+        $summaryCards = array_merge($this->managementBranchLocalSummaryCards($rows), [
+            $this->managementOriginalSummaryCard('Total Sales / Receivable', $rows, 'total_receivable'),
+            $this->managementOriginalSummaryCard('Total Received', $rows, 'total_received'),
+            $this->managementOriginalSummaryCard('Customer Outstanding', $rows, 'customer_outstanding'),
+            $this->managementOriginalSummaryCard('Supplier Payable', $rows, 'total_payable'),
+            $this->managementOriginalSummaryCard('Supplier Paid', $rows, 'total_supplier_paid'),
+            $this->managementOriginalSummaryCard('Supplier Balance', $rows, 'supplier_outstanding'),
+            $this->managementOriginalSummaryCard('Gross Profit', $rows, 'profit_snapshot'),
+            $this->managementOriginalSummaryCard('Expenses', $rows, 'total_expenses'),
+            $this->managementOriginalSummaryCard('Net Profit', $rows, 'net_profit'),
+        ]);
+
+        if ($selectedBranchId <= 0) {
+            $summaryCards = array_merge($summaryCards, [
+                $this->managementConsolidatedCurrencySummaryCard('Group PKR Sales', $rows, 'total_receivable', 'PKR', $pkrRates),
+                $this->managementConsolidatedCurrencySummaryCard('Group PKR Received', $rows, 'total_received', 'PKR', $pkrRates),
+                $this->managementConsolidatedCurrencySummaryCard('Group PKR Gross Profit', $rows, 'profit_snapshot', 'PKR', $pkrRates),
+                $this->managementConsolidatedCurrencySummaryCard('Group PKR Expenses', $rows, 'total_expenses', 'PKR', $pkrRates),
+                $this->managementConsolidatedCurrencySummaryCard('Group PKR Net Profit', $rows, 'net_profit', 'PKR', $pkrRates),
+                $this->managementConsolidatedCurrencySummaryCard('Group AED Sales', $rows, 'total_receivable', 'AED', $aedRates),
+                $this->managementConsolidatedCurrencySummaryCard('Group AED Received', $rows, 'total_received', 'AED', $aedRates),
+                $this->managementConsolidatedCurrencySummaryCard('Group AED Gross Profit', $rows, 'profit_snapshot', 'AED', $aedRates),
+                $this->managementConsolidatedCurrencySummaryCard('Group AED Expenses', $rows, 'total_expenses', 'AED', $aedRates),
+                $this->managementConsolidatedCurrencySummaryCard('Group AED Net Profit', $rows, 'net_profit', 'AED', $aedRates),
+            ]);
+        }
 
         return [array_values($rows), $summaryCards];
     }
@@ -1993,7 +2356,7 @@ final class ReportService extends Service
         return (new ExchangeRateRepository($this->app))->latestRatesToTarget($currencies, 'PKR', $asOfDate);
     }
 
-    private function reportingRateMapForManagementSummary(array $data, string $asOfDate): array
+    private function reportingRateMapForManagementSummary(array $data, string $asOfDate, string $targetCurrency = 'PKR'): array
     {
         $currencies = [];
         foreach (['branches', 'serviceTypes', 'receipts', 'supplierPayments', 'receivables', 'payables', 'expenses', 'expenseCategories'] as $bucket) {
@@ -2005,7 +2368,7 @@ final class ReportService extends Service
             }
         }
 
-        return (new ExchangeRateRepository($this->app))->latestRatesToTarget($currencies, 'PKR', $asOfDate);
+        return (new ExchangeRateRepository($this->app))->latestRatesToTarget($currencies, $targetCurrency, $asOfDate);
     }
 
     private function currenciesFromBuckets(array $buckets): array
@@ -2160,6 +2523,205 @@ final class ReportService extends Service
 
     private function formatSummaryCurrencyMap(array $rows, string $metricKey): string
     {
+        $totals = $this->summaryCurrencyTotals($rows, $metricKey);
+
+        if ($totals === []) {
+            return 'PKR 0.00';
+        }
+
+        $parts = [];
+        foreach ($totals as $currency => $amount) {
+            $parts[] = $currency . ' ' . $this->money($amount);
+        }
+
+        return implode(' / ', $parts);
+    }
+
+    private function managementOriginalSummaryCard(string $label, array $rows, string $metricKey): array
+    {
+        return [
+            'label' => $label,
+            'value' => $this->formatSummaryCurrencyMap($rows, $metricKey),
+            'lines' => $this->summaryCurrencyLines($rows, $metricKey),
+            'note' => 'Original transaction currencies. No PKR conversion.',
+            'tone' => 'original',
+        ];
+    }
+
+    private function managementBranchLocalSummaryCards(array $rows): array
+    {
+        $branchRows = [];
+        $nonBaseCurrencies = [];
+
+        foreach ($rows as $row) {
+            $branchName = (string) ($row['branch_name'] ?? 'Branch');
+            $baseCurrency = strtoupper(trim((string) ($row['branch_base_currency'] ?? $row['currency'] ?? 'PKR')));
+            $currency = strtoupper(trim((string) ($row['currency'] ?? 'PKR')));
+            $branchKey = $branchName . '|' . $baseCurrency;
+
+            if (! isset($branchRows[$branchKey])) {
+                $branchRows[$branchKey] = [
+                    'branch_name' => $branchName,
+                    'base_currency' => $baseCurrency,
+                    'sales' => 0.0,
+                    'purchases' => 0.0,
+                    'received' => 0.0,
+                    'supplier_paid' => 0.0,
+                    'customer_outstanding' => 0.0,
+                    'supplier_balance' => 0.0,
+                    'expenses' => 0.0,
+                    'net_profit' => 0.0,
+                ];
+            }
+
+            if ($currency !== $baseCurrency) {
+                $nonBaseCurrencies[$branchKey][$currency] = true;
+                continue;
+            }
+
+            $branchRows[$branchKey]['sales'] += $this->displayMoneyToFloat((string) ($row['total_receivable'] ?? '0')) ?? 0.0;
+            $branchRows[$branchKey]['purchases'] += $this->displayMoneyToFloat((string) ($row['total_payable'] ?? '0')) ?? 0.0;
+            $branchRows[$branchKey]['expenses'] += $this->displayMoneyToFloat((string) ($row['total_expenses'] ?? '0')) ?? 0.0;
+            $branchRows[$branchKey]['net_profit'] += $this->displayMoneyToFloat((string) ($row['net_profit'] ?? '0')) ?? 0.0;
+        }
+
+        $dedupeMetrics = [
+            'total_received' => 'received',
+            'total_supplier_paid' => 'supplier_paid',
+            'customer_outstanding' => 'customer_outstanding',
+            'supplier_outstanding' => 'supplier_balance',
+        ];
+        $seen = [];
+        foreach ($rows as $row) {
+            $branchName = (string) ($row['branch_name'] ?? 'Branch');
+            $baseCurrency = strtoupper(trim((string) ($row['branch_base_currency'] ?? $row['currency'] ?? 'PKR')));
+            $currency = strtoupper(trim((string) ($row['currency'] ?? 'PKR')));
+            if ($currency !== $baseCurrency) {
+                continue;
+            }
+
+            $branchKey = $branchName . '|' . $baseCurrency;
+            foreach ($dedupeMetrics as $sourceKey => $targetKey) {
+                $dedupeKey = $branchKey . '|' . $sourceKey;
+                if (isset($seen[$dedupeKey])) {
+                    continue;
+                }
+                $seen[$dedupeKey] = true;
+                $branchRows[$branchKey][$targetKey] += $this->displayMoneyToFloat((string) ($row[$sourceKey] ?? '0')) ?? 0.0;
+            }
+        }
+
+        $cards = [];
+        foreach ($branchRows as $branchKey => $branch) {
+            $baseCurrency = (string) $branch['base_currency'];
+            $otherCurrencies = array_keys($nonBaseCurrencies[$branchKey] ?? []);
+            $note = 'Branch-local report in ' . $baseCurrency . '. No group conversion.';
+            if ($otherCurrencies !== []) {
+                $note .= ' Other currencies also exist: ' . implode(', ', $otherCurrencies) . '.';
+            }
+
+            $cards[] = [
+                'label' => (string) $branch['branch_name'] . ' P/L',
+                'value' => $baseCurrency . ' ' . $this->money((float) $branch['net_profit']),
+                'lines' => [
+                    ['currency' => 'Sales', 'amount' => $baseCurrency . ' ' . $this->money((float) $branch['sales'])],
+                    ['currency' => 'Purchases', 'amount' => $baseCurrency . ' ' . $this->money((float) $branch['purchases'])],
+                    ['currency' => 'Received', 'amount' => $baseCurrency . ' ' . $this->money((float) $branch['received'])],
+                    ['currency' => 'Supp. Paid', 'amount' => $baseCurrency . ' ' . $this->money((float) $branch['supplier_paid'])],
+                    ['currency' => 'Cust. Due', 'amount' => $baseCurrency . ' ' . $this->money((float) $branch['customer_outstanding'])],
+                    ['currency' => 'Supp. Due', 'amount' => $baseCurrency . ' ' . $this->money((float) $branch['supplier_balance'])],
+                    ['currency' => 'Expenses', 'amount' => $baseCurrency . ' ' . $this->money((float) $branch['expenses'])],
+                    ['currency' => 'Net P/L', 'amount' => $baseCurrency . ' ' . $this->money((float) $branch['net_profit'])],
+                ],
+                'note' => $note,
+                'tone' => 'branch-local',
+            ];
+        }
+
+        return $cards;
+    }
+
+    private function managementConsolidatedSummaryCard(string $label, array $rows, string $metricKey): array
+    {
+        return [
+            'label' => 'Consolidated ' . $label,
+            'value' => 'PKR ' . $this->money($this->sumPkrMetric($rows, $metricKey)),
+            'lines' => [
+                ['currency' => 'PKR', 'amount' => $this->money($this->sumPkrMetric($rows, $metricKey))],
+            ],
+            'note' => 'PKR reporting total using configured reporting rates.',
+            'tone' => 'converted',
+        ];
+    }
+
+    private function managementConsolidatedCurrencySummaryCard(string $label, array $rows, string $metricKey, string $targetCurrency, array $rates): array
+    {
+        $targetCurrency = strtoupper(trim($targetCurrency));
+        $total = $this->sumConvertedSummaryMetric($rows, $metricKey, $targetCurrency, $rates);
+
+        return [
+            'label' => $label,
+            'value' => $targetCurrency . ' ' . $this->money($total),
+            'lines' => [
+                ['currency' => $targetCurrency, 'amount' => $this->money($total)],
+            ],
+            'note' => '',
+            'tone' => 'converted',
+            'group' => 'group-' . strtolower($targetCurrency),
+            'group_label' => 'Group Consolidated - ' . $targetCurrency,
+        ];
+    }
+
+    private function sumConvertedSummaryMetric(array $rows, string $metricKey, string $targetCurrency, array $rates): float
+    {
+        $total = 0.0;
+        foreach ($this->summaryCurrencyTotals($rows, $metricKey) as $currency => $amount) {
+            $converted = $this->convertToTargetCurrency((float) $amount, (string) $currency, $targetCurrency, $rates);
+            if ($converted !== null) {
+                $total += $converted;
+            }
+        }
+
+        return round($total, 2);
+    }
+
+    private function convertToTargetCurrency(float $amount, string $currency, string $targetCurrency, array $rates): ?float
+    {
+        $currency = strtoupper(trim($currency));
+        $targetCurrency = strtoupper(trim($targetCurrency));
+        if ($currency === '' || $targetCurrency === '') {
+            return null;
+        }
+
+        if ($currency === $targetCurrency) {
+            return round($amount, 2);
+        }
+
+        $rate = $rates[$currency] ?? null;
+
+        return is_numeric($rate) && (float) $rate > 0 ? round($amount * (float) $rate, 2) : null;
+    }
+
+    private function summaryCurrencyLines(array $rows, string $metricKey): array
+    {
+        $totals = $this->summaryCurrencyTotals($rows, $metricKey);
+        if ($totals === []) {
+            return [['currency' => 'PKR', 'amount' => '0.00']];
+        }
+
+        $lines = [];
+        foreach ($totals as $currency => $amount) {
+            $lines[] = [
+                'currency' => (string) $currency,
+                'amount' => $this->money((float) $amount),
+            ];
+        }
+
+        return $lines;
+    }
+
+    private function summaryCurrencyTotals(array $rows, string $metricKey): array
+    {
         $totals = [];
         $seenBranchCurrency = [];
         foreach ($rows as $row) {
@@ -2189,16 +2751,7 @@ final class ReportService extends Service
             $totals[$currency] = ($totals[$currency] ?? 0.0) + $amount;
         }
 
-        if ($totals === []) {
-            return 'PKR 0.00';
-        }
-
-        $parts = [];
-        foreach ($totals as $currency => $amount) {
-            $parts[] = $currency . ' ' . $this->money($amount);
-        }
-
-        return implode(' / ', $parts);
+        return $totals;
     }
 
     private function displayMoneyToFloat(string $value): ?float

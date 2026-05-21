@@ -9,6 +9,7 @@ use App\Helpers\AuditLog;
 use App\Repositories\AuditLogRepository;
 use App\Repositories\TrustedDeviceRepository;
 use App\Repositories\UserRepository;
+use RuntimeException;
 
 final class SecuritySettingsService extends Service
 {
@@ -31,7 +32,69 @@ final class SecuritySettingsService extends Service
 
     public function adminTargetSummary(int $userId): array
     {
-        return $this->userSummary($userId);
+        $users = new UserRepository($this->app);
+        $summary = $this->userSummary($userId);
+        $roleCode = (string) (($summary['user']['role_code'] ?? '') ?: '');
+        $summary['branch_access_ids'] = $users->branchIdsForUser($userId, $roleCode);
+
+        return $summary;
+    }
+
+    public function adminRoleBranchOptions(): array
+    {
+        $users = new UserRepository($this->app);
+
+        return [
+            'roles' => $users->listAssignableRoles(),
+            'branches' => $users->listActiveBranches(),
+        ];
+    }
+
+    public function adminUpdateRoleAndBranchAccess(int $actorUserId, array $input): int
+    {
+        $targetUserId = (int) ($input['target_user_id'] ?? 0);
+        $roleCode = mb_strtolower(trim((string) ($input['role_code'] ?? '')));
+        $defaultBranchId = (int) ($input['default_branch_id'] ?? 0);
+        $branchIds = array_map('intval', (array) ($input['branch_ids'] ?? []));
+
+        if ($targetUserId <= 0) {
+            throw new RuntimeException('Please select a user.');
+        }
+
+        if (! in_array($roleCode, ['super_admin', 'branch_admin', 'employee'], true)) {
+            throw new RuntimeException('Please select a valid role.');
+        }
+
+        $branchIds = array_values(array_unique(array_filter($branchIds, static fn (int $id): bool => $id > 0)));
+        if ($branchIds === []) {
+            throw new RuntimeException('Select at least one branch.');
+        }
+
+        if (! in_array($defaultBranchId, $branchIds, true)) {
+            throw new RuntimeException('Default branch must be selected in branch access.');
+        }
+
+        $users = new UserRepository($this->app);
+        $target = $users->findById($targetUserId);
+        if ($target === null) {
+            throw new RuntimeException('The selected user was not found.');
+        }
+
+        if ($targetUserId === $actorUserId && $roleCode !== 'super_admin') {
+            throw new RuntimeException('You cannot remove your own super admin role.');
+        }
+
+        $users->updateRoleAndBranchAccess($targetUserId, $roleCode, $defaultBranchId, $branchIds);
+
+        AuditLog::record($this->app, 'auth.super_admin.role_branch_access_updated', [
+            'user_id' => $actorUserId,
+            'target_user_id' => $targetUserId,
+            'role_code' => $roleCode,
+            'default_branch_id' => $defaultBranchId,
+            'branch_ids' => $branchIds,
+        ]);
+
+        return $targetUserId;
     }
 
     public function logoutAllDevices(int $userId): void

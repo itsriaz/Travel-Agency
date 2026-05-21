@@ -453,6 +453,10 @@ final class CommercialObligationSyncService extends Service
 
     private function supplierAdvanceTraceLog(string $method, string $step, array $context): void
     {
+        if (! app_debug_tools_enabled()) {
+            return;
+        }
+
         $parts = [
             'timestamp=' . date('Y-m-d H:i:s'),
             'trace_id=' . ($context['trace_id'] ?? $this->supplierAdvanceTraceId()),
@@ -479,6 +483,10 @@ final class CommercialObligationSyncService extends Service
 
     private function writeSupplierAdvanceTraceLine(string $line): void
     {
+        if (! app_debug_tools_enabled()) {
+            return;
+        }
+
         $logDirectory = dirname(__DIR__, 2) . '/storage/logs';
         $logFile = $logDirectory . '/supplier_advance_trace_v2.log';
 

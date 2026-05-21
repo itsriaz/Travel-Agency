@@ -1,4 +1,9 @@
+Options -Indexes
+
 RewriteEngine On
+
+RewriteRule ^(?:app|config|database|docs|launcher|routes|scripts|storage|tests|vendor)(?:/|$) - [F,L,NC]
+RewriteRule ^(?:\.git|\.env|composer\.(?:json|lock)|package(?:-lock)?\.json|AGENTS\.md)(?:$|/) - [F,L,NC]
 
 RewriteCond %{REQUEST_FILENAME} !-f
 RewriteCond %{REQUEST_FILENAME} !-d

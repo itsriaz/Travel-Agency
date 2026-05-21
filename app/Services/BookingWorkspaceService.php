@@ -87,6 +87,8 @@ final class BookingWorkspaceService extends Service
                 throw new RuntimeException('You cannot update a booking outside your accessible branches.');
             }
 
+            $this->assertCanUseStatus($repository, $bookingId, (string) $payload['booking']['booking_status']);
+
             $repository->updateBooking(
                 $bookingId,
                 array_merge($payload['booking'], ['actor_user_id' => $actorUserId]),
@@ -122,6 +124,10 @@ final class BookingWorkspaceService extends Service
             ];
         }
 
+        if ((string) $payload['booking']['booking_status'] === 'closed') {
+            throw new RuntimeException('A new invoice cannot be created as Closed. Save the invoice, complete services and payments, then close it.');
+        }
+
         $newBookingId = $repository->createBooking(
             array_merge($payload['booking'], ['actor_user_id' => $actorUserId]),
             $payload['party']
@@ -154,6 +160,24 @@ final class BookingWorkspaceService extends Service
             'booking' => $savedBooking,
             'action' => 'created',
         ];
+    }
+
+    private function assertCanUseStatus(BookingRepository $repository, int $bookingId, string $status): void
+    {
+        if ($status !== 'closed') {
+            return;
+        }
+
+        $totals = $repository->closeReadinessTotals($bookingId);
+        if ((int) $totals['serviceCount'] <= 0) {
+            throw new RuntimeException('Invoice cannot be closed before at least one active service is saved.');
+        }
+
+        if ((float) $totals['customerOutstanding'] > 0.005 || (float) $totals['supplierOutstanding'] > 0.005) {
+            throw new RuntimeException(
+                'Invoice cannot be closed while customer outstanding or supplier payable balance is still open.'
+            );
+        }
     }
 
     private function validatedPayload(array $input, array $accessibleBranchIds): array

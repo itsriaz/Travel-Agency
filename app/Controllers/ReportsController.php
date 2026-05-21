@@ -16,6 +16,10 @@ final class ReportsController extends BaseController
     public function index(): string
     {
         try {
+            if ((string) ($_GET['report'] ?? '') === 'accounting_integrity' && ! Auth::isFinancialAdmin()) {
+                throw new RuntimeException('Only super admin or branch admin can open accounting integrity checks.');
+            }
+
             $state = (new ReportService($this->app))->reportState(
                 $_GET,
                 Authorization::accessibleBranchIds(),
@@ -36,6 +40,10 @@ final class ReportsController extends BaseController
     public function exportCsv(): never
     {
         try {
+            if ((string) ($_GET['report'] ?? '') === 'accounting_integrity' && ! Auth::isFinancialAdmin()) {
+                throw new RuntimeException('Only super admin or branch admin can export accounting integrity checks.');
+            }
+
             $state = (new ReportService($this->app))->reportState(
                 $_GET,
                 Authorization::accessibleBranchIds(),

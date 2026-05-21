@@ -90,6 +90,44 @@ final class BookingRepository extends BaseRepository
         });
     }
 
+    public function closeReadinessTotals(int $bookingId): array
+    {
+        $statement = $this->db->prepare(
+            'SELECT
+                COALESCE(recv.customer_outstanding, 0) AS customer_outstanding,
+                COALESCE(supp.supplier_outstanding, 0) AS supplier_outstanding,
+                COALESCE(svc.service_count, 0) AS service_count
+             FROM bookings b
+             LEFT JOIN (
+                SELECT booking_reference, SUM(GREATEST(outstanding_amount, 0)) AS customer_outstanding
+                FROM customer_receivable_items
+                WHERE status IN ("open", "partially_paid")
+                GROUP BY booking_reference
+             ) recv ON recv.booking_reference = b.booking_reference
+             LEFT JOIN (
+                SELECT booking_reference, SUM(GREATEST(net_payable_amount, 0)) AS supplier_outstanding
+                FROM supplier_obligations
+                WHERE status IN ("open", "partially_covered")
+                GROUP BY booking_reference
+             ) supp ON supp.booking_reference = b.booking_reference
+             LEFT JOIN (
+                SELECT booking_id, COUNT(*) AS service_count
+                FROM booking_services
+                WHERE LOWER(status) <> "cancelled"
+                GROUP BY booking_id
+             ) svc ON svc.booking_id = b.id
+             WHERE b.id = :booking_id'
+        );
+        $statement->execute(['booking_id' => $bookingId]);
+        $row = $statement->fetch() ?: [];
+
+        return [
+            'customerOutstanding' => round((float) ($row['customer_outstanding'] ?? 0), 2),
+            'supplierOutstanding' => round((float) ($row['supplier_outstanding'] ?? 0), 2),
+            'serviceCount' => (int) ($row['service_count'] ?? 0),
+        ];
+    }
+
     public function findBookingById(int $bookingId): ?array
     {
         $statement = $this->db->prepare(

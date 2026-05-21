@@ -6,6 +6,22 @@ $filters = is_array($filters ?? null) ? $filters : [];
 $columns = is_array($columns ?? null) ? $columns : [];
 $rows = is_array($rows ?? null) ? $rows : [];
 $summaryCards = is_array($summaryCards ?? null) ? $summaryCards : [];
+$regularSummaryCards = $summaryCards;
+$groupPkrSummaryCards = [];
+$groupAedSummaryCards = [];
+if ($selectedReport === 'management_summary') {
+    $regularSummaryCards = [];
+    foreach ($summaryCards as $summaryCard) {
+        $groupKey = (string) ($summaryCard['group'] ?? '');
+        if ($groupKey === 'group-pkr') {
+            $groupPkrSummaryCards[] = $summaryCard;
+        } elseif ($groupKey === 'group-aed') {
+            $groupAedSummaryCards[] = $summaryCard;
+        } else {
+            $regularSummaryCards[] = $summaryCard;
+        }
+    }
+}
 $receivableAgingSummaryRows = is_array($receivableAgingSummaryRows ?? null) ? $receivableAgingSummaryRows : [];
 $receivableAgingSummaryColumns = is_array($receivableAgingSummaryColumns ?? null) ? $receivableAgingSummaryColumns : [];
 $selectedReport = (string) ($selectedReport ?? 'receivable_aging');
@@ -83,10 +99,37 @@ if ($selectedReport === 'receivable_aging') {
         . ' | Branch: ' . $selectedBranchLabel
         . ' | Currency: ' . $currencyLabel
         . ' | Scope: ' . $scopeLabel;
+} elseif ($selectedReport === 'unallocated_money') {
+    $currencyLabel = $selectedCurrency !== '' ? $selectedCurrency : 'All currencies';
+    $reportContextLine = 'Period: ' . $reportPeriodLabel
+        . ' | Branch: ' . $selectedBranchLabel
+        . ' | Currency: ' . $currencyLabel
+        . ' | Scope: Customer receipt credits, unallocated supplier payments, and available supplier advances. Click a receipt/payment number to open the source document.';
+} elseif ($selectedReport === 'void_reversal_register') {
+    $currencyLabel = $selectedCurrency !== '' ? $selectedCurrency : 'All currencies';
+    $reportContextLine = 'Period: ' . $reportPeriodLabel
+        . ' | Branch: ' . $selectedBranchLabel
+        . ' | Currency: ' . $currencyLabel
+        . ' | Scope: Voided customer receipts and supplier payments with reversal references, reasons, users, and journal linkage where available.';
+} elseif ($selectedReport === 'finance_audit_trail') {
+    $currencyLabel = $selectedCurrency !== '' ? $selectedCurrency : 'All currencies';
+    $reportContextLine = 'Period: ' . $reportPeriodLabel
+        . ' | Branch: ' . $selectedBranchLabel
+        . ' | Currency: ' . $currencyLabel
+        . ' | Scope: Finance-related audit events for receipts, supplier payments, supplier advances, allocations, metadata edits, and void actions.';
+} elseif ($selectedReport === 'accounting_integrity') {
+    $reportContextLine = 'Branch: ' . $selectedBranchLabel
+        . ' | Scope: Read-only accounting exception checks for journals, receivables, payables, receipts, supplier payments, and supplier advances.';
 } else {
-    $dateBasisLabel = in_array($selectedReport, ['management_summary', 'branch_performance'], true)
-        ? 'Booking/service activity uses booking date. Receipts use receipt date. Supplier payments use payment date.'
-        : 'Report-specific date filters are applied.';
+    if ($selectedReport === 'management_summary') {
+        $dateBasisLabel = $selectedBranchId > 0
+            ? 'Single-branch view: branch-local P/L uses the branch base currency; group PKR consolidation is hidden.'
+            : 'All-branch view: branch-local P/L cards are shown first, followed by original-currency totals, then separate Group PKR and Group AED consolidation.';
+    } else {
+        $dateBasisLabel = $selectedReport === 'branch_performance'
+            ? 'Booking/service activity uses booking date. Receipts use receipt date. Supplier payments use payment date.'
+            : 'Report-specific date filters are applied.';
+    }
 
     $reportContextLine = 'Report period: ' . $reportPeriodLabel
         . ' | As of date: ' . $formattedAsOfDate
@@ -164,10 +207,8 @@ $exportQuery = http_build_query([
 <section class="page-head">
     <div>
         <h1>Reports</h1>
-        <p>Core financial and operational reports from live booking data, with original-currency truth and PKR-converted consolidated totals where supported.</p>
     </div>
     <div class="page-actions">
-        <a class="btn btn-sm" href="<?= e(url('/workspace')) ?>">Booking Workspace</a>
         <a class="btn btn-primary" id="reports-export-link" href="<?= e(url('/reports/export.csv?' . $exportQuery)) ?>">Export CSV</a>
     </div>
 </section>
@@ -209,15 +250,15 @@ $exportQuery = http_build_query([
                 <?php endforeach; ?>
             </select>
         </label>
-        <label class="station-field span-1">
+        <label class="station-field span-2 report-date-field">
             <span>Date From</span>
             <input type="date" name="date_from" value="<?= e((string) ($filters['dateFrom'] ?? '')) ?>" data-report-filter="debounced">
         </label>
-        <label class="station-field span-1">
+        <label class="station-field span-2 report-date-field">
             <span>Date To</span>
             <input type="date" name="date_to" value="<?= e((string) ($filters['dateTo'] ?? '')) ?>" data-report-filter="debounced">
         </label>
-        <label class="station-field span-1">
+        <label class="station-field span-2 report-date-field">
             <span>As Of Date</span>
             <input type="date" name="as_of_date" value="<?= e((string) ($filters['asOfDate'] ?? date('Y-m-d'))) ?>" data-report-filter="debounced">
         </label>
@@ -244,15 +285,52 @@ $exportQuery = http_build_query([
     </form>
 </section>
 
-<section class="stat-grid">
-    <?php foreach ($summaryCards as $summaryCard): ?>
-        <article class="stat-card">
-            <div class="stat-label"><?= e((string) ($summaryCard['label'] ?? 'Summary')) ?></div>
+<?php $renderSummaryCard = static function (array $summaryCard): void { ?>
+    <article class="stat-card <?= ! empty($summaryCard['lines']) ? 'stat-card--ledger' : '' ?> <?= (string) ($summaryCard['tone'] ?? '') === 'converted' ? 'stat-card--converted' : '' ?> <?= (string) ($summaryCard['tone'] ?? '') === 'branch-local' ? 'stat-card--branch-local' : '' ?>">
+        <div class="stat-label"><?= e((string) ($summaryCard['label'] ?? 'Summary')) ?></div>
+        <?php if (is_array($summaryCard['lines'] ?? null) && $summaryCard['lines'] !== []): ?>
+            <div class="stat-ledger-lines">
+                <?php foreach ($summaryCard['lines'] as $line): ?>
+                    <div class="stat-ledger-line">
+                        <span><?= e((string) ($line['currency'] ?? '')) ?></span>
+                        <strong><?= e((string) ($line['amount'] ?? '0.00')) ?></strong>
+                    </div>
+                <?php endforeach; ?>
+            </div>
+        <?php else: ?>
             <div class="stat-value"><?= e((string) ($summaryCard['value'] ?? '')) ?></div>
-            <div class="stat-note">Operational totals from persisted live data.</div>
-        </article>
+        <?php endif; ?>
+        <?php $summaryNote = (string) ($summaryCard['note'] ?? 'Operational totals from persisted live data.'); ?>
+        <?php if ($summaryNote !== ''): ?>
+            <div class="stat-note"><?= e($summaryNote) ?></div>
+        <?php endif; ?>
+    </article>
+<?php }; ?>
+
+<section class="stat-grid">
+    <?php foreach ($regularSummaryCards as $summaryCard): ?>
+        <?php $renderSummaryCard($summaryCard); ?>
     <?php endforeach; ?>
 </section>
+
+<?php if ($groupPkrSummaryCards !== [] || $groupAedSummaryCards !== []): ?>
+    <?php foreach ([['Group Consolidated - PKR', $groupPkrSummaryCards, 'pkr'], ['Group Consolidated - AED', $groupAedSummaryCards, 'aed']] as $groupSection): ?>
+        <?php if ($groupSection[1] === []): ?>
+            <?php continue; ?>
+        <?php endif; ?>
+        <section class="panel compact-panel report-summary-group report-summary-group--<?= e((string) $groupSection[2]) ?>">
+            <div class="panel-header">
+                <h2><?= e((string) $groupSection[0]) ?></h2>
+                <div class="panel-meta">Group reporting conversion, shown separately from branch-local and original-currency totals.</div>
+            </div>
+            <div class="stat-grid stat-grid--group">
+                <?php foreach ($groupSection[1] as $summaryCard): ?>
+                    <?php $renderSummaryCard($summaryCard); ?>
+                <?php endforeach; ?>
+            </div>
+        </section>
+    <?php endforeach; ?>
+<?php endif; ?>
 
 <section class="panel compact-panel">
     <div class="panel-header">

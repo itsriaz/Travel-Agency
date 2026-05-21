@@ -66,11 +66,61 @@ final class BookingServiceRepository extends BaseRepository
                 sat.ticket_commission,
                 sat.supplier_cost,
                 sat.sale_amount,
-                sat.ticket_remarks
+                sat.ticket_remarks,
+                sv.visa_country,
+                sv.visa_type,
+                sv.application_reference AS visa_application_reference,
+                sv.passport_number AS visa_passport_number,
+                sv.submission_date AS visa_submission_date,
+                sv.issue_date AS visa_issue_date,
+                sv.expiry_date AS visa_expiry_date,
+                sv.visa_status,
+                sv.remarks AS visa_remarks,
+                su.package_name AS umrah_package_name,
+                su.mofa_reference AS umrah_mofa_reference,
+                su.departure_date AS umrah_departure_date,
+                su.return_date AS umrah_return_date,
+                su.hotel_name AS umrah_hotel_name,
+                su.transport_notes AS umrah_transport_notes,
+                su.remarks AS umrah_remarks,
+                sh.hotel_name,
+                sh.city AS hotel_city,
+                sh.confirmation_number AS hotel_confirmation_number,
+                sh.check_in_date AS hotel_check_in_date,
+                sh.check_out_date AS hotel_check_out_date,
+                sh.room_type AS hotel_room_type,
+                sh.guest_count AS hotel_guest_count,
+                sh.remarks AS hotel_remarks,
+                st.transport_mode,
+                st.vehicle_type AS transport_vehicle_type,
+                st.pickup_date AS transport_pickup_date,
+                st.pickup_location AS transport_pickup_location,
+                st.dropoff_location AS transport_dropoff_location,
+                st.driver_detail AS transport_driver_detail,
+                st.route_notes AS transport_route_notes,
+                st.remarks AS transport_remarks,
+                sto.tour_name,
+                sto.destination AS tour_destination,
+                sto.confirmation_number AS tour_confirmation_number,
+                sto.start_date AS tour_start_date,
+                sto.end_date AS tour_end_date,
+                sto.inclusions AS tour_inclusions,
+                sto.remarks AS tour_remarks,
+                so.label AS other_label,
+                so.reference_number AS other_reference_number,
+                so.service_date AS other_service_date,
+                so.provider_name AS other_provider_name,
+                so.remarks AS other_remarks
              FROM booking_services bs
              LEFT JOIN suppliers s ON s.id = bs.supplier_id
              LEFT JOIN travelers t ON t.id = bs.traveler_id
              LEFT JOIN service_air_ticket sat ON sat.booking_service_id = bs.id
+             LEFT JOIN service_visa sv ON sv.booking_service_id = bs.id
+             LEFT JOIN service_umrah su ON su.booking_service_id = bs.id
+             LEFT JOIN service_hotel sh ON sh.booking_service_id = bs.id
+             LEFT JOIN service_transport st ON st.booking_service_id = bs.id
+             LEFT JOIN service_tour sto ON sto.booking_service_id = bs.id
+             LEFT JOIN service_other so ON so.booking_service_id = bs.id
              WHERE bs.booking_id = :booking_id
              ORDER BY bs.display_order ASC, bs.id ASC'
         );
@@ -216,9 +266,59 @@ final class BookingServiceRepository extends BaseRepository
                 sat.ticket_commission,
                 sat.supplier_cost,
                 sat.sale_amount,
-                sat.ticket_remarks
+                sat.ticket_remarks,
+                sv.visa_country,
+                sv.visa_type,
+                sv.application_reference AS visa_application_reference,
+                sv.passport_number AS visa_passport_number,
+                sv.submission_date AS visa_submission_date,
+                sv.issue_date AS visa_issue_date,
+                sv.expiry_date AS visa_expiry_date,
+                sv.visa_status,
+                sv.remarks AS visa_remarks,
+                su.package_name AS umrah_package_name,
+                su.mofa_reference AS umrah_mofa_reference,
+                su.departure_date AS umrah_departure_date,
+                su.return_date AS umrah_return_date,
+                su.hotel_name AS umrah_hotel_name,
+                su.transport_notes AS umrah_transport_notes,
+                su.remarks AS umrah_remarks,
+                sh.hotel_name,
+                sh.city AS hotel_city,
+                sh.confirmation_number AS hotel_confirmation_number,
+                sh.check_in_date AS hotel_check_in_date,
+                sh.check_out_date AS hotel_check_out_date,
+                sh.room_type AS hotel_room_type,
+                sh.guest_count AS hotel_guest_count,
+                sh.remarks AS hotel_remarks,
+                st.transport_mode,
+                st.vehicle_type AS transport_vehicle_type,
+                st.pickup_date AS transport_pickup_date,
+                st.pickup_location AS transport_pickup_location,
+                st.dropoff_location AS transport_dropoff_location,
+                st.driver_detail AS transport_driver_detail,
+                st.route_notes AS transport_route_notes,
+                st.remarks AS transport_remarks,
+                sto.tour_name,
+                sto.destination AS tour_destination,
+                sto.confirmation_number AS tour_confirmation_number,
+                sto.start_date AS tour_start_date,
+                sto.end_date AS tour_end_date,
+                sto.inclusions AS tour_inclusions,
+                sto.remarks AS tour_remarks,
+                so.label AS other_label,
+                so.reference_number AS other_reference_number,
+                so.service_date AS other_service_date,
+                so.provider_name AS other_provider_name,
+                so.remarks AS other_remarks
              FROM booking_services bs
              LEFT JOIN service_air_ticket sat ON sat.booking_service_id = bs.id
+             LEFT JOIN service_visa sv ON sv.booking_service_id = bs.id
+             LEFT JOIN service_umrah su ON su.booking_service_id = bs.id
+             LEFT JOIN service_hotel sh ON sh.booking_service_id = bs.id
+             LEFT JOIN service_transport st ON st.booking_service_id = bs.id
+             LEFT JOIN service_tour sto ON sto.booking_service_id = bs.id
+             LEFT JOIN service_other so ON so.booking_service_id = bs.id
              WHERE bs.id = :id
              LIMIT 1'
         );
@@ -228,9 +328,9 @@ final class BookingServiceRepository extends BaseRepository
         return $row !== false ? $row : null;
     }
 
-    public function createService(array $masterData, array $airTicketData): int
+    public function createService(array $masterData, array $subtypeData): int
     {
-        return $this->transaction(function () use ($masterData, $airTicketData): int {
+        return $this->transaction(function () use ($masterData, $subtypeData): int {
             $displayOrder = $this->nextDisplayOrder((int) $masterData['booking_id']);
             $lineReference = 'SV-' . str_pad((string) $displayOrder, 3, '0', STR_PAD_LEFT);
 
@@ -282,15 +382,15 @@ final class BookingServiceRepository extends BaseRepository
             ]);
 
             $serviceId = (int) $this->db->lastInsertId();
-            $this->replaceSubtypeRecord($serviceId, (string) $masterData['service_type'], $airTicketData);
+            $this->replaceSubtypeRecord($serviceId, (string) $masterData['service_type'], $subtypeData);
 
             return $serviceId;
         });
     }
 
-    public function updateService(int $serviceId, array $masterData, array $airTicketData): void
+    public function updateService(int $serviceId, array $masterData, array $subtypeData): void
     {
-        $this->transaction(function () use ($serviceId, $masterData, $airTicketData): void {
+        $this->transaction(function () use ($serviceId, $masterData, $subtypeData): void {
             $statement = $this->db->prepare(
                 'UPDATE booking_services
                  SET service_type = :service_type,
@@ -355,7 +455,7 @@ final class BookingServiceRepository extends BaseRepository
                 'updated_by_user_id' => $masterData['actor_user_id'],
             ]);
 
-            $this->replaceSubtypeRecord($serviceId, (string) $masterData['service_type'], $airTicketData);
+            $this->replaceSubtypeRecord($serviceId, (string) $masterData['service_type'], $subtypeData);
         });
     }
 
@@ -373,7 +473,50 @@ final class BookingServiceRepository extends BaseRepository
         ]);
     }
 
-    private function replaceSubtypeRecord(int $serviceId, string $serviceType, array $airTicketData): void
+    public function updateServiceStatus(int $serviceId, string $status, int $actorUserId): void
+    {
+        $statement = $this->db->prepare(
+            'UPDATE booking_services
+             SET service_status = :service_status,
+                 updated_by_user_id = :updated_by_user_id
+             WHERE id = :id'
+        );
+        $statement->execute([
+            'id' => $serviceId,
+            'service_status' => $status,
+            'updated_by_user_id' => $actorUserId,
+        ]);
+    }
+
+    public function updateAirTicketReissueDetails(int $serviceId, ?string $ticketNumber, ?string $pnr, int $actorUserId): void
+    {
+        $this->transaction(function () use ($serviceId, $ticketNumber, $pnr, $actorUserId): void {
+            $statement = $this->db->prepare(
+                'UPDATE service_air_ticket
+                 SET ticket_number = :ticket_number,
+                     pnr = :pnr
+                 WHERE booking_service_id = :service_id'
+            );
+            $statement->execute([
+                'service_id' => $serviceId,
+                'ticket_number' => $ticketNumber,
+                'pnr' => $pnr,
+            ]);
+
+            $updateService = $this->db->prepare(
+                'UPDATE booking_services
+                 SET service_status = "Booked",
+                     updated_by_user_id = :updated_by_user_id
+                 WHERE id = :id'
+            );
+            $updateService->execute([
+                'id' => $serviceId,
+                'updated_by_user_id' => $actorUserId,
+            ]);
+        });
+    }
+
+    private function replaceSubtypeRecord(int $serviceId, string $serviceType, array $subtypeData): void
     {
         foreach (self::SUBTYPE_TABLES as $tableName) {
             $deleteStatement = $this->db->prepare('DELETE FROM ' . $tableName . ' WHERE booking_service_id = :service_id');
@@ -392,21 +535,21 @@ final class BookingServiceRepository extends BaseRepository
             );
             $statement->execute([
                 'booking_service_id' => $serviceId,
-                'pnr' => $airTicketData['pnr'],
-                'ticket_number' => $airTicketData['ticket_number'],
-                'airline' => $airTicketData['airline'],
-                'sector_from' => $airTicketData['sector_from'],
-                'sector_to' => $airTicketData['sector_to'],
-                'departure_date' => $airTicketData['departure_date'],
-                'return_date' => $airTicketData['return_date'],
-                'travel_class' => $airTicketData['travel_class'],
-                'fare' => $airTicketData['fare'],
-                'ticket_tax' => $airTicketData['ticket_tax'],
-                'ticket_vat' => $airTicketData['ticket_vat'],
-                'ticket_commission' => $airTicketData['ticket_commission'],
-                'supplier_cost' => $airTicketData['supplier_cost'],
-                'sale_amount' => $airTicketData['sale_amount'],
-                'ticket_remarks' => $airTicketData['ticket_remarks'],
+                'pnr' => $subtypeData['pnr'],
+                'ticket_number' => $subtypeData['ticket_number'],
+                'airline' => $subtypeData['airline'],
+                'sector_from' => $subtypeData['sector_from'],
+                'sector_to' => $subtypeData['sector_to'],
+                'departure_date' => $subtypeData['departure_date'],
+                'return_date' => $subtypeData['return_date'],
+                'travel_class' => $subtypeData['travel_class'],
+                'fare' => $subtypeData['fare'],
+                'ticket_tax' => $subtypeData['ticket_tax'],
+                'ticket_vat' => $subtypeData['ticket_vat'],
+                'ticket_commission' => $subtypeData['ticket_commission'],
+                'supplier_cost' => $subtypeData['supplier_cost'],
+                'sale_amount' => $subtypeData['sale_amount'],
+                'ticket_remarks' => $subtypeData['ticket_remarks'],
             ]);
 
             return;
@@ -414,12 +557,12 @@ final class BookingServiceRepository extends BaseRepository
 
         $tableName = self::SUBTYPE_TABLES[$serviceType] ?? 'service_other';
         $payload = match ($tableName) {
-            'service_visa' => ['visa_country', 'visa_type', 'remarks'],
-            'service_umrah' => ['package_name', 'remarks'],
-            'service_hotel' => ['hotel_name', 'city', 'remarks'],
-            'service_transport' => ['transport_mode', 'route_notes', 'remarks'],
-            'service_tour' => ['tour_name', 'destination', 'remarks'],
-            default => ['label', 'remarks'],
+            'service_visa' => ['visa_country', 'visa_type', 'application_reference', 'passport_number', 'submission_date', 'issue_date', 'expiry_date', 'visa_status', 'remarks'],
+            'service_umrah' => ['package_name', 'mofa_reference', 'departure_date', 'return_date', 'hotel_name', 'transport_notes', 'remarks'],
+            'service_hotel' => ['hotel_name', 'city', 'confirmation_number', 'check_in_date', 'check_out_date', 'room_type', 'guest_count', 'remarks'],
+            'service_transport' => ['transport_mode', 'vehicle_type', 'pickup_date', 'pickup_location', 'dropoff_location', 'driver_detail', 'route_notes', 'remarks'],
+            'service_tour' => ['tour_name', 'destination', 'confirmation_number', 'start_date', 'end_date', 'inclusions', 'remarks'],
+            default => ['label', 'reference_number', 'service_date', 'provider_name', 'remarks'],
         };
 
         $columns = implode(', ', array_merge(['booking_service_id'], $payload));
@@ -428,7 +571,7 @@ final class BookingServiceRepository extends BaseRepository
 
         $values = ['booking_service_id' => $serviceId];
         foreach ($payload as $column) {
-            $values[$column] = null;
+            $values[$column] = $subtypeData[$column] ?? null;
         }
         $statement->execute($values);
     }

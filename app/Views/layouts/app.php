@@ -57,7 +57,7 @@ $isWorkspacePage = str_contains($requestPath, '/workspace');
 
         <main class="content-panel">
             <?php if ($flash !== null): ?>
-                <div class="alert alert-<?= e($flash['type']) ?>"><?= e($flash['message']) ?></div>
+                <div class="alert alert-toast alert-<?= e($flash['type']) ?>" role="status" aria-live="polite"><?= e($flash['message']) ?></div>
             <?php endif; ?>
             <?= $content ?>
         </main>

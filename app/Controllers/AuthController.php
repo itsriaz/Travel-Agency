@@ -268,6 +268,8 @@ final class AuthController extends BaseController
 
     public function logout(): never
     {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+
         \App\Helpers\AuditLog::record($this->app, 'auth.logout', [
             'user_id' => Auth::id(),
         ]);

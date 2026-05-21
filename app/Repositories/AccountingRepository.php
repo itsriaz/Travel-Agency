@@ -46,28 +46,45 @@ final class AccountingRepository extends BaseRepository
 
             $journalEntryId = (int) $this->db->lastInsertId();
 
-            $lineStatement = $this->db->prepare(
-                'INSERT INTO journal_entry_lines (
-                    journal_entry_id, account_id, service_line_reference, supplier_obligation_id,
-                    customer_receivable_item_id, customer_receipt_id, line_description, debit_amount, credit_amount
-                 ) VALUES (
-                    :journal_entry_id, :account_id, :service_line_reference, :supplier_obligation_id,
-                    :customer_receivable_item_id, :customer_receipt_id, :line_description, :debit_amount, :credit_amount
-                 )'
+            $lineColumns = [
+                'journal_entry_id',
+                'account_id',
+                'service_line_reference',
+                'supplier_obligation_id',
+            ];
+            if ($this->columnExists('journal_entry_lines', 'supplier_payment_id')) {
+                $lineColumns[] = 'supplier_payment_id';
+            }
+            array_push(
+                $lineColumns,
+                'customer_receivable_item_id',
+                'customer_receipt_id',
+                'line_description',
+                'debit_amount',
+                'credit_amount'
             );
 
+            $linePlaceholders = array_map(static fn (string $column): string => ':' . $column, $lineColumns);
+            $lineStatement = $this->db->prepare(sprintf(
+                'INSERT INTO journal_entry_lines (%s) VALUES (%s)',
+                implode(', ', $lineColumns),
+                implode(', ', $linePlaceholders)
+            ));
+
             foreach ($lines as $line) {
-                $lineStatement->execute([
+                $linePayload = [
                     'journal_entry_id' => $journalEntryId,
                     'account_id' => $this->accountIdByCode($line['account_code']),
                     'service_line_reference' => $line['service_line_reference'] ?? null,
                     'supplier_obligation_id' => $line['supplier_obligation_id'] ?? null,
+                    'supplier_payment_id' => $line['supplier_payment_id'] ?? null,
                     'customer_receivable_item_id' => $line['customer_receivable_item_id'] ?? null,
                     'customer_receipt_id' => $line['customer_receipt_id'] ?? null,
                     'line_description' => $line['line_description'] ?? null,
                     'debit_amount' => $line['debit_amount'] ?? 0,
                     'credit_amount' => $line['credit_amount'] ?? 0,
-                ]);
+                ];
+                $lineStatement->execute(array_intersect_key($linePayload, array_flip($lineColumns)));
             }
 
             AuditLog::record($this->app, 'accounting.journal_entry.posted', [
@@ -320,6 +337,7 @@ final class AccountingRepository extends BaseRepository
         $lines = [
             [
                 'account_code' => 'SUPPLIER_ADVANCES',
+                'supplier_payment_id' => $data['supplier_payment_id'] ?? null,
                 'line_description' => 'Supplier payment recorded as unapplied settlement asset',
                 'debit_amount' => $paidAmount,
                 'credit_amount' => 0,
@@ -329,6 +347,7 @@ final class AccountingRepository extends BaseRepository
         if ($chargesAmount > 0) {
             $lines[] = [
                 'account_code' => 'CARD_CHARGES',
+                'supplier_payment_id' => $data['supplier_payment_id'] ?? null,
                 'line_description' => 'Supplier payment charges recognized',
                 'debit_amount' => $chargesAmount,
                 'credit_amount' => 0,
@@ -337,6 +356,7 @@ final class AccountingRepository extends BaseRepository
 
         $lines[] = [
             'account_code' => $cashAccountCode,
+            'supplier_payment_id' => $data['supplier_payment_id'] ?? null,
             'line_description' => 'Cash or bank supplier outflow',
             'debit_amount' => 0,
             'credit_amount' => $paidAmount + $chargesAmount,
@@ -370,6 +390,7 @@ final class AccountingRepository extends BaseRepository
                 'account_code' => 'AP_CONTROL',
                 'service_line_reference' => $data['service_line_reference'] ?? null,
                 'supplier_obligation_id' => $data['supplier_obligation_id'] ?? null,
+                'supplier_payment_id' => $data['supplier_payment_id'] ?? null,
                 'line_description' => 'Accounts payable reduced by supplier payment allocation',
                 'debit_amount' => $data['allocated_amount'],
                 'credit_amount' => 0,
@@ -378,11 +399,119 @@ final class AccountingRepository extends BaseRepository
                 'account_code' => 'SUPPLIER_ADVANCES',
                 'service_line_reference' => $data['service_line_reference'] ?? null,
                 'supplier_obligation_id' => $data['supplier_obligation_id'] ?? null,
+                'supplier_payment_id' => $data['supplier_payment_id'] ?? null,
                 'line_description' => 'Unapplied supplier payment consumed',
                 'debit_amount' => 0,
                 'credit_amount' => $data['allocated_amount'],
             ],
         ]);
+    }
+
+    public function postSupplierPaymentVoidReversal(array $data): ?int
+    {
+        $rows = [];
+        if ($this->columnExists('journal_entry_lines', 'supplier_payment_id')) {
+            $statement = $this->db->prepare(
+                'SELECT
+                    je.id AS journal_entry_id,
+                    je.branch_id,
+                    je.booking_reference,
+                    je.currency,
+                    coa.code AS account_code,
+                    jel.service_line_reference,
+                    jel.supplier_obligation_id,
+                    jel.supplier_payment_id,
+                    jel.line_description,
+                    jel.debit_amount,
+                    jel.credit_amount
+                 FROM journal_entries je
+                 INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+                 INNER JOIN chart_of_accounts coa ON coa.id = jel.account_id
+                 WHERE jel.supplier_payment_id = :supplier_payment_id
+                   AND je.source_type IN ("supplier_payment_recorded", "supplier_payment_allocated")
+                 ORDER BY je.id ASC, jel.id ASC'
+            );
+            $statement->execute([
+                'supplier_payment_id' => $data['supplier_payment_id'],
+            ]);
+            $rows = $statement->fetchAll() ?: [];
+        }
+
+        if ($rows === [] && trim((string) ($data['payment_no'] ?? '')) !== '') {
+            $statement = $this->db->prepare(
+                'SELECT
+                    je.id AS journal_entry_id,
+                    je.branch_id,
+                    je.booking_reference,
+                    je.currency,
+                    coa.code AS account_code,
+                    jel.service_line_reference,
+                    jel.supplier_obligation_id,
+                    NULL AS supplier_payment_id,
+                    jel.line_description,
+                    jel.debit_amount,
+                    jel.credit_amount
+                 FROM journal_entries je
+                 INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+                 INNER JOIN chart_of_accounts coa ON coa.id = jel.account_id
+                 WHERE je.source_type IN ("supplier_payment_recorded", "supplier_payment_allocated")
+                   AND (
+                        je.source_reference = :payment_no_exact
+                        OR je.source_reference LIKE :payment_no_alloc
+                   )
+                 ORDER BY je.id ASC, jel.id ASC'
+            );
+            $paymentNo = (string) $data['payment_no'];
+            $statement->execute([
+                'payment_no_exact' => $paymentNo,
+                'payment_no_alloc' => $paymentNo . '-ALLOC-%',
+            ]);
+            $rows = $statement->fetchAll() ?: [];
+        }
+
+        if ($rows === []) {
+            return null;
+        }
+
+        $lines = [];
+        foreach ($rows as $row) {
+            $debitAmount = round((float) ($row['debit_amount'] ?? 0), 2);
+            $creditAmount = round((float) ($row['credit_amount'] ?? 0), 2);
+            if ($debitAmount <= 0 && $creditAmount <= 0) {
+                continue;
+            }
+
+            $lines[] = [
+                'account_code' => (string) ($row['account_code'] ?? ''),
+                'service_line_reference' => ($row['service_line_reference'] ?? null) !== null && (string) ($row['service_line_reference'] ?? '') !== ''
+                    ? (string) $row['service_line_reference']
+                    : null,
+                'supplier_obligation_id' => (int) ($row['supplier_obligation_id'] ?? 0) > 0
+                    ? (int) $row['supplier_obligation_id']
+                    : null,
+                'supplier_payment_id' => (int) ($data['supplier_payment_id'] ?? 0) > 0
+                    ? (int) $data['supplier_payment_id']
+                    : null,
+                'line_description' => 'Supplier payment void reversal: ' . (string) ($row['line_description'] ?? ''),
+                'debit_amount' => $creditAmount,
+                'credit_amount' => $debitAmount,
+            ];
+        }
+
+        if ($lines === []) {
+            return null;
+        }
+
+        return $this->postJournalEntry([
+            'branch_id' => $data['branch_id'],
+            'booking_reference' => $data['booking_reference'],
+            'source_type' => 'supplier_payment_void_reversed',
+            'source_reference' => $data['source_reference'] ?? null,
+            'entry_date' => $data['entry_date'],
+            'currency' => $data['currency'],
+            'narration' => $data['narration'] ?? 'Supplier payment void reversal',
+            'actor_user_id' => $data['actor_user_id'] ?? null,
+        ], $lines);
     }
 
     public function postCustomerReceiptRecorded(array $data): int
@@ -538,6 +667,100 @@ final class AccountingRepository extends BaseRepository
             'narration' => $data['narration'] ?? 'Customer receipt void reversal',
             'actor_user_id' => $data['actor_user_id'] ?? null,
         ], $lines);
+    }
+
+    public function postServiceRefund(array $data): int
+    {
+        $customerRefundAmount = round((float) ($data['customer_refund_amount'] ?? 0), 2);
+        $supplierRefundAmount = round((float) ($data['supplier_refund_amount'] ?? 0), 2);
+        $cashAccountCode = match ($data['payment_method'] ?? 'bank_transfer') {
+            'cash' => 'CASH_ON_HAND',
+            'debit_card', 'credit_card' => 'CARD_CLEARING',
+            default => 'BANK_CLEARING',
+        };
+
+        $lines = [];
+        if ($customerRefundAmount > 0) {
+            $lines[] = [
+                'account_code' => 'CUSTOMER_CREDIT',
+                'service_line_reference' => $data['service_line_reference'] ?? null,
+                'line_description' => 'Customer credit refunded',
+                'debit_amount' => $customerRefundAmount,
+                'credit_amount' => 0,
+            ];
+            $lines[] = [
+                'account_code' => $cashAccountCode,
+                'service_line_reference' => $data['service_line_reference'] ?? null,
+                'line_description' => 'Cash or bank customer refund paid',
+                'debit_amount' => 0,
+                'credit_amount' => $customerRefundAmount,
+            ];
+        }
+
+        if ($supplierRefundAmount > 0) {
+            $lines[] = [
+                'account_code' => $cashAccountCode,
+                'service_line_reference' => $data['service_line_reference'] ?? null,
+                'line_description' => 'Cash or bank supplier refund received',
+                'debit_amount' => $supplierRefundAmount,
+                'credit_amount' => 0,
+            ];
+            $lines[] = [
+                'account_code' => 'SUPPLIER_ADVANCES',
+                'service_line_reference' => $data['service_line_reference'] ?? null,
+                'line_description' => 'Supplier advance or credit reduced by refund',
+                'debit_amount' => 0,
+                'credit_amount' => $supplierRefundAmount,
+            ];
+        }
+
+        if ($lines === []) {
+            throw new RuntimeException('Refund journal requires a customer or supplier refund amount.');
+        }
+
+        return $this->postJournalEntry([
+            'branch_id' => $data['branch_id'],
+            'booking_reference' => $data['booking_reference'],
+            'source_type' => 'service_refund_posted',
+            'source_reference' => $data['source_reference'] ?? null,
+            'entry_date' => $data['entry_date'],
+            'currency' => $data['currency'],
+            'narration' => $data['narration'] ?? 'Service refund posted',
+            'actor_user_id' => $data['actor_user_id'] ?? null,
+        ], $lines);
+    }
+
+    public function accountNetBalanceForBooking(string $bookingReference, string $currency, string $accountCode): float
+    {
+        $statement = $this->db->prepare(
+            'SELECT
+                coa.normal_balance,
+                COALESCE(SUM(jel.debit_amount), 0) AS debit_total,
+                COALESCE(SUM(jel.credit_amount), 0) AS credit_total
+             FROM chart_of_accounts coa
+             LEFT JOIN journal_entry_lines jel ON jel.account_id = coa.id
+             LEFT JOIN journal_entries je ON je.id = jel.journal_entry_id
+             WHERE coa.code = :account_code
+               AND (je.id IS NULL OR (je.booking_reference = :booking_reference AND je.currency = :currency))
+             GROUP BY coa.id, coa.normal_balance
+             LIMIT 1'
+        );
+        $statement->execute([
+            'booking_reference' => $bookingReference,
+            'currency' => $currency,
+            'account_code' => $accountCode,
+        ]);
+        $row = $statement->fetch();
+        if ($row === false) {
+            return 0.0;
+        }
+
+        $debitTotal = round((float) ($row['debit_total'] ?? 0), 2);
+        $creditTotal = round((float) ($row['credit_total'] ?? 0), 2);
+
+        return (string) ($row['normal_balance'] ?? 'debit') === 'credit'
+            ? round($creditTotal - $debitTotal, 2)
+            : round($debitTotal - $creditTotal, 2);
     }
 
     public function ledgerSnapshotByBookingReference(string $bookingReference): array

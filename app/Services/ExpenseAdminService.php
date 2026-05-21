@@ -62,8 +62,8 @@ final class ExpenseAdminService extends Service
 
             if ($repository->attachmentsTableExists()) {
                 foreach ($repository->attachmentsForExpense($id) as $attachment) {
-                    $absolutePath = base_path('/storage/' . ltrim((string) ($attachment['storage_path'] ?? ''), '/'));
-                    if ($absolutePath !== '' && is_file($absolutePath)) {
+                    $absolutePath = $this->resolveStoredExpenseProofPath((string) ($attachment['storage_path'] ?? ''), false);
+                    if ($absolutePath !== null && is_file($absolutePath)) {
                         @unlink($absolutePath);
                     }
                 }
@@ -103,9 +103,18 @@ final class ExpenseAdminService extends Service
             throw new RuntimeException('This expense proof is no longer available for download.');
         }
 
-        $absolutePath = base_path('/storage/' . ltrim((string) ($attachment['storage_path'] ?? ''), '/'));
+        $absolutePath = $this->secureStoredExpenseProofPath((string) ($attachment['storage_path'] ?? ''));
         if (! is_file($absolutePath)) {
             throw new RuntimeException('The secure expense proof file is missing from storage.');
+        }
+
+        if ((int) filesize($absolutePath) !== (int) ($attachment['file_size_bytes'] ?? 0)) {
+            throw new RuntimeException('The secure expense proof file failed integrity validation.');
+        }
+
+        $expectedHash = strtolower(trim((string) ($attachment['sha256_hash'] ?? '')));
+        if ($expectedHash !== '' && ! hash_equals($expectedHash, strtolower((string) hash_file('sha256', $absolutePath)))) {
+            throw new RuntimeException('The secure expense proof file failed integrity validation.');
         }
 
         AuditLog::record($this->app, 'admin.business_expense.attachment.downloaded', [
@@ -118,7 +127,7 @@ final class ExpenseAdminService extends Service
 
         return [
             'absolute_path' => $absolutePath,
-            'download_name' => (string) ($attachment['original_file_name'] ?? 'expense-proof'),
+            'download_name' => $this->safeOriginalFileName((string) ($attachment['original_file_name'] ?? 'expense-proof')),
             'mime_type' => (string) ($attachment['mime_type'] ?? 'application/octet-stream'),
             'size' => (int) ($attachment['file_size_bytes'] ?? 0),
         ];
@@ -290,7 +299,9 @@ final class ExpenseAdminService extends Service
             throw new RuntimeException('The expense proof could not be stored securely.');
         }
 
-        $relativePath = 'documents/' . trim(str_replace('\\', '/', substr($absolutePath, strlen(base_path('/storage')))), '/');
+        @chmod($absolutePath, 0640);
+
+        $relativePath = trim(str_replace('\\', '/', substr($absolutePath, strlen(base_path('/storage')))), '/');
         $replacedAttachment = $repository->activeAttachmentForExpense($expenseId);
 
         try {
@@ -438,9 +449,13 @@ final class ExpenseAdminService extends Service
             throw new RuntimeException('The uploaded proof file type is not permitted.');
         }
 
+        if (! $this->extensionMatchesMime($extension, $mimeType)) {
+            throw new RuntimeException('The uploaded proof extension does not match its detected file type.');
+        }
+
         return [
             'tmp_name' => $tmpName,
-            'original_name' => substr(basename($originalName), 0, 255),
+            'original_name' => $this->safeOriginalFileName($originalName),
             'extension' => $extension,
             'mime_type' => $mimeType,
             'size' => $size,
@@ -453,5 +468,86 @@ final class ExpenseAdminService extends Service
         $datePath = date('Y/m');
 
         return base_path('/storage/documents/expense-proofs/branch_' . $branchId . '/expense_' . $expenseId . '/' . $datePath);
+    }
+
+    private function secureStoredExpenseProofPath(string $storagePath): string
+    {
+        $absolutePath = $this->resolveStoredExpenseProofPath($storagePath, true);
+        if ($absolutePath === null) {
+            throw new RuntimeException('The secure expense proof storage path is invalid.');
+        }
+
+        return $absolutePath;
+    }
+
+    private function resolveStoredExpenseProofPath(string $storagePath, bool $throwOnMissing): ?string
+    {
+        $relativePath = ltrim(str_replace('\\', '/', $storagePath), '/');
+        if ($relativePath === '' || str_contains($relativePath, '../') || str_contains($relativePath, '..\\')) {
+            if ($throwOnMissing) {
+                throw new RuntimeException('The secure expense proof storage path is invalid.');
+            }
+
+            return null;
+        }
+
+        if (! str_starts_with($relativePath, 'documents/expense-proofs/') && ! str_starts_with($relativePath, 'documents/documents/expense-proofs/')) {
+            if ($throwOnMissing) {
+                throw new RuntimeException('The secure expense proof storage path is invalid.');
+            }
+
+            return null;
+        }
+
+        $documentRoot = realpath(base_path('/storage/documents/expense-proofs'));
+        if ($documentRoot === false) {
+            if ($throwOnMissing) {
+                throw new RuntimeException('Secure expense proof storage is not available.');
+            }
+
+            return null;
+        }
+
+        $candidatePaths = [$relativePath];
+        if (str_starts_with($relativePath, 'documents/documents/')) {
+            $candidatePaths[] = substr($relativePath, strlen('documents/'));
+        }
+
+        foreach ($candidatePaths as $candidatePath) {
+            $resolvedPath = realpath(base_path('/storage/' . $candidatePath));
+            if ($resolvedPath !== false && str_starts_with($resolvedPath, $documentRoot . DIRECTORY_SEPARATOR)) {
+                return $resolvedPath;
+            }
+        }
+
+        if ($throwOnMissing) {
+            throw new RuntimeException('The secure expense proof storage path is invalid.');
+        }
+
+        return null;
+    }
+
+    private function extensionMatchesMime(string $extension, string $mimeType): bool
+    {
+        return match ($extension) {
+            'pdf' => $mimeType === 'application/pdf',
+            'jpg', 'jpeg' => $mimeType === 'image/jpeg',
+            'png' => $mimeType === 'image/png',
+            'webp' => $mimeType === 'image/webp',
+            default => false,
+        };
+    }
+
+    private function safeOriginalFileName(string $name): string
+    {
+        $baseName = basename(str_replace('\\', '/', $name));
+        $safeName = preg_replace('/[^\w.\- ()\[\]]+/u', '_', $baseName) ?: 'expense-proof';
+        $safeName = trim($safeName, " .\t\n\r\0\x0B");
+
+        if ($safeName === '') {
+            $safeName = 'expense-proof';
+        }
+
+        return mb_substr($safeName, 0, 180);
     }
 }

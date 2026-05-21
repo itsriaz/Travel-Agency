@@ -82,9 +82,25 @@ final class SecurityController extends BaseController
         return $this->view('security/admin_panel', [
             'title' => 'Security Controls',
             'users' => $service->userOptions(),
+            'roleBranchOptions' => $service->adminRoleBranchOptions(),
             'selectedUserId' => $selectedUserId,
             'target' => $selectedUserId > 0 ? $service->adminTargetSummary($selectedUserId) : null,
         ]);
+    }
+
+    public function adminUpdateRoleBranchAccess(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+
+        try {
+            $targetUserId = (new SecuritySettingsService($this->app))->adminUpdateRoleAndBranchAccess((int) Auth::id(), $_POST);
+            Flash::success('Role and branch access updated.');
+            $this->redirect('/admin/security?user_id=' . $targetUserId);
+        } catch (\Throwable $exception) {
+            Flash::error($exception->getMessage());
+            $targetUserId = (int) ($_POST['target_user_id'] ?? 0);
+            $this->redirect('/admin/security' . ($targetUserId > 0 ? '?user_id=' . $targetUserId : ''));
+        }
     }
 
     public function adminForcePasswordReset(): never

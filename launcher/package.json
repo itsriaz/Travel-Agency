@@ -1,0 +1,28 @@
+{
+  "name": "travel-agency-launcher",
+  "version": "0.1.0",
+  "description": "Windows desktop launcher for Travel Agency Operations",
+  "author": "Imdad International Travel Agency / Noble Route",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "package:win": "electron-builder --win portable"
+  },
+  "devDependencies": {
+    "electron": "^30.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.imdadnobleroute.travelops",
+    "productName": "Travel Agency Operations",
+    "files": [
+      "**/*"
+    ],
+    "win": {
+      "target": "portable",
+      "signAndEditExecutable": false,
+      "forceCodeSigning": false
+    }
+  }
+}

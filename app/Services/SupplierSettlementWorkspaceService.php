@@ -24,35 +24,66 @@ final class SupplierSettlementWorkspaceService extends Service
         $booking = $this->loadBooking((int) ($input['booking_id'] ?? 0), $accessibleBranchIds);
         $supplier = $this->resolveSupplier($input, $accessibleBranchIds);
         $payload = $this->validatedPaymentPayload($input);
+        if ($payload['status'] === 'void') {
+            $this->assertFinancialAdminActor($actorUserId, 'Only super admin or branch admin can create a void supplier payment.');
+        }
 
+        /** @var PDO $db */
+        $db = $this->app->get('db');
         $repository = new SupplierRepository($this->app);
-        $paymentNo = $repository->nextSupplierPaymentNumber();
-        $paymentId = $repository->createSupplierPayment(array_merge($payload, [
-            'supplier_id' => (int) $supplier['id'],
-            'branch_id' => (int) $booking['branch_id'],
-            'booking_reference' => (string) $booking['booking_reference'],
-            'payment_no' => $paymentNo,
-            'actor_user_id' => $actorUserId,
-        ]));
+        $accounting = new AccountingRepository($this->app);
+        $startedTransaction = ! $db->inTransaction();
 
-        if ($payload['status'] !== 'void') {
-            (new AccountingRepository($this->app))->postSupplierPaymentRecorded([
+        if ($startedTransaction) {
+            $db->beginTransaction();
+        }
+
+        try {
+            $paymentNo = $repository->nextSupplierPaymentNumber();
+            $paymentId = $repository->createSupplierPayment(array_merge($payload, [
+                'supplier_id' => (int) $supplier['id'],
                 'branch_id' => (int) $booking['branch_id'],
                 'booking_reference' => (string) $booking['booking_reference'],
                 'payment_no' => $paymentNo,
-                'paid_amount' => $payload['paid_amount'],
-                'charges_amount' => $payload['charges_amount'],
-                'payment_method' => $payload['payment_method'],
-                'entry_date' => $payload['payment_date'],
-                'currency' => $payload['currency'],
                 'actor_user_id' => $actorUserId,
-            ]);
-        }
+            ]));
 
-        return [
-            'payment' => $repository->findSupplierPaymentById($paymentId),
-            'booking_id' => (int) $booking['id'],
-        ];
+            if ($payload['status'] !== 'void') {
+                $accounting->postSupplierPaymentRecorded([
+                    'branch_id' => (int) $booking['branch_id'],
+                    'booking_reference' => (string) $booking['booking_reference'],
+                    'payment_no' => $paymentNo,
+                    'supplier_payment_id' => $paymentId,
+                    'paid_amount' => $payload['paid_amount'],
+                    'charges_amount' => $payload['charges_amount'],
+                    'payment_method' => $payload['payment_method'],
+                    'entry_date' => $payload['payment_date'],
+                    'currency' => $payload['currency'],
+                    'actor_user_id' => $actorUserId,
+                ]);
+            }
+
+            $payment = $repository->findSupplierPaymentById($paymentId);
+
+            if ($startedTransaction && $db->inTransaction()) {
+                $db->commit();
+            }
+
+            return [
+                'payment' => $payment,
+                'booking_id' => (int) $booking['id'],
+            ];
+        } catch (\Throwable $exception) {
+            if ($startedTransaction && $db->inTransaction()) {
+                $db->rollBack();
+            }
+
+            if ($exception instanceof RuntimeException) {
+                throw $exception;
+            }
+
+            throw new RuntimeException('Supplier payment could not be saved.', 0, $exception);
+        }
     }
 
     public function recordSimplePostpaidSupplierPayment(array $input, int $actorUserId, array $accessibleBranchIds): array
@@ -200,6 +231,7 @@ final class SupplierSettlementWorkspaceService extends Service
                         'branch_id' => (int) $booking['branch_id'],
                         'booking_reference' => (string) $booking['booking_reference'],
                         'payment_no' => $paymentNo,
+                        'supplier_payment_id' => $paymentId,
                         'paid_amount' => $supplierAllocatedAmount,
                         'charges_amount' => 0,
                         'payment_method' => $paymentPayload['payment_method'],
@@ -224,6 +256,7 @@ final class SupplierSettlementWorkspaceService extends Service
                             'source_reference' => $paymentNo . '-ALLOC-' . $allocationId,
                             'service_line_reference' => $plan['service_line_reference'] !== '' ? $plan['service_line_reference'] : null,
                             'supplier_obligation_id' => (int) $plan['obligation_id'],
+                            'supplier_payment_id' => $paymentId,
                             'allocated_amount' => (float) $plan['amount'],
                             'entry_date' => $paymentPayload['payment_date'],
                             'currency' => $selectedCurrency,
@@ -277,45 +310,71 @@ final class SupplierSettlementWorkspaceService extends Service
 
         $accounting = new AccountingRepository($this->app);
         $allocationCount = 0;
+        /** @var PDO $db */
+        $db = $this->app->get('db');
+        $startedTransaction = ! $db->inTransaction();
 
-        foreach ($allocationLines as $line) {
-            $obligation = $repository->findObligationById((int) $line['obligation_id']);
-            if ($obligation === null || (string) $obligation['booking_reference'] !== (string) $booking['booking_reference']) {
-                throw new RuntimeException('One of the selected supplier obligations does not belong to this booking.');
-            }
-
-            $allocationId = $repository->allocateSupplierPayment(
-                $paymentId,
-                (int) $line['obligation_id'],
-                (float) $line['amount'],
-                $line['exchange_rate'],
-                $line['note'],
-                $actorUserId
-            );
-
-            $accounting->postSupplierPaymentAllocation([
-                'branch_id' => (int) $booking['branch_id'],
-                'booking_reference' => (string) $booking['booking_reference'],
-                'source_reference' => (string) $payment['payment_no'] . '-ALLOC-' . $allocationId,
-                'service_line_reference' => (string) ($obligation['service_line_reference'] ?? '') !== '' ? (string) $obligation['service_line_reference'] : null,
-                'supplier_obligation_id' => (int) $line['obligation_id'],
-                'allocated_amount' => (float) $line['amount'],
-                'entry_date' => (string) $payment['payment_date'],
-                'currency' => (string) ($obligation['currency'] ?? $payment['currency']),
-                'actor_user_id' => $actorUserId,
-            ]);
-
-            $allocationCount++;
+        if ($startedTransaction) {
+            $db->beginTransaction();
         }
 
-        return [
-            'booking_id' => (int) $booking['id'],
-            'allocation_count' => $allocationCount,
-        ];
+        try {
+            foreach ($allocationLines as $line) {
+                $obligation = $repository->findObligationById((int) $line['obligation_id']);
+                if ($obligation === null || (string) $obligation['booking_reference'] !== (string) $booking['booking_reference']) {
+                    throw new RuntimeException('One of the selected supplier obligations does not belong to this booking.');
+                }
+
+                $allocationId = $repository->allocateSupplierPayment(
+                    $paymentId,
+                    (int) $line['obligation_id'],
+                    (float) $line['amount'],
+                    $line['exchange_rate'],
+                    $line['note'],
+                    $actorUserId
+                );
+
+                $accounting->postSupplierPaymentAllocation([
+                    'branch_id' => (int) $booking['branch_id'],
+                    'booking_reference' => (string) $booking['booking_reference'],
+                    'source_reference' => (string) $payment['payment_no'] . '-ALLOC-' . $allocationId,
+                    'service_line_reference' => (string) ($obligation['service_line_reference'] ?? '') !== '' ? (string) $obligation['service_line_reference'] : null,
+                    'supplier_obligation_id' => (int) $line['obligation_id'],
+                    'supplier_payment_id' => $paymentId,
+                    'allocated_amount' => (float) $line['amount'],
+                    'entry_date' => (string) $payment['payment_date'],
+                    'currency' => (string) ($obligation['currency'] ?? $payment['currency']),
+                    'actor_user_id' => $actorUserId,
+                ]);
+
+                $allocationCount++;
+            }
+
+            if ($startedTransaction && $db->inTransaction()) {
+                $db->commit();
+            }
+
+            return [
+                'booking_id' => (int) $booking['id'],
+                'allocation_count' => $allocationCount,
+            ];
+        } catch (\Throwable $exception) {
+            if ($startedTransaction && $db->inTransaction()) {
+                $db->rollBack();
+            }
+
+            if ($exception instanceof RuntimeException) {
+                throw $exception;
+            }
+
+            throw new RuntimeException('Supplier payment allocation could not be saved.', 0, $exception);
+        }
     }
 
     public function voidSupplierPayment(array $input, int $actorUserId, array $accessibleBranchIds): array
     {
+        $this->assertFinancialAdminActor($actorUserId, 'Only super admin or branch admin can void supplier payments.');
+
         $booking = $this->loadBooking((int) ($input['booking_id'] ?? 0), $accessibleBranchIds);
         $paymentId = (int) ($input['supplier_payment_id'] ?? 0);
         $voidReason = $this->requiredVoidReason($input['void_reason'] ?? null);
@@ -354,12 +413,25 @@ final class SupplierSettlementWorkspaceService extends Service
 
         try {
             $reversalReference = 'VOID-' . (string) ($payment['payment_no'] ?? ('P-' . $paymentId));
+            $accountingRepository = new AccountingRepository($this->app);
+            $reversalJournalEntryId = $accountingRepository->postSupplierPaymentVoidReversal([
+                'branch_id' => (int) ($payment['branch_id'] ?? (int) ($booking['branch_id'] ?? 0)),
+                'booking_reference' => (string) ($payment['booking_reference'] ?? (string) ($booking['booking_reference'] ?? '')),
+                'supplier_payment_id' => $paymentId,
+                'payment_no' => (string) ($payment['payment_no'] ?? ''),
+                'source_reference' => $reversalReference,
+                'entry_date' => date('Y-m-d'),
+                'currency' => (string) ($payment['currency'] ?? 'PKR'),
+                'narration' => 'Supplier payment void reversal for ' . (string) ($payment['payment_no'] ?? $paymentId),
+                'actor_user_id' => $actorUserId,
+            ]);
+
             $voidResult = $repository->voidSupplierPayment(
                 $paymentId,
                 $voidReason,
                 $actorUserId,
                 $reversalReference,
-                null
+                $reversalJournalEntryId
             );
 
             AuditLog::record($this->app, 'supplier.payment.voided', [
@@ -370,12 +442,11 @@ final class SupplierSettlementWorkspaceService extends Service
                 'supplier_id' => (int) ($voidResult['supplier_id'] ?? 0),
                 'void_reason' => $voidReason,
                 'reversal_reference' => $reversalReference,
-                'reversal_journal_entry_id' => null,
+                'reversal_journal_entry_id' => $reversalJournalEntryId,
                 'allocation_count_reversed' => (int) ($voidResult['allocation_count_reversed'] ?? 0),
                 'total_allocated_amount_reversed' => (float) ($voidResult['total_allocated_amount_reversed'] ?? 0),
                 'affected_supplier_obligation_ids' => $voidResult['affected_supplier_obligation_ids'] ?? [],
-                'accounting_reversal_skipped' => true,
-                'accounting_reversal_skip_reason' => 'journal_entry_lines does not store supplier_payment_id; reversal not posted automatically',
+                'accounting_reversal_posted' => $reversalJournalEntryId !== null,
             ]);
 
             if ($startedTransaction && $db->inTransaction()) {
@@ -385,7 +456,7 @@ final class SupplierSettlementWorkspaceService extends Service
             return [
                 'booking_id' => (int) $booking['id'],
                 'supplier_payment_id' => $paymentId,
-                'reversal_journal_entry_id' => null,
+                'reversal_journal_entry_id' => $reversalJournalEntryId,
             ];
         } catch (\Throwable $exception) {
             if ($startedTransaction && $db->inTransaction()) {

@@ -35,6 +35,11 @@ final class Auth
         return self::roleCode() === 'super_admin';
     }
 
+    public static function isFinancialAdmin(): bool
+    {
+        return in_array(self::roleCode(), ['super_admin', 'branch_admin'], true);
+    }
+
     public static function activeBranchId(): ?int
     {
         $user = self::user();

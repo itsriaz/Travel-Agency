@@ -853,12 +853,12 @@ final class SupplierRepository extends BaseRepository
             $updatePayment = $this->db->prepare(
                 'UPDATE supplier_payments
                  SET allocated_amount = allocated_amount + :payment_allocated_amount,
-                     unallocated_amount = GREATEST(0, paid_amount - (allocated_amount + :payment_unallocated_delta)),
+                     unallocated_amount = GREATEST(0, unallocated_amount - :payment_unallocated_delta),
                      status = CASE
-                         WHEN paid_amount - (allocated_amount + :payment_status_delta) <= 0 THEN "fully_allocated"
+                         WHEN unallocated_amount - :payment_status_delta <= 0 THEN "fully_allocated"
                          ELSE "partially_allocated"
                      END
-                 WHERE id = :payment_id'
+                  WHERE id = :payment_id'
             );
             $updatePayment->execute([
                 'payment_allocated_amount' => $paymentConsumedAmount,
@@ -1772,6 +1772,10 @@ final class SupplierRepository extends BaseRepository
 
     private function supplierAdvanceTraceLog(string $method, string $step, array $context): void
     {
+        if (! app_debug_tools_enabled()) {
+            return;
+        }
+
         $parts = [
             'timestamp=' . date('Y-m-d H:i:s'),
             'trace_id=' . ($context['trace_id'] ?? $this->supplierAdvanceTraceId()),
@@ -1798,6 +1802,10 @@ final class SupplierRepository extends BaseRepository
 
     private function writeSupplierAdvanceTraceLine(string $line): void
     {
+        if (! app_debug_tools_enabled()) {
+            return;
+        }
+
         $logDirectory = dirname(__DIR__, 2) . '/storage/logs';
         $logFile = $logDirectory . '/supplier_advance_trace_v2.log';
 

@@ -90,7 +90,9 @@ final class DocumentWorkspaceService extends Service
             throw new RuntimeException('The uploaded file could not be stored securely.');
         }
 
-        $relativePath = 'documents/' . trim(str_replace('\\', '/', substr($absolutePath, strlen(base_path('/storage')))), '/');
+        @chmod($absolutePath, 0640);
+
+        $relativePath = trim(str_replace('\\', '/', substr($absolutePath, strlen(base_path('/storage')))), '/');
         if ($replaceDocumentId > 0) {
             $replacedDocument = $repository->findDocumentById($replaceDocumentId);
             if ($replacedDocument === null || (int) $replacedDocument['booking_id'] !== $bookingId || (string) $replacedDocument['status'] !== 'active') {
@@ -201,9 +203,18 @@ final class DocumentWorkspaceService extends Service
             throw new RuntimeException('This document is no longer available for download.');
         }
 
-        $absolutePath = base_path('/storage/' . ltrim((string) $document['storage_path'], '/'));
+        $absolutePath = $this->secureStoredDocumentPath((string) $document['storage_path']);
         if (! is_file($absolutePath)) {
             throw new RuntimeException('The secure document file is missing from storage.');
+        }
+
+        if ((int) filesize($absolutePath) !== (int) $document['file_size_bytes']) {
+            throw new RuntimeException('The secure document file failed integrity validation.');
+        }
+
+        $expectedHash = strtolower(trim((string) ($document['sha256_hash'] ?? '')));
+        if ($expectedHash !== '' && ! hash_equals($expectedHash, strtolower((string) hash_file('sha256', $absolutePath)))) {
+            throw new RuntimeException('The secure document file failed integrity validation.');
         }
 
         AuditLog::record($this->app, 'document.downloaded', [
@@ -217,7 +228,7 @@ final class DocumentWorkspaceService extends Service
 
         return [
             'absolute_path' => $absolutePath,
-            'download_name' => (string) $document['original_file_name'],
+            'download_name' => $this->safeOriginalFileName((string) $document['original_file_name']),
             'mime_type' => (string) $document['mime_type'],
             'size' => (int) $document['file_size_bytes'],
         ];
@@ -364,9 +375,13 @@ final class DocumentWorkspaceService extends Service
             throw new RuntimeException('The uploaded file type is not permitted.');
         }
 
+        if (! $this->extensionMatchesMime($extension, $mimeType)) {
+            throw new RuntimeException('The uploaded file extension does not match its detected file type.');
+        }
+
         return [
             'tmp_name' => $tmpName,
-            'original_name' => substr(basename($originalName), 0, 255),
+            'original_name' => $this->safeOriginalFileName($originalName),
             'extension' => $extension,
             'mime_type' => $mimeType,
             'size' => $size,
@@ -380,6 +395,67 @@ final class DocumentWorkspaceService extends Service
         $datePath = date('Y/m');
 
         return base_path('/storage/documents/branch_' . $branchId . '/' . $safeReference . '/' . $datePath);
+    }
+
+    private function secureStoredDocumentPath(string $storagePath): string
+    {
+        $relativePath = ltrim(str_replace('\\', '/', $storagePath), '/');
+        if ($relativePath === '' || str_contains($relativePath, '../') || str_contains($relativePath, '..\\')) {
+            throw new RuntimeException('The secure document storage path is invalid.');
+        }
+
+        if (! str_starts_with($relativePath, 'documents/')) {
+            throw new RuntimeException('The secure document storage path is invalid.');
+        }
+
+        $documentRoot = realpath(base_path('/storage/documents'));
+        if ($documentRoot === false) {
+            throw new RuntimeException('Secure document storage is not available.');
+        }
+
+        $candidatePaths = [$relativePath];
+        if (str_starts_with($relativePath, 'documents/documents/')) {
+            $candidatePaths[] = substr($relativePath, strlen('documents/'));
+        }
+
+        $absolutePath = false;
+        foreach ($candidatePaths as $candidatePath) {
+            $resolvedPath = realpath(base_path('/storage/' . $candidatePath));
+            if ($resolvedPath !== false) {
+                $absolutePath = $resolvedPath;
+                break;
+            }
+        }
+
+        if ($absolutePath === false || ! str_starts_with($absolutePath, $documentRoot . DIRECTORY_SEPARATOR)) {
+            throw new RuntimeException('The secure document storage path is invalid.');
+        }
+
+        return $absolutePath;
+    }
+
+    private function extensionMatchesMime(string $extension, string $mimeType): bool
+    {
+        return match ($extension) {
+            'pdf' => $mimeType === 'application/pdf',
+            'jpg', 'jpeg' => $mimeType === 'image/jpeg',
+            'png' => $mimeType === 'image/png',
+            'webp' => $mimeType === 'image/webp',
+            default => false,
+        };
+    }
+
+    private function safeOriginalFileName(string $name): string
+    {
+        $baseName = basename(str_replace('\\', '/', $name));
+        $safeName = preg_replace('/[^\w.\- ()\[\]]+/u', '_', $baseName) ?: 'document';
+        $safeName = trim($safeName, " .\t\n\r\0\x0B");
+
+        if ($safeName === '') {
+            $safeName = 'document';
+        }
+
+        return mb_substr($safeName, 0, 180);
     }
 
     private function normalizeDocumentType(string $value): string

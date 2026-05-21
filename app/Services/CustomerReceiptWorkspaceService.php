@@ -38,6 +38,10 @@ final class CustomerReceiptWorkspaceService extends Service
         }
 
         $payload = $this->validatedReceiptPayload($input);
+        if ($payload['status'] === 'void') {
+            $this->assertFinancialAdminActor($actorUserId, 'Only super admin or branch admin can create a void customer receipt.');
+        }
+
         $repository = new CustomerPaymentRepository($this->app);
         $accountingRepository = new AccountingRepository($this->app);
         /** @var PDO $db */
@@ -165,51 +169,76 @@ final class CustomerReceiptWorkspaceService extends Service
 
         $accountingRepository = new AccountingRepository($this->app);
         $allocationCount = 0;
+        /** @var PDO $db */
+        $db = $this->app->get('db');
+        $startedTransaction = ! $db->inTransaction();
 
-        foreach ($allocationLines as $line) {
-            $receivable = $paymentRepository->findReceivableById((int) $line['receivable_id']);
-            if ($receivable === null || (string) $receivable['booking_reference'] !== (string) $booking['booking_reference']) {
-                throw new RuntimeException('One of the selected due items does not belong to this booking.');
-            }
-
-            $allocationPayload = $this->buildExplicitAllocationPayload($receipt, $receivable, $line);
-            $allocationPayload['receipt_id'] = $receiptId;
-            $allocationPayload['receivable_item_id'] = (int) $line['receivable_id'];
-            $allocationPayload['receivable_amount_to_settle'] = (float) $line['amount'];
-            $allocationPayload['allocation_note'] = $line['note'];
-            $allocationPayload['actor_user_id'] = $actorUserId;
-
-            $allocationResult = $paymentRepository->allocateReceiptExplicit($allocationPayload);
-            $allocationId = (int) ($allocationResult['allocation_id'] ?? 0);
-            $allocatedAmount = round((float) ($allocationResult['allocated_amount'] ?? 0), 2);
-            if ($allocationId <= 0 || $allocatedAmount <= 0) {
-                throw new RuntimeException('Receipt allocation could not be completed.');
-            }
-
-            $accountingRepository->postCustomerReceiptAllocation([
-                'branch_id' => (int) $booking['branch_id'],
-                'booking_reference' => (string) $booking['booking_reference'],
-                'source_reference' => (string) $receipt['receipt_no'] . '-ALLOC-' . $allocationId,
-                'service_line_reference' => (string) ($receivable['service_line_reference'] ?? '') !== '' ? (string) $receivable['service_line_reference'] : null,
-                'customer_receivable_item_id' => (int) $line['receivable_id'],
-                'customer_receipt_id' => $receiptId,
-                'allocated_amount' => $allocatedAmount,
-                'entry_date' => (string) $receipt['receipt_date'],
-                'currency' => (string) ($receivable['currency'] ?? $receipt['currency']),
-                'actor_user_id' => $actorUserId,
-            ]);
-
-            $allocationCount++;
+        if ($startedTransaction) {
+            $db->beginTransaction();
         }
 
-        return [
-            'booking_id' => $bookingId,
-            'allocation_count' => $allocationCount,
-        ];
+        try {
+            foreach ($allocationLines as $line) {
+                $receivable = $paymentRepository->findReceivableById((int) $line['receivable_id']);
+                if ($receivable === null || (string) $receivable['booking_reference'] !== (string) $booking['booking_reference']) {
+                    throw new RuntimeException('One of the selected due items does not belong to this booking.');
+                }
+
+                $allocationPayload = $this->buildExplicitAllocationPayload($receipt, $receivable, $line);
+                $allocationPayload['receipt_id'] = $receiptId;
+                $allocationPayload['receivable_item_id'] = (int) $line['receivable_id'];
+                $allocationPayload['receivable_amount_to_settle'] = (float) $line['amount'];
+                $allocationPayload['allocation_note'] = $line['note'];
+                $allocationPayload['actor_user_id'] = $actorUserId;
+
+                $allocationResult = $paymentRepository->allocateReceiptExplicit($allocationPayload);
+                $allocationId = (int) ($allocationResult['allocation_id'] ?? 0);
+                $allocatedAmount = round((float) ($allocationResult['allocated_amount'] ?? 0), 2);
+                if ($allocationId <= 0 || $allocatedAmount <= 0) {
+                    throw new RuntimeException('Receipt allocation could not be completed.');
+                }
+
+                $accountingRepository->postCustomerReceiptAllocation([
+                    'branch_id' => (int) $booking['branch_id'],
+                    'booking_reference' => (string) $booking['booking_reference'],
+                    'source_reference' => (string) $receipt['receipt_no'] . '-ALLOC-' . $allocationId,
+                    'service_line_reference' => (string) ($receivable['service_line_reference'] ?? '') !== '' ? (string) $receivable['service_line_reference'] : null,
+                    'customer_receivable_item_id' => (int) $line['receivable_id'],
+                    'customer_receipt_id' => $receiptId,
+                    'allocated_amount' => $allocatedAmount,
+                    'entry_date' => (string) $receipt['receipt_date'],
+                    'currency' => (string) ($receivable['currency'] ?? $receipt['currency']),
+                    'actor_user_id' => $actorUserId,
+                ]);
+
+                $allocationCount++;
+            }
+
+            if ($startedTransaction && $db->inTransaction()) {
+                $db->commit();
+            }
+
+            return [
+                'booking_id' => $bookingId,
+                'allocation_count' => $allocationCount,
+            ];
+        } catch (\Throwable $exception) {
+            if ($startedTransaction && $db->inTransaction()) {
+                $db->rollBack();
+            }
+
+            if ($exception instanceof RuntimeException) {
+                throw $exception;
+            }
+
+            throw new RuntimeException('Receipt allocation could not be saved.', 0, $exception);
+        }
     }
 
     public function voidReceipt(array $input, int $actorUserId, array $accessibleBranchIds): array
     {
+        $this->assertFinancialAdminActor($actorUserId, 'Only super admin or branch admin can void customer receipts.');
+
         $bookingId = (int) ($input['booking_id'] ?? 0);
         $receiptId = (int) ($input['customer_receipt_id'] ?? 0);
         $voidReason = $this->requiredVoidReason($input['void_reason'] ?? null);
@@ -442,6 +471,10 @@ final class CustomerReceiptWorkspaceService extends Service
         }
 
         $payload = $this->validatedReceiptPayload($input);
+        if ($payload['status'] === 'void') {
+            $this->assertFinancialAdminActor($actorUserId, 'Only super admin or branch admin can create a void customer receipt.');
+        }
+
         $settlement = $this->validatedExchangeSettlementPayload($input, $payload);
         $repository = new CustomerPaymentRepository($this->app);
         $accountingRepository = new AccountingRepository($this->app);

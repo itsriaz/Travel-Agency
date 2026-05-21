@@ -63,12 +63,112 @@ function url(string $path = '/'): string
 
 function asset(string $path): string
 {
-    return url('/public/' . ltrim($path, '/'));
+    $scriptFilename = str_replace('\\', '/', (string) ($_SERVER['SCRIPT_FILENAME'] ?? ''));
+    $isPublicFrontController = str_ends_with($scriptFilename, '/public/index.php');
+
+    return url(($isPublicFrontController ? '/' : '/public/') . ltrim($path, '/'));
 }
 
 function e(?string $value): string
 {
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
+}
+
+function app_environment(): string
+{
+    return mb_strtolower(trim((string) config('app.env', 'local')));
+}
+
+function app_is_production(): bool
+{
+    return app_environment() === 'production';
+}
+
+function app_debug_tools_enabled(): bool
+{
+    return ! app_is_production() && (bool) config('app.debug', false);
+}
+
+function app_request_is_secure(): bool
+{
+    $https = (string) ($_SERVER['HTTPS'] ?? '');
+    $forwardedProto = mb_strtolower(trim((string) ($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '')));
+
+    return ($https !== '' && $https !== 'off') || $forwardedProto === 'https';
+}
+
+function app_send_security_headers(): void
+{
+    if (PHP_SAPI === 'cli' || headers_sent() || ! (bool) config('security.headers.enabled', true)) {
+        return;
+    }
+
+    header('X-Frame-Options: DENY');
+    header('X-Content-Type-Options: nosniff');
+    header('Referrer-Policy: ' . (string) config('security.headers.referrer_policy', 'strict-origin-when-cross-origin'));
+    header('Permissions-Policy: ' . (string) config('security.headers.permissions_policy', 'camera=(), microphone=(), geolocation=(), payment=()'));
+    header('Content-Security-Policy: ' . (string) config('security.headers.content_security_policy', "default-src 'self'; frame-ancestors 'none'; object-src 'none'"));
+
+    if ((bool) config('security.headers.hsts_enabled', false) && app_request_is_secure()) {
+        header('Strict-Transport-Security: max-age=' . (int) config('security.headers.hsts_max_age', 31536000) . '; includeSubDomains');
+    }
+}
+
+function app_log_path(string $filename = 'app-runtime.log'): string
+{
+    $sanitized = trim(str_replace(['\\', '..'], ['/', ''], $filename));
+
+    if ($sanitized === '') {
+        $sanitized = 'app-runtime.log';
+    }
+
+    return base_path('/storage/logs/' . ltrim($sanitized, '/'));
+}
+
+function app_write_log(string $channel, string $message, array $context = []): void
+{
+    $path = app_log_path();
+    $directory = dirname($path);
+
+    if (! is_dir($directory)) {
+        @mkdir($directory, 0775, true);
+    }
+
+    $normalizedContext = [];
+    foreach ($context as $key => $value) {
+        if (is_scalar($value) || $value === null) {
+            $normalizedContext[$key] = $value;
+            continue;
+        }
+
+        try {
+            $normalizedContext[$key] = json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        } catch (\Throwable) {
+            $normalizedContext[$key] = '[unserializable]';
+        }
+    }
+
+    $line = sprintf(
+        "[%s] %s: %s%s",
+        date('Y-m-d H:i:s'),
+        $channel,
+        $message,
+        $normalizedContext !== [] ? ' | ' . json_encode($normalizedContext, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : ''
+    );
+
+    @file_put_contents($path, $line . PHP_EOL, FILE_APPEND | LOCK_EX);
+}
+
+function app_log_exception(\Throwable $exception, string $channel = 'app.exception'): void
+{
+    app_write_log($channel, $exception->getMessage(), [
+        'type' => $exception::class,
+        'file' => $exception->getFile(),
+        'line' => $exception->getLine(),
+        'url' => $_SERVER['REQUEST_URI'] ?? null,
+        'method' => $_SERVER['REQUEST_METHOD'] ?? null,
+        'trace' => app_debug_tools_enabled() ? $exception->getTraceAsString() : null,
+    ]);
 }
 
 function app_path(string $uri): string
