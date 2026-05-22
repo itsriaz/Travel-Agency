@@ -6,6 +6,7 @@ namespace App\Services;
 
 use App\Helpers\AuditLog;
 use App\Repositories\BookingRepository;
+use App\Repositories\BookingServiceEventRepository;
 use App\Repositories\BookingServiceRepository;
 use App\Repositories\TravelerRepository;
 use RuntimeException;
@@ -15,6 +16,7 @@ final class OperationalOutputService extends Service
     private const OUTPUT_TYPES = [
         'invoice' => 'Customer Invoice',
         'customer_receipt' => 'Customer Receipt',
+        'service_refund_receipt' => 'Cancellation / Refund Receipt',
         'supplier_voucher' => 'Supplier Voucher / Payment Document',
         'account_statement' => 'Account Statement',
         'itinerary' => 'Itinerary',
@@ -27,6 +29,7 @@ final class OperationalOutputService extends Service
         array $accessibleBranchIds,
         ?int $receiptId,
         ?int $supplierPaymentId,
+        ?int $refundEventId,
         int $actorUserId
     ): array {
         $type = $this->normalizeOutputType($outputType);
@@ -57,6 +60,7 @@ final class OperationalOutputService extends Service
 
         $selectedReceipt = $this->resolveReceipt($type, $receiptId, $customerPaymentFoundation['receipts'] ?? []);
         $selectedSupplierPayment = $this->resolveSupplierPayment($type, $supplierPaymentId, $supplierFoundation['payments'] ?? []);
+        $selectedRefundEvent = $this->resolveRefundEvent($type, $refundEventId, $services, $bookingId);
 
         AuditLog::record($this->app, 'output.viewed', [
             'user_id' => $actorUserId,
@@ -65,6 +69,7 @@ final class OperationalOutputService extends Service
             'output_type' => $type,
             'customer_receipt_id' => $selectedReceipt['id'] ?? null,
             'supplier_payment_id' => $selectedSupplierPayment['id'] ?? null,
+            'service_refund_event_id' => $selectedRefundEvent['id'] ?? null,
         ]);
 
         return [
@@ -78,6 +83,7 @@ final class OperationalOutputService extends Service
             'supplierFoundation' => $supplierFoundation,
             'selectedReceipt' => $selectedReceipt,
             'selectedSupplierPayment' => $selectedSupplierPayment,
+            'selectedRefundEvent' => $selectedRefundEvent,
             'branchBranding' => $this->branchBranding($booking),
             'summary' => $this->summary($services, $customerPaymentFoundation, $supplierFoundation),
             'generatedAt' => date('Y-m-d H:i'),
@@ -139,6 +145,35 @@ final class OperationalOutputService extends Service
         }
 
         throw new RuntimeException('The selected supplier payment could not be opened for this booking.');
+    }
+
+    private function resolveRefundEvent(string $type, ?int $refundEventId, array $services, int $bookingId): ?array
+    {
+        if ($type !== 'service_refund_receipt') {
+            return null;
+        }
+
+        $eventRepository = new BookingServiceEventRepository($this->app);
+        if ($refundEventId !== null && $refundEventId > 0) {
+            $event = $eventRepository->findPostedEventById($refundEventId, 'refund');
+            if ($event !== null && (int) ($event['booking_id'] ?? 0) === $bookingId) {
+                return $event;
+            }
+        }
+
+        foreach ($services as $service) {
+            $serviceId = (int) ($service['id'] ?? 0);
+            if ($serviceId <= 0) {
+                continue;
+            }
+
+            $event = $eventRepository->latestPostedEvent($serviceId, 'refund');
+            if ($event !== null) {
+                return $event;
+            }
+        }
+
+        throw new RuntimeException('No posted service refund is available for this booking yet.');
     }
 
     private function branchBranding(array $booking): array

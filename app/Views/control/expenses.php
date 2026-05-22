@@ -13,7 +13,6 @@ $expensePaymentMethodOptions = is_array($expensePaymentMethodOptions ?? null) ? 
 <section class="page-head">
     <div>
         <h1>Business Expenses</h1>
-        <p>Record branch-level business expenses separately from booking operations so gross profit and net profit stay distinct.</p>
     </div>
     <div class="page-actions">
         <a class="btn btn-primary" href="<?= e(url('/workspace')) ?>">Open Booking Workspace</a>
@@ -34,17 +33,14 @@ $expensePaymentMethodOptions = is_array($expensePaymentMethodOptions ?? null) ? 
     <article class="stat-card">
         <div class="stat-label">Expense Categories</div>
         <div class="stat-value"><?= e((string) count(($panels[0]['rows'] ?? []))) ?></div>
-        <div class="stat-note">Predefined operating buckets for rent, salary, utilities, transport, and other overheads.</div>
     </article>
     <article class="stat-card">
         <div class="stat-label">Recorded Expenses</div>
         <div class="stat-value"><?= e((string) $expenseCount) ?></div>
-        <div class="stat-note">Branch-aware business expenses kept outside booking workspace commercial rows.</div>
     </article>
     <article class="stat-card">
         <div class="stat-label">Register Rows</div>
         <div class="stat-value"><?= e((string) $totalRows) ?></div>
-        <div class="stat-note">Categories and recorded expense entries available in the current admin scope.</div>
     </article>
 </section>
 
@@ -74,7 +70,6 @@ if (is_array($categoryPanel)) {
     <div class="panel-header">
         <div>
             <h2>Business Expenses</h2>
-            <div class="panel-meta">Admin-only expense entry and maintenance, kept fully separate from booking/service commercial rows.</div>
         </div>
         <div class="workspace-mode-chip workspace-mode-chip--light"><?= e((string) count($expenseRows)) ?> Rows</div>
     </div>
@@ -265,8 +260,6 @@ if (is_array($categoryPanel)) {
                                     <a href="<?= e(url('/expenses/attachment/download?attachment_id=' . (int) $expenseEditRecord['attachment_id'])) ?>"><?= e((string) ($expenseEditRecord['attachment_file_name'] ?? 'Download current proof')) ?></a>.
                                     Upload a new file to replace it.
                                 </small>
-                            <?php else: ?>
-                                <small>Optional. Upload a PDF, JPG, PNG, or WEBP bill, receipt, or voucher.</small>
                             <?php endif; ?>
                         </label>
                         <label class="admin-field admin-field--stack admin-field--full">

@@ -27,6 +27,8 @@ final class ServiceWorkspaceService extends Service
         $services = [];
         $suppliers = [];
 
+        $suppliers = (new SupplierRepository($this->app))->activeSuppliersForBranches($accessibleBranchIds);
+
         if ($bookingId !== null && $bookingId > 0) {
             $bookingRepository = new BookingRepository($this->app);
             if (! $bookingRepository->bookingExistsInBranches($bookingId, $accessibleBranchIds)) {
@@ -34,7 +36,20 @@ final class ServiceWorkspaceService extends Service
             }
 
             $services = (new BookingServiceRepository($this->app))->servicesForBooking($bookingId);
-            $suppliers = (new SupplierRepository($this->app))->activeSuppliersForBranches($accessibleBranchIds);
+            $eventRepository = new BookingServiceEventRepository($this->app);
+            foreach ($services as &$serviceRow) {
+                $serviceId = (int) ($serviceRow['id'] ?? 0);
+                if ($serviceId <= 0) {
+                    continue;
+                }
+
+                $latestRefundEvent = $eventRepository->latestPostedEvent($serviceId, 'refund');
+                $serviceRow['latest_refund_event_id'] = (int) ($latestRefundEvent['id'] ?? 0);
+                $serviceRow['latest_refund_event_date'] = (string) ($latestRefundEvent['event_date'] ?? '');
+                $serviceRow['latest_refund_customer_amount'] = (float) ($latestRefundEvent['customer_refund_amount'] ?? 0);
+                $serviceRow['latest_refund_supplier_amount'] = (float) ($latestRefundEvent['supplier_refund_amount'] ?? 0);
+            }
+            unset($serviceRow);
         }
 
         return [
@@ -443,16 +458,10 @@ final class ServiceWorkspaceService extends Service
         $obligation = $supplierRepository->findObligationByServiceLine($bookingReference, $lineReference);
 
         $allocatedCustomerAmount = round((float) ($receivable['allocated_amount'] ?? 0), 2);
-        if ($customerPenaltyAmount < $allocatedCustomerAmount - 0.005) {
-            throw new RuntimeException('Customer penalty cannot be lower than already allocated customer receipts in this version.');
-        }
 
         $supplierSettledAmount = 0.0;
         if ($obligation !== null) {
             $supplierSettledAmount = round((float) ($obligation['gross_amount'] ?? 0) - (float) ($obligation['net_payable_amount'] ?? 0), 2);
-        }
-        if ($supplierPenaltyAmount < $supplierSettledAmount - 0.005) {
-            throw new RuntimeException('Supplier penalty cannot be lower than already settled supplier payments/advances in this version.');
         }
 
         /** @var \PDO $db */
@@ -464,6 +473,27 @@ final class ServiceWorkspaceService extends Service
 
         try {
             $accountingRepository = new AccountingRepository($this->app);
+            $releasedCustomerCredit = 0.0;
+            $releasedSupplierCredit = 0.0;
+            if ($receivable !== null && $customerPenaltyAmount < $allocatedCustomerAmount - 0.005) {
+                $release = $customerRepository->releaseAllocatedCreditForReceivable(
+                    (int) $receivable['id'],
+                    $customerPenaltyAmount,
+                    $actorUserId,
+                    'Cancellation settlement release for ' . $lineReference
+                );
+                $releasedCustomerCredit = round((float) ($release['released_payment_amount'] ?? 0), 2);
+            }
+            if ($obligation !== null && $supplierPenaltyAmount < $supplierSettledAmount - 0.005) {
+                $release = $supplierRepository->releaseSettledCreditForObligation(
+                    (int) $obligation['id'],
+                    $supplierPenaltyAmount,
+                    $actorUserId,
+                    'Cancellation settlement release for ' . $lineReference
+                );
+                $releasedSupplierCredit = round((float) ($release['released_amount'] ?? 0), 2);
+            }
+
             $customerSync = $customerRepository->syncReceivableItem([
                 'branch_id' => (int) $existingService['branch_id'],
                 'booking_reference' => $bookingReference,
@@ -511,7 +541,36 @@ final class ServiceWorkspaceService extends Service
                 ]);
             }
 
+            if ($releasedCustomerCredit > 0.0) {
+                $journalIds[] = $accountingRepository->postCustomerReceiptAllocationRelease([
+                    'branch_id' => (int) $existingService['branch_id'],
+                    'booking_reference' => $bookingReference,
+                    'service_line_reference' => $lineReference,
+                    'customer_receivable_item_id' => $customerSync['record']['id'] ?? null,
+                    'released_amount' => $releasedCustomerCredit,
+                    'source_reference' => $lineReference . '-CANCEL-RELEASE',
+                    'entry_date' => $eventDate,
+                    'currency' => $currency,
+                    'narration' => 'Cancellation settlement released customer credit for ' . $lineReference,
+                    'actor_user_id' => $actorUserId,
+                ]);
+            }
+
             $supplierDelta = round((float) ($supplierSync['delta_amount'] ?? 0), 2);
+            if ($releasedSupplierCredit > 0.0) {
+                $journalIds[] = $accountingRepository->postSupplierSettlementRelease([
+                    'branch_id' => (int) $existingService['branch_id'],
+                    'booking_reference' => $bookingReference,
+                    'service_line_reference' => $lineReference,
+                    'supplier_obligation_id' => $supplierSync['record']['id'] ?? null,
+                    'released_amount' => $releasedSupplierCredit,
+                    'source_reference' => $lineReference . '-SUPPLIER-CANCEL-RELEASE',
+                    'entry_date' => $eventDate,
+                    'currency' => $currency,
+                    'narration' => 'Cancellation settlement released supplier credit for ' . $lineReference,
+                    'actor_user_id' => $actorUserId,
+                ]);
+            }
             if ($supplierDelta !== 0.0) {
                 $journalIds[] = $accountingRepository->postPayableAdjusted([
                     'branch_id' => (int) $existingService['branch_id'],
@@ -549,14 +608,16 @@ final class ServiceWorkspaceService extends Service
 
             $eventRepository->updateCancellationFinancials($eventId, [
                 'penalty_amount' => $customerPenaltyAmount,
-                'customer_credit_amount' => max(round((float) ($receivable['due_amount'] ?? $customerPenaltyAmount) - $customerPenaltyAmount, 2), 0),
-                'supplier_credit_amount' => max(round((float) ($obligation['gross_amount'] ?? $supplierPenaltyAmount) - $supplierPenaltyAmount, 2), 0),
+                'customer_credit_amount' => $releasedCustomerCredit,
+                'supplier_credit_amount' => $releasedSupplierCredit,
                 'journal_entry_id' => $journalIds[0] ?? null,
                 'reason' => $reason,
                 'notes' => $this->optionalText($input['settlement_notes'] ?? null, 4000),
                 'payload_json' => [
                     'customer_penalty_amount' => $customerPenaltyAmount,
                     'supplier_penalty_amount' => $supplierPenaltyAmount,
+                    'released_customer_credit' => $releasedCustomerCredit,
+                    'released_supplier_credit' => $releasedSupplierCredit,
                     'customer_delta' => $customerDelta,
                     'supplier_delta' => $supplierDelta,
                     'journal_entry_ids' => $journalIds,
@@ -574,6 +635,8 @@ final class ServiceWorkspaceService extends Service
                 'currency' => $currency,
                 'customer_penalty_amount' => $customerPenaltyAmount,
                 'supplier_penalty_amount' => $supplierPenaltyAmount,
+                'released_customer_credit' => $releasedCustomerCredit,
+                'released_supplier_credit' => $releasedSupplierCredit,
                 'customer_delta' => $customerDelta,
                 'supplier_delta' => $supplierDelta,
                 'journal_entry_ids' => $journalIds,
@@ -1085,6 +1148,8 @@ final class ServiceWorkspaceService extends Service
 
             $newTravelerId = $travelerRepository->createTraveler([
                 'branch_id' => $branchId,
+                'first_name' => $this->optionalText($passengerName, 100),
+                'last_name' => null,
                 'full_name' => $this->optionalText($passengerName, 190),
                 'passport_number' => null,
                 'nationality' => null,
@@ -1093,6 +1158,13 @@ final class ServiceWorkspaceService extends Service
                 'passport_expiry' => null,
                 'mobile' => null,
                 'address' => null,
+                'permanent_residence' => null,
+                'current_residence' => null,
+                'occupation' => null,
+                'village' => null,
+                'district' => null,
+                'family_id' => null,
+                'color_tag' => null,
                 'notes' => 'Added from invoice service entry.',
                 'actor_user_id' => $actorUserId,
             ]);

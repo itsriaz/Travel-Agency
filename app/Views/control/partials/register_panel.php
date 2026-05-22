@@ -18,7 +18,6 @@ foreach ($fields as $field) {
     <div class="panel-header">
         <div>
             <h2><?= e((string) $panel['title']) ?></h2>
-            <div class="panel-meta"><?= e((string) $panel['description']) ?></div>
         </div>
         <div class="workspace-mode-chip workspace-mode-chip--light"><?= e((string) count($rows)) ?> Rows</div>
     </div>
@@ -84,10 +83,6 @@ foreach ($fields as $field) {
                         <a class="btn btn-sm" href="<?= e(url($pagePath)) ?>#register-<?= e($register) ?>">Clear</a>
                     <?php endif; ?>
                 </div>
-
-                <?php if ($isEditing && (int) ($editRecord['is_system'] ?? 0) === 1): ?>
-                    <div class="admin-inline-note">System row: keep the key active and stable. Delete is intentionally blocked.</div>
-                <?php endif; ?>
 
                 <form method="post" action="<?= e($saveAction) ?>">
                     <?= \App\Helpers\Csrf::input() ?>

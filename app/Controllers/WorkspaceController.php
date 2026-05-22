@@ -11,6 +11,7 @@ use App\Helpers\Flash;
 use App\Helpers\Session;
 use App\Repositories\BookingRepository;
 use App\Repositories\BookingServiceRepository;
+use App\Repositories\SupplierRepository;
 use App\Repositories\TravelerRepository;
 use App\Services\AccountingFoundationService;
 use App\Services\BookingWorkspaceService;
@@ -402,6 +403,85 @@ final class WorkspaceController extends BaseController
         ]);
     }
 
+    public function registerSupplier(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+
+        try {
+            $accessibleBranchIds = array_map('intval', Authorization::accessibleBranchIds());
+            $name = trim((string) ($_POST['supplier_name'] ?? ''));
+            $branchId = (int) ($_POST['branch_id'] ?? 0);
+            $currency = strtoupper(trim((string) ($_POST['default_currency'] ?? 'PKR')));
+            $mode = trim((string) ($_POST['supplier_mode'] ?? 'normal_payable'));
+            $notes = trim((string) ($_POST['notes'] ?? ''));
+
+            if ($name === '') {
+                throw new RuntimeException('Enter supplier name.');
+            }
+
+            if (strlen($name) > 190) {
+                throw new RuntimeException('Supplier name is too long.');
+            }
+
+            if ($branchId <= 0 || ! in_array($branchId, $accessibleBranchIds, true)) {
+                throw new RuntimeException('Please select an accessible branch for this supplier.');
+            }
+
+            if (! in_array($currency, ['PKR', 'AED', 'USD'], true)) {
+                throw new RuntimeException('Please select a valid supplier currency.');
+            }
+
+            if (! in_array($mode, ['normal_payable', 'running_balance'], true)) {
+                throw new RuntimeException('Please select a valid supplier type.');
+            }
+
+            if (strlen($notes) > 4000) {
+                throw new RuntimeException('Supplier notes are too long.');
+            }
+
+            $repository = new SupplierRepository($this->app);
+            $supplier = $repository->findAccessibleSupplierByName($name, $accessibleBranchIds);
+            $created = false;
+
+            if ($supplier === null) {
+                $supplierId = $repository->registerSupplier([
+                    'branch_id' => $branchId,
+                    'code' => $repository->nextSupplierCode(),
+                    'name' => $name,
+                    'supplier_mode' => $mode,
+                    'default_currency' => $currency,
+                    'notes' => $notes !== '' ? $notes : 'Created from booking workspace.',
+                    'actor_user_id' => (int) Auth::id(),
+                ]);
+                $supplier = $repository->findSupplierById($supplierId);
+                $created = true;
+            }
+
+            if ($supplier === null) {
+                throw new RuntimeException('Supplier could not be loaded after saving.');
+            }
+
+            $this->jsonResponse([
+                'ok' => true,
+                'created' => $created,
+                'supplier' => [
+                    'id' => (int) ($supplier['id'] ?? 0),
+                    'branch_id' => (int) ($supplier['branch_id'] ?? 0),
+                    'code' => (string) ($supplier['code'] ?? ''),
+                    'name' => (string) ($supplier['name'] ?? $name),
+                    'supplier_mode' => (string) ($supplier['supplier_mode'] ?? $mode),
+                    'default_currency' => (string) ($supplier['default_currency'] ?? $currency),
+                ],
+                'message' => $created ? 'Supplier added.' : 'Supplier already exists.',
+            ]);
+        } catch (RuntimeException $exception) {
+            $this->jsonResponse([
+                'ok' => false,
+                'message' => $exception->getMessage(),
+            ], 422);
+        }
+    }
+
     public function supplierAvailableAdvance(): never
     {
         $accessibleBranchIds = Authorization::accessibleBranchIds();
@@ -645,6 +725,7 @@ final class WorkspaceController extends BaseController
     public function saveTraveler(): never
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);
+        $isAjax = strtolower((string) ($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '')) === 'xmlhttprequest';
 
         try {
             $result = (new TravelerWorkspaceService($this->app))->saveTraveler(
@@ -652,6 +733,16 @@ final class WorkspaceController extends BaseController
                 (int) Auth::id(),
                 Authorization::accessibleBranchIds()
             );
+            if ($isAjax) {
+                $this->jsonResponse([
+                    'ok' => true,
+                    'traveler' => $result['traveler'] ?? null,
+                    'action' => (string) ($result['action'] ?? 'saved'),
+                    'booking_id' => (int) ($result['booking_id'] ?? 0),
+                    'message' => 'Customer ' . (string) ($result['action'] ?? 'saved') . '.',
+                ]);
+            }
+
             Flash::success('Traveler ' . $result['action'] . ' successfully.');
             if ((int) $result['booking_id'] > 0) {
                 $this->redirect('/workspace?booking_id=' . (int) $result['booking_id'] . '#dock-panel-travelers');
@@ -661,6 +752,13 @@ final class WorkspaceController extends BaseController
             $suffix = $travelerId > 0 ? '&customer_id=' . $travelerId : '';
             $this->redirect('/workspace?new=1' . $suffix);
         } catch (RuntimeException $exception) {
+            if ($isAjax) {
+                $this->jsonResponse([
+                    'ok' => false,
+                    'message' => $exception->getMessage(),
+                ], 422);
+            }
+
             Flash::error($exception->getMessage());
             $bookingId = (int) ($_POST['booking_id'] ?? 0);
             if ($bookingId > 0) {
@@ -1279,6 +1377,7 @@ final class WorkspaceController extends BaseController
         $outputType = (string) ($_GET['doc'] ?? 'invoice');
         $receiptId = isset($_GET['receipt_id']) ? (int) $_GET['receipt_id'] : null;
         $supplierPaymentId = isset($_GET['supplier_payment_id']) ? (int) $_GET['supplier_payment_id'] : null;
+        $refundEventId = isset($_GET['refund_event_id']) ? (int) $_GET['refund_event_id'] : null;
 
         try {
             $document = (new OperationalOutputService($this->app))->buildOutputDocument(
@@ -1287,6 +1386,7 @@ final class WorkspaceController extends BaseController
                 Authorization::accessibleBranchIds(),
                 $receiptId,
                 $supplierPaymentId,
+                $refundEventId,
                 (int) Auth::id()
             );
         } catch (RuntimeException $exception) {

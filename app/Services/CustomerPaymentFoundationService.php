@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+use App\Repositories\AccountingRepository;
 use App\Repositories\BookingServiceRepository;
 use App\Repositories\CustomerPaymentRepository;
 use App\Repositories\ExchangeRateRepository;
@@ -136,9 +137,26 @@ final class CustomerPaymentFoundationService extends Service
             $invoiceOutstanding[$currency] = ($invoiceOutstanding[$currency] ?? 0) + (float) $receivableRow['outstandingAmount'];
             $customerOutstanding[$currency] = ($customerOutstanding[$currency] ?? 0) + (float) $receivableRow['outstandingAmount'];
         }
+        $creditCurrencies = [];
         foreach ($receipts as $receiptRow) {
-            $currency = (string) $receiptRow['currency'];
-            $customerCredit[$currency] = ($customerCredit[$currency] ?? 0) + (float) $receiptRow['unallocatedAmount'];
+            $currency = trim((string) ($receiptRow['currency'] ?? ''));
+            if ($currency !== '') {
+                $creditCurrencies[$currency] = true;
+            }
+        }
+        foreach ($serviceReceivables as $receivableRow) {
+            $currency = trim((string) ($receivableRow['currency'] ?? ''));
+            if ($currency !== '') {
+                $creditCurrencies[$currency] = true;
+            }
+        }
+        $accountingRepository = new AccountingRepository($this->app);
+        foreach (array_keys($creditCurrencies) as $currency) {
+            $customerCredit[$currency] = $accountingRepository->accountNetBalanceForBooking(
+                $bookingReference,
+                $currency,
+                'CUSTOMER_CREDIT'
+            );
         }
         foreach ($allocations as $allocationRow) {
             if ((string) ($allocationRow['bookingReference'] ?? '') !== $bookingReference) {

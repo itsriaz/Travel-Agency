@@ -9,40 +9,90 @@ final class ReportRepository extends BaseRepository
     public function cashFlow(array $branchIds, ?string $dateFrom, ?string $dateTo): array
     {
         [$clause, $params] = $this->branchScope($branchIds);
+        [$customerRefundClause, $customerRefundParams] = $this->branchScope($branchIds, 'refund_branch_');
+        [$supplierRefundClause, $supplierRefundParams] = $this->branchScope($branchIds, 'supplier_refund_branch_');
         $dateParams = $params;
         $receiptWindow = $this->bookingDateWindow('cr.receipt_date', $dateFrom, $dateTo, $dateParams);
         $supplierWindow = $this->bookingDateWindow('sp.payment_date', $dateFrom, $dateTo, $dateParams);
+        $customerRefundWindow = $this->bookingDateWindow('bse.event_date', $dateFrom, $dateTo, $customerRefundParams, 'refund_');
+        $supplierRefundWindow = $this->bookingDateWindow('bse.event_date', $dateFrom, $dateTo, $supplierRefundParams, 'supplier_refund_');
 
         $receiptRows = $this->fetchRows(
             'SELECT
-                cr.branch_id,
-                br.name AS branch_name,
-                cr.receipt_date AS movement_date,
-                cr.currency,
-                SUM(cr.received_amount) AS cash_in_amount
-             FROM customer_receipts cr
-             INNER JOIN branches br ON br.id = cr.branch_id
-             WHERE cr.branch_id ' . $clause . '
-               AND cr.status <> "void"' . $receiptWindow . '
-             GROUP BY cr.branch_id, br.name, cr.receipt_date, cr.currency
-             ORDER BY cr.receipt_date ASC, br.name ASC, cr.currency ASC',
-            $dateParams
+                receipt_rows.branch_id,
+                receipt_rows.branch_name,
+                receipt_rows.movement_date,
+                receipt_rows.currency,
+                GREATEST(receipt_rows.cash_in_amount - COALESCE(refund_rows.refund_amount, 0), 0) AS cash_in_amount
+             FROM (
+                SELECT
+                    cr.branch_id,
+                    br.name AS branch_name,
+                    cr.receipt_date AS movement_date,
+                    cr.currency,
+                    SUM(cr.received_amount) AS cash_in_amount
+                 FROM customer_receipts cr
+                 INNER JOIN branches br ON br.id = cr.branch_id
+                 WHERE cr.branch_id ' . $clause . '
+                   AND cr.status <> "void"' . $receiptWindow . '
+                 GROUP BY cr.branch_id, br.name, cr.receipt_date, cr.currency
+             ) AS receipt_rows
+             LEFT JOIN (
+                SELECT
+                    bse.branch_id,
+                    bse.event_date AS movement_date,
+                    bse.currency,
+                    SUM(bse.customer_refund_amount) AS refund_amount
+                 FROM booking_service_events bse
+                 WHERE bse.branch_id ' . $customerRefundClause . '
+                   AND bse.event_type = "refund"
+                   AND bse.event_status = "posted"' . $customerRefundWindow . '
+                 GROUP BY bse.branch_id, bse.event_date, bse.currency
+             ) AS refund_rows
+                ON refund_rows.branch_id = receipt_rows.branch_id
+               AND refund_rows.movement_date = receipt_rows.movement_date
+               AND refund_rows.currency = receipt_rows.currency
+             ORDER BY receipt_rows.movement_date ASC, receipt_rows.branch_name ASC, receipt_rows.currency ASC',
+            array_merge($dateParams, $customerRefundParams)
         );
 
         $supplierPaymentRows = $this->fetchRows(
             'SELECT
-                sp.branch_id,
-                br.name AS branch_name,
-                sp.payment_date AS movement_date,
-                sp.currency,
-                SUM(sp.paid_amount + COALESCE(sp.charges_amount, 0)) AS cash_out_amount
-             FROM supplier_payments sp
-             INNER JOIN branches br ON br.id = sp.branch_id
-             WHERE sp.branch_id ' . $clause . '
-               AND sp.status <> "void"' . $supplierWindow . '
-             GROUP BY sp.branch_id, br.name, sp.payment_date, sp.currency
-             ORDER BY sp.payment_date ASC, br.name ASC, sp.currency ASC',
-            $dateParams
+                payment_rows.branch_id,
+                payment_rows.branch_name,
+                payment_rows.movement_date,
+                payment_rows.currency,
+                GREATEST(payment_rows.cash_out_amount - COALESCE(refund_rows.refund_amount, 0), 0) AS cash_out_amount
+             FROM (
+                SELECT
+                    sp.branch_id,
+                    br.name AS branch_name,
+                    sp.payment_date AS movement_date,
+                    sp.currency,
+                    SUM(sp.paid_amount + COALESCE(sp.charges_amount, 0)) AS cash_out_amount
+                 FROM supplier_payments sp
+                 INNER JOIN branches br ON br.id = sp.branch_id
+                 WHERE sp.branch_id ' . $clause . '
+                   AND sp.status <> "void"' . $supplierWindow . '
+                 GROUP BY sp.branch_id, br.name, sp.payment_date, sp.currency
+             ) AS payment_rows
+             LEFT JOIN (
+                SELECT
+                    bse.branch_id,
+                    bse.event_date AS movement_date,
+                    bse.currency,
+                    SUM(bse.supplier_refund_amount) AS refund_amount
+                 FROM booking_service_events bse
+                 WHERE bse.branch_id ' . $supplierRefundClause . '
+                   AND bse.event_type = "refund"
+                   AND bse.event_status = "posted"' . $supplierRefundWindow . '
+                 GROUP BY bse.branch_id, bse.event_date, bse.currency
+             ) AS refund_rows
+                ON refund_rows.branch_id = payment_rows.branch_id
+               AND refund_rows.movement_date = payment_rows.movement_date
+               AND refund_rows.currency = payment_rows.currency
+             ORDER BY payment_rows.movement_date ASC, payment_rows.branch_name ASC, payment_rows.currency ASC',
+            array_merge($dateParams, $supplierRefundParams)
         );
 
         return [
@@ -54,14 +104,20 @@ final class ReportRepository extends BaseRepository
     public function managementSummary(array $branchIds, ?string $dateFrom, ?string $dateTo): array
     {
         [$clause, $params] = $this->branchScope($branchIds);
+        [$customerRefundClause, $customerRefundParams] = $this->branchScope($branchIds, 'refund_branch_');
+        [$supplierRefundClause, $supplierRefundParams] = $this->branchScope($branchIds, 'supplier_refund_branch_');
         $bookingParams = $params;
         $receiptParams = $params;
         $supplierPaymentParams = $params;
+        $supplierAdvanceAppliedParams = $params;
         $receivableParams = $params;
         $payableParams = $params;
         $bookingWindow = $this->bookingDateWindow('b.booking_date', $dateFrom, $dateTo, $bookingParams);
         $receiptWindow = $this->bookingDateWindow('cr.receipt_date', $dateFrom, $dateTo, $receiptParams);
         $supplierPaymentWindow = $this->bookingDateWindow('sp.payment_date', $dateFrom, $dateTo, $supplierPaymentParams);
+        $customerRefundWindow = $this->bookingDateWindow('bse.event_date', $dateFrom, $dateTo, $customerRefundParams, 'refund_');
+        $supplierRefundWindow = $this->bookingDateWindow('bse.event_date', $dateFrom, $dateTo, $supplierRefundParams, 'supplier_refund_');
+        $supplierAdvanceAppliedWindow = $this->bookingDateWindow('b.booking_date', $dateFrom, $dateTo, $supplierAdvanceAppliedParams);
         $receivableBookingWindow = $this->bookingDateWindow('b.booking_date', $dateFrom, $dateTo, $receivableParams);
         $payableBookingWindow = $this->bookingDateWindow('b.booking_date', $dateFrom, $dateTo, $payableParams);
         $receivableAggregateSql = $this->receivableAggregateSql();
@@ -146,32 +202,90 @@ final class ReportRepository extends BaseRepository
 
         $receiptRows = $this->fetchRows(
             'SELECT
-                cr.branch_id,
-                br.name AS branch_name,
-                br.base_currency AS branch_base_currency,
-                cr.currency,
-                SUM(cr.received_amount) AS total_received
-             FROM customer_receipts cr
-             INNER JOIN branches br ON br.id = cr.branch_id
-             WHERE cr.branch_id ' . $clause . '
-               AND cr.status <> "void"' . $receiptWindow . '
-              GROUP BY cr.branch_id, br.name, br.base_currency, cr.currency',
-            $receiptParams
+                receipt_rows.branch_id,
+                receipt_rows.branch_name,
+                receipt_rows.branch_base_currency,
+                receipt_rows.currency,
+                GREATEST(receipt_rows.total_received - COALESCE(refund_rows.total_refunded, 0), 0) AS total_received
+             FROM (
+                SELECT
+                    cr.branch_id,
+                    br.name AS branch_name,
+                    br.base_currency AS branch_base_currency,
+                    cr.currency,
+                    SUM(cr.received_amount) AS total_received
+                 FROM customer_receipts cr
+                 INNER JOIN branches br ON br.id = cr.branch_id
+                 WHERE cr.branch_id ' . $clause . '
+                   AND cr.status <> "void"' . $receiptWindow . '
+                  GROUP BY cr.branch_id, br.name, br.base_currency, cr.currency
+             ) AS receipt_rows
+             LEFT JOIN (
+                SELECT
+                    bse.branch_id,
+                    bse.currency,
+                    SUM(bse.customer_refund_amount) AS total_refunded
+                 FROM booking_service_events bse
+                  WHERE bse.branch_id ' . $customerRefundClause . '
+                   AND bse.event_type = "refund"
+                   AND bse.event_status = "posted"' . $customerRefundWindow . '
+                 GROUP BY bse.branch_id, bse.currency
+             ) AS refund_rows
+                ON refund_rows.branch_id = receipt_rows.branch_id
+               AND refund_rows.currency = receipt_rows.currency',
+            array_merge($receiptParams, $customerRefundParams)
         );
 
         $supplierPaymentRows = $this->fetchRows(
             'SELECT
-                sp.branch_id,
+                payment_rows.branch_id,
+                payment_rows.branch_name,
+                payment_rows.branch_base_currency,
+                payment_rows.currency,
+                GREATEST(payment_rows.total_supplier_paid - COALESCE(refund_rows.total_refunded, 0), 0) AS total_supplier_paid
+             FROM (
+                SELECT
+                    sp.branch_id,
+                    br.name AS branch_name,
+                    br.base_currency AS branch_base_currency,
+                    sp.currency,
+                    SUM(sp.paid_amount + COALESCE(sp.charges_amount, 0)) AS total_supplier_paid
+                 FROM supplier_payments sp
+                 INNER JOIN branches br ON br.id = sp.branch_id
+                 WHERE sp.branch_id ' . $clause . '
+                   AND sp.status <> "void"' . $supplierPaymentWindow . '
+                  GROUP BY sp.branch_id, br.name, br.base_currency, sp.currency
+             ) AS payment_rows
+             LEFT JOIN (
+                SELECT
+                    bse.branch_id,
+                    bse.currency,
+                    SUM(bse.supplier_refund_amount) AS total_refunded
+                 FROM booking_service_events bse
+                  WHERE bse.branch_id ' . $supplierRefundClause . '
+                   AND bse.event_type = "refund"
+                   AND bse.event_status = "posted"' . $supplierRefundWindow . '
+                 GROUP BY bse.branch_id, bse.currency
+             ) AS refund_rows
+                ON refund_rows.branch_id = payment_rows.branch_id
+               AND refund_rows.currency = payment_rows.currency',
+            array_merge($supplierPaymentParams, $supplierRefundParams)
+        );
+
+        $supplierAdvanceAppliedRows = $this->fetchRows(
+            'SELECT
+                b.branch_id,
                 br.name AS branch_name,
                 br.base_currency AS branch_base_currency,
-                sp.currency,
-                SUM(sp.paid_amount + COALESCE(sp.charges_amount, 0)) AS total_supplier_paid
-             FROM supplier_payments sp
-             INNER JOIN branches br ON br.id = sp.branch_id
-             WHERE sp.branch_id ' . $clause . '
-               AND sp.status <> "void"' . $supplierPaymentWindow . '
-              GROUP BY sp.branch_id, br.name, br.base_currency, sp.currency',
-            $supplierPaymentParams
+                so.currency,
+                SUM(so.advance_applied_amount) AS supplier_advance_applied
+             FROM supplier_obligations so
+             INNER JOIN bookings b ON b.booking_reference = so.booking_reference
+             INNER JOIN branches br ON br.id = b.branch_id
+             WHERE so.advance_applied_amount > 0
+               AND b.branch_id ' . $clause . $supplierAdvanceAppliedWindow . '
+              GROUP BY b.branch_id, br.name, br.base_currency, so.currency',
+            $supplierAdvanceAppliedParams
         );
 
         $receivableRows = $this->fetchRows(
@@ -214,6 +328,7 @@ final class ReportRepository extends BaseRepository
             'serviceTypes' => $serviceTypeRows,
             'receipts' => $receiptRows,
             'supplierPayments' => $supplierPaymentRows,
+            'supplierAdvanceApplied' => $supplierAdvanceAppliedRows,
             'receivables' => $receivableRows,
             'payables' => $payableRows,
             'expenses' => $expenseRows,
@@ -1257,6 +1372,8 @@ final class ReportRepository extends BaseRepository
     public function branchPerformance(array $branchIds, ?string $dateFrom, ?string $dateTo): array
     {
         [$clause, $params] = $this->branchScope($branchIds);
+        [$customerRefundClause, $customerRefundParams] = $this->branchScope($branchIds, 'refund_branch_');
+        [$supplierRefundClause, $supplierRefundParams] = $this->branchScope($branchIds, 'supplier_refund_branch_');
         $bookingParams = $params;
         $receiptParams = $params;
         $supplierPaymentParams = $params;
@@ -1265,6 +1382,8 @@ final class ReportRepository extends BaseRepository
         $bookingWindow = $this->bookingDateWindow('b.booking_date', $dateFrom, $dateTo, $bookingParams);
         $receiptWindow = $this->bookingDateWindow('cr.receipt_date', $dateFrom, $dateTo, $receiptParams);
         $supplierPaymentWindow = $this->bookingDateWindow('sp.payment_date', $dateFrom, $dateTo, $supplierPaymentParams);
+        $customerRefundWindow = $this->bookingDateWindow('bse.event_date', $dateFrom, $dateTo, $customerRefundParams, 'refund_');
+        $supplierRefundWindow = $this->bookingDateWindow('bse.event_date', $dateFrom, $dateTo, $supplierRefundParams, 'supplier_refund_');
         $receivableBookingWindow = $this->bookingDateWindow('b.booking_date', $dateFrom, $dateTo, $receivableParams);
         $payableBookingWindow = $this->bookingDateWindow('b.booking_date', $dateFrom, $dateTo, $payableParams);
         $receivableAggregateSql = $this->receivableAggregateSql();
@@ -1316,30 +1435,70 @@ final class ReportRepository extends BaseRepository
 
         $receiptRows = $this->fetchRows(
             'SELECT
-                cr.branch_id,
-                br.name AS branch_name,
-                cr.currency,
-                SUM(cr.received_amount) AS total_received
-             FROM customer_receipts cr
-             INNER JOIN branches br ON br.id = cr.branch_id
-             WHERE cr.branch_id ' . $clause . '
-               AND cr.status <> "void"' . $receiptWindow . '
-             GROUP BY cr.branch_id, br.name, cr.currency',
-            $receiptParams
+                receipt_rows.branch_id,
+                receipt_rows.branch_name,
+                receipt_rows.currency,
+                GREATEST(receipt_rows.total_received - COALESCE(refund_rows.total_refunded, 0), 0) AS total_received
+             FROM (
+                SELECT
+                    cr.branch_id,
+                    br.name AS branch_name,
+                    cr.currency,
+                    SUM(cr.received_amount) AS total_received
+                 FROM customer_receipts cr
+                 INNER JOIN branches br ON br.id = cr.branch_id
+                 WHERE cr.branch_id ' . $clause . '
+                   AND cr.status <> "void"' . $receiptWindow . '
+                 GROUP BY cr.branch_id, br.name, cr.currency
+             ) AS receipt_rows
+             LEFT JOIN (
+                SELECT
+                    bse.branch_id,
+                    bse.currency,
+                    SUM(bse.customer_refund_amount) AS total_refunded
+                 FROM booking_service_events bse
+                  WHERE bse.branch_id ' . $customerRefundClause . '
+                   AND bse.event_type = "refund"
+                   AND bse.event_status = "posted"' . $customerRefundWindow . '
+                 GROUP BY bse.branch_id, bse.currency
+             ) AS refund_rows
+                ON refund_rows.branch_id = receipt_rows.branch_id
+               AND refund_rows.currency = receipt_rows.currency',
+            array_merge($receiptParams, $customerRefundParams)
         );
 
         $supplierPaymentRows = $this->fetchRows(
             'SELECT
-                sp.branch_id,
-                br.name AS branch_name,
-                sp.currency,
-                SUM(sp.paid_amount) AS total_supplier_paid
-             FROM supplier_payments sp
-             INNER JOIN branches br ON br.id = sp.branch_id
-             WHERE sp.branch_id ' . $clause . '
-               AND sp.status <> "void"' . $supplierPaymentWindow . '
-             GROUP BY sp.branch_id, br.name, sp.currency',
-            $supplierPaymentParams
+                payment_rows.branch_id,
+                payment_rows.branch_name,
+                payment_rows.currency,
+                GREATEST(payment_rows.total_supplier_paid - COALESCE(refund_rows.total_refunded, 0), 0) AS total_supplier_paid
+             FROM (
+                SELECT
+                    sp.branch_id,
+                    br.name AS branch_name,
+                    sp.currency,
+                    SUM(sp.paid_amount) AS total_supplier_paid
+                 FROM supplier_payments sp
+                 INNER JOIN branches br ON br.id = sp.branch_id
+                 WHERE sp.branch_id ' . $clause . '
+                   AND sp.status <> "void"' . $supplierPaymentWindow . '
+                 GROUP BY sp.branch_id, br.name, sp.currency
+             ) AS payment_rows
+             LEFT JOIN (
+                SELECT
+                    bse.branch_id,
+                    bse.currency,
+                    SUM(bse.supplier_refund_amount) AS total_refunded
+                 FROM booking_service_events bse
+                  WHERE bse.branch_id ' . $supplierRefundClause . '
+                   AND bse.event_type = "refund"
+                   AND bse.event_status = "posted"' . $supplierRefundWindow . '
+                 GROUP BY bse.branch_id, bse.currency
+             ) AS refund_rows
+                ON refund_rows.branch_id = payment_rows.branch_id
+               AND refund_rows.currency = payment_rows.currency',
+            array_merge($supplierPaymentParams, $supplierRefundParams)
         );
 
         $receivableRows = $this->fetchRows(
@@ -1864,7 +2023,7 @@ final class ReportRepository extends BaseRepository
         return $this->fetchRows($sql, $params);
     }
 
-    private function branchScope(array $branchIds): array
+    private function branchScope(array $branchIds, string $prefix = 'branch_'): array
     {
         if ($branchIds === []) {
             return ['IN (NULL)', []];
@@ -1874,7 +2033,7 @@ final class ReportRepository extends BaseRepository
         $params = [];
 
         foreach (array_values($branchIds) as $index => $branchId) {
-            $key = 'branch_' . $index;
+            $key = $prefix . $index;
             $placeholders[] = ':' . $key;
             $params[$key] = (int) $branchId;
         }
@@ -1882,17 +2041,17 @@ final class ReportRepository extends BaseRepository
         return ['IN (' . implode(', ', $placeholders) . ')', $params];
     }
 
-    private function bookingDateWindow(string $column, ?string $dateFrom, ?string $dateTo, array &$params): string
+    private function bookingDateWindow(string $column, ?string $dateFrom, ?string $dateTo, array &$params, string $prefix = ''): string
     {
         $sql = '';
         if ($dateFrom !== null) {
-            $sql .= ' AND ' . $column . ' >= :date_from';
-            $params['date_from'] = $dateFrom;
+            $sql .= ' AND ' . $column . ' >= :' . $prefix . 'date_from';
+            $params[$prefix . 'date_from'] = $dateFrom;
         }
 
         if ($dateTo !== null) {
-            $sql .= ' AND ' . $column . ' <= :date_to';
-            $params['date_to'] = $dateTo;
+            $sql .= ' AND ' . $column . ' <= :' . $prefix . 'date_to';
+            $params[$prefix . 'date_to'] = $dateTo;
         }
 
         return $sql;

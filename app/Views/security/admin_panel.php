@@ -8,7 +8,6 @@ $branchAccessIds = array_map('intval', $targetSummary['branch_access_ids'] ?? []
 <section class="page-head">
     <div>
         <h1>Super Admin Security Controls</h1>
-        <p>Force resets and review targeted security activity without weakening core protections.</p>
     </div>
 </section>
 

@@ -185,7 +185,7 @@ async function syncDrafts() {
 
 async function init() {
   config = await window.travelLauncher.config();
-  document.getElementById('server-label').textContent = config.serverUrl;
+  document.getElementById('server-label').textContent = 'Secure cloud connection';
   document.getElementById('open-online').addEventListener('click', () => window.travelLauncher.openOnline());
   document.getElementById('refresh-cache').addEventListener('click', refreshCache);
   document.getElementById('sync-drafts').addEventListener('click', syncDrafts);

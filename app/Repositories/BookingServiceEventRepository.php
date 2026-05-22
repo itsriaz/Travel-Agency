@@ -107,6 +107,25 @@ final class BookingServiceEventRepository extends BaseRepository
         return $row !== false ? $row : null;
     }
 
+    public function findPostedEventById(int $eventId, string $eventType): ?array
+    {
+        $statement = $this->db->prepare(
+            'SELECT *
+             FROM booking_service_events
+             WHERE id = :id
+               AND event_type = :event_type
+               AND event_status = "posted"
+             LIMIT 1'
+        );
+        $statement->execute([
+            'id' => $eventId,
+            'event_type' => $eventType,
+        ]);
+        $row = $statement->fetch();
+
+        return $row !== false ? $row : null;
+    }
+
     public function updateCancellationFinancials(int $eventId, array $data): void
     {
         $statement = $this->db->prepare(

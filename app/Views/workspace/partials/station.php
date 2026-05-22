@@ -130,6 +130,28 @@ $visibleCustomerOpenBalanceTotals = array_filter(
     $customerOpenBalanceTotals,
     static fn (float $amount): bool => abs($amount) > 0.005
 );
+$bookingReceivedTotals = [];
+foreach (($customerPaymentFoundation['receipts'] ?? []) as $receiptRow) {
+    $receiptStatusRaw = str_replace(' ', '_', mb_strtolower(trim((string) ($receiptRow['statusRaw'] ?? $receiptRow['status'] ?? ''))));
+    if ($receiptStatusRaw === 'void') {
+        continue;
+    }
+
+    $receiptCurrency = (string) ($receiptRow['currency'] ?? '');
+    if ($receiptCurrency === '') {
+        continue;
+    }
+
+    $bookingReceivedTotals[$receiptCurrency] = ($bookingReceivedTotals[$receiptCurrency] ?? 0.0)
+        + (float) ($receiptRow['receivedAmount'] ?? 0);
+}
+$customerCreditTotals = is_array($customerPaymentFoundation['summary']['customerCredit'] ?? null)
+    ? $customerPaymentFoundation['summary']['customerCredit']
+    : [];
+$sameCurrencyCustomerCreditAmount = (float) ($customerCreditTotals[$invoiceCurrency] ?? 0.0);
+$settlementPaidHintAmount = (float) ($bookingReceivedTotals[$invoiceCurrency] ?? 0.0);
+$settlementPaidHintDisplay = $invoiceCurrency . ' ' . number_format($settlementPaidHintAmount, 2);
+$refundCreditHintDisplay = $invoiceCurrency . ' ' . number_format($sameCurrencyCustomerCreditAmount, 2);
 $paidOnCurrentInvoiceDisplay = $invoiceCurrency . ' ' . number_format($currentReceivedPersistedAmount, 2);
 $hasCurrentInvoiceAmount = $currentInvoiceAmountValue > 0.005 || $currentReceivedPersistedAmount > 0.005 || $effectiveCurrentInvoiceDueValue > 0.005;
 $paymentCurrency = $invoiceCurrency;
@@ -181,6 +203,10 @@ $paymentReceiptsJson = json_encode(
 ) ?: '[]';
 $paymentAllocationsJson = json_encode(
     $customerPaymentFoundation['allocations'] ?? [],
+    JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
+) ?: '[]';
+$serviceSupplierOptionsJson = json_encode(
+    $serviceSupplierOptions ?? [],
     JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
 ) ?: '[]';
 $serviceTaxTotal = static function (array $row): float {
@@ -266,9 +292,12 @@ $supplierAdvanceAppliedTotals = $sumByCurrency($supplierFoundation['obligations'
 $supplierPaidTotals = $sumByCurrency($supplierFoundation['payments'] ?? [], 'currency', static fn (array $row): float => (float) ($row['paidAmount'] ?? 0));
 $supplierOutstandingTotals = $sumByCurrency($supplierFoundation['obligations'] ?? [], 'currency', static fn (array $row): float => (float) ($row['balanceDueAmount'] ?? $row['netPayableAmount'] ?? 0));
 $supplierAdvanceBalanceTotals = $sumByCurrency($supplierFoundation['advances'] ?? [], 'currency', static fn (array $row): float => (float) ($row['availableAmount'] ?? 0));
+$latestRefundPrintUrl = (int) ($workspaceBooking['id'] ?? 0) > 0 && (int) ($activeService['latestRefundEventId'] ?? 0) > 0
+    ? url('/workspace/output?booking_id=' . (int) $workspaceBooking['id'] . '&doc=service_refund_receipt&refund_event_id=' . (int) ($activeService['latestRefundEventId'] ?? 0))
+    : '';
 ?>
 
-<section class="legacy-workspace" data-workspace-station data-service-engine data-has-services="<?= $hasActiveServices ? '1' : '0' ?>" data-has-selected-customer="<?= ((int) ($selectedTravelerProfile['id'] ?? 0) > 0 || trim((string) ($workspaceBooking['lead'] ?? '')) !== '') ? '1' : '0' ?>" data-new-booking-url="<?= e(url('/workspace?new=1&focus=customer')) ?>" data-autosave-invoice-url="<?= e(url('/workspace/autosave/invoice')) ?>" data-autosave-service-url="<?= e(url('/workspace/autosave/service')) ?>" data-supplier-advance-lookup-url="<?= e(url('/suppliers/advances/available')) ?>" data-can-void-financials="<?= $canPostServiceEvents ? '1' : '0' ?>" data-debug-tools-enabled="<?= $showWorkspaceDebug ? '1' : '0' ?>">
+<section class="legacy-workspace" data-workspace-station data-service-engine data-has-services="<?= $hasActiveServices ? '1' : '0' ?>" data-has-selected-customer="<?= ((int) ($selectedTravelerProfile['id'] ?? 0) > 0 || trim((string) ($workspaceBooking['lead'] ?? '')) !== '') ? '1' : '0' ?>" data-new-booking-url="<?= e(url('/workspace?new=1&focus=customer')) ?>" data-autosave-invoice-url="<?= e(url('/workspace/autosave/invoice')) ?>" data-autosave-service-url="<?= e(url('/workspace/autosave/service')) ?>" data-supplier-register-url="<?= e(url('/workspace/suppliers/register')) ?>" data-supplier-advance-lookup-url="<?= e(url('/suppliers/advances/available')) ?>" data-can-void-financials="<?= $canPostServiceEvents ? '1' : '0' ?>" data-debug-tools-enabled="<?= $showWorkspaceDebug ? '1' : '0' ?>">
     <div class="workspace-feedback" data-workspace-feedback aria-live="polite"></div>
     <?php if ($showWorkspaceDebug && $serviceSaveDebugJson !== null): ?>
         <pre class="commercial-debug-block" style="margin:8px 0 12px; white-space:pre-wrap;">Service save debug
@@ -367,7 +396,6 @@ $supplierAdvanceBalanceTotals = $sumByCurrency($supplierFoundation['advances'] ?
                 <span>Customer Name</span>
                 <input id="lead-traveler-focus" type="text" name="lead_traveler_name" value="<?= e($workspaceBooking['lead']) ?>" autocomplete="off" placeholder="Type customer name / family ID / passport / mobile" data-customer-autocomplete-input onfocus="window.workspaceOpenInlineCustomerLookup && window.workspaceOpenInlineCustomerLookup(this)" onclick="window.workspaceOpenInlineCustomerLookup && window.workspaceOpenInlineCustomerLookup(this)" oninput="window.workspaceHandleInlineCustomerLookupInput && window.workspaceHandleInlineCustomerLookupInput(this)" onkeydown="window.workspaceHandleInlineCustomerLookupKeydown && window.workspaceHandleInlineCustomerLookupKeydown(event, this)">
                 <div class="customer-inline-picker" data-customer-autocomplete-panel hidden>
-                    <div class="customer-inline-picker__hint">Search by name, family ID, passport, phone, village, district, or notes.</div>
                     <div class="customer-inline-picker__results" data-customer-autocomplete-results></div>
                 </div>
             </label>
@@ -415,7 +443,21 @@ $supplierAdvanceBalanceTotals = $sumByCurrency($supplierFoundation['advances'] ?
         <label class="legacy-field legacy-field--service-type"><span>Service Type</span><select name="service_type" data-service-field="type"><?php foreach ($serviceTypeOptions as $serviceTypeOption): ?><option value="<?= e($serviceTypeOption) ?>" <?= $serviceTypeOption === ($activeService['type'] ?? 'air ticket') ? 'selected' : '' ?>><?= e(ucwords($serviceTypeOption)) ?></option><?php endforeach; ?></select></label>
         <label class="legacy-field legacy-field--ticket-ref"><span data-service-ref-label>Ticket No. / Ref No.</span><input type="text" name="ticket_number" data-ticket-field="ticket_number" value="<?= e($serviceReference) ?>"></label>
         <label class="legacy-field legacy-field--pnr"><span data-service-second-ref-label>PNR.#</span><input type="text" name="ticket_pnr" data-ticket-field="pnr" value="<?= e((string) ($activeService['pnr'] ?? '')) ?>"></label>
-        <label class="legacy-field legacy-field--supplier"><span data-service-supplier-label>Tkt.Purchase From</span><input type="text" name="supplier_name" list="service-supplier-options" data-service-field="supplier" value="<?= e((string) ($activeService['supplier'] ?? '')) ?>"></label>
+        <label class="legacy-field legacy-field--supplier"><span data-service-supplier-label>Tkt.Purchase From</span><select name="supplier_name" data-service-field="supplier" data-service-supplier-input>
+            <?php $activeSupplierName = trim((string) ($activeService['supplier'] ?? '')); ?>
+            <?php $supplierOptionNames = array_map(static fn (array $row): string => trim((string) ($row['name'] ?? '')), $serviceSupplierOptions); ?>
+            <option value="" <?= $activeSupplierName === '' ? 'selected' : '' ?>>Select supplier</option>
+            <?php foreach ($serviceSupplierOptions as $supplierOption): ?>
+                <?php $supplierOptionName = trim((string) ($supplierOption['name'] ?? '')); ?>
+                <?php if ($supplierOptionName !== ''): ?>
+                    <option value="<?= e($supplierOptionName) ?>" <?= $supplierOptionName === $activeSupplierName ? 'selected' : '' ?>><?= e($supplierOptionName) ?></option>
+                <?php endif; ?>
+            <?php endforeach; ?>
+            <?php if ($activeSupplierName !== '' && ! in_array($activeSupplierName, $supplierOptionNames, true)): ?>
+                <option value="<?= e($activeSupplierName) ?>" selected><?= e($activeSupplierName) ?></option>
+            <?php endif; ?>
+            <option value="__add_supplier__">+ Add new supplier...</option>
+        </select></label>
         <label class="legacy-field legacy-field--ticket-type" data-air-only>
             <span>Ticket Type</span>
             <select name="ticket_type" data-ticket-field="ticket_type">
@@ -530,7 +572,7 @@ Kept here in case manual service save is needed again later.
         $activeServiceId = (int) ($activeService['serviceId'] ?? 0);
         $activeServiceStatus = strtolower(trim((string) ($activeService['status'] ?? '')));
         $activeServiceType = strtolower(trim((string) ($activeService['type'] ?? '')));
-        $showCancelAction = $activeServiceId > 0 && $activeServiceStatus !== 'cancelled';
+        $showCancelAction = $activeServiceId > 0;
         $showRefundAction = $activeServiceId > 0;
         $showSettlementAction = $activeServiceId > 0 && $activeServiceStatus === 'cancelled';
         $showReissueAction = $activeServiceId > 0 && $activeServiceType === 'air ticket';
@@ -544,10 +586,22 @@ Kept here in case manual service save is needed again later.
         <label class="legacy-service-event-field"><span>Note</span><input type="text" name="cancel_notes" value="" placeholder="Optional note" maxlength="4000"></label>
         <button class="btn btn-sm legacy-service-event-action" type="submit" data-service-cancel-button <?= (int) ($activeService['serviceId'] ?? 0) > 0 && (string) ($activeService['status'] ?? '') !== 'Cancelled' ? '' : 'disabled' ?>>Cancel Service</button>
     </form>
+    <form class="legacy-service-event-bar legacy-service-event-bar--settlement" method="post" action="<?= e(url('/workspace/services/cancellation-financials')) ?>" data-service-event-bar="settlement" data-workflow-gate="service-entry" <?= $showSettlementAction ? '' : 'hidden' ?> onsubmit="return confirm('Post cancellation financial adjustment for this service line?');">
+        <?= \App\Helpers\Csrf::input() ?>
+        <input type="hidden" name="booking_id" value="<?= e((string) $workspaceBooking['id']) ?>">
+        <input type="hidden" name="service_id" value="<?= e((string) ($activeService['serviceId'] ?? 0)) ?>" data-service-settlement-id>
+        <div class="legacy-service-event-note">Already received on this booking: <strong><?= e($settlementPaidHintDisplay) ?></strong></div>
+        <label class="legacy-service-event-field"><span>Date</span><input type="date" name="settlement_event_date" value="<?= e(date('Y-m-d')) ?>" aria-label="Settlement date"></label>
+        <label class="legacy-service-event-field"><span>Customer Penalty</span><input type="number" name="customer_penalty_amount" value="0.00" min="0" step="0.01" aria-label="Customer penalty amount"></label>
+        <label class="legacy-service-event-field"><span>Supplier Penalty</span><input type="number" name="supplier_penalty_amount" value="0.00" min="0" step="0.01" aria-label="Supplier penalty amount"></label>
+        <label class="legacy-service-event-field"><span>Reason</span><input type="text" name="settlement_reason" value="" placeholder="Settlement reason" minlength="5" maxlength="1000" required></label>
+        <button class="btn btn-sm legacy-service-event-action" type="submit" data-service-settlement-button <?= (int) ($activeService['serviceId'] ?? 0) > 0 && (string) ($activeService['status'] ?? '') === 'Cancelled' ? '' : 'disabled' ?>>Settle Cancel</button>
+    </form>
     <form class="legacy-service-event-bar legacy-service-event-bar--refund" method="post" action="<?= e(url('/workspace/services/refund')) ?>" data-service-event-bar="refund" data-workflow-gate="service-entry" <?= $showRefundAction ? '' : 'hidden' ?> onsubmit="return confirm('Post refund for this service line? This will create accounting journal entries.');">
         <?= \App\Helpers\Csrf::input() ?>
         <input type="hidden" name="booking_id" value="<?= e((string) $workspaceBooking['id']) ?>">
         <input type="hidden" name="service_id" value="<?= e((string) ($activeService['serviceId'] ?? 0)) ?>" data-service-refund-id>
+        <div class="legacy-service-event-note">Available refund credit in <?= e($invoiceCurrency) ?>: <strong><?= e($refundCreditHintDisplay) ?></strong></div>
         <label class="legacy-service-event-field"><span>Date</span><input type="date" name="refund_event_date" value="<?= e(date('Y-m-d')) ?>" aria-label="Refund date"></label>
         <label class="legacy-service-event-field"><span>Customer Refund</span><input type="number" name="customer_refund_amount" value="0.00" min="0" step="0.01" aria-label="Customer refund amount"></label>
         <label class="legacy-service-event-field"><span>Supplier Refund</span><input type="number" name="supplier_refund_amount" value="0.00" min="0" step="0.01" aria-label="Supplier refund received"></label>
@@ -558,16 +612,9 @@ Kept here in case manual service save is needed again later.
         </select></label>
         <label class="legacy-service-event-field"><span>Reason</span><input type="text" name="refund_reason" value="" placeholder="Refund reason" minlength="5" maxlength="1000" required></label>
         <button class="btn btn-sm legacy-service-event-action" type="submit" data-service-refund-button <?= (int) ($activeService['serviceId'] ?? 0) > 0 ? '' : 'disabled' ?>>Post Refund</button>
-    </form>
-    <form class="legacy-service-event-bar legacy-service-event-bar--settlement" method="post" action="<?= e(url('/workspace/services/cancellation-financials')) ?>" data-service-event-bar="settlement" data-workflow-gate="service-entry" <?= $showSettlementAction ? '' : 'hidden' ?> onsubmit="return confirm('Post cancellation financial adjustment for this service line?');">
-        <?= \App\Helpers\Csrf::input() ?>
-        <input type="hidden" name="booking_id" value="<?= e((string) $workspaceBooking['id']) ?>">
-        <input type="hidden" name="service_id" value="<?= e((string) ($activeService['serviceId'] ?? 0)) ?>" data-service-settlement-id>
-        <label class="legacy-service-event-field"><span>Date</span><input type="date" name="settlement_event_date" value="<?= e(date('Y-m-d')) ?>" aria-label="Settlement date"></label>
-        <label class="legacy-service-event-field"><span>Customer Penalty</span><input type="number" name="customer_penalty_amount" value="0.00" min="0" step="0.01" aria-label="Customer penalty amount"></label>
-        <label class="legacy-service-event-field"><span>Supplier Penalty</span><input type="number" name="supplier_penalty_amount" value="0.00" min="0" step="0.01" aria-label="Supplier penalty amount"></label>
-        <label class="legacy-service-event-field"><span>Reason</span><input type="text" name="settlement_reason" value="" placeholder="Settlement reason" minlength="5" maxlength="1000" required></label>
-        <button class="btn btn-sm legacy-service-event-action" type="submit" data-service-settlement-button <?= (int) ($activeService['serviceId'] ?? 0) > 0 && (string) ($activeService['status'] ?? '') === 'Cancelled' ? '' : 'disabled' ?>>Settle Cancel</button>
+        <?php if ($latestRefundPrintUrl !== ''): ?>
+            <a class="btn btn-sm legacy-service-event-action legacy-service-event-action--secondary" href="<?= e($latestRefundPrintUrl) ?>" target="_blank" rel="noopener">Print Refund</a>
+        <?php endif; ?>
     </form>
     <form class="legacy-service-event-bar legacy-service-event-bar--reissue" method="post" action="<?= e(url('/workspace/services/reissue')) ?>" data-service-event-bar="reissue" data-workflow-gate="service-entry" <?= $showReissueAction ? '' : 'hidden' ?> onsubmit="return confirm('Record reissue for this service line?');">
         <?= \App\Helpers\Csrf::input() ?>
@@ -589,6 +636,32 @@ Kept here in case manual service save is needed again later.
             <option value="<?= e((string) $supplierOption['name']) ?>">
         <?php endforeach; ?>
     </datalist>
+    <section class="customer-picker-modal" data-service-supplier-add-modal hidden aria-hidden="true">
+        <div class="customer-picker-modal__backdrop" data-service-supplier-add-close></div>
+        <div class="customer-picker-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="service-supplier-add-title" style="max-width:760px;">
+            <header class="customer-picker-modal__header">
+                <div>
+                    <strong id="service-supplier-add-title">Add Supplier</strong>
+                </div>
+                <button class="btn btn-sm" type="button" data-service-supplier-add-close>Close</button>
+            </header>
+            <form class="customer-picker-modal__body" data-service-supplier-add-form>
+                <?= \App\Helpers\Csrf::input() ?>
+                <div class="station-form-grid station-form-grid--12">
+                    <label class="station-field span-3"><span>Supplier Name</span><input type="text" name="supplier_name" value="" maxlength="190" required data-service-supplier-add-name></label>
+                    <label class="station-field span-2"><span>Branch</span><select name="branch_id" data-service-supplier-add-branch><?php foreach ($branchOptions as $branchRow): ?><option value="<?= e((string) $branchRow['id']) ?>" <?= (int) $branchRow['id'] === (int) $workspaceBooking['branchId'] ? 'selected' : '' ?>><?= e((string) $branchRow['name']) ?></option><?php endforeach; ?></select></label>
+                    <label class="station-field"><span>Currency</span><select name="default_currency" data-service-supplier-add-currency><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>" <?= $currencyOption === $invoiceCurrency ? 'selected' : '' ?>><?= e($currencyOption) ?></option><?php endforeach; ?></select></label>
+                    <label class="station-field span-2"><span>Supplier Type</span><select name="supplier_mode"><option value="normal_payable">Normal Payable</option><option value="running_balance">Running Balance</option></select></label>
+                    <label class="station-field span-4"><span>Notes</span><input type="text" name="notes" value="" maxlength="4000" placeholder="Optional"></label>
+                </div>
+                <div class="workspace-feedback workspace-feedback--inline" data-service-supplier-add-feedback hidden></div>
+                <div class="modal-actions">
+                    <button class="btn btn-primary btn-sm" type="submit" data-service-supplier-add-submit>Save Supplier</button>
+                    <button class="btn btn-sm" type="button" data-service-supplier-add-close>Cancel</button>
+                </div>
+            </form>
+        </div>
+    </section>
     <datalist id="service-passenger-options">
         <?php foreach ($travelers as $travelerOption): ?>
             <?php $travelerId = (int) ($travelerOption['travelerId'] ?? 0); ?>
@@ -890,7 +963,6 @@ Kept here in case manual service save is needed again later.
             <header class="customer-picker-modal__header">
                 <div>
                     <strong id="payment-history-title">Payment History</strong>
-                    <span>Invoice-level receipts and allocation history. Customer ledger remains separate.</span>
                 </div>
                 <button class="btn btn-sm" type="button" data-payment-history-close>Close</button>
             </header>
@@ -902,13 +974,9 @@ Kept here in case manual service save is needed again later.
                         <strong><?= e($currentInvoiceBalance) ?></strong>
                     </span>
                 </div>
-                <div class="workspace-feedback workspace-feedback--inline" style="display:block;margin-bottom:12px;">
-                    Posted customer receipt financial fields are not editable. To correct amount, currency, allocation, or other financial values, void the receipt and create a new one. Only non-financial metadata may be opened for controlled edit later.
-                </div>
                 <div class="legacy-modal-grid">
                     <article>
                         <h3>Receipt History</h3>
-                        <p class="supplier-settlement-helper">Metadata-only edit is allowed here for payment reference, bank/payment details, and remarks. Financial values such as amount, currency, and allocation stay locked after posting.</p>
                         <table class="legacy-table">
                             <thead><tr><th>Receipt</th><th>Date</th><th>Curr.</th><th>Payment Received</th><th>Applied</th><th>Credit / Return</th><th>Method</th><th>Status</th><th>Print</th><th>Meta Edit</th><th>Void</th><th>Recreate</th></tr></thead>
                             <tbody data-payment-history-receipts-body>
@@ -950,7 +1018,6 @@ Kept here in case manual service save is needed again later.
             <header class="customer-picker-modal__header">
                 <div>
                     <strong id="customer-dues-title">Customer Dues Finder</strong>
-                    <span>Search customer by name, mobile, passport, or family ID, then open the unpaid booking in the stable payment workspace.</span>
                 </div>
                 <button class="btn btn-sm" type="button" data-customer-dues-close>Close</button>
             </header>
@@ -1033,38 +1100,19 @@ Kept here in case manual service save is needed again later.
                     <label class="station-field span-2"><span>Target Currency</span><input type="text" value="" readonly data-payment-exchange-target-currency></label>
                     <label class="station-field span-2"><span>Target Balance</span><input type="text" value="" readonly data-payment-exchange-target-balance></label>
                     <label class="station-field span-2"><span>Payment Currency</span><input type="text" value="" readonly data-payment-exchange-payment-currency></label>
-                    <label class="station-field span-2"><span>Amount Receiving</span><input type="number" step="0.01" value="" data-payment-exchange-payment-amount></label>
-                    <label class="station-field span-2"><span>Rate Date</span><input type="text" value="<?= e(date('Y-m-d')) ?>" readonly data-payment-exchange-rate-date-display></label>
+                    <label class="station-field span-3"><span>Rate Date</span><input type="text" value="<?= e(date('Y-m-d')) ?>" readonly data-payment-exchange-rate-date-display></label>
                     <label class="station-field span-6" data-payment-exchange-rate-row hidden><span data-payment-exchange-rate-label>Exchange Rate</span><input type="number" step="0.00000001" value="" data-payment-exchange-rate-input></label>
                 </div>
                 <div class="workspace-feedback workspace-feedback--inline" data-payment-exchange-rate-help hidden></div>
                 <div class="workspace-feedback workspace-feedback--inline" data-payment-exchange-feedback hidden></div>
                 <div class="legacy-modal-grid top-gap">
                     <article>
-                        <h3>Settlement Summary</h3>
-                        <table class="legacy-table">
-                            <tbody>
-                            <tr><th>Invoice Amount Settled</th><td data-payment-exchange-preview-settled>0.00</td></tr>
-                            <tr><th>Payment Amount Used</th><td data-payment-exchange-preview-consumed>0.00</td></tr>
-                            <tr><th>Remaining Invoice Balance</th><td data-payment-exchange-preview-target-remaining>0.00</td></tr>
-                            <tr><th>Credit / Return</th><td data-payment-exchange-preview-return>0.00</td></tr>
-                            <tr><th hidden>Payment Required to Fully Clear Target</th><td hidden data-payment-exchange-preview-required>0.00</td></tr>
-                            <tr><th hidden>Remaining Payment Amount</th><td hidden data-payment-exchange-preview-payment-remaining>0.00</td></tr>
-                            <tr><th hidden>Auto-Apply to Same Payment Currency Dues</th><td hidden data-payment-exchange-preview-auto-apply>0.00</td></tr>
-                            </tbody>
-                        </table>
-                    </article>
-                    <article>
-                        <h3>Rules</h3>
-                        <div class="workspace-feedback workspace-feedback--inline" style="display:block;">
-                            Save Payment remains unchanged for same-currency receipts.
-                            This flow settles the current invoice first, then uses any remaining payment only on older dues in the same payment currency.
+                        <h3>Actions</h3>
+                        <div class="station-command-buttons">
+                            <button class="btn btn-primary btn-sm" type="button" data-payment-exchange-confirm>Confirm Settlement</button>
+                            <button class="btn btn-sm" type="button" data-payment-exchange-close>Cancel</button>
                         </div>
                     </article>
-                </div>
-                <div class="station-command-buttons top-gap">
-                    <button class="btn btn-primary btn-sm" type="button" data-payment-exchange-confirm>Confirm Settlement</button>
-                    <button class="btn btn-sm" type="button" data-payment-exchange-close>Cancel</button>
                 </div>
             </div>
         </div>
@@ -1076,7 +1124,6 @@ Kept here in case manual service save is needed again later.
             <header class="customer-picker-modal__header">
                 <div>
                     <strong id="supplier-settlement-title">Postpaid Supplier Settlement</strong>
-                    <span>Use this screen to pay existing supplier payable balances. For payments made before purchase, use the global Prepaid Supplier Payment option.</span>
                 </div>
                 <button class="btn btn-sm" type="button" data-supplier-settlement-close>Close</button>
             </header>
@@ -1084,7 +1131,6 @@ Kept here in case manual service save is needed again later.
                 <div class="legacy-modal-grid">
                     <article>
                         <h3>Supplier Summary</h3>
-                        <p class="supplier-settlement-helper">This popup is only for postpaid supplier settlement. Prepaid supplier payments are managed from the global Prepaid Supplier Payment action.</p>
                         <div class="legacy-highlight-strip">
                             <div class="legacy-highlight legacy-highlight--red"><span>Total Supplier Payable</span><strong><?= e($formatCurrencyTotals($supplierGrossTotals)) ?></strong></div>
                             <div class="legacy-highlight legacy-highlight--orange"><span>Advance Used</span><strong><?= e($formatCurrencyTotals($supplierAdvanceAppliedTotals)) ?></strong></div>
@@ -1133,7 +1179,6 @@ Kept here in case manual service save is needed again later.
                     </article>
                     <article>
                         <h3>Pay Outstanding Supplier Balance</h3>
-                        <p class="supplier-settlement-helper">Posted supplier payment financial fields are not editable. To correct amount, currency, supplier allocation, or other financial values, void the payment and create a new one.</p>
                         <?php if ($supplierPaymentRecreateDraft !== null): ?>
                             <div class="workspace-feedback workspace-feedback--inline" style="display:block;margin-bottom:12px;">
                                 Draft loaded from voided supplier payment <strong><?= e((string) ($supplierPaymentRecreateDraft['paymentNo'] ?? '')) ?></strong>.
@@ -1185,7 +1230,6 @@ Kept here in case manual service save is needed again later.
                             <div class="supplier-dashboard-advanced__body">
                                 <article>
                                     <h3>Record Supplier Payment</h3>
-                                    <p class="supplier-settlement-helper">Use this only for a new supplier payment. Once posted, financial fields stay locked and correction must be done through Void plus a new payment.</p>
                                     <?php if ($supplierPaymentRecreateDraft !== null): ?>
                                         <div class="workspace-feedback workspace-feedback--inline" style="display:block;margin-bottom:12px;">
                                             Recreate helper is active for supplier payment <strong><?= e((string) ($supplierPaymentRecreateDraft['paymentNo'] ?? '')) ?></strong>.
@@ -1242,7 +1286,6 @@ Kept here in case manual service save is needed again later.
                     </article>
                     <article>
                         <h3>Supplier Payments</h3>
-                        <p class="supplier-settlement-helper">Supplier payment history is audit trail. Posted financial values are not edited in place; use Void and then record a replacement payment.</p>
                         <table class="legacy-table">
                             <thead><tr><th>Payment No.</th><th>Supplier</th><th>Date</th><th>Curr.</th><th>Paid</th><th>Allocated</th><th>Open</th><th>Status</th><th>Print</th><th>Meta Edit</th><th>Void</th><th>Recreate</th></tr></thead>
                             <tbody>
@@ -1284,7 +1327,6 @@ Kept here in case manual service save is needed again later.
             <header class="customer-picker-modal__header">
                 <div>
                     <strong id="global-prepaid-supplier-title">Prepaid Supplier Payment</strong>
-                    <span>Use this when paying a supplier before purchase. This creates supplier advance and can be used later for the same supplier and currency.</span>
                 </div>
                 <button class="btn btn-sm" type="button" data-global-prepaid-supplier-close>Close</button>
             </header>
@@ -1295,11 +1337,11 @@ Kept here in case manual service save is needed again later.
                         <form method="post" action="<?= e(url('/suppliers/advances/save')) ?>">
                             <?= \App\Helpers\Csrf::input() ?>
                             <div class="station-form-grid station-form-grid--6 station-form-grid--inline">
-                                <label class="station-field span-2"><span>Branch</span><select name="branch_id"><?php foreach ($branchOptions as $branchRow): ?><option value="<?= e((string) $branchRow['id']) ?>" <?= (int) $branchRow['id'] === $globalPrepaidDefaultBranchId ? 'selected' : '' ?>><?= e((string) $branchRow['name']) ?></option><?php endforeach; ?></select></label>
-                                <label class="station-field span-2"><span>Supplier</span><input type="text" name="supplier_name" list="service-supplier-options" value=""></label>
-                                <label class="station-field span-2"><span>Currency</span><select name="advance_currency"><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>"><?= e($currencyOption) ?></option><?php endforeach; ?></select></label>
+                                <label class="station-field span-2"><span>Branch</span><select name="branch_id" data-global-prepaid-branch><?php foreach ($branchOptions as $branchRow): ?><option value="<?= e((string) $branchRow['id']) ?>" <?= (int) $branchRow['id'] === $globalPrepaidDefaultBranchId ? 'selected' : '' ?>><?= e((string) $branchRow['name']) ?></option><?php endforeach; ?></select></label>
+                                <label class="station-field span-2"><span>Supplier</span><input type="text" name="supplier_name" list="service-supplier-options" value="" data-global-prepaid-supplier></label>
+                                <label class="station-field span-2"><span>Currency</span><select name="advance_currency" data-global-prepaid-currency><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>"><?= e($currencyOption) ?></option><?php endforeach; ?></select></label>
                                 <label class="station-field span-2"><span>Payment Date</span><input type="date" name="advance_date" value="<?= e(date('Y-m-d')) ?>"></label>
-                                <label class="station-field span-2"><span>Advance Amount</span><input type="number" step="0.01" name="advance_amount" value="0.00"></label>
+                                <label class="station-field span-2"><span>Advance Amount</span><input type="number" step="0.01" name="advance_amount" value="0.00" data-global-prepaid-amount></label>
                                 <label class="station-field span-3"><span>Reference</span><input type="text" name="advance_reference_number" value=""></label>
                                 <label class="station-field span-3"><span>Remarks</span><input type="text" name="advance_remarks" value=""></label>
                             </div>
@@ -1391,6 +1433,7 @@ Kept here in case manual service save is needed again later.
     <script id="workspace-daily-settlement-rates-data" type="application/json"><?= $dailySettlementRatesJson ?></script>
     <script id="workspace-payment-receipts-data" type="application/json"><?= $paymentReceiptsJson ?></script>
     <script id="workspace-payment-allocations-data" type="application/json"><?= $paymentAllocationsJson ?></script>
+    <script id="workspace-service-suppliers-data" type="application/json"><?= $serviceSupplierOptionsJson ?></script>
     <script>
         (function () {
             var init = function () {
@@ -1595,6 +1638,7 @@ Kept here in case manual service save is needed again later.
 
                 field.dispatchEvent(new Event('change', { bubbles: true }));
                 hidePanel();
+                station.dispatchEvent(new CustomEvent('workspace:customer-selected', { bubbles: true }));
             };
 
             var renderPanel = function () {
@@ -1809,6 +1853,7 @@ Kept here in case manual service save is needed again later.
                     }
 
                     closeModal();
+                    station.dispatchEvent(new CustomEvent('workspace:customer-selected', { bubbles: true }));
                 };
 
                 var openEditModal = function (customer) {
@@ -2131,7 +2176,8 @@ Kept here in case manual service save is needed again later.
 
             station.dataset.enterAsTabInit = '1';
 
-            var shouldSkipField = function (field) {
+            var shouldSkipField = function (field, options) {
+                options = options || {};
                 if (!field) {
                     return true;
                 }
@@ -2147,11 +2193,11 @@ Kept here in case manual service save is needed again later.
                     return true;
                 }
 
-                if (tag === 'textarea') {
+                if (tag === 'textarea' && !options.allowTextarea) {
                     return true;
                 }
 
-                if (tag === 'button' || tag === 'a') {
+                if ((tag === 'button' || tag === 'a') && !options.allowActions) {
                     return true;
                 }
 
@@ -2162,6 +2208,10 @@ Kept here in case manual service save is needed again later.
                 var style = window.getComputedStyle(field);
 
                 return style.display === 'none' || style.visibility === 'hidden';
+            };
+
+            var isVisibleAction = function (field) {
+                return !shouldSkipField(field, { allowActions: true });
             };
 
             var getFocusableFields = function () {
@@ -2200,6 +2250,76 @@ Kept here in case manual service save is needed again later.
                 }
             };
 
+            var findField = function (selector, options) {
+                var field = station.querySelector(selector);
+                if (!field) {
+                    return null;
+                }
+
+                return shouldSkipField(field, options) ? null : field;
+            };
+
+            var scrollAndFocus = function (field) {
+                if (!field) {
+                    return;
+                }
+
+                var holder = field.closest('.legacy-financial-grid, .legacy-payment-strip, .legacy-service-band, .legacy-invoice-header, .legacy-payment-panel, .legacy-fin-block') || field;
+
+                holder.scrollIntoView({
+                    behavior: 'smooth',
+                    block: 'center',
+                    inline: 'nearest'
+                });
+
+                window.setTimeout(function () {
+                    field.focus();
+
+                    if (typeof field.select === 'function' && field.tagName.toLowerCase() === 'input') {
+                        field.select();
+                    }
+                }, 90);
+            };
+
+            var workflowTargets = [
+                ['[data-customer-autocomplete-input]', '.legacy-invoice-header__remarks input[name="remarks"]', { allowTextarea: true }],
+                ['.legacy-invoice-header__remarks input[name="remarks"]', 'select[name="service_type"]'],
+                ['select[name="service_type"]', 'input[name="ticket_number"]'],
+                ['input[name="ticket_number"]', 'input[name="ticket_pnr"]'],
+                ['input[name="ticket_pnr"]', '#legacy-service-form [name="supplier_name"]'],
+                ['#legacy-service-form [name="supplier_name"]', 'select[name="ticket_type"]'],
+                ['select[name="ticket_type"]', 'select[name="ticket_class"]'],
+                ['select[name="ticket_class"]', '#commercial-sale-price'],
+                ['#commercial-sale-price', '#commercial-service-charge'],
+                ['#commercial-service-charge', '[data-payment-focus="received_amount"]'],
+                ['[data-payment-focus="received_amount"]', '[data-payment-submit-action="save"]', { allowActions: true }]
+            ];
+
+            var workflowNextFor = function (target) {
+                if (!(target instanceof HTMLElement)) {
+                    return null;
+                }
+
+                for (var index = 0; index < workflowTargets.length; index += 1) {
+                    if (target.matches(workflowTargets[index][0])) {
+                        return findField(workflowTargets[index][1], workflowTargets[index][2]);
+                    }
+                }
+
+                return null;
+            };
+
+            station.addEventListener('workspace:customer-selected', function () {
+                scrollAndFocus(findField('.legacy-invoice-header__remarks input[name="remarks"]', { allowTextarea: true }));
+            });
+
+            station.addEventListener('workspace:payment-saved', function () {
+                var printButton = station.querySelector('[data-payment-action="print-receipt"]');
+                if (printButton && isVisibleAction(printButton)) {
+                    scrollAndFocus(printButton);
+                }
+            });
+
             station.addEventListener('keydown', function (event) {
                 if (event.key !== 'Enter') {
                     return;
@@ -2207,7 +2327,7 @@ Kept here in case manual service save is needed again later.
 
                 var target = event.target;
 
-                if (!target || shouldSkipField(target)) {
+                if (!target) {
                     return;
                 }
 
@@ -2217,6 +2337,60 @@ Kept here in case manual service save is needed again later.
                     target.matches('[data-customer-picker-input]') ||
                     target.matches('[data-customer-dues-search]')
                 ) {
+                    if (target.matches('[data-customer-autocomplete-input]')) {
+                        var panel = station.querySelector('[data-customer-autocomplete-panel]');
+                        if (panel && panel.hidden) {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            scrollAndFocus(findField('.legacy-invoice-header__remarks input[name="remarks"]', { allowTextarea: true }));
+                        }
+                    }
+                    return;
+                }
+
+                if (target.matches('[data-payment-submit-action="save"]')) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    target.click();
+                    return;
+                }
+
+                if (target.matches('[data-payment-action="print-receipt"]')) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    target.click();
+                    return;
+                }
+
+                if (shouldSkipField(target, { allowTextarea: true, allowActions: true })) {
+                    return;
+                }
+
+                var workflowNext = workflowNextFor(target);
+                if (workflowNext) {
+                    if (
+                        workflowNext.matches('#legacy-service-form [name="supplier_name"]') &&
+                        typeof window.workspaceFocusSupplierDropdown === 'function' &&
+                        window.workspaceFocusSupplierDropdown()
+                    ) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        return;
+                    }
+
+                    if (
+                        target.matches('#legacy-service-form [name="supplier_name"]') &&
+                        typeof window.workspaceMaybeOpenSupplierAddModal === 'function' &&
+                        window.workspaceMaybeOpenSupplierAddModal(target)
+                    ) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        return;
+                    }
+
+                    event.preventDefault();
+                    event.stopPropagation();
+                    scrollAndFocus(workflowNext);
                     return;
                 }
 
@@ -2263,6 +2437,14 @@ Kept here in case manual service save is needed again later.
             };
 
             var getInvoiceDueAmount = function () {
+                if (currentBalanceInput) {
+                    var liveCurrentBalance = parseAmount(currentBalanceInput.value);
+
+                    if (liveCurrentBalance > 0.005) {
+                        return liveCurrentBalance;
+                    }
+                }
+
                 if (totalOutstandingInput) {
                     var totalOutstanding = parseAmount(
                         totalOutstandingInput.getAttribute('data-payment-total-due-now')
@@ -2300,7 +2482,12 @@ Kept here in case manual service save is needed again later.
                 var receivedAmount = parseAmount(amountInput.value);
                 var invoiceDueAmount = getInvoiceDueAmount();
 
-                if (receivedAmount <= 0.005 || invoiceDueAmount <= 0.005) {
+                if (
+                    receivedAmount <= 0.005
+                    || invoiceDueAmount <= 0.005
+                    || dueDateInput.disabled
+                    || dueDateInput.closest('[hidden]') !== null
+                ) {
                     return;
                 }
 

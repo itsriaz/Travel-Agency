@@ -8,7 +8,6 @@ $events = $summary['events'];
 <section class="page-head">
     <div>
         <h1>Security Settings</h1>
-        <p>Review account protection, trusted devices, recovery options, and recent security activity.</p>
     </div>
 </section>
 
@@ -31,7 +30,6 @@ $events = $summary['events'];
     <div class="panel compact-panel">
         <div class="panel-header">
             <h2>Security Actions</h2>
-            <div class="panel-meta">Sensitive actions rotate session state and keep protections intact.</div>
         </div>
         <div class="security-action-list">
             <form method="post" action="<?= e(url('/security/2fa/re-enroll')) ?>" class="compact-inline-form">
@@ -81,7 +79,6 @@ $events = $summary['events'];
     <div class="panel compact-panel">
         <div class="panel-header">
             <h2>Trusted Devices</h2>
-            <div class="panel-meta">Remember-this-device is optional and unavailable for super admins.</div>
         </div>
         <?php if (Auth::isSuperAdmin()): ?>
             <div class="placeholder-card">Trusted devices are intentionally disabled for super admin accounts.</div>

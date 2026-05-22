@@ -7,6 +7,7 @@ $customerPaymentFoundation = is_array($customerPaymentFoundation ?? null) ? $cus
 $supplierFoundation = is_array($supplierFoundation ?? null) ? $supplierFoundation : [];
 $selectedReceipt = is_array($selectedReceipt ?? null) ? $selectedReceipt : null;
 $selectedSupplierPayment = is_array($selectedSupplierPayment ?? null) ? $selectedSupplierPayment : null;
+$selectedRefundEvent = is_array($selectedRefundEvent ?? null) ? $selectedRefundEvent : null;
 $branchBranding = is_array($branchBranding ?? null) ? $branchBranding : [];
 $summary = is_array($summary ?? null) ? $summary : [];
 $outputType = (string) ($outputType ?? 'invoice');
@@ -103,6 +104,7 @@ $documentAudienceNote = match ($outputType) {
     'account_statement' => 'Customer account statement for this booking and its saved receipts.',
     'itinerary' => 'Travel service summary for passenger and booking reference use.',
     'booking_confirmation' => 'Booking confirmation generated from the current saved booking record.',
+    'service_refund_receipt' => 'Cancellation and refund receipt generated from the posted service refund event.',
     'supplier_voucher' => 'Supplier-facing or finance-facing payment voucher for the selected supplier payment.',
     default => 'Operational output generated from the current saved booking record.',
 };
@@ -255,8 +257,28 @@ $remainingCustomerBalanceSource = is_array($customerPaymentFoundation['summary']
     ? $customerPaymentFoundation['summary']['fullCustomerOutstanding']
     : [];
 $remainingCustomerBalanceTotals = $nonZeroCurrencyTotals($remainingCustomerBalanceSource);
+$statementPreviousBalanceTotals = $nonZeroCurrencyTotals($customerPreviousBalanceTotals);
+$statementCustomerCreditTotals = $nonZeroCurrencyTotals($customerCreditTotals);
 $selectedReceiptId = (int) ($selectedReceipt['id'] ?? 0);
 $selectedReceiptNo = (string) ($selectedReceipt['receiptNo'] ?? '');
+$selectedRefundPayload = [];
+if ($selectedRefundEvent !== null && ! empty($selectedRefundEvent['payload_json'])) {
+    $decodedPayload = json_decode((string) $selectedRefundEvent['payload_json'], true);
+    if (is_array($decodedPayload)) {
+        $selectedRefundPayload = $decodedPayload;
+    }
+}
+$selectedRefundPaymentMethod = ucwords(str_replace('_', ' ', (string) ($selectedRefundPayload['payment_method'] ?? 'cash')));
+$selectedRefundService = null;
+if ($selectedRefundEvent !== null) {
+    $refundServiceId = (int) ($selectedRefundEvent['booking_service_id'] ?? 0);
+    foreach ($services as $service) {
+        if ((int) ($service['id'] ?? 0) === $refundServiceId) {
+            $selectedRefundService = $service;
+            break;
+        }
+    }
+}
 $receiptOriginalPaymentRowsByKey = [];
 
 $registerReceiptOriginalPayment = static function (array $receiptRow) use (&$receiptOriginalPaymentRowsByKey): void {
@@ -771,6 +793,65 @@ openReceivables: <?= e(json_encode($receiptDebug['openReceivables'], JSON_PRETTY
             </section>
         <?php endif; ?>
 
+        <?php if ($outputType === 'service_refund_receipt' && $selectedRefundEvent !== null): ?>
+            <section class="receipt-sheet">
+                <header class="receipt-sheet__head">
+                    <div>
+                        <div class="receipt-sheet__branch"><?= e((string) ($branchBranding['name'] ?? 'Travel Agency Branch')) ?></div>
+                        <div class="receipt-sheet__meta"><?= e(trim((string) (($branchBranding['city'] ?? '') . ((string) ($branchBranding['country'] ?? '') !== '' ? ', ' . (string) ($branchBranding['country'] ?? '') : '')))) ?></div>
+                        <div class="receipt-sheet__meta"><?= e((string) ($branchBranding['tagline'] ?? 'Travel Agency Operations')) ?></div>
+                    </div>
+                    <div class="receipt-sheet__title-wrap">
+                        <div class="receipt-sheet__title">Cancellation / Refund Receipt</div>
+                        <div class="receipt-sheet__subtitle">Cancelled service and refunded amount confirmation</div>
+                    </div>
+                </header>
+
+                <section class="receipt-card">
+                    <div class="receipt-card__grid">
+                        <div><span>Booking / Invoice No.</span><strong><?= e((string) ($booking['booking_reference'] ?? '')) ?></strong></div>
+                        <div><span>Refund Date</span><strong><?= e((string) ($selectedRefundEvent['event_date'] ?? '')) ?></strong></div>
+                        <div><span>Customer Name</span><strong><?= e($customerName) ?></strong></div>
+                        <div><span>Service Line</span><strong><?= e((string) ($selectedRefundEvent['service_line_reference'] ?? 'N/A')) ?></strong></div>
+                        <div><span>Service Status</span><strong>Cancelled</strong></div>
+                        <div><span>Payment Method</span><strong><?= e($selectedRefundPaymentMethod) ?></strong></div>
+                        <?php if ($selectedRefundService !== null): ?>
+                            <div><span>Service Type</span><strong><?= e(ucwords((string) ($selectedRefundService['service_type'] ?? 'service'))) ?></strong></div>
+                            <div><span>Service Detail</span><strong><?= e($cleanServiceDescription($selectedRefundService)) ?></strong></div>
+                            <?php $refundServiceReference = trim((string) (($selectedRefundService['ticket_number'] ?? '') !== '' ? $selectedRefundService['ticket_number'] : ($selectedRefundService['line_reference'] ?? ''))); ?>
+                            <?php if ($refundServiceReference !== ''): ?>
+                                <div><span>Ticket / Reference No.</span><strong><?= e($refundServiceReference) ?></strong></div>
+                            <?php endif; ?>
+                            <?php if (trim((string) ($selectedRefundService['pnr'] ?? '')) !== ''): ?>
+                                <div><span>PNR</span><strong><?= e((string) $selectedRefundService['pnr']) ?></strong></div>
+                            <?php endif; ?>
+                            <?php if (trim((string) ($selectedRefundService['airline'] ?? '')) !== ''): ?>
+                                <div><span>Airline / Supplier</span><strong><?= e((string) $selectedRefundService['airline']) ?></strong></div>
+                            <?php endif; ?>
+                        <?php endif; ?>
+                        <div style="grid-column:1 / -1;"><span>Refund Reason</span><strong><?= e((string) ($selectedRefundEvent['reason'] ?? '')) ?></strong></div>
+                    </div>
+                </section>
+
+                <section class="receipt-card receipt-card--finance">
+                    <div class="receipt-finance-strip">
+                        <div>
+                            <span>Customer Refund Paid</span>
+                            <strong><?= e((string) ($selectedRefundEvent['currency'] ?? 'PKR')) ?> <?= e($formatMoney((float) ($selectedRefundEvent['customer_refund_amount'] ?? 0))) ?></strong>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="receipt-card">
+                    <div class="receipt-card__grid">
+                        <div><span>Document Type</span><strong>Service Refund</strong></div>
+                        <div><span>Generated At</span><strong><?= e($generatedAt) ?></strong></div>
+                        <div><span>Prepared By</span><strong><?= e($receivedBy) ?></strong></div>
+                    </div>
+                </section>
+            </section>
+        <?php endif; ?>
+
         <?php if ($outputType === 'supplier_voucher' && $selectedSupplierPayment !== null): ?>
             <section class="output-block">
                 <h2>
@@ -833,15 +914,15 @@ openReceivables: <?= e(json_encode($receiptDebug['openReceivables'], JSON_PRETTY
             <section class="output-block">
                 <h2>Statement Summary</h2>
                 <div class="output-summary-strip">
-                    <div><span>Previous Balance</span><strong><?= e($statementPreviousBalanceDisplay) ?></strong></div>
-                    <div><span>Current Invoice Amount</span><strong><?= e($formatCurrencyTotals($invoiceReceivableTotals)) ?></strong></div>
-                    <div><span>Current Invoice Outstanding</span><strong><?= e($formatCurrencyTotals($invoiceOutstandingTotals)) ?></strong></div>
-                    <div><span>Total Outstanding</span><strong><?= e($formatCurrencyTotals($statementTotalOutstandingTotals)) ?></strong></div>
-                    <?php if ($statementOtherCurrencyPreviousTotals !== []): ?>
-                        <div><span>Other Currency Outstanding</span><strong><?= e($formatCurrencyTotals($statementOtherCurrencyPreviousTotals)) ?></strong></div>
+                    <div><span>Invoice Amount</span><strong><?= e($formatCurrencyTotals($invoiceReceivableTotals)) ?></strong></div>
+                    <div><span>Payments Received</span><strong><?= e($formatCurrencyTotals($invoiceReceivedTotals)) ?></strong></div>
+                    <?php if ($statementPreviousBalanceTotals !== []): ?>
+                        <div><span>Previous Balance</span><strong><?= e($formatCurrencyTotals($statementPreviousBalanceTotals)) ?></strong></div>
                     <?php endif; ?>
-                    <div><span>Still Due</span><strong><?= e($formatCurrencyTotals($remainingCustomerBalanceTotals !== [] ? $remainingCustomerBalanceTotals : ['PKR' => 0])) ?></strong></div>
-                    <div><span>Customer Credit</span><strong><?= e($formatCurrencyTotals($customerCreditTotals)) ?></strong></div>
+                    <div><span>Balance Due</span><strong><?= e($formatCurrencyTotals($remainingCustomerBalanceTotals !== [] ? $remainingCustomerBalanceTotals : ['PKR' => 0])) ?></strong></div>
+                    <?php if ($statementCustomerCreditTotals !== []): ?>
+                        <div><span>Customer Credit</span><strong><?= e($formatCurrencyTotals($statementCustomerCreditTotals)) ?></strong></div>
+                    <?php endif; ?>
                 </div>
             </section>
             <section class="output-block">

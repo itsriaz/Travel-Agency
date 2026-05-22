@@ -13,7 +13,6 @@ $systemRows = array_sum(array_map(
 <section class="page-head">
     <div>
         <h1>Master Data</h1>
-        <p>Full super-admin register maintenance for operational masters, branch setup, and shared booking vocabularies.</p>
     </div>
     <div class="page-actions">
         <a class="btn btn-primary" href="<?= e(url('/workspace')) ?>">Open Booking Workspace</a>
@@ -33,17 +32,14 @@ $systemRows = array_sum(array_map(
     <article class="stat-card">
         <div class="stat-label">Registers</div>
         <div class="stat-value"><?= e((string) count($panels)) ?></div>
-        <div class="stat-note">Branch, currency, service, payment, supplier, and document registers.</div>
     </article>
     <article class="stat-card">
         <div class="stat-label">Active Rows</div>
         <div class="stat-value"><?= e((string) $activeRows) ?></div>
-        <div class="stat-note">Rows currently available to the operational side of the system.</div>
     </article>
     <article class="stat-card">
         <div class="stat-label">System Locked</div>
         <div class="stat-value"><?= e((string) $systemRows) ?></div>
-        <div class="stat-note">Protected baseline rows that can be edited carefully but not deleted.</div>
     </article>
 </section>
 

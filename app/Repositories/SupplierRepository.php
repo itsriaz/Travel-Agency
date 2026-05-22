@@ -1190,10 +1190,9 @@ final class SupplierRepository extends BaseRepository
                 ];
             }
 
-            $netPayableAmount = max(0, $grossAmount - $advanceAppliedAmount);
-            $status = $grossAmount <= 0
-                ? 'cancelled'
-                : ($netPayableAmount <= 0 ? 'covered_by_advance' : ($advanceAppliedAmount > 0 ? 'partially_covered' : 'open'));
+            $paymentAllocatedAmount = $this->paymentAllocatedAmountForObligation((int) $existing['id']);
+            $netPayableAmount = max(0, $grossAmount - $advanceAppliedAmount - $paymentAllocatedAmount);
+            $status = $this->obligationStatus($grossAmount, $advanceAppliedAmount, $paymentAllocatedAmount, $netPayableAmount);
 
             $statement = $this->db->prepare(
                 'UPDATE supplier_obligations
@@ -1244,6 +1243,276 @@ final class SupplierRepository extends BaseRepository
                 'prior_amount' => (float) $existing['gross_amount'],
             ];
         });
+    }
+
+    public function releaseSettledCreditForObligation(
+        int $obligationId,
+        float $targetSettledAmount,
+        ?int $actorUserId = null,
+        ?string $reason = null
+    ): array {
+        return $this->transaction(function () use ($obligationId, $targetSettledAmount, $actorUserId, $reason): array {
+            $obligationStatement = $this->db->prepare(
+                'SELECT id, supplier_id, branch_id, booking_reference, service_line_reference, currency,
+                        gross_amount, advance_applied_amount, net_payable_amount, status
+                 FROM supplier_obligations
+                 WHERE id = :obligation_id
+                 FOR UPDATE'
+            );
+            $obligationStatement->execute(['obligation_id' => $obligationId]);
+            $obligation = $obligationStatement->fetch();
+
+            if ($obligation === false) {
+                throw new \RuntimeException('Supplier obligation not found.');
+            }
+
+            $grossAmount = round((float) ($obligation['gross_amount'] ?? 0), 2);
+            $currentAdvanceAppliedAmount = round((float) ($obligation['advance_applied_amount'] ?? 0), 2);
+            $currentPaymentAllocatedAmount = $this->paymentAllocatedAmountForObligation($obligationId);
+            $currentSettledAmount = round($currentAdvanceAppliedAmount + $currentPaymentAllocatedAmount, 2);
+            $targetSettledAmount = round(max(min($targetSettledAmount, $grossAmount), 0), 2);
+            $remainingToRelease = round(max($currentSettledAmount - $targetSettledAmount, 0), 2);
+
+            if ($remainingToRelease <= 0.005) {
+                return [
+                    'released_amount' => 0.0,
+                    'released_payment_amount' => 0.0,
+                    'released_advance_amount' => 0.0,
+                    'affected_payment_ids' => [],
+                    'affected_advance_ids' => [],
+                ];
+            }
+
+            $paymentAllocationStatement = $this->db->prepare(
+                'SELECT
+                    a.id,
+                    a.supplier_payment_id,
+                    a.allocated_amount,
+                    p.paid_amount,
+                    p.allocated_amount AS payment_allocated_amount,
+                    p.unallocated_amount AS payment_unallocated_amount
+                 FROM supplier_payment_allocations a
+                 INNER JOIN supplier_payments p ON p.id = a.supplier_payment_id
+                 WHERE a.supplier_obligation_id = :obligation_id
+                 ORDER BY a.allocated_at DESC, a.id DESC
+                 FOR UPDATE'
+            );
+            $paymentAllocationStatement->execute(['obligation_id' => $obligationId]);
+            $paymentAllocations = $paymentAllocationStatement->fetchAll() ?: [];
+
+            $advanceApplicationStatement = $this->db->prepare(
+                'SELECT
+                    aa.id,
+                    aa.supplier_advance_id,
+                    aa.applied_amount,
+                    sa.available_amount
+                 FROM supplier_advance_applications aa
+                 INNER JOIN supplier_advances sa ON sa.id = aa.supplier_advance_id
+                 WHERE aa.supplier_obligation_id = :obligation_id
+                 ORDER BY aa.created_at DESC, aa.id DESC
+                 FOR UPDATE'
+            );
+            $advanceApplicationStatement->execute(['obligation_id' => $obligationId]);
+            $advanceApplications = $advanceApplicationStatement->fetchAll() ?: [];
+
+            $updatePaymentAllocation = $this->db->prepare(
+                'UPDATE supplier_payment_allocations
+                 SET allocated_amount = :allocated_amount
+                 WHERE id = :allocation_id'
+            );
+            $deletePaymentAllocation = $this->db->prepare(
+                'DELETE FROM supplier_payment_allocations
+                 WHERE id = :allocation_id'
+            );
+            $updatePayment = $this->db->prepare(
+                'UPDATE supplier_payments
+                 SET allocated_amount = :allocated_amount,
+                     unallocated_amount = :unallocated_amount,
+                     status = :status
+                 WHERE id = :payment_id'
+            );
+            $increaseAdvance = $this->db->prepare(
+                'UPDATE supplier_advances
+                 SET available_amount = available_amount + :returned_amount
+                 WHERE id = :advance_id'
+            );
+            $updateAdvanceApplication = $this->db->prepare(
+                'UPDATE supplier_advance_applications
+                 SET applied_amount = :applied_amount,
+                     created_by_user_id = :created_by_user_id
+                 WHERE id = :application_id'
+            );
+            $deleteAdvanceApplication = $this->db->prepare(
+                'DELETE FROM supplier_advance_applications
+                 WHERE id = :application_id'
+            );
+            $updateObligation = $this->db->prepare(
+                'UPDATE supplier_obligations
+                 SET advance_applied_amount = :advance_applied_amount,
+                     net_payable_amount = :net_payable_amount,
+                     status = :status
+                 WHERE id = :obligation_id'
+            );
+
+            $releasedPaymentAmount = 0.0;
+            $releasedAdvanceAmount = 0.0;
+            $affectedPaymentIds = [];
+            $affectedAdvanceIds = [];
+
+            foreach ($paymentAllocations as $allocation) {
+                if ($remainingToRelease <= 0.005) {
+                    break;
+                }
+
+                $allocationAmount = round((float) ($allocation['allocated_amount'] ?? 0), 2);
+                $releaseAmount = min($remainingToRelease, $allocationAmount);
+                if ($releaseAmount <= 0) {
+                    continue;
+                }
+
+                $remainingAllocationAmount = round($allocationAmount - $releaseAmount, 2);
+                if ($remainingAllocationAmount > 0.005) {
+                    $updatePaymentAllocation->execute([
+                        'allocated_amount' => $remainingAllocationAmount,
+                        'allocation_id' => (int) $allocation['id'],
+                    ]);
+                } else {
+                    $deletePaymentAllocation->execute(['allocation_id' => (int) $allocation['id']]);
+                }
+
+                $paidAmount = round((float) ($allocation['paid_amount'] ?? 0), 2);
+                $paymentAllocatedAmount = round((float) ($allocation['payment_allocated_amount'] ?? 0), 2);
+                $newPaymentAllocatedAmount = round(max($paymentAllocatedAmount - $releaseAmount, 0), 2);
+                $newPaymentUnallocatedAmount = round(min(
+                    $paidAmount,
+                    max((float) ($allocation['payment_unallocated_amount'] ?? 0) + $releaseAmount, 0)
+                ), 2);
+                $newPaymentStatus = $newPaymentAllocatedAmount <= 0.005
+                    ? 'paid'
+                    : ($newPaymentUnallocatedAmount <= 0.005 ? 'fully_allocated' : 'partially_allocated');
+                $updatePayment->execute([
+                    'payment_id' => (int) $allocation['supplier_payment_id'],
+                    'allocated_amount' => $newPaymentAllocatedAmount,
+                    'unallocated_amount' => $newPaymentUnallocatedAmount,
+                    'status' => $newPaymentStatus,
+                ]);
+
+                $releasedPaymentAmount = round($releasedPaymentAmount + $releaseAmount, 2);
+                $remainingToRelease = round(max($remainingToRelease - $releaseAmount, 0), 2);
+                $affectedPaymentIds[] = (int) $allocation['supplier_payment_id'];
+            }
+
+            foreach ($advanceApplications as $application) {
+                if ($remainingToRelease <= 0.005) {
+                    break;
+                }
+
+                $appliedAmount = round((float) ($application['applied_amount'] ?? 0), 2);
+                $releaseAmount = min($remainingToRelease, $appliedAmount);
+                if ($releaseAmount <= 0) {
+                    continue;
+                }
+
+                $increaseAdvance->execute([
+                    'returned_amount' => $releaseAmount,
+                    'advance_id' => (int) $application['supplier_advance_id'],
+                ]);
+
+                $remainingApplicationAmount = round($appliedAmount - $releaseAmount, 2);
+                if ($remainingApplicationAmount > 0.005) {
+                    $updateAdvanceApplication->execute([
+                        'applied_amount' => $remainingApplicationAmount,
+                        'created_by_user_id' => $actorUserId,
+                        'application_id' => (int) $application['id'],
+                    ]);
+                } else {
+                    $deleteAdvanceApplication->execute([
+                        'application_id' => (int) $application['id'],
+                    ]);
+                }
+
+                $releasedAdvanceAmount = round($releasedAdvanceAmount + $releaseAmount, 2);
+                $remainingToRelease = round(max($remainingToRelease - $releaseAmount, 0), 2);
+                $affectedAdvanceIds[] = (int) $application['supplier_advance_id'];
+            }
+
+            if ($remainingToRelease > 0.005) {
+                throw new \RuntimeException('Unable to release settled supplier credit from the existing payment/advance allocations.');
+            }
+
+            $finalAdvanceAppliedAmount = round(max($currentAdvanceAppliedAmount - $releasedAdvanceAmount, 0), 2);
+            $finalPaymentAllocatedAmount = round(max($currentPaymentAllocatedAmount - $releasedPaymentAmount, 0), 2);
+            $finalNetPayableAmount = round(max($grossAmount - $finalAdvanceAppliedAmount - $finalPaymentAllocatedAmount, 0), 2);
+            $finalStatus = $this->obligationStatus($grossAmount, $finalAdvanceAppliedAmount, $finalPaymentAllocatedAmount, $finalNetPayableAmount);
+
+            $updateObligation->execute([
+                'obligation_id' => $obligationId,
+                'advance_applied_amount' => $finalAdvanceAppliedAmount,
+                'net_payable_amount' => $finalNetPayableAmount,
+                'status' => $finalStatus,
+            ]);
+
+            AuditLog::record($this->app, 'supplier.settlement.released', [
+                'user_id' => $actorUserId,
+                'supplier_obligation_id' => $obligationId,
+                'booking_reference' => (string) ($obligation['booking_reference'] ?? ''),
+                'service_line_reference' => (string) ($obligation['service_line_reference'] ?? ''),
+                'currency' => (string) ($obligation['currency'] ?? 'PKR'),
+                'released_amount' => round($releasedPaymentAmount + $releasedAdvanceAmount, 2),
+                'released_payment_amount' => $releasedPaymentAmount,
+                'released_advance_amount' => $releasedAdvanceAmount,
+                'reason' => $reason,
+                'affected_payment_ids' => array_values(array_unique($affectedPaymentIds)),
+                'affected_advance_ids' => array_values(array_unique($affectedAdvanceIds)),
+            ]);
+
+            return [
+                'released_amount' => round($releasedPaymentAmount + $releasedAdvanceAmount, 2),
+                'released_payment_amount' => $releasedPaymentAmount,
+                'released_advance_amount' => $releasedAdvanceAmount,
+                'affected_payment_ids' => array_values(array_unique($affectedPaymentIds)),
+                'affected_advance_ids' => array_values(array_unique($affectedAdvanceIds)),
+            ];
+        });
+    }
+
+    private function paymentAllocatedAmountForObligation(int $obligationId): float
+    {
+        if ($obligationId <= 0) {
+            return 0.0;
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT COALESCE(SUM(allocated_amount), 0)
+             FROM supplier_payment_allocations
+             WHERE supplier_obligation_id = :obligation_id'
+        );
+        $statement->execute(['obligation_id' => $obligationId]);
+
+        return round((float) $statement->fetchColumn(), 2);
+    }
+
+    private function obligationStatus(float $grossAmount, float $advanceAppliedAmount, float $paymentAllocatedAmount, float $netPayableAmount): string
+    {
+        if ($grossAmount <= 0.005) {
+            return 'cancelled';
+        }
+
+        if ($netPayableAmount <= 0.005) {
+            if ($paymentAllocatedAmount > 0.005) {
+                return 'paid';
+            }
+
+            if ($advanceAppliedAmount > 0.005) {
+                return 'covered_by_advance';
+            }
+        }
+
+        if ($advanceAppliedAmount > 0.005 || $paymentAllocatedAmount > 0.005) {
+            return 'partially_covered';
+        }
+
+        return 'open';
     }
 
     public function applyAdvanceToObligation(int $advanceId, int $obligationId, float $amount, ?int $actorUserId = null): void

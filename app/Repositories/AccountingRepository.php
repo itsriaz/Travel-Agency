@@ -324,6 +324,37 @@ final class AccountingRepository extends BaseRepository
         ]);
     }
 
+    public function postSupplierSettlementRelease(array $data): int
+    {
+        return $this->postJournalEntry([
+            'branch_id' => $data['branch_id'],
+            'booking_reference' => $data['booking_reference'],
+            'source_type' => 'supplier_settlement_released',
+            'source_reference' => $data['source_reference'] ?? null,
+            'entry_date' => $data['entry_date'],
+            'currency' => $data['currency'],
+            'narration' => $data['narration'] ?? 'Supplier settlement released back to supplier credit',
+            'actor_user_id' => $data['actor_user_id'] ?? null,
+        ], [
+            [
+                'account_code' => 'SUPPLIER_ADVANCES',
+                'service_line_reference' => $data['service_line_reference'] ?? null,
+                'supplier_obligation_id' => $data['supplier_obligation_id'] ?? null,
+                'line_description' => 'Supplier credit restored from cancellation settlement release',
+                'debit_amount' => $data['released_amount'],
+                'credit_amount' => 0,
+            ],
+            [
+                'account_code' => 'AP_CONTROL',
+                'service_line_reference' => $data['service_line_reference'] ?? null,
+                'supplier_obligation_id' => $data['supplier_obligation_id'] ?? null,
+                'line_description' => 'Accounts payable restored from cancellation settlement release',
+                'debit_amount' => 0,
+                'credit_amount' => $data['released_amount'],
+            ],
+        ]);
+    }
+
     public function postSupplierPaymentRecorded(array $data): int
     {
         $chargesAmount = (float) ($data['charges_amount'] ?? 0);
@@ -593,6 +624,37 @@ final class AccountingRepository extends BaseRepository
                 'line_description' => 'Accounts receivable reduced',
                 'debit_amount' => 0,
                 'credit_amount' => $data['allocated_amount'],
+            ],
+        ]);
+    }
+
+    public function postCustomerReceiptAllocationRelease(array $data): int
+    {
+        return $this->postJournalEntry([
+            'branch_id' => $data['branch_id'],
+            'booking_reference' => $data['booking_reference'],
+            'source_type' => 'customer_receipt_allocation_released',
+            'source_reference' => $data['source_reference'] ?? null,
+            'entry_date' => $data['entry_date'],
+            'currency' => $data['currency'],
+            'narration' => $data['narration'] ?? 'Customer allocation released back to booking credit',
+            'actor_user_id' => $data['actor_user_id'] ?? null,
+        ], [
+            [
+                'account_code' => 'AR_CONTROL',
+                'service_line_reference' => $data['service_line_reference'] ?? null,
+                'customer_receivable_item_id' => $data['customer_receivable_item_id'] ?? null,
+                'line_description' => 'Accounts receivable restored from cancellation settlement release',
+                'debit_amount' => $data['released_amount'],
+                'credit_amount' => 0,
+            ],
+            [
+                'account_code' => 'CUSTOMER_CREDIT',
+                'service_line_reference' => $data['service_line_reference'] ?? null,
+                'customer_receivable_item_id' => $data['customer_receivable_item_id'] ?? null,
+                'line_description' => 'Customer credit recreated from released allocation',
+                'debit_amount' => 0,
+                'credit_amount' => $data['released_amount'],
             ],
         ]);
     }
@@ -874,10 +936,12 @@ final class AccountingRepository extends BaseRepository
             'supplier_payable_adjusted' => 'Supplier Payable Adjusted',
             'customer_receipt_recorded' => 'Customer Receipt Recorded',
             'customer_receipt_allocated' => 'Customer Receipt Allocated',
+            'customer_receipt_allocation_released' => 'Customer Allocation Released',
             'customer_receipt_void_reversed' => 'Customer Receipt Void Reversed',
             'supplier_advance_recorded' => 'Supplier Advance Recorded',
             'supplier_advance_applied' => 'Supplier Advance Applied',
             'supplier_advance_adjusted' => 'Supplier Advance Adjusted',
+            'supplier_settlement_released' => 'Supplier Settlement Released',
             'supplier_payment_recorded' => 'Supplier Payment Recorded',
             'supplier_payment_allocated' => 'Supplier Payment Allocated',
             default => ucwords(str_replace('_', ' ', $sourceType)),

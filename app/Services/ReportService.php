@@ -91,24 +91,26 @@ final class ReportService extends Service
                     ['key' => 'branch_name', 'label' => 'Branch'],
                     ['key' => 'service_type', 'label' => 'Service Type'],
                     ['key' => 'currency', 'label' => 'Curr.'],
-                    ['key' => 'service_count', 'label' => 'Count'],
+                    ['key' => 'service_count', 'label' => 'Items Sold'],
                     ['key' => 'total_receivable', 'label' => 'Sales / Recv.'],
                     ['key' => 'total_payable', 'label' => 'Payable'],
                     ['key' => 'profit_snapshot', 'label' => 'Gross Profit'],
                     ['key' => 'total_expenses', 'label' => 'Expenses'],
                     ['key' => 'net_profit', 'label' => 'Net Profit'],
                     ['key' => 'total_received', 'label' => 'Received'],
-                    ['key' => 'total_supplier_paid', 'label' => 'Supplier Paid'],
+                    ['key' => 'total_supplier_paid', 'label' => 'Supplier Cash Paid'],
+                    ['key' => 'supplier_advance_applied', 'label' => 'Prepaid Used'],
                     ['key' => 'customer_outstanding', 'label' => 'Cust. Outstd'],
                     ['key' => 'supplier_outstanding', 'label' => 'Supp. Outstd'],
                     ['key' => 'pkr_rate', 'label' => 'PKR Rate'],
-                    ['key' => 'pkr_total_receivable', 'label' => 'PKR Recv.'],
-                    ['key' => 'pkr_total_payable', 'label' => 'PKR Pay.'],
-                    ['key' => 'pkr_profit_snapshot', 'label' => 'PKR Gross'],
-                    ['key' => 'pkr_total_expenses', 'label' => 'PKR Exp.'],
-                    ['key' => 'pkr_net_profit', 'label' => 'PKR Net'],
+                    ['key' => 'pkr_total_receivable', 'label' => 'PKR Sales'],
+                    ['key' => 'pkr_total_payable', 'label' => 'PKR Supplier Cost'],
+                    ['key' => 'pkr_profit_snapshot', 'label' => 'PKR Gross Profit'],
+                    ['key' => 'pkr_total_expenses', 'label' => 'PKR Expenses'],
+                    ['key' => 'pkr_net_profit', 'label' => 'PKR Net Profit'],
                     ['key' => 'pkr_total_received', 'label' => 'PKR Received'],
                     ['key' => 'pkr_total_supplier_paid', 'label' => 'PKR Supp. Paid'],
+                    ['key' => 'pkr_supplier_advance_applied', 'label' => 'PKR Prepaid Used'],
                     ['key' => 'pkr_customer_outstanding', 'label' => 'PKR Cust. Outstd'],
                     ['key' => 'pkr_supplier_outstanding', 'label' => 'PKR Supp. Outstd'],
                 ];
@@ -1639,6 +1641,7 @@ final class ReportService extends Service
                 'net_profit' => $this->money($profitAmount),
                 'total_received' => $this->money(0),
                 'total_supplier_paid' => $this->money(0),
+                'supplier_advance_applied' => $this->money(0),
                 'customer_outstanding' => $this->money(0),
                 'supplier_outstanding' => $this->money(0),
                 'pkr_rate' => $this->rateLabelForCurrency($currency, $pkrRates),
@@ -1649,6 +1652,7 @@ final class ReportService extends Service
                 'pkr_net_profit' => $this->pkrMoney($profitAmount, $currency, $pkrRates),
                 'pkr_total_received' => $this->money(0),
                 'pkr_total_supplier_paid' => $this->money(0),
+                'pkr_supplier_advance_applied' => $this->money(0),
                 'pkr_customer_outstanding' => $this->money(0),
                 'pkr_supplier_outstanding' => $this->money(0),
             ];
@@ -1738,6 +1742,7 @@ final class ReportService extends Service
                 'branch_base_currency' => (string) ($branchRow['branch_base_currency'] ?? $branchRow['currency'] ?? 'PKR'),
                 'received' => 0.0,
                 'supplier_paid' => 0.0,
+                'supplier_advance_applied' => 0.0,
                 'customer_outstanding' => 0.0,
                 'supplier_outstanding' => 0.0,
                 'expenses' => 0.0,
@@ -1752,6 +1757,7 @@ final class ReportService extends Service
                     'branch_base_currency' => (string) ($row['branch_base_currency'] ?? $row['currency'] ?? 'PKR'),
                     'received' => 0.0,
                     'supplier_paid' => 0.0,
+                    'supplier_advance_applied' => 0.0,
                     'customer_outstanding' => 0.0,
                     'supplier_outstanding' => 0.0,
                     'expenses' => 0.0,
@@ -1768,12 +1774,30 @@ final class ReportService extends Service
                     'branch_base_currency' => (string) ($row['branch_base_currency'] ?? $row['currency'] ?? 'PKR'),
                     'received' => 0.0,
                     'supplier_paid' => 0.0,
+                    'supplier_advance_applied' => 0.0,
                     'customer_outstanding' => 0.0,
                     'supplier_outstanding' => 0.0,
                     'expenses' => 0.0,
                 ];
             }
             $branchTotals[$key]['supplier_paid'] = (float) ($row['total_supplier_paid'] ?? 0);
+        }
+        foreach (($data['supplierAdvanceApplied'] ?? []) as $row) {
+            $key = (int) ($row['branch_id'] ?? 0) . '|' . (string) ($row['currency'] ?? 'PKR');
+            if (! isset($branchTotals[$key])) {
+                $branchTotals[$key] = [
+                    'branch_name' => (string) ($row['branch_name'] ?? ''),
+                    'currency' => (string) ($row['currency'] ?? 'PKR'),
+                    'branch_base_currency' => (string) ($row['branch_base_currency'] ?? $row['currency'] ?? 'PKR'),
+                    'received' => 0.0,
+                    'supplier_paid' => 0.0,
+                    'supplier_advance_applied' => 0.0,
+                    'customer_outstanding' => 0.0,
+                    'supplier_outstanding' => 0.0,
+                    'expenses' => 0.0,
+                ];
+            }
+            $branchTotals[$key]['supplier_advance_applied'] = (float) ($row['supplier_advance_applied'] ?? 0);
         }
         foreach (($data['receivables'] ?? []) as $row) {
             $key = (int) ($row['branch_id'] ?? 0) . '|' . (string) ($row['currency'] ?? 'PKR');
@@ -1784,6 +1808,7 @@ final class ReportService extends Service
                     'branch_base_currency' => (string) ($row['branch_base_currency'] ?? $row['currency'] ?? 'PKR'),
                     'received' => 0.0,
                     'supplier_paid' => 0.0,
+                    'supplier_advance_applied' => 0.0,
                     'customer_outstanding' => 0.0,
                     'supplier_outstanding' => 0.0,
                     'expenses' => 0.0,
@@ -1800,6 +1825,7 @@ final class ReportService extends Service
                     'branch_base_currency' => (string) ($row['branch_base_currency'] ?? $row['currency'] ?? 'PKR'),
                     'received' => 0.0,
                     'supplier_paid' => 0.0,
+                    'supplier_advance_applied' => 0.0,
                     'customer_outstanding' => 0.0,
                     'supplier_outstanding' => 0.0,
                     'expenses' => 0.0,
@@ -1816,6 +1842,7 @@ final class ReportService extends Service
                     'branch_base_currency' => (string) ($row['branch_base_currency'] ?? $row['currency'] ?? 'PKR'),
                     'received' => 0.0,
                     'supplier_paid' => 0.0,
+                    'supplier_advance_applied' => 0.0,
                     'customer_outstanding' => 0.0,
                     'supplier_outstanding' => 0.0,
                     'expenses' => 0.0,
@@ -1841,12 +1868,14 @@ final class ReportService extends Service
             $row['net_profit'] = $this->money($netProfit);
             $row['total_received'] = $this->money((float) ($metrics['received'] ?? 0));
             $row['total_supplier_paid'] = $this->money((float) ($metrics['supplier_paid'] ?? 0));
+            $row['supplier_advance_applied'] = $this->money((float) ($metrics['supplier_advance_applied'] ?? 0));
             $row['customer_outstanding'] = $this->money((float) ($metrics['customer_outstanding'] ?? 0));
             $row['supplier_outstanding'] = $this->money((float) ($metrics['supplier_outstanding'] ?? 0));
             $row['pkr_total_expenses'] = $this->pkrMoney($expenses, $currency, $pkrRates);
             $row['pkr_net_profit'] = $this->pkrMoney($netProfit, $currency, $pkrRates);
             $row['pkr_total_received'] = $this->pkrMoney((float) ($metrics['received'] ?? 0), $currency, $pkrRates);
             $row['pkr_total_supplier_paid'] = $this->pkrMoney((float) ($metrics['supplier_paid'] ?? 0), $currency, $pkrRates);
+            $row['pkr_supplier_advance_applied'] = $this->pkrMoney((float) ($metrics['supplier_advance_applied'] ?? 0), $currency, $pkrRates);
             $row['pkr_customer_outstanding'] = $this->pkrMoney((float) ($metrics['customer_outstanding'] ?? 0), $currency, $pkrRates);
             $row['pkr_supplier_outstanding'] = $this->pkrMoney((float) ($metrics['supplier_outstanding'] ?? 0), $currency, $pkrRates);
         }
@@ -1862,7 +1891,7 @@ final class ReportService extends Service
             $rows[$branchCurrencyKey . '|admin'] = [
                 'branch_name' => (string) ($metrics['branch_name'] ?? ''),
                 'branch_base_currency' => (string) ($metrics['branch_base_currency'] ?? $currency),
-                'service_type' => 'Admin / No Sales',
+                'service_type' => 'Payments / Adjustments',
                 'currency' => $currency,
                 'service_count' => '0',
                 'total_receivable' => $this->money(0),
@@ -1872,6 +1901,7 @@ final class ReportService extends Service
                 'net_profit' => $this->money(0 - $expenses),
                 'total_received' => $this->money((float) ($metrics['received'] ?? 0)),
                 'total_supplier_paid' => $this->money((float) ($metrics['supplier_paid'] ?? 0)),
+                'supplier_advance_applied' => $this->money((float) ($metrics['supplier_advance_applied'] ?? 0)),
                 'customer_outstanding' => $this->money((float) ($metrics['customer_outstanding'] ?? 0)),
                 'supplier_outstanding' => $this->money((float) ($metrics['supplier_outstanding'] ?? 0)),
                 'pkr_rate' => $this->rateLabelForCurrency($currency, $pkrRates),
@@ -1882,6 +1912,7 @@ final class ReportService extends Service
                 'pkr_net_profit' => $this->pkrMoney(0 - $expenses, $currency, $pkrRates),
                 'pkr_total_received' => $this->pkrMoney((float) ($metrics['received'] ?? 0), $currency, $pkrRates),
                 'pkr_total_supplier_paid' => $this->pkrMoney((float) ($metrics['supplier_paid'] ?? 0), $currency, $pkrRates),
+                'pkr_supplier_advance_applied' => $this->pkrMoney((float) ($metrics['supplier_advance_applied'] ?? 0), $currency, $pkrRates),
                 'pkr_customer_outstanding' => $this->pkrMoney((float) ($metrics['customer_outstanding'] ?? 0), $currency, $pkrRates),
                 'pkr_supplier_outstanding' => $this->pkrMoney((float) ($metrics['supplier_outstanding'] ?? 0), $currency, $pkrRates),
             ];
@@ -1891,9 +1922,9 @@ final class ReportService extends Service
             $this->managementOriginalSummaryCard('Total Sales / Receivable', $rows, 'total_receivable'),
             $this->managementOriginalSummaryCard('Total Received', $rows, 'total_received'),
             $this->managementOriginalSummaryCard('Customer Outstanding', $rows, 'customer_outstanding'),
-            $this->managementOriginalSummaryCard('Supplier Payable', $rows, 'total_payable'),
-            $this->managementOriginalSummaryCard('Supplier Paid', $rows, 'total_supplier_paid'),
-            $this->managementOriginalSummaryCard('Supplier Balance', $rows, 'supplier_outstanding'),
+            $this->managementOriginalSummaryCard('Supplier Purchase / Cost', $rows, 'total_payable'),
+            $this->managementOriginalCombinedSummaryCard('Supplier Paid / Settled', $rows, ['total_supplier_paid', 'supplier_advance_applied']),
+            $this->managementOriginalSummaryCard('Supplier Due', $rows, 'supplier_outstanding'),
             $this->managementOriginalSummaryCard('Gross Profit', $rows, 'profit_snapshot'),
             $this->managementOriginalSummaryCard('Expenses', $rows, 'total_expenses'),
             $this->managementOriginalSummaryCard('Net Profit', $rows, 'net_profit'),
@@ -2359,7 +2390,7 @@ final class ReportService extends Service
     private function reportingRateMapForManagementSummary(array $data, string $asOfDate, string $targetCurrency = 'PKR'): array
     {
         $currencies = [];
-        foreach (['branches', 'serviceTypes', 'receipts', 'supplierPayments', 'receivables', 'payables', 'expenses', 'expenseCategories'] as $bucket) {
+        foreach (['branches', 'serviceTypes', 'receipts', 'supplierPayments', 'supplierAdvanceApplied', 'receivables', 'payables', 'expenses', 'expenseCategories'] as $bucket) {
             foreach (($data[$bucket] ?? []) as $row) {
                 $currency = strtoupper(trim((string) ($row['currency'] ?? '')));
                 if ($currency !== '') {
@@ -2548,6 +2579,97 @@ final class ReportService extends Service
         ];
     }
 
+    private function managementOriginalCombinedSummaryCard(string $label, array $rows, array $metricKeys): array
+    {
+        $totals = [];
+        foreach ($metricKeys as $metricKey) {
+            foreach ($this->summaryCurrencyTotals($rows, $metricKey) as $currency => $amount) {
+                $totals[$currency] = ($totals[$currency] ?? 0.0) + (float) $amount;
+            }
+        }
+
+        if ($totals === []) {
+            $totals['PKR'] = 0.0;
+        }
+
+        $parts = [];
+        $lines = [];
+        foreach ($totals as $currency => $amount) {
+            $parts[] = $currency . ' ' . $this->money((float) $amount);
+            $lines[] = [
+                'currency' => (string) $currency,
+                'amount' => $this->money((float) $amount),
+            ];
+        }
+
+        return [
+            'label' => $label,
+            'value' => implode(' / ', $parts),
+            'lines' => $lines,
+            'note' => 'Supplier settled amount from cash payments and prepaid balance usage.',
+            'tone' => 'original',
+        ];
+    }
+
+    private function branchSummaryCurrencyLines(array $rows, string $branchName, string $baseCurrency, string $metricKey, string $label): array
+    {
+        return $this->branchSummaryCurrencyLinesForMetrics($rows, $branchName, $baseCurrency, [$metricKey], $label, true);
+    }
+
+    private function branchSummaryCurrencyLinesForMetrics(array $rows, string $branchName, string $baseCurrency, array $metricKeys, string $label, bool $showBaseZero = false): array
+    {
+        $baseCurrency = strtoupper(trim($baseCurrency));
+        $totals = [];
+        $seen = [];
+
+        foreach ($rows as $row) {
+            if ((string) ($row['branch_name'] ?? '') !== $branchName) {
+                continue;
+            }
+
+            $currency = strtoupper(trim((string) ($row['currency'] ?? $baseCurrency)));
+            foreach ($metricKeys as $metricKey) {
+                $dedupeKey = $branchName . '|' . $currency . '|' . $metricKey;
+                if (isset($seen[$dedupeKey])) {
+                    continue;
+                }
+                $seen[$dedupeKey] = true;
+
+                $amount = $this->displayMoneyToFloat((string) ($row[$metricKey] ?? ''));
+                if ($amount === null || (abs($amount) < 0.005 && ($currency !== $baseCurrency || ! $showBaseZero))) {
+                    continue;
+                }
+
+                $totals[$currency] = ($totals[$currency] ?? 0.0) + $amount;
+            }
+        }
+
+        if ($totals === []) {
+            $totals[$baseCurrency] = 0.0;
+        }
+
+        uksort($totals, static function (string $left, string $right) use ($baseCurrency): int {
+            if ($left === $baseCurrency) {
+                return -1;
+            }
+            if ($right === $baseCurrency) {
+                return 1;
+            }
+
+            return $left <=> $right;
+        });
+
+        $lines = [];
+        foreach ($totals as $currency => $amount) {
+            $lines[] = [
+                'currency' => $label . ' ' . $currency,
+                'amount' => $this->money((float) $amount),
+            ];
+        }
+
+        return $lines;
+    }
+
     private function managementBranchLocalSummaryCards(array $rows): array
     {
         $branchRows = [];
@@ -2567,6 +2689,7 @@ final class ReportService extends Service
                     'purchases' => 0.0,
                     'received' => 0.0,
                     'supplier_paid' => 0.0,
+                    'supplier_advance_applied' => 0.0,
                     'customer_outstanding' => 0.0,
                     'supplier_balance' => 0.0,
                     'expenses' => 0.0,
@@ -2588,6 +2711,7 @@ final class ReportService extends Service
         $dedupeMetrics = [
             'total_received' => 'received',
             'total_supplier_paid' => 'supplier_paid',
+            'supplier_advance_applied' => 'supplier_advance_applied',
             'customer_outstanding' => 'customer_outstanding',
             'supplier_outstanding' => 'supplier_balance',
         ];
@@ -2614,25 +2738,32 @@ final class ReportService extends Service
         $cards = [];
         foreach ($branchRows as $branchKey => $branch) {
             $baseCurrency = (string) $branch['base_currency'];
+            $branchName = (string) $branch['branch_name'];
             $otherCurrencies = array_keys($nonBaseCurrencies[$branchKey] ?? []);
-            $note = 'Branch-local report in ' . $baseCurrency . '. No group conversion.';
+            $note = 'Branch-local P/L in ' . $baseCurrency . '.';
             if ($otherCurrencies !== []) {
-                $note .= ' Other currencies also exist: ' . implode(', ', $otherCurrencies) . '.';
+                $note .= ' Mixed-currency activity is shown on received and supplier lines.';
             }
 
-            $cards[] = [
-                'label' => (string) $branch['branch_name'] . ' P/L',
-                'value' => $baseCurrency . ' ' . $this->money((float) $branch['net_profit']),
-                'lines' => [
+            $lines = array_merge(
+                [
                     ['currency' => 'Sales', 'amount' => $baseCurrency . ' ' . $this->money((float) $branch['sales'])],
                     ['currency' => 'Purchases', 'amount' => $baseCurrency . ' ' . $this->money((float) $branch['purchases'])],
-                    ['currency' => 'Received', 'amount' => $baseCurrency . ' ' . $this->money((float) $branch['received'])],
-                    ['currency' => 'Supp. Paid', 'amount' => $baseCurrency . ' ' . $this->money((float) $branch['supplier_paid'])],
-                    ['currency' => 'Cust. Due', 'amount' => $baseCurrency . ' ' . $this->money((float) $branch['customer_outstanding'])],
-                    ['currency' => 'Supp. Due', 'amount' => $baseCurrency . ' ' . $this->money((float) $branch['supplier_balance'])],
+                ],
+                $this->branchSummaryCurrencyLines($rows, $branchName, $baseCurrency, 'total_received', 'Received'),
+                $this->branchSummaryCurrencyLinesForMetrics($rows, $branchName, $baseCurrency, ['total_supplier_paid', 'supplier_advance_applied'], 'Supplier Paid', true),
+                $this->branchSummaryCurrencyLines($rows, $branchName, $baseCurrency, 'customer_outstanding', 'Cust. Due'),
+                $this->branchSummaryCurrencyLines($rows, $branchName, $baseCurrency, 'supplier_outstanding', 'Supplier Due'),
+                [
                     ['currency' => 'Expenses', 'amount' => $baseCurrency . ' ' . $this->money((float) $branch['expenses'])],
                     ['currency' => 'Net P/L', 'amount' => $baseCurrency . ' ' . $this->money((float) $branch['net_profit'])],
                 ],
+            );
+
+            $cards[] = [
+                'label' => $branchName . ' P/L',
+                'value' => $baseCurrency . ' ' . $this->money((float) $branch['net_profit']),
+                'lines' => $lines,
                 'note' => $note,
                 'tone' => 'branch-local',
             ];
@@ -2729,7 +2860,7 @@ final class ReportService extends Service
             $branchName = (string) ($row['branch_name'] ?? '');
             $serviceType = (string) ($row['service_type'] ?? '');
 
-            if (in_array($metricKey, ['total_received', 'total_supplier_paid', 'customer_outstanding', 'supplier_outstanding'], true)) {
+            if (in_array($metricKey, ['total_received', 'total_supplier_paid', 'supplier_advance_applied', 'customer_outstanding', 'supplier_outstanding'], true)) {
                 $dedupeKey = $branchName . '|' . $currency;
                 if (isset($seenBranchCurrency[$metricKey][$dedupeKey])) {
                     continue;

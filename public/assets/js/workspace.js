@@ -5,6 +5,8 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
     }
 
+    const pendingFreshCustomerKey = 'travel_ops_pending_fresh_customer';
+
     const feedback = station.querySelector('[data-workspace-feedback]');
     const quickSearch = station.querySelector('#workspace-search');
     const quickSearchForm = station.querySelector('#workspace-search-form');
@@ -60,10 +62,28 @@ document.addEventListener('DOMContentLoaded', () => {
     const globalPrepaidSupplierModal = station.querySelector('[data-global-prepaid-supplier-modal]');
     const globalPrepaidSupplierOpenButtons = Array.from(station.querySelectorAll('[data-global-prepaid-supplier-open]'));
     const globalPrepaidSupplierCloseButtons = Array.from(station.querySelectorAll('[data-global-prepaid-supplier-close]'));
+    const globalPrepaidSupplierField = station.querySelector('[data-global-prepaid-supplier]');
+    const globalPrepaidBranchField = station.querySelector('[data-global-prepaid-branch]');
+    const globalPrepaidCurrencyField = station.querySelector('[data-global-prepaid-currency]');
+    const globalPrepaidAmountField = station.querySelector('[data-global-prepaid-amount]');
     const supplierAdvanceLookupUrl = station.dataset.supplierAdvanceLookupUrl || '';
+    const supplierRegisterUrl = station.dataset.supplierRegisterUrl || '';
     const supplierAdvanceNote = station.querySelector('[data-supplier-advance-note]');
     const supplierAdvanceSummary = station.querySelector('[data-supplier-advance-summary]');
     const supplierAdvanceMessage = station.querySelector('[data-supplier-advance-message]');
+    const supplierInput = station.querySelector('[data-service-supplier-input]');
+    const supplierOptionsNode = document.getElementById('workspace-service-suppliers-data');
+    const supplierOptionsList = document.getElementById('service-supplier-options');
+    const addSupplierOptionValue = '__add_supplier__';
+    const supplierAddModal = station.querySelector('[data-service-supplier-add-modal]');
+    const supplierAddForm = station.querySelector('[data-service-supplier-add-form]');
+    const supplierAddCloseButtons = Array.from(station.querySelectorAll('[data-service-supplier-add-close]'));
+    const supplierAddName = station.querySelector('[data-service-supplier-add-name]');
+    const supplierAddBranch = station.querySelector('[data-service-supplier-add-branch]');
+    const supplierAddCurrency = station.querySelector('[data-service-supplier-add-currency]');
+    const supplierAddFeedback = station.querySelector('[data-service-supplier-add-feedback]');
+    const supplierAddSubmit = station.querySelector('[data-service-supplier-add-submit]');
+    const supplierAddMode = supplierAddForm?.elements?.namedItem('supplier_mode') || null;
     const paymentForm = station.querySelector('.legacy-payment-strip');
     const debugToolsEnabled = station.dataset.debugToolsEnabled === '1';
     const canVoidFinancials = station.dataset.canVoidFinancials === '1';
@@ -339,6 +359,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let paymentSubmitValidationInFlight = false;
     let paymentExchangeConfirmInFlight = false;
     let paymentExchangeAutoOpenInFlight = false;
+    let paymentExchangeConfirmFocusDone = false;
     const emptySavedPaymentState = () => ({
         saved: false,
         bookingId: 0,
@@ -709,6 +730,217 @@ document.addEventListener('DOMContentLoaded', () => {
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
 
+    let serviceSupplierOptions = [];
+    try {
+        serviceSupplierOptions = JSON.parse(supplierOptionsNode?.textContent || '[]');
+    } catch (error) {
+        serviceSupplierOptions = [];
+    }
+
+    const normalizeSupplierName = (value) => String(value ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+    const supplierExists = (name) => {
+        const normalized = normalizeSupplierName(name);
+        return normalized !== '' && serviceSupplierOptions.some((supplier) => normalizeSupplierName(supplier?.name) === normalized);
+    };
+    const closeSupplierAddModal = () => {
+        if (!supplierAddModal) {
+            return;
+        }
+
+        supplierAddModal.hidden = true;
+        supplierAddModal.setAttribute('aria-hidden', 'true');
+        if (supplierAddFeedback) {
+            supplierAddFeedback.hidden = true;
+            supplierAddFeedback.textContent = '';
+        }
+    };
+    const focusTicketTypeAfterSupplier = () => {
+        const nextField = station.querySelector('select[name="ticket_type"]');
+        if (nextField instanceof HTMLElement) {
+            nextField.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+            window.setTimeout(() => nextField.focus(), 80);
+        }
+    };
+    const openNativeSelect = (select) => {
+        if (!(select instanceof HTMLSelectElement)) {
+            return;
+        }
+
+        if (typeof select.showPicker === 'function') {
+            try {
+                select.showPicker();
+            } catch (error) {
+                // Some browsers only allow showPicker from direct user actions.
+            }
+        }
+    };
+    const openSupplierAddModal = (name = '') => {
+        if (!supplierAddModal || !supplierAddForm || !supplierRegisterUrl) {
+            return false;
+        }
+
+        if (supplierAddName) {
+            supplierAddName.value = String(name || supplierInput?.value || '').trim();
+        }
+
+        const bookingBranch = serviceForm?.elements?.namedItem('auto_branch_id')?.value || invoiceForm?.elements?.namedItem('branch_id')?.value || '';
+        if (supplierAddBranch && bookingBranch !== '') {
+            supplierAddBranch.value = bookingBranch;
+        }
+
+        const currencyField = station.querySelector('[data-service-field="currency-mirror"]');
+        if (supplierAddCurrency && currencyField && currencyField.value) {
+            supplierAddCurrency.value = currencyField.value;
+        }
+
+        supplierAddModal.hidden = false;
+        supplierAddModal.setAttribute('aria-hidden', 'false');
+        window.setTimeout(() => {
+            supplierAddName?.focus();
+            supplierAddName?.select();
+        }, 60);
+
+        return true;
+    };
+    window.workspaceMaybeOpenSupplierAddModal = (field) => {
+        const value = String(field?.value || '').trim();
+        if (value === addSupplierOptionValue) {
+            return openSupplierAddModal('');
+        }
+
+        if (value === '' || supplierExists(value)) {
+            return false;
+        }
+
+        return openSupplierAddModal(value);
+    };
+    window.workspaceFocusSupplierDropdown = () => {
+        if (!(supplierInput instanceof HTMLSelectElement)) {
+            return false;
+        }
+
+        supplierInput.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+        supplierInput.focus();
+        openNativeSelect(supplierInput);
+        return true;
+    };
+
+    supplierAddCloseButtons.forEach((button) => {
+        button.addEventListener('click', () => {
+            closeSupplierAddModal();
+            supplierInput?.focus();
+        });
+    });
+
+    supplierAddForm?.addEventListener('submit', async (event) => {
+        event.preventDefault();
+
+        if (!supplierRegisterUrl) {
+            return;
+        }
+
+        const supplierName = String(supplierAddName?.value || '').trim();
+        if (supplierName === '') {
+            if (supplierAddFeedback) {
+                supplierAddFeedback.hidden = false;
+                supplierAddFeedback.textContent = 'Enter supplier name.';
+            }
+            supplierAddName?.focus();
+            return;
+        }
+
+        if (supplierAddSubmit) {
+            supplierAddSubmit.disabled = true;
+        }
+
+        try {
+            const response = await fetch(supplierRegisterUrl, {
+                method: 'POST',
+                body: new FormData(supplierAddForm),
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest',
+                    Accept: 'application/json',
+                },
+            });
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok || payload.ok === false) {
+                throw new Error(payload.message || 'Supplier could not be saved.');
+            }
+
+            const supplier = payload.supplier || {};
+            const savedName = String(supplier.name || supplierName).trim();
+            const supplierMode = String(supplier.supplier_mode || supplierAddMode?.value || '').trim();
+            if (savedName !== '' && !supplierExists(savedName)) {
+                serviceSupplierOptions.push(supplier);
+                if (supplierInput instanceof HTMLSelectElement) {
+                    const selectOption = document.createElement('option');
+                    selectOption.value = savedName;
+                    selectOption.textContent = savedName;
+                    const addOption = supplierInput.querySelector(`option[value="${addSupplierOptionValue}"]`);
+                    supplierInput.insertBefore(selectOption, addOption || null);
+                }
+                if (supplierOptionsList) {
+                    const option = document.createElement('option');
+                    option.value = savedName;
+                    supplierOptionsList.appendChild(option);
+                }
+            }
+
+            if (supplierInput) {
+                supplierInput.value = savedName;
+                supplierInput.dispatchEvent(new Event('input', { bubbles: true }));
+                supplierInput.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+
+            closeSupplierAddModal();
+            showFeedback(payload.message || 'Supplier added.');
+            if (supplierMode === 'running_balance') {
+                openGlobalPrepaidSupplierModal({
+                    supplierName: savedName,
+                    branchId: supplier.branch_id || supplierAddBranch?.value || '',
+                    currency: supplier.default_currency || supplierAddCurrency?.value || '',
+                    returnToTicketType: true,
+                });
+            } else {
+                focusTicketTypeAfterSupplier();
+            }
+        } catch (error) {
+            if (supplierAddFeedback) {
+                supplierAddFeedback.hidden = false;
+                supplierAddFeedback.textContent = error.message || 'Supplier could not be saved.';
+            } else {
+                showFeedback(error.message || 'Supplier could not be saved.');
+            }
+        } finally {
+            if (supplierAddSubmit) {
+                supplierAddSubmit.disabled = false;
+            }
+        }
+    });
+
+    supplierInput?.addEventListener('focus', () => {
+        supplierInput.dataset.previousSupplierValue = supplierInput.value === addSupplierOptionValue ? '' : supplierInput.value;
+        window.setTimeout(() => openNativeSelect(supplierInput), 0);
+    });
+
+    supplierInput?.addEventListener('change', () => {
+        window.setTimeout(() => {
+            if (!supplierInput || supplierAddModal?.hidden === false) {
+                return;
+            }
+
+            if (supplierInput.value === addSupplierOptionValue) {
+                const previousValue = supplierInput.dataset.previousSupplierValue || '';
+                supplierInput.value = previousValue;
+                openSupplierAddModal('');
+                return;
+            }
+
+            supplierInput.dataset.previousSupplierValue = supplierInput.value;
+            window.workspaceMaybeOpenSupplierAddModal(supplierInput);
+        }, 80);
+    });
+
     const parseBalanceMap = (rawValue) => {
         if (rawValue && typeof rawValue === 'object' && !Array.isArray(rawValue)) {
             return rawValue;
@@ -972,6 +1204,32 @@ document.addEventListener('DOMContentLoaded', () => {
 
         paymentExchangeConfirmButton.disabled = !hasValidPreview;
         paymentExchangeConfirmButton.textContent = 'Confirm Settlement';
+    };
+
+    const focusExchangeConfirmWhenReady = (preview = null) => {
+        if (
+            !preview
+            || !paymentExchangeModal
+            || paymentExchangeModal.hidden
+            || !paymentExchangeConfirmButton
+            || paymentExchangeConfirmButton.disabled
+            || paymentExchangeConfirmFocusDone
+        ) {
+            return;
+        }
+
+        const activeElement = document.activeElement;
+        const focusCameFromSettlementInput = activeElement === paymentExchangeRateInput
+            || activeElement === receivedNowInput;
+        if (!focusCameFromSettlementInput) {
+            return;
+        }
+
+        paymentExchangeConfirmFocusDone = true;
+        window.setTimeout(() => {
+            paymentExchangeConfirmButton.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            paymentExchangeConfirmButton.focus({ preventScroll: true });
+        }, 80);
     };
 
     const currentSettlementTargets = () => {
@@ -1489,9 +1747,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         const paymentCurrency = paymentCurrencySelect?.value || paymentCurrentInvoiceInput?.dataset.paymentCurrency || 'PKR';
-        const paymentAmountSource = paymentExchangePaymentAmountInput && paymentExchangeModal && !paymentExchangeModal.hidden
-            ? paymentExchangePaymentAmountInput.value
-            : receivedNowInput?.value || 0;
+        const paymentAmountSource = receivedNowInput?.value || 0;
         const paymentAmount = Math.max(toNumber(paymentAmountSource || 0), 0);
         const targetCurrency = String(target.currency || 'PKR');
         const targetBalance = Math.max(
@@ -1522,11 +1778,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         if (paymentExchangePaymentCurrencyInput) {
             paymentExchangePaymentCurrencyInput.value = paymentCurrency;
-        }
-        if (paymentExchangePaymentAmountInput) {
-            if (document.activeElement !== paymentExchangePaymentAmountInput) {
-                paymentExchangePaymentAmountInput.value = paymentAmount > 0 ? paymentAmount.toFixed(2) : '';
-            }
         }
         if (paymentExchangeRateDateDisplay) {
             paymentExchangeRateDateDisplay.value = rateDate;
@@ -1592,28 +1843,6 @@ document.addEventListener('DOMContentLoaded', () => {
         const autoAppliedToSameCurrency = roundToTwo(Math.min(remainingPaymentAmount, samePaymentCurrencyOtherBalance));
         const returnOrCredit = roundToTwo(Math.max(remainingPaymentAmount - autoAppliedToSameCurrency, 0));
 
-        if (paymentExchangePreviewRequired) {
-            paymentExchangePreviewRequired.textContent = formatCurrencyAmount(paymentCurrency, paymentRequiredToFullyClearTarget);
-        }
-        if (paymentExchangePreviewSettled) {
-            paymentExchangePreviewSettled.textContent = formatCurrencyAmount(targetCurrency, targetSettled);
-        }
-        if (paymentExchangePreviewConsumed) {
-            paymentExchangePreviewConsumed.textContent = formatCurrencyAmount(paymentCurrency, paymentConsumed);
-        }
-        if (paymentExchangePreviewTargetRemaining) {
-            paymentExchangePreviewTargetRemaining.textContent = formatCurrencyAmount(targetCurrency, remainingTargetBalance);
-        }
-        if (paymentExchangePreviewPaymentRemaining) {
-            paymentExchangePreviewPaymentRemaining.textContent = formatCurrencyAmount(paymentCurrency, remainingPaymentAmount);
-        }
-        if (paymentExchangePreviewAutoApply) {
-            paymentExchangePreviewAutoApply.textContent = formatCurrencyAmount(paymentCurrency, autoAppliedToSameCurrency);
-        }
-        if (paymentExchangePreviewReturn) {
-            paymentExchangePreviewReturn.textContent = formatCurrencyAmount(paymentCurrency, returnOrCredit);
-        }
-
         const preview = {
             target,
             quote: workingQuote,
@@ -1629,6 +1858,7 @@ document.addEventListener('DOMContentLoaded', () => {
         };
 
         updateExchangeConfirmAvailability(preview);
+        focusExchangeConfirmWhenReady(preview);
 
         return preview;
     };
@@ -2112,11 +2342,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 showFeedback('No current invoice balance is available for exchange settlement.');
                 return;
             }
-            if (selectedPaymentCurrency === invoiceSnapshot.invoiceCurrency) {
-                showFeedback('Use Save Payment for same-currency receipts.');
-                return;
-            }
-
             await openExchangeSettlementModal();
         });
     }
@@ -2156,6 +2381,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (paymentExchangeRateInput) {
         paymentExchangeRateInput.addEventListener('input', () => {
+            paymentExchangeConfirmFocusDone = false;
             exchangeSettlementPreview();
         });
     }
@@ -2171,9 +2397,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 await maybeOpenExchangeSettlementModal({ requireAmount: true });
             }
             if (paymentExchangeModal && !paymentExchangeModal.hidden) {
-                if (paymentExchangePaymentAmountInput && document.activeElement !== paymentExchangePaymentAmountInput) {
-                    paymentExchangePaymentAmountInput.value = receivedNowInput.value;
-                }
                 exchangeSettlementPreview();
             }
         });
@@ -2187,28 +2410,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 await maybeOpenExchangeSettlementModal({ requireAmount: true });
             }
             if (paymentExchangeModal && !paymentExchangeModal.hidden) {
-                if (paymentExchangePaymentAmountInput && document.activeElement !== paymentExchangePaymentAmountInput) {
-                    paymentExchangePaymentAmountInput.value = receivedNowInput.value;
-                }
                 exchangeSettlementPreview();
             }
-        });
-    }
-
-    if (paymentExchangePaymentAmountInput) {
-        ['input', 'change'].forEach((eventName) => {
-            paymentExchangePaymentAmountInput.addEventListener(eventName, () => {
-                if (receivedNowInput) {
-                    receivedNowInput.value = paymentExchangePaymentAmountInput.value;
-                }
-                if (currentSavedPaymentApplies()) {
-                    noteSavedPaymentEditAttempt();
-                }
-                refreshPaymentPreview();
-                if (paymentExchangeModal && !paymentExchangeModal.hidden) {
-                    exchangeSettlementPreview();
-                }
-            });
         });
     }
 
@@ -2232,8 +2435,8 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             if (preview.paymentAmount <= 0.005) {
-                showExchangeFeedback('Enter a payment amount before confirming exchange settlement.');
-                paymentExchangePaymentAmountInput?.focus();
+                showExchangeFeedback('Enter the payment in the main Amount Receiving field before confirming exchange settlement.');
+                receivedNowInput?.focus();
                 return;
             }
 
@@ -2560,6 +2763,7 @@ document.addEventListener('DOMContentLoaded', () => {
             refreshPaymentPreview();
             const receiptSummary = currentReceiptSummary(payload);
             showFeedback(receiptSummary.receiptNo !== '' ? `Payment saved: ${receiptSummary.receiptNo}` : (payload.message || 'Customer receipt recorded successfully.'));
+            station.dispatchEvent(new CustomEvent('workspace:payment-saved', { bubbles: true, detail: payload }));
         } catch (error) {
             paymentSubmitDebug.lastBackendError = error instanceof Error ? error.message : 'Customer receipt could not be saved.';
             showFeedback(paymentSubmitDebug.lastBackendError);
@@ -3973,7 +4177,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (serviceEventBars.cancel) {
-            serviceEventBars.cancel.hidden = !isPersisted || status === 'cancelled';
+            serviceEventBars.cancel.hidden = !isPersisted;
         }
 
         if (serviceEventBars.refund) {
@@ -4746,6 +4950,9 @@ document.addEventListener('DOMContentLoaded', () => {
             if (Number.parseInt(String(serviceLine.serviceId || 0), 10) <= 0) {
                 return total;
             }
+            if (String(serviceLine.status || serviceLine.displayStatus || '').trim().toLowerCase() === 'cancelled') {
+                return total;
+            }
 
             const savedFinalSale = toNumber(serviceLine.finalSalePrice);
             if (Math.abs(savedFinalSale) > 0.005) {
@@ -5306,6 +5513,46 @@ document.addEventListener('DOMContentLoaded', () => {
         updateWorkflowState();
     };
 
+    const startFreshWorkspaceForCustomer = (customer) => {
+        if (!customer) {
+            return;
+        }
+
+        const newBookingUrl = station.dataset.newBookingUrl || '/workspace?new=1';
+        try {
+            window.sessionStorage.setItem(pendingFreshCustomerKey, JSON.stringify(customer));
+            window.location.href = newBookingUrl;
+        } catch (error) {
+            applyCustomerToForms(customer);
+            focusTarget('[data-service-passenger-name]');
+        }
+    };
+
+    const restorePendingFreshWorkspaceCustomer = () => {
+        let raw = '';
+        try {
+            raw = window.sessionStorage.getItem(pendingFreshCustomerKey) || '';
+        } catch (error) {
+            return;
+        }
+
+        if (raw.trim() === '') {
+            return;
+        }
+
+        try {
+            const customer = JSON.parse(raw);
+            window.sessionStorage.removeItem(pendingFreshCustomerKey);
+            if (!customer || Number.parseInt(String(customer.id || 0), 10) <= 0) {
+                return;
+            }
+            applyCustomerToForms(customer);
+            window.setTimeout(() => focusTarget('[data-service-passenger-name]'), 80);
+        } catch (error) {
+            window.sessionStorage.removeItem(pendingFreshCustomerKey);
+        }
+    };
+
     const renderInlineCustomerLabel = (customer) => {
         const idLabel = customer.id ? `#${customer.id}` : '-';
         const phoneLabel = customer.mobile || '-';
@@ -5442,8 +5689,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 <td>${customer.color_tag ? String(customer.color_tag).replace(/_/g, ' ').replace(/\b\w/g, (m) => m.toUpperCase()) : ''}</td>
                 <td><button class="btn btn-sm" type="button" data-customer-edit="${customer.id || ''}">Edit</button></td>
             `;
-            row.addEventListener('click', () => applyCustomerToForms(customer));
-            row.addEventListener('dblclick', () => applyCustomerToForms(customer));
+            row.addEventListener('click', () => startFreshWorkspaceForCustomer(customer));
+            row.addEventListener('dblclick', () => startFreshWorkspaceForCustomer(customer));
             customerPickerResults.appendChild(row);
 
             const editButton = row.querySelector('[data-customer-edit]');
@@ -5560,6 +5807,55 @@ document.addEventListener('DOMContentLoaded', () => {
         newCustomerModal.setAttribute('aria-hidden', 'true');
         resetNewCustomerForm();
     }
+
+    newCustomerForm?.addEventListener('submit', async (event) => {
+        if (!(newCustomerForm instanceof HTMLFormElement)) {
+            return;
+        }
+
+        event.preventDefault();
+        if (newCustomerSubmit) {
+            newCustomerSubmit.disabled = true;
+        }
+
+        try {
+            const response = await fetch(newCustomerForm.action, {
+                method: 'POST',
+                body: new FormData(newCustomerForm),
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest',
+                    Accept: 'application/json',
+                },
+            });
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok || payload.ok === false) {
+                throw new Error(payload.message || 'Customer could not be saved.');
+            }
+
+            const customer = payload.traveler || null;
+            if (customer) {
+                const existingIndex = customerDirectory.findIndex((entry) => Number(entry.id || 0) === Number(customer.id || 0));
+                if (existingIndex >= 0) {
+                    customerDirectory[existingIndex] = customer;
+                } else {
+                    customerDirectory.push(customer);
+                }
+                filteredCustomers = customerDirectory.slice();
+                filteredAutocompleteCustomers = customerDirectory.slice(0, 12);
+                startFreshWorkspaceForCustomer(customer);
+            }
+
+            closeNewCustomerModal();
+            showFeedback(payload.message || 'Customer saved.');
+            station.dispatchEvent(new CustomEvent('workspace:customer-selected', { bubbles: true, detail: customer || {} }));
+        } catch (error) {
+            showFeedback(error.message || 'Customer could not be saved.');
+        } finally {
+            if (newCustomerSubmit) {
+                newCustomerSubmit.disabled = false;
+            }
+        }
+    });
 
     function openPaymentHistoryModal() {
         if (!paymentHistoryModal) {
@@ -5937,14 +6233,35 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    function openGlobalPrepaidSupplierModal() {
+    function openGlobalPrepaidSupplierModal(options = {}) {
         if (!globalPrepaidSupplierModal) {
             return;
         }
 
+        if (globalPrepaidSupplierField && options.supplierName) {
+            globalPrepaidSupplierField.value = String(options.supplierName);
+        }
+        if (globalPrepaidBranchField && options.branchId) {
+            globalPrepaidBranchField.value = String(options.branchId);
+        }
+        if (globalPrepaidCurrencyField && options.currency) {
+            globalPrepaidCurrencyField.value = String(options.currency);
+        }
+        if (globalPrepaidAmountField && options.focusAmount !== false) {
+            globalPrepaidAmountField.value = globalPrepaidAmountField.value || '0.00';
+        }
+        globalPrepaidSupplierModal.dataset.returnToTicketType = options.returnToTicketType ? '1' : '0';
         globalPrepaidSupplierModal.hidden = false;
         globalPrepaidSupplierModal.setAttribute('aria-hidden', 'false');
         showFeedback('Global prepaid supplier payment opened. Record supplier advance before purchase.');
+        window.setTimeout(() => {
+            if (globalPrepaidAmountField) {
+                globalPrepaidAmountField.focus();
+                globalPrepaidAmountField.select();
+            } else {
+                globalPrepaidSupplierField?.focus();
+            }
+        }, 70);
     }
 
     function closeGlobalPrepaidSupplierModal() {
@@ -5952,8 +6269,13 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
+        const shouldReturnToTicketType = globalPrepaidSupplierModal.dataset.returnToTicketType === '1';
         globalPrepaidSupplierModal.hidden = true;
         globalPrepaidSupplierModal.setAttribute('aria-hidden', 'true');
+        globalPrepaidSupplierModal.dataset.returnToTicketType = '0';
+        if (shouldReturnToTicketType) {
+            focusTicketTypeAfterSupplier();
+        }
     }
 
     async function openExchangeSettlementModal() {
@@ -5979,15 +6301,13 @@ document.addEventListener('DOMContentLoaded', () => {
         paymentExchangeTargetSelect.appendChild(option);
 
         clearExchangeSettlementFields();
-        if (paymentExchangePaymentAmountInput) {
-            paymentExchangePaymentAmountInput.value = receivedNowInput?.value || '';
-        }
+        paymentExchangeConfirmFocusDone = false;
         paymentExchangeModal.hidden = false;
         paymentExchangeModal.setAttribute('aria-hidden', 'false');
         exchangeSettlementPreview();
         window.setTimeout(() => {
-            if (paymentExchangePaymentAmountInput && Math.max(toNumber(paymentExchangePaymentAmountInput.value || 0), 0) <= 0.005) {
-                paymentExchangePaymentAmountInput.focus();
+            if (Math.max(toNumber(receivedNowInput?.value || 0), 0) <= 0.005) {
+                receivedNowInput?.focus();
                 return;
             }
             if (paymentExchangeRateInput && !paymentExchangeRateRow?.hidden && toNumber(paymentExchangeRateInput.value || 0) <= 0.005) {
@@ -6006,6 +6326,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const { clear = true } = options;
         paymentExchangeModal.hidden = true;
         paymentExchangeModal.setAttribute('aria-hidden', 'true');
+        paymentExchangeConfirmFocusDone = false;
         if (clear) {
             clearExchangeSettlementFields();
         }
@@ -6100,6 +6421,10 @@ document.addEventListener('DOMContentLoaded', () => {
         serviceFields.supplier.addEventListener('input', () => {
             scheduleSupplierAdvanceBalanceRefresh(220);
         });
+        serviceFields.supplier.addEventListener('change', () => {
+            scheduleSupplierAdvanceBalanceRefresh(0);
+        });
+    } else if (serviceFields.supplier instanceof HTMLSelectElement) {
         serviceFields.supplier.addEventListener('change', () => {
             scheduleSupplierAdvanceBalanceRefresh(0);
         });
@@ -6397,7 +6722,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (event.key === 'Enter') {
                 event.preventDefault();
-                applyCustomerToForms(filteredCustomers[customerPickerSelectionIndex] || null);
+                startFreshWorkspaceForCustomer(filteredCustomers[customerPickerSelectionIndex] || null);
                 return;
             }
 
@@ -6466,4 +6791,6 @@ document.addEventListener('DOMContentLoaded', () => {
             quickSearch.select();
         }, 120);
     }
+
+    restorePendingFreshWorkspaceCustomer();
 });

@@ -11,7 +11,6 @@ $expenseByCategory = $analytics['expenseByCategory'] ?? [];
 <section class="page-head">
     <div>
         <h1>Super Admin Dashboard</h1>
-        <p>Admin-side financial summary for gross profit, recorded expenses, and net profit.</p>
     </div>
     <div class="page-actions">
         <a class="btn btn-primary" href="<?= e(url('/workspace')) ?>">Open Booking Workspace</a>
@@ -24,24 +23,20 @@ $expenseByCategory = $analytics['expenseByCategory'] ?? [];
     <article class="stat-card">
         <div class="stat-label">Branches</div>
         <div class="stat-value">2</div>
-        <div class="stat-note">Imdad International Travel Agency / Noble Route</div>
     </article>
     <article class="stat-card">
         <div class="stat-label">Profit Model</div>
         <div class="stat-value">Gross - Expenses</div>
-        <div class="stat-note">Booking gross profit remains separate from admin expenses.</div>
     </article>
     <article class="stat-card">
         <div class="stat-label">Expense Control</div>
         <div class="stat-value">Admin Only</div>
-        <div class="stat-note">Expense entry stays outside the booking workspace.</div>
     </article>
 </section>
 
 <section class="panel">
     <div class="panel-header">
         <h2>Net Profit Summary</h2>
-        <div class="panel-meta">Today, this week, and this month from current booking gross-profit truth plus recorded expenses.</div>
     </div>
     <div class="dense-table-wrap">
         <table class="dense-table">
@@ -82,7 +77,6 @@ $expenseByCategory = $analytics['expenseByCategory'] ?? [];
 <section class="panel">
     <div class="panel-header">
         <h2>This Month Expense by Branch</h2>
-        <div class="panel-meta">Branch-aware expense totals in original currency with PKR-converted visibility.</div>
     </div>
     <div class="dense-table-wrap">
         <table class="dense-table">
@@ -117,7 +111,6 @@ $expenseByCategory = $analytics['expenseByCategory'] ?? [];
 <section class="panel">
     <div class="panel-header">
         <h2>This Month Expense by Category</h2>
-        <div class="panel-meta">Practical category view for rent, salary, utilities, and other recorded business costs.</div>
     </div>
     <div class="dense-table-wrap">
         <table class="dense-table">

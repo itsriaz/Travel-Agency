@@ -16,7 +16,6 @@ $flash = Flash::consume();
 <body class="guest-shell">
     <main class="guest-card">
         <div class="guest-brand">Travel Agency Operations</div>
-        <div class="guest-subtitle">Foundation login shell for secure XAMPP-first setup</div>
         <?php if ($flash !== null): ?>
             <div class="alert alert-<?= e($flash['type']) ?>"><?= e($flash['message']) ?></div>
         <?php endif; ?>

@@ -6,11 +6,11 @@ $systemRows = array_sum(array_map(
     static fn (array $panel): int => count(array_filter($panel['rows'] ?? [], static fn (array $row): bool => ((int) ($row['is_system'] ?? 0)) === 1)),
     $panels ?? []
 ));
+$journalRows = $accountingFoundation['journalPreview'] ?? [];
 ?>
 <section class="page-head">
     <div>
         <h1>Accounting Engine</h1>
-        <p>Full super-admin maintenance for control accounts, posting rules, and booking-driven journal behavior.</p>
     </div>
     <div class="page-actions">
         <a class="btn btn-primary" href="<?= e(url('/workspace')) ?>">Open Booking Workspace</a>
@@ -23,71 +23,28 @@ $systemRows = array_sum(array_map(
     <strong><?= e($branchLabel !== '' ? $branchLabel : 'Restricted') ?></strong>
     <span class="workspace-context-divider">|</span>
     <span>Engine Scope:</span>
-    <strong>Double-entry Controls and Posting Rules</strong>
+    <strong>Active</strong>
 </div>
 
 <section class="stat-grid">
     <article class="stat-card">
-        <div class="stat-label">Registers</div>
+        <div class="stat-label">Setup Areas</div>
         <div class="stat-value"><?= e((string) count($panels)) ?></div>
-        <div class="stat-note">Control accounts and event-driven posting rule registers.</div>
     </article>
     <article class="stat-card">
-        <div class="stat-label">Protected Rows</div>
+        <div class="stat-label">Protected Setup</div>
         <div class="stat-value"><?= e((string) $systemRows) ?></div>
-        <div class="stat-note">Critical system rows that keep the live accounting engine stable.</div>
     </article>
     <article class="stat-card">
-        <div class="stat-label">Journal Preview</div>
-        <div class="stat-value"><?= e((string) count($accountingFoundation['journalPreview'] ?? [])) ?></div>
-        <div class="stat-note">Preview shows how current booking events map into debit and credit entries.</div>
+        <div class="stat-label">Current Journal Rows</div>
+        <div class="stat-value"><?= e((string) count($journalRows)) ?></div>
     </article>
 </section>
-
-<section class="panel compact-panel admin-register-index">
-    <div class="panel-header">
-        <h2>Engine Navigator</h2>
-        <div class="panel-meta"><?= e((string) $totalRows) ?> total accounting setup rows</div>
-    </div>
-    <div class="station-chip-row">
-        <?php foreach ($panels as $panel): ?>
-            <a class="station-chip" href="#register-<?= e((string) $panel['register']) ?>"><?= e((string) $panel['title']) ?></a>
-        <?php endforeach; ?>
-    </div>
-</section>
-
-<?php foreach ($panels as $panel): ?>
-    <?php
-    $pagePath = '/accounting-engine';
-    $saveAction = url('/accounting-engine/save');
-    $deleteAction = url('/accounting-engine/delete');
-    require base_path('/app/Views/control/partials/register_panel.php');
-    ?>
-<?php endforeach; ?>
 
 <section class="control-grid">
     <article class="panel compact-panel">
         <div class="panel-header">
-            <h2>Runtime Rules</h2>
-            <div class="panel-meta">Posting behavior still visible in business language</div>
-        </div>
-        <div class="security-action-list">
-            <?php foreach ($accountingFoundation['rules'] ?? [] as $rule): ?>
-                <div class="placeholder-card"><?= e((string) $rule) ?></div>
-            <?php endforeach; ?>
-            <?php foreach ($supplierFoundation['postingNotes'] ?? [] as $postingNote): ?>
-                <div class="placeholder-card"><?= e((string) $postingNote) ?></div>
-            <?php endforeach; ?>
-            <?php foreach ($customerPaymentFoundation['rules'] ?? [] as $paymentRule): ?>
-                <div class="placeholder-card"><?= e((string) $paymentRule) ?></div>
-            <?php endforeach; ?>
-        </div>
-    </article>
-
-    <article class="panel compact-panel">
-        <div class="panel-header">
-            <h2>Snapshot Totals</h2>
-            <div class="panel-meta">Preview totals by currency</div>
+            <h2>Financial Snapshot</h2>
         </div>
         <div class="dense-table-wrap">
             <table class="dense-table">
@@ -136,35 +93,59 @@ $systemRows = array_sum(array_map(
     </article>
 </section>
 
-<section class="panel compact-panel">
-    <div class="panel-header">
-        <h2>Journal Mapping Preview</h2>
-        <div class="panel-meta">Sample booking financial trace</div>
-    </div>
-    <div class="dense-table-wrap">
-        <table class="dense-table">
-            <thead>
-            <tr>
-                <th>Event</th>
-                <th>Reference</th>
-                <th>Currency</th>
-                <th>Debit</th>
-                <th>Credit</th>
-                <th>Amount</th>
-            </tr>
-            </thead>
-            <tbody>
-            <?php foreach ($accountingFoundation['journalPreview'] ?? [] as $journalRow): ?>
-                <tr>
-                    <td><?= e((string) $journalRow['event']) ?></td>
-                    <td><?= e((string) $journalRow['reference']) ?></td>
-                    <td><?= e((string) $journalRow['currency']) ?></td>
-                    <td><?= e((string) $journalRow['debit']) ?></td>
-                    <td><?= e((string) $journalRow['credit']) ?></td>
-                    <td><?= e($formatAmount((float) $journalRow['amount'])) ?></td>
-                </tr>
+<details class="panel compact-panel admin-advanced-panel">
+    <summary>Advanced Accounting Setup</summary>
+    <section class="admin-register-index top-gap">
+        <div class="panel-header">
+            <h2>Setup Navigator</h2>
+        </div>
+        <div class="station-chip-row">
+            <?php foreach ($panels as $panel): ?>
+                <a class="station-chip" href="#register-<?= e((string) $panel['register']) ?>"><?= e((string) $panel['title']) ?></a>
             <?php endforeach; ?>
-            </tbody>
-        </table>
-    </div>
-</section>
+        </div>
+    </section>
+
+    <?php foreach ($panels as $panel): ?>
+        <?php
+        $pagePath = '/accounting-engine';
+        $saveAction = url('/accounting-engine/save');
+        $deleteAction = url('/accounting-engine/delete');
+        require base_path('/app/Views/control/partials/register_panel.php');
+        ?>
+    <?php endforeach; ?>
+
+    <?php if ($journalRows !== []): ?>
+        <section class="panel compact-panel">
+            <div class="panel-header">
+                <h2>Journal Entries</h2>
+            </div>
+            <div class="dense-table-wrap">
+                <table class="dense-table">
+                    <thead>
+                    <tr>
+                        <th>Event</th>
+                        <th>Reference</th>
+                        <th>Currency</th>
+                        <th>Debit</th>
+                        <th>Credit</th>
+                        <th>Amount</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    <?php foreach ($journalRows as $journalRow): ?>
+                        <tr>
+                            <td><?= e((string) $journalRow['event']) ?></td>
+                            <td><?= e((string) $journalRow['reference']) ?></td>
+                            <td><?= e((string) $journalRow['currency']) ?></td>
+                            <td><?= e((string) $journalRow['debit']) ?></td>
+                            <td><?= e((string) $journalRow['credit']) ?></td>
+                            <td><?= e($formatAmount((float) $journalRow['amount'])) ?></td>
+                        </tr>
+                    <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    <?php endif; ?>
+</details>

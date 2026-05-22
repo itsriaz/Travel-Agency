@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 
 const defaultConfig = {
-  serverUrl: 'http://localhost/Travel-Agency',
+  serverUrl: 'https://noble.gt.tc',
   windowTitle: 'Travel Agency Operations',
   sourceDevice: 'Windows Launcher'
 };
@@ -25,6 +25,51 @@ const config = readConfig();
 
 function serverUrl(pathname = '/') {
   return new URL(pathname, config.serverUrl.replace(/\/+$/, '/') + '/').toString();
+}
+
+function isInternalUrl(url) {
+  try {
+    return new URL(url).origin === new URL(config.serverUrl).origin;
+  } catch {
+    return false;
+  }
+}
+
+function createAppWindow(initialUrl, parentWindow = null) {
+  const win = new BrowserWindow({
+    width: parentWindow ? 1180 : 1280,
+    height: parentWindow ? 780 : 820,
+    minWidth: 1024,
+    minHeight: 680,
+    title: config.windowTitle,
+    parent: parentWindow || undefined,
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (isInternalUrl(url)) {
+      createAppWindow(url, win);
+      return { action: 'deny' };
+    }
+
+    shell.openExternal(url);
+    return { action: 'deny' };
+  });
+
+  win.webContents.on('did-fail-load', () => {
+    if (!parentWindow) {
+      win.loadFile(path.join(__dirname, 'offline.html'));
+    }
+  });
+
+  win.loadURL(initialUrl);
+
+  return win;
 }
 
 async function cookieHeaderFor(url) {
@@ -69,29 +114,7 @@ async function serverRequest(pathname, options = {}) {
 }
 
 function createWindow() {
-  const win = new BrowserWindow({
-    width: 1280,
-    height: 820,
-    minWidth: 1024,
-    minHeight: 680,
-    title: config.windowTitle,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false
-    }
-  });
-
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
-    return { action: 'deny' };
-  });
-
-  win.webContents.on('did-fail-load', () => {
-    win.loadFile(path.join(__dirname, 'offline.html'));
-  });
-
-  win.loadURL(config.serverUrl);
+  return createAppWindow(config.serverUrl);
 }
 
 ipcMain.handle('launcher:config', async () => ({

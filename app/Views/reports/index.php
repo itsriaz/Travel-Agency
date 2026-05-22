@@ -217,7 +217,6 @@ $exportQuery = http_build_query([
     <div class="panel-header">
         <h2>Filters</h2>
         <div class="panel-meta">
-            <span>Branch-aware, whitelist-based filters only.</span>
             <span id="reports-auto-status" aria-live="polite" hidden>Loading report...</span>
         </div>
     </div>
@@ -300,7 +299,7 @@ $exportQuery = http_build_query([
         <?php else: ?>
             <div class="stat-value"><?= e((string) ($summaryCard['value'] ?? '')) ?></div>
         <?php endif; ?>
-        <?php $summaryNote = (string) ($summaryCard['note'] ?? 'Operational totals from persisted live data.'); ?>
+        <?php $summaryNote = (string) ($summaryCard['note'] ?? ''); ?>
         <?php if ($summaryNote !== ''): ?>
             <div class="stat-note"><?= e($summaryNote) ?></div>
         <?php endif; ?>
@@ -321,7 +320,6 @@ $exportQuery = http_build_query([
         <section class="panel compact-panel report-summary-group report-summary-group--<?= e((string) $groupSection[2]) ?>">
             <div class="panel-header">
                 <h2><?= e((string) $groupSection[0]) ?></h2>
-                <div class="panel-meta">Group reporting conversion, shown separately from branch-local and original-currency totals.</div>
             </div>
             <div class="stat-grid stat-grid--group">
                 <?php foreach ($groupSection[1] as $summaryCard): ?>
@@ -336,11 +334,9 @@ $exportQuery = http_build_query([
     <div class="panel-header">
         <h2><?= e((string) ($reportOptions[$selectedReport] ?? 'Report')) ?></h2>
     </div>
-    <div class="panel-meta report-context-line"><?= e($reportContextLine) ?></div>
     <?php if ($selectedReport === 'receivable_aging' && $receivableAgingSummaryRows !== []): ?>
         <div class="panel-header" style="padding-top: 0.15rem;">
             <h2>Customer Outstanding Summary</h2>
-            <div class="panel-meta">Grouped by customer and currency, using the same receivable aging truth as the invoice-level detail below.</div>
         </div>
         <div class="dense-table-wrap">
             <table class="dense-table">

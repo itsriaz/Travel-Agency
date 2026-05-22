@@ -626,6 +626,183 @@ final class CustomerPaymentRepository extends BaseRepository
         });
     }
 
+    public function releaseAllocatedCreditForReceivable(
+        int $receivableItemId,
+        float $targetAllocatedAmount,
+        ?int $actorUserId = null,
+        ?string $reason = null
+    ): array {
+        $receivableStatement = $this->db->prepare(
+            'SELECT id, booking_reference, service_line_reference, currency, due_amount, allocated_amount, outstanding_amount
+             FROM customer_receivable_items
+             WHERE id = :receivable_id
+             FOR UPDATE'
+        );
+        $receivableStatement->execute(['receivable_id' => $receivableItemId]);
+        $receivable = $receivableStatement->fetch();
+
+        if ($receivable === false) {
+            throw new \RuntimeException('Receivable item not found.');
+        }
+
+        $currentAllocatedAmount = round((float) ($receivable['allocated_amount'] ?? 0), 2);
+        $targetAllocatedAmount = round(max($targetAllocatedAmount, 0), 2);
+        $releasedReceivableAmount = round(max($currentAllocatedAmount - $targetAllocatedAmount, 0), 2);
+
+        if ($releasedReceivableAmount <= 0) {
+            return [
+                'released_receivable_amount' => 0.0,
+                'released_payment_amount' => 0.0,
+                'affected_receipt_ids' => [],
+            ];
+        }
+
+        $allocationStatement = $this->db->prepare(
+            'SELECT
+                a.id,
+                a.customer_receipt_id,
+                a.allocated_amount,
+                COALESCE(a.receivable_amount_allocated, a.allocated_amount) AS receivable_amount_allocated,
+                COALESCE(a.payment_amount_consumed, a.allocated_amount) AS payment_amount_consumed,
+                r.received_amount,
+                r.allocated_amount AS receipt_allocated_amount,
+                r.unallocated_amount AS receipt_unallocated_amount,
+                r.status AS receipt_status
+             FROM customer_receipt_allocations a
+             INNER JOIN customer_receipts r ON r.id = a.customer_receipt_id
+             WHERE a.customer_receivable_item_id = :receivable_id
+             ORDER BY a.allocated_at DESC, a.id DESC
+             FOR UPDATE'
+        );
+        $allocationStatement->execute(['receivable_id' => $receivableItemId]);
+        $allocations = $allocationStatement->fetchAll() ?: [];
+
+        $remainingToRelease = $releasedReceivableAmount;
+        $releasedPaymentAmount = 0.0;
+        $affectedReceiptIds = [];
+
+        $updateAllocationStatement = $this->db->prepare(
+            'UPDATE customer_receipt_allocations
+             SET allocated_amount = :allocated_amount,
+                 receivable_amount_allocated = :receivable_amount_allocated,
+                 payment_amount_consumed = :payment_amount_consumed
+             WHERE id = :allocation_id'
+        );
+        $deleteAllocationStatement = $this->db->prepare(
+            'DELETE FROM customer_receipt_allocations
+             WHERE id = :allocation_id'
+        );
+        $updateReceiptStatement = $this->db->prepare(
+            'UPDATE customer_receipts
+             SET allocated_amount = :allocated_amount,
+                 unallocated_amount = :unallocated_amount,
+                 status = :status
+             WHERE id = :receipt_id'
+        );
+        $updateReceivableStatement = $this->db->prepare(
+            'UPDATE customer_receivable_items
+             SET allocated_amount = :allocated_amount,
+                 outstanding_amount = :outstanding_amount,
+                 status = :status
+             WHERE id = :receivable_id'
+        );
+
+        foreach ($allocations as $allocation) {
+            if ($remainingToRelease <= 0.005) {
+                break;
+            }
+
+            $allocationId = (int) ($allocation['id'] ?? 0);
+            $receiptId = (int) ($allocation['customer_receipt_id'] ?? 0);
+            $receivableAmountAllocated = round((float) ($allocation['receivable_amount_allocated'] ?? 0), 2);
+            $paymentAmountConsumed = round((float) ($allocation['payment_amount_consumed'] ?? 0), 2);
+            if ($allocationId <= 0 || $receiptId <= 0 || $receivableAmountAllocated <= 0) {
+                continue;
+            }
+
+            $releasableReceivableAmount = min($remainingToRelease, $receivableAmountAllocated);
+            if ($releasableReceivableAmount <= 0) {
+                continue;
+            }
+
+            $releaseFully = abs($releasableReceivableAmount - $receivableAmountAllocated) <= 0.005;
+            $releasablePaymentAmount = $releaseFully
+                ? $paymentAmountConsumed
+                : min($paymentAmountConsumed, round(($paymentAmountConsumed / $receivableAmountAllocated) * $releasableReceivableAmount, 2));
+
+            $newReceivableAmountAllocated = round(max($receivableAmountAllocated - $releasableReceivableAmount, 0), 2);
+            $newPaymentAmountConsumed = round(max($paymentAmountConsumed - $releasablePaymentAmount, 0), 2);
+
+            if ($newReceivableAmountAllocated <= 0.005 && $newPaymentAmountConsumed <= 0.005) {
+                $deleteAllocationStatement->execute(['allocation_id' => $allocationId]);
+            } else {
+                $updateAllocationStatement->execute([
+                    'allocation_id' => $allocationId,
+                    'allocated_amount' => $newReceivableAmountAllocated,
+                    'receivable_amount_allocated' => $newReceivableAmountAllocated,
+                    'payment_amount_consumed' => $newPaymentAmountConsumed,
+                ]);
+            }
+
+            $receiptReceivedAmount = round((float) ($allocation['received_amount'] ?? 0), 2);
+            $receiptAllocatedAmount = round((float) ($allocation['receipt_allocated_amount'] ?? 0), 2);
+            $newReceiptAllocatedAmount = round(max($receiptAllocatedAmount - $releasablePaymentAmount, 0), 2);
+            $newReceiptUnallocatedAmount = round(min(
+                $receiptReceivedAmount,
+                max((float) ($allocation['receipt_unallocated_amount'] ?? 0) + $releasablePaymentAmount, 0)
+            ), 2);
+            $newReceiptStatus = $newReceiptAllocatedAmount <= 0.005
+                ? 'received'
+                : ($newReceiptUnallocatedAmount <= 0.005 ? 'fully_allocated' : 'partially_allocated');
+
+            $updateReceiptStatement->execute([
+                'receipt_id' => $receiptId,
+                'allocated_amount' => $newReceiptAllocatedAmount,
+                'unallocated_amount' => $newReceiptUnallocatedAmount,
+                'status' => $newReceiptStatus,
+            ]);
+
+            $remainingToRelease = round(max($remainingToRelease - $releasableReceivableAmount, 0), 2);
+            $releasedPaymentAmount = round($releasedPaymentAmount + $releasablePaymentAmount, 2);
+            $affectedReceiptIds[] = $receiptId;
+        }
+
+        if ($remainingToRelease > 0.005) {
+            throw new \RuntimeException('Unable to release allocated customer credit from the existing receipt allocations.');
+        }
+
+        $currentDueAmount = round((float) ($receivable['due_amount'] ?? 0), 2);
+        $newOutstandingAmount = round(max($currentDueAmount - $targetAllocatedAmount, 0), 2);
+        $newStatus = $currentDueAmount <= 0.005
+            ? 'cancelled'
+            : ($newOutstandingAmount <= 0.005 ? 'paid' : ($targetAllocatedAmount > 0.005 ? 'partially_paid' : 'open'));
+
+        $updateReceivableStatement->execute([
+            'receivable_id' => $receivableItemId,
+            'allocated_amount' => $targetAllocatedAmount,
+            'outstanding_amount' => $newOutstandingAmount,
+            'status' => $newStatus,
+        ]);
+
+        AuditLog::record($this->app, 'customer.receipt.allocation_released', [
+            'user_id' => $actorUserId,
+            'customer_receivable_item_id' => $receivableItemId,
+            'booking_reference' => (string) ($receivable['booking_reference'] ?? ''),
+            'service_line_reference' => (string) ($receivable['service_line_reference'] ?? ''),
+            'currency' => (string) ($receivable['currency'] ?? 'PKR'),
+            'released_receivable_amount' => $releasedReceivableAmount,
+            'released_payment_amount' => $releasedPaymentAmount,
+            'reason' => $reason,
+            'affected_receipt_ids' => array_values(array_unique($affectedReceiptIds)),
+        ]);
+
+        return [
+            'released_receivable_amount' => $releasedReceivableAmount,
+            'released_payment_amount' => $releasedPaymentAmount,
+            'affected_receipt_ids' => array_values(array_unique($affectedReceiptIds)),
+        ];
+    }
+
     public function createReceivableItem(array $data): int
     {
         return $this->transaction(function () use ($data): int {
