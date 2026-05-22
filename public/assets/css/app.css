@@ -3431,6 +3431,37 @@ textarea {
     box-shadow: 0 0 0 2px rgba(11, 111, 156, 0.16);
 }
 
+.legacy-field:focus-within span,
+.legacy-service-event-field:focus-within span,
+.legacy-fin-fields label:focus-within span,
+.legacy-client-row:focus-within .legacy-client-row__label,
+.legacy-quick-search:focus-within label {
+    color: #c2410c;
+}
+
+.legacy-payment-panel__body--form label:focus-within span,
+.legacy-payment-panel__body--balances label:focus-within span,
+.legacy-payment-strip--rail label:focus-within span {
+    color: #b42318;
+    font-weight: 900;
+}
+
+.legacy-payment-panel__body--form label:focus-within,
+.legacy-payment-panel__body--balances label:focus-within,
+.legacy-payment-strip--rail label:focus-within {
+    background: #fff6db;
+    border-radius: 4px;
+}
+
+.legacy-payment-panel__body--form input:focus,
+.legacy-payment-panel__body--form select:focus,
+.legacy-payment-panel__body--balances input:focus,
+.legacy-payment-strip--rail input:focus,
+.legacy-payment-strip--rail select:focus {
+    border-color: #b45309;
+    box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.22);
+}
+
 .legacy-field input[readonly],
 .legacy-customer-summary input[readonly],
 .legacy-fin-fields input[readonly],

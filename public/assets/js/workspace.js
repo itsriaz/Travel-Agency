@@ -2577,6 +2577,16 @@ document.addEventListener('DOMContentLoaded', () => {
         paymentMethodSelect.addEventListener('change', () => {
             noteSavedPaymentEditAttempt();
         });
+        paymentMethodSelect.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter') {
+                return;
+            }
+
+            event.preventDefault();
+            if (paymentPrimarySaveButton) {
+                paymentPrimarySaveButton.focus();
+            }
+        });
     }
 
     if (paymentDueDatePicker && paymentDueDateInput) {
@@ -2777,6 +2787,14 @@ document.addEventListener('DOMContentLoaded', () => {
         paymentSubmitDebug.saveButtonFound = true;
         paymentPrimarySaveButton.addEventListener('click', () => {
             void performSameCurrencyPaymentSave();
+        });
+        paymentPrimarySaveButton.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter' && event.code !== 'NumpadEnter') {
+                return;
+            }
+
+            event.preventDefault();
+            paymentPrimarySaveButton.click();
         });
         paymentSubmitDebug.handlerAttached = true;
     }
