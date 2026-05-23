@@ -2366,6 +2366,13 @@ Kept here in case manual service save is needed again later.
                     return;
                 }
 
+                // Do not let the global Enter-as-Tab workflow steal Enter from supplier modals.
+                if (
+                    typeof target.closest === 'function' &&
+                    target.closest('[data-service-supplier-add-form], [data-global-prepaid-supplier-form]')
+                ) {
+                    return;
+                }
                 // Do not interfere with customer search/autocomplete Enter behavior.
                 if (
                     target.matches('[data-customer-autocomplete-input]') ||

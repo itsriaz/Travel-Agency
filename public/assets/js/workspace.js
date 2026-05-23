@@ -87,6 +87,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const supplierAddFeedback = station.querySelector('[data-service-supplier-add-feedback]');
     const supplierAddSubmit = station.querySelector('[data-service-supplier-add-submit]');
     const supplierAddMode = supplierAddForm?.elements?.namedItem('supplier_mode') || null;
+    const supplierAddNotes = supplierAddForm?.elements?.namedItem('notes') instanceof HTMLInputElement
+        ? supplierAddForm.elements.namedItem('notes')
+        : null;
     const paymentForm = station.querySelector('.legacy-payment-strip');
     const debugToolsEnabled = station.dataset.debugToolsEnabled === '1';
     const canVoidFinancials = station.dataset.canVoidFinancials === '1';
@@ -971,6 +974,81 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
+    const supplierAddFieldOrder = [
+        supplierAddName,
+        supplierAddBranch,
+        supplierAddCurrency,
+        supplierAddMode,
+        supplierAddNotes,
+    ].filter((field) => field instanceof HTMLElement);
+
+    const focusSupplierAddField = (field) => {
+        if (!(field instanceof HTMLElement)) {
+            return;
+        }
+
+        field.focus();
+        if (field instanceof HTMLInputElement) {
+            field.select();
+        }
+    };
+
+    const submitSupplierAddFormFromKeyboard = () => {
+        if (!(supplierAddForm instanceof HTMLFormElement) || !supplierAddSubmit || supplierAddSubmit.disabled) {
+            return;
+        }
+
+        if (typeof supplierAddForm.requestSubmit === 'function') {
+            supplierAddForm.requestSubmit(supplierAddSubmit);
+            return;
+        }
+
+        supplierAddSubmit.click();
+    };
+
+    const handleSupplierAddFormEnter = (event) => {
+        if (event.key !== 'Enter' && event.code !== 'NumpadEnter') {
+            return;
+        }
+
+        const target = event.target;
+        if (!(target instanceof HTMLInputElement || target instanceof HTMLSelectElement)) {
+            return;
+        }
+
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+
+        const currentIndex = supplierAddFieldOrder.indexOf(target);
+        const isLastField = target === supplierAddNotes || currentIndex === supplierAddFieldOrder.length - 1;
+
+        if (isLastField) {
+            submitSupplierAddFormFromKeyboard();
+            return;
+        }
+
+        const nextField = supplierAddFieldOrder[currentIndex + 1] || supplierAddNotes || supplierAddSubmit;
+        focusSupplierAddField(nextField);
+    };
+
+    if (supplierAddForm) {
+        supplierAddForm.addEventListener('keydown', handleSupplierAddFormEnter, true);
+    }
+
+    const handleSupplierAddModeChange = () => {
+        if (String(supplierAddMode?.value || '').trim() !== 'running_balance') {
+            return;
+        }
+
+        window.setTimeout(() => {
+            submitSupplierAddFormFromKeyboard();
+        }, 0);
+    };
+
+    if (supplierAddMode instanceof HTMLElement) {
+        supplierAddMode.addEventListener('change', handleSupplierAddModeChange);
+    }
     supplierAddForm?.addEventListener('submit', async (event) => {
         event.preventDefault();
 
@@ -6687,6 +6765,68 @@ document.addEventListener('DOMContentLoaded', () => {
         globalPrepaidSupplierForm.addEventListener('submit', submitGlobalPrepaidSupplierForm);
     }
 
+    const focusGlobalPrepaidSupplierField = (field) => {
+        if (!(field instanceof HTMLElement)) {
+            return;
+        }
+
+        field.focus();
+        if (field instanceof HTMLInputElement) {
+            field.select();
+        }
+    };
+
+    const submitGlobalPrepaidSupplierFormFromKeyboard = () => {
+        if (!(globalPrepaidSupplierForm instanceof HTMLFormElement) || globalPrepaidSupplierSubmit?.disabled) {
+            return;
+        }
+
+        if (typeof globalPrepaidSupplierForm.requestSubmit === 'function') {
+            if (globalPrepaidSupplierSubmit instanceof HTMLElement) {
+                globalPrepaidSupplierForm.requestSubmit(globalPrepaidSupplierSubmit);
+            } else {
+                globalPrepaidSupplierForm.requestSubmit();
+            }
+            return;
+        }
+
+        globalPrepaidSupplierSubmit?.click();
+    };
+
+    const handleGlobalPrepaidSupplierFormEnter = (event) => {
+        if (event.key !== 'Enter' && event.code !== 'NumpadEnter') {
+            return;
+        }
+
+        const target = event.target;
+        if (!(target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement)) {
+            return;
+        }
+
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+
+
+        const fields = Array.from(globalPrepaidSupplierForm?.elements || [])
+            .filter((field) => field instanceof HTMLInputElement || field instanceof HTMLSelectElement || field instanceof HTMLTextAreaElement)
+            .filter((field) => !(field instanceof HTMLInputElement && field.type === 'hidden'))
+            .filter((field) => !field.disabled);
+
+        const currentIndex = fields.indexOf(target);
+        const nextField = fields[currentIndex + 1];
+
+        if (nextField instanceof HTMLElement) {
+            focusGlobalPrepaidSupplierField(nextField);
+            return;
+        }
+
+        submitGlobalPrepaidSupplierFormFromKeyboard();
+    };
+
+    if (globalPrepaidSupplierForm) {
+        globalPrepaidSupplierForm.addEventListener('keydown', handleGlobalPrepaidSupplierFormEnter, true);
+    }
     if (serviceFields.supplier instanceof HTMLInputElement) {
         serviceFields.supplier.addEventListener('input', () => {
             scheduleSupplierAdvanceBalanceRefresh(220);
