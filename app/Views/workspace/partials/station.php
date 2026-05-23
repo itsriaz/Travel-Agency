@@ -1368,7 +1368,7 @@ Kept here in case manual service save is needed again later.
                 <div class="legacy-modal-grid">
                     <article>
                         <h3>Record Global Supplier Advance</h3>
-                        <form method="post" action="<?= e(url('/suppliers/advances/save')) ?>">
+                        <form method="post" action="<?= e(url('/suppliers/advances/save')) ?>" data-global-prepaid-supplier-form>
                             <?= \App\Helpers\Csrf::input() ?>
                             <div class="station-form-grid station-form-grid--6 station-form-grid--inline">
                                 <label class="station-field span-2"><span>Branch</span><select name="branch_id" data-global-prepaid-branch><?php foreach ($branchOptions as $branchRow): ?><option value="<?= e((string) $branchRow['id']) ?>" <?= (int) $branchRow['id'] === $globalPrepaidDefaultBranchId ? 'selected' : '' ?>><?= e((string) $branchRow['name']) ?></option><?php endforeach; ?></select></label>
@@ -1379,8 +1379,9 @@ Kept here in case manual service save is needed again later.
                                 <label class="station-field span-3"><span>Reference</span><input type="text" name="advance_reference_number" value=""></label>
                                 <label class="station-field span-3"><span>Remarks</span><input type="text" name="advance_remarks" value=""></label>
                             </div>
+                            <div class="workspace-feedback workspace-feedback--inline" data-global-prepaid-supplier-feedback hidden></div>
                             <div class="station-command-buttons top-gap">
-                                <button class="btn btn-primary btn-sm" type="submit">Save Prepaid Supplier Payment</button>
+                                <button class="btn btn-primary btn-sm" type="submit" data-global-prepaid-supplier-submit>Save Prepaid Supplier Payment</button>
                                 <a class="btn btn-sm" href="<?= e(url('/reports?report=supplier_prepaid_payments')) ?>" target="_blank" rel="noopener">View All Prepaid Payments</a>
                             </div>
                         </form>

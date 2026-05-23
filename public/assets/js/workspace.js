@@ -66,6 +66,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const globalPrepaidBranchField = station.querySelector('[data-global-prepaid-branch]');
     const globalPrepaidCurrencyField = station.querySelector('[data-global-prepaid-currency]');
     const globalPrepaidAmountField = station.querySelector('[data-global-prepaid-amount]');
+    const globalPrepaidSupplierForm = station.querySelector('[data-global-prepaid-supplier-form]');
+    const globalPrepaidSupplierFeedback = station.querySelector('[data-global-prepaid-supplier-feedback]');
+    const globalPrepaidSupplierSubmit = station.querySelector('[data-global-prepaid-supplier-submit]');
     const supplierAdvanceLookupUrl = station.dataset.supplierAdvanceLookupUrl || '';
     const supplierRegisterUrl = station.dataset.supplierRegisterUrl || '';
     const supplierAdvanceNote = station.querySelector('[data-supplier-advance-note]');
@@ -6602,6 +6605,87 @@ document.addEventListener('DOMContentLoaded', () => {
     globalPrepaidSupplierCloseButtons.forEach((button) => {
         button.addEventListener('click', closeGlobalPrepaidSupplierModal);
     });
+
+    const showGlobalPrepaidSupplierFeedback = (message) => {
+        const text = String(message || '').trim();
+
+        if (globalPrepaidSupplierFeedback) {
+            globalPrepaidSupplierFeedback.textContent = text;
+            globalPrepaidSupplierFeedback.hidden = text === '';
+            return;
+        }
+
+        if (text !== '') {
+            showFeedback(text);
+        }
+    };
+
+    const submitGlobalPrepaidSupplierForm = async (event) => {
+        event.preventDefault();
+
+        if (!(globalPrepaidSupplierForm instanceof HTMLFormElement)) {
+            return;
+        }
+
+        const supplierName = String(globalPrepaidSupplierField?.value || '').trim();
+        const advanceAmount = Math.max(toNumber(globalPrepaidAmountField?.value || 0), 0);
+
+        if (supplierName === '') {
+            showGlobalPrepaidSupplierFeedback('Enter supplier name.');
+            globalPrepaidSupplierField?.focus();
+            return;
+        }
+
+        if (advanceAmount <= 0.005) {
+            showGlobalPrepaidSupplierFeedback('Enter a valid prepaid supplier amount.');
+            globalPrepaidAmountField?.focus();
+            globalPrepaidAmountField?.select();
+            return;
+        }
+
+        showGlobalPrepaidSupplierFeedback('');
+
+        if (globalPrepaidSupplierSubmit) {
+            globalPrepaidSupplierSubmit.disabled = true;
+            globalPrepaidSupplierSubmit.textContent = 'Saving...';
+        }
+
+        try {
+            const response = await fetch(globalPrepaidSupplierForm.action, {
+                method: 'POST',
+                body: new FormData(globalPrepaidSupplierForm),
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest',
+                    Accept: 'application/json',
+                },
+                credentials: 'same-origin',
+            });
+
+            const payload = await response.json().catch(() => ({
+                ok: false,
+                message: 'The server returned an invalid prepaid supplier response.',
+            }));
+
+            if (!response.ok || payload.ok === false) {
+                throw new Error(payload.message || 'Prepaid supplier payment could not be saved.');
+            }
+
+            showFeedback(payload.message || 'Prepaid supplier payment recorded successfully.');
+            closeGlobalPrepaidSupplierModal();
+            scheduleSupplierAdvanceBalanceRefresh(0);
+        } catch (error) {
+            showGlobalPrepaidSupplierFeedback(error instanceof Error ? error.message : 'Prepaid supplier payment could not be saved.');
+        } finally {
+            if (globalPrepaidSupplierSubmit) {
+                globalPrepaidSupplierSubmit.disabled = false;
+                globalPrepaidSupplierSubmit.textContent = 'Save Prepaid Supplier Payment';
+            }
+        }
+    };
+
+    if (globalPrepaidSupplierForm) {
+        globalPrepaidSupplierForm.addEventListener('submit', submitGlobalPrepaidSupplierForm);
+    }
 
     if (serviceFields.supplier instanceof HTMLInputElement) {
         serviceFields.supplier.addEventListener('input', () => {

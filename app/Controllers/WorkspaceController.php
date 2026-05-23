@@ -1211,6 +1211,7 @@ final class WorkspaceController extends BaseController
     public function saveGlobalSupplierAdvance(): never
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);
+        $isAjax = strtolower((string) ($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '')) === 'xmlhttprequest';
 
         try {
             $result = (new SupplierSettlementWorkspaceService($this->app))->recordGlobalSupplierAdvance(
@@ -1218,22 +1219,39 @@ final class WorkspaceController extends BaseController
                 (int) Auth::id(),
                 Authorization::accessibleBranchIds()
             );
-            Flash::success(
-                'Prepaid supplier payment recorded successfully. Recorded '
+
+            $message = 'Prepaid supplier payment recorded successfully. Recorded '
                 . (string) ($result['currency'] ?? 'PKR')
                 . ' '
                 . number_format((float) ($result['amount'] ?? 0), 2)
                 . ' advance for '
                 . (string) ($result['supplier_name'] ?? 'Supplier')
-                . '.'
-            );
+                . '.';
+
+            if ($isAjax) {
+                $this->jsonResponse([
+                    'ok' => true,
+                    'message' => $message,
+                    'supplier_name' => (string) ($result['supplier_name'] ?? ''),
+                    'currency' => (string) ($result['currency'] ?? 'PKR'),
+                    'amount' => round((float) ($result['amount'] ?? 0), 2),
+                ]);
+            }
+
+            Flash::success($message);
             $this->redirect('/workspace');
-        } catch (RuntimeException $exception) {
+        } catch (\RuntimeException $exception) {
+            if ($isAjax) {
+                $this->jsonResponse([
+                    'ok' => false,
+                    'message' => $exception->getMessage(),
+                ], 422);
+            }
+
             Flash::error($exception->getMessage());
             $this->redirect('/workspace');
         }
     }
-
     public function applySupplierAdvance(): never
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);
