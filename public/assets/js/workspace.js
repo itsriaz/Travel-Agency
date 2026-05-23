@@ -302,6 +302,26 @@ document.addEventListener('DOMContentLoaded', () => {
     const paymentMethodSelect = paymentForm?.elements?.namedItem('payment_method') instanceof HTMLSelectElement
         ? paymentForm.elements.namedItem('payment_method')
         : null;
+    const paymentReferenceInput = paymentForm?.elements?.namedItem('reference_number') instanceof HTMLInputElement
+        ? paymentForm.elements.namedItem('reference_number')
+        : null;
+    const paymentBankCardDetailInput = paymentForm?.elements?.namedItem('bank_card_detail') instanceof HTMLInputElement
+        ? paymentForm.elements.namedItem('bank_card_detail')
+        : null;
+    const paymentChargesAmountInput = paymentForm?.elements?.namedItem('charges_amount') instanceof HTMLInputElement
+        ? paymentForm.elements.namedItem('charges_amount')
+        : null;
+    const paymentRemarksInput = paymentForm?.elements?.namedItem('receipt_remarks') instanceof HTMLInputElement
+        ? paymentForm.elements.namedItem('receipt_remarks')
+        : null;
+    const paymentDetailModal = station.querySelector('[data-payment-detail-modal]');
+    const paymentDetailCloseButtons = Array.from(station.querySelectorAll('[data-payment-detail-close]'));
+    const paymentDetailMethodLabel = station.querySelector('[data-payment-detail-method-label]');
+    const paymentDetailReferenceInput = station.querySelector('[data-payment-detail-reference]');
+    const paymentDetailBankCardInput = station.querySelector('[data-payment-detail-bank-card]');
+    const paymentDetailChargesInput = station.querySelector('[data-payment-detail-charges]');
+    const paymentDetailRemarksInput = station.querySelector('[data-payment-detail-remarks]');
+    const paymentDetailApplyButton = station.querySelector('[data-payment-detail-apply]');
     const paymentSettlementModeInput = paymentForm?.elements?.namedItem('settlement_mode') instanceof HTMLInputElement
         ? paymentForm.elements.namedItem('settlement_mode')
         : null;
@@ -629,6 +649,7 @@ document.addEventListener('DOMContentLoaded', () => {
             closePaymentHistoryModal();
             closeSupplierSettlementModal();
             closeExchangeSettlementModal({ clear: false });
+            closePaymentDetailModal();
         }
 
         if (event.key !== '/') {
@@ -730,6 +751,121 @@ document.addEventListener('DOMContentLoaded', () => {
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
 
+
+    const paymentMethodLabels = {
+        bank_transfer: 'Bank Transfer',
+        debit_card: 'Debit Card',
+        credit_card: 'Credit Card',
+    };
+
+    const nonCashPaymentMethods = new Set(Object.keys(paymentMethodLabels));
+
+    const isNonCashPaymentMethod = (method) => nonCashPaymentMethods.has(String(method || '').trim());
+
+    const currentPaymentMethodLabel = () => {
+        const method = String(paymentMethodSelect?.value || '').trim();
+
+        return paymentMethodLabels[method] || method.replace(/_/g, ' ').replace(/\b\w/g, (match) => match.toUpperCase()) || 'Payment';
+    };
+
+    const closePaymentDetailModal = () => {
+        if (!paymentDetailModal) {
+            return;
+        }
+
+        paymentDetailModal.hidden = true;
+        paymentDetailModal.setAttribute('aria-hidden', 'true');
+    };
+
+    const clearPaymentDetailHiddenFields = () => {
+        if (paymentReferenceInput) {
+            paymentReferenceInput.value = '';
+        }
+        if (paymentBankCardDetailInput) {
+            paymentBankCardDetailInput.value = '';
+        }
+        if (paymentChargesAmountInput) {
+            paymentChargesAmountInput.value = '0.00';
+        }
+        if (paymentRemarksInput) {
+            paymentRemarksInput.value = '';
+        }
+    };
+
+    const fillPaymentDetailModalFromHidden = () => {
+        if (paymentDetailReferenceInput) {
+            paymentDetailReferenceInput.value = paymentReferenceInput?.value || '';
+        }
+        if (paymentDetailBankCardInput) {
+            paymentDetailBankCardInput.value = paymentBankCardDetailInput?.value || '';
+        }
+        if (paymentDetailChargesInput) {
+            paymentDetailChargesInput.value = paymentChargesAmountInput?.value || '0.00';
+        }
+        if (paymentDetailRemarksInput) {
+            paymentDetailRemarksInput.value = paymentRemarksInput?.value || '';
+        }
+    };
+
+    const openPaymentDetailModal = () => {
+        if (!paymentDetailModal) {
+            return false;
+        }
+
+        if (paymentDetailMethodLabel) {
+            paymentDetailMethodLabel.textContent = `Record reference details for ${currentPaymentMethodLabel()}.`;
+        }
+
+        fillPaymentDetailModalFromHidden();
+        paymentDetailModal.hidden = false;
+        paymentDetailModal.setAttribute('aria-hidden', 'false');
+
+        window.setTimeout(() => {
+            paymentDetailReferenceInput?.focus();
+            paymentDetailReferenceInput?.select();
+        }, 60);
+
+        return true;
+    };
+
+    const applyPaymentDetailModalValues = () => {
+        if (paymentReferenceInput) {
+            paymentReferenceInput.value = String(paymentDetailReferenceInput?.value || '').trim();
+        }
+        if (paymentBankCardDetailInput) {
+            paymentBankCardDetailInput.value = String(paymentDetailBankCardInput?.value || '').trim();
+        }
+        if (paymentChargesAmountInput) {
+            paymentChargesAmountInput.value = Math.max(toNumber(paymentDetailChargesInput?.value || 0), 0).toFixed(2);
+        }
+        if (paymentRemarksInput) {
+            paymentRemarksInput.value = String(paymentDetailRemarksInput?.value || '').trim();
+        }
+
+        closePaymentDetailModal();
+        showFeedback(`${currentPaymentMethodLabel()} details applied.`);
+    };
+
+    const hasPaymentDetailMetadata = () => {
+        return String(paymentReferenceInput?.value || '').trim() !== ''
+            || String(paymentBankCardDetailInput?.value || '').trim() !== ''
+            || String(paymentRemarksInput?.value || '').trim() !== ''
+            || Math.max(toNumber(paymentChargesAmountInput?.value || 0), 0) > 0.005;
+    };
+
+    const ensurePaymentDetailReadyForSave = () => {
+        if (!paymentMethodSelect || !isNonCashPaymentMethod(paymentMethodSelect.value)) {
+            return true;
+        }
+
+        if (hasPaymentDetailMetadata()) {
+            return true;
+        }
+
+        openPaymentDetailModal();
+        showFeedback(`Enter ${currentPaymentMethodLabel()} details before saving payment.`);
+        return false;
+    };
     let serviceSupplierOptions = [];
     try {
         serviceSupplierOptions = JSON.parse(supplierOptionsNode?.textContent || '[]');
@@ -2508,6 +2644,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
+            if (!ensurePaymentDetailReadyForSave()) {
+                showExchangeFeedback(`Enter ${currentPaymentMethodLabel()} details before saving payment.`);
+                return;
+            }
+
             if (receivedNowInput) {
                 receivedNowInput.value = preview.paymentAmount.toFixed(2);
             }
@@ -2575,7 +2716,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (paymentMethodSelect) {
         paymentMethodSelect.addEventListener('change', () => {
-            noteSavedPaymentEditAttempt();
+            if (noteSavedPaymentEditAttempt()) {
+                return;
+            }
+
+            if (isNonCashPaymentMethod(paymentMethodSelect.value)) {
+                openPaymentDetailModal();
+                return;
+            }
+
+            clearPaymentDetailHiddenFields();
+            closePaymentDetailModal();
         });
         paymentMethodSelect.addEventListener('keydown', (event) => {
             if (event.key !== 'Enter') {
@@ -2586,6 +2737,20 @@ document.addEventListener('DOMContentLoaded', () => {
             if (paymentPrimarySaveButton) {
                 paymentPrimarySaveButton.focus();
             }
+        });
+    }
+
+    paymentDetailCloseButtons.forEach((button) => {
+        button.addEventListener('click', () => {
+            closePaymentDetailModal();
+            paymentMethodSelect?.focus();
+        });
+    });
+
+    if (paymentDetailApplyButton) {
+        paymentDetailApplyButton.addEventListener('click', () => {
+            applyPaymentDetailModalValues();
+            paymentPrimarySaveButton?.focus();
         });
     }
 
@@ -2723,6 +2888,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             }
 
+            if (!ensurePaymentDetailReadyForSave()) {
+                return;
+            }
             const csrfField = paymentForm.elements.namedItem('_token');
             const csrfToken = csrfField instanceof HTMLInputElement ? csrfField.value.trim() : '';
             const formData = new FormData(paymentForm);

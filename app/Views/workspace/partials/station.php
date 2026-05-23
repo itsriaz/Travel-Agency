@@ -893,6 +893,40 @@ Kept here in case manual service save is needed again later.
             <input type="hidden" name="settlement_rate_to_currency" value="" data-payment-settlement-rate-to>
             <input type="hidden" name="settlement_exchange_rate" value="" data-payment-settlement-rate>
             <input type="hidden" name="settlement_exchange_rate_effective_date" value="<?= e(date('Y-m-d')) ?>" data-payment-settlement-rate-date>
+    <section class="customer-picker-modal customer-picker-modal--child" data-payment-detail-modal hidden aria-hidden="true">
+        <div class="customer-picker-modal__backdrop" data-payment-detail-close></div>
+        <div class="customer-picker-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="payment-detail-title" style="max-width:620px;">
+            <header class="customer-picker-modal__header">
+                <h3 id="payment-detail-title">Payment Details</h3>
+                <button type="button" class="customer-picker-modal__close" data-payment-detail-close>&times;</button>
+            </header>
+            <div class="customer-picker-modal__body">
+                <p class="muted-text" data-payment-detail-method-label>Record reference details for this non-cash payment.</p>
+                <div class="legacy-modal-grid">
+                    <label class="span-2">
+                        <span>Reference / Transaction No.</span>
+                        <input type="text" maxlength="100" data-payment-detail-reference placeholder="Transaction ID, slip no., approval code">
+                    </label>
+                    <label class="span-2">
+                        <span>Bank / Channel / Card Detail</span>
+                        <input type="text" maxlength="190" data-payment-detail-bank-card placeholder="Bank name, channel, POS, last 4 digits">
+                    </label>
+                    <label>
+                        <span>Charges</span>
+                        <input type="number" step="0.01" min="0" value="0.00" data-payment-detail-charges>
+                    </label>
+                    <label class="span-2">
+                        <span>Remarks</span>
+                        <input type="text" maxlength="4000" data-payment-detail-remarks placeholder="Optional note">
+                    </label>
+                </div>
+                <div class="modal-actions">
+                    <button type="button" class="btn btn-primary btn-sm" data-payment-detail-apply>Apply Details</button>
+                    <button type="button" class="btn btn-sm" data-payment-detail-close>Cancel</button>
+                </div>
+            </div>
+        </div>
+    </section>
         </form>
     </div>
 
