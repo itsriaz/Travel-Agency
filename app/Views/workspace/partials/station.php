@@ -2347,6 +2347,25 @@ Kept here in case manual service save is needed again later.
                     }
                     return;
                 }
+                
+                                if (target.matches('select[name="payment_method"]')) {
+                    event.preventDefault();
+                    event.stopPropagation();
+
+                    var saveButton = station.querySelector('[data-payment-submit-action="save"]');
+
+                    if (saveButton && !saveButton.disabled && isVisibleAction(saveButton)) {
+                        scrollAndFocus(saveButton);
+
+                        window.setTimeout(function () {
+                            saveButton.click();
+                        }, 140);
+                    }
+
+                    return;
+                }
+
+               
 
                 if (target.matches('[data-payment-submit-action="save"]')) {
                     event.preventDefault();
