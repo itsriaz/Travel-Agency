@@ -550,6 +550,125 @@ if ($outputType === 'supplier_voucher' && (int) ($booking['id'] ?? 0) > 0) {
             </section>
         <?php endif; ?>
 
+        <?php if ($outputType === 'booking_summary_receipt'): ?>
+            <?php
+            $bookingSummaryPaymentRows = [];
+
+            foreach ($invoicePaymentHistoryRows as $historyRow) {
+                $receiptNo = trim((string) ($historyRow['receiptNo'] ?? ''));
+                $receiptId = (int) ($historyRow['receiptId'] ?? 0);
+                $receiptKey = $receiptId > 0 ? 'id:' . $receiptId : 'no:' . $receiptNo;
+
+                if ($receiptKey === 'no:') {
+                    $receiptKey = 'row:' . count($bookingSummaryPaymentRows);
+                }
+
+                if (!isset($bookingSummaryPaymentRows[$receiptKey])) {
+                    $bookingSummaryPaymentRows[$receiptKey] = [
+                        'receiptNo' => $receiptNo,
+                        'allocatedAt' => (string) ($historyRow['allocatedAt'] ?? ''),
+                        'status' => (string) ($historyRow['receiptStatusRaw'] ?? $historyRow['receiptStatus'] ?? 'posted'),
+                        'totals' => [],
+                    ];
+                }
+
+                $currency = (string) ($historyRow['receivableCurrency'] ?? $historyRow['currency'] ?? 'PKR');
+                $amount = (float) ($historyRow['receivableAmountAllocated'] ?? $historyRow['allocatedAmount'] ?? 0);
+
+                if ($currency !== '' && abs($amount) > 0.005) {
+                    $bookingSummaryPaymentRows[$receiptKey]['totals'][$currency] =
+                        (float) ($bookingSummaryPaymentRows[$receiptKey]['totals'][$currency] ?? 0) + $amount;
+                }
+            }
+            ?>
+
+            <section class="output-block">
+                <h2>Booking Summary Receipt</h2>
+                <div class="output-summary-strip">
+                    <div><span>Booking / Invoice No.</span><strong><?= e($bookingReference) ?></strong></div>
+                    <div><span>Customer</span><strong><?= e($customerName) ?></strong></div>
+                    <div><span>Total Invoice Amount</span><strong><?= e($formatCurrencyTotals($invoiceReceivableTotals !== [] ? $invoiceReceivableTotals : ['PKR' => 0])) ?></strong></div>
+                    <div><span>Total Paid</span><strong><?= e($formatCurrencyTotals($invoiceReceivedTotals !== [] ? $invoiceReceivedTotals : ['PKR' => 0])) ?></strong></div>
+                    <div><span>Balance Due</span><strong><?= e($formatCurrencyTotals($invoiceOutstandingTotals !== [] ? $invoiceOutstandingTotals : ['PKR' => 0])) ?></strong></div>
+                    <?php if ($bookingDueDate !== ''): ?>
+                        <div><span>Due Date</span><strong><?= e($bookingDueDate) ?></strong></div>
+                    <?php endif; ?>
+                </div>
+            </section>
+
+            <section class="output-block">
+                <h2>Services Included in This Booking</h2>
+                <table class="output-table">
+                    <thead>
+                    <tr>
+                        <th>Line</th>
+                        <th>Service</th>
+                        <th>Passenger</th>
+                        <th>Ticket / Ref.</th>
+                        <th>Detail</th>
+                        <th>Currency</th>
+                        <th>Amount</th>
+                        <th>Status</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    <?php foreach ($services as $service): ?>
+                        <?php
+                        $summaryServiceReference = trim((string) (($service['ticket_number'] ?? '') !== '' ? $service['ticket_number'] : ($service['line_reference'] ?? '')));
+                        $summaryPassenger = trim((string) ($service['passenger_name'] ?? ''));
+                        $summaryFinalSale = (float) ($service['final_sale_price'] ?? 0);
+                        $summaryServiceAmount = abs($summaryFinalSale) > 0.005
+                            ? $summaryFinalSale
+                            : (float) ($service['sale_price'] ?? 0)
+                                + (float) ($service['service_charge'] ?? 0)
+                                - (float) ($service['discount_amount'] ?? 0);
+                        ?>
+                        <tr>
+                            <td><?= e((string) ($service['line_reference'] ?? '')) ?></td>
+                            <td><?= e(ucwords((string) ($service['service_type'] ?? 'service'))) ?></td>
+                            <td><?= e($summaryPassenger !== '' ? $summaryPassenger : $customerName) ?></td>
+                            <td><?= e($summaryServiceReference !== '' ? $summaryServiceReference : 'N/A') ?></td>
+                            <td><?= e($cleanServiceDescription($service)) ?></td>
+                            <td><?= e((string) ($service['currency'] ?? 'PKR')) ?></td>
+                            <td><?= e($formatMoney($summaryServiceAmount)) ?></td>
+                            <td><?= e(ucwords((string) ($service['status'] ?? 'Open'))) ?></td>
+                        </tr>
+                    <?php endforeach; ?>
+                    <?php if ($services === []): ?>
+                        <tr><td colspan="8">No service lines recorded for this booking yet.</td></tr>
+                    <?php endif; ?>
+                    </tbody>
+                </table>
+            </section>
+
+            <section class="output-block">
+                <h2>Payments Applied to This Booking</h2>
+                <table class="output-table">
+                    <thead>
+                    <tr>
+                        <th>Receipt No.</th>
+                        <th>Applied At</th>
+                        <th>Amount Applied</th>
+                        <th>Status</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    <?php if ($bookingSummaryPaymentRows === []): ?>
+                        <tr><td colspan="4">No customer payment has been applied to this booking yet.</td></tr>
+                    <?php endif; ?>
+                    <?php foreach ($bookingSummaryPaymentRows as $paymentRow): ?>
+                        <tr>
+                            <td><?= e((string) ($paymentRow['receiptNo'] ?? '')) ?></td>
+                            <td><?= e((string) ($paymentRow['allocatedAt'] ?? '')) ?></td>
+                            <td><?= e($formatCurrencyTotals($paymentRow['totals'] ?? [])) ?></td>
+                            <td><?= e($formatStatusLabel((string) ($paymentRow['status'] ?? 'posted'))) ?></td>
+                        </tr>
+                    <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </section>
+        <?php endif; ?>
+
         <?php if ($outputType === 'customer_receipt' && $selectedReceipt !== null): ?>
             <section class="receipt-sheet">
                 <header class="receipt-sheet__head">
@@ -678,56 +797,147 @@ openReceivables: <?= e(json_encode($receiptDebug['openReceivables'], JSON_PRETTY
                     <?php endif; ?>
                 </section>
 
-                <section class="receipt-card">
+                                <section class="receipt-card">
+                    <?php
+                    $receiptPaymentHistoryRows = [];
+
+                    foreach ($invoicePaymentHistoryRows as $historyRow) {
+                        $receiptNo = trim((string) ($historyRow['receiptNo'] ?? ''));
+                        $receiptId = (int) ($historyRow['receiptId'] ?? 0);
+                        $historyKey = $receiptId > 0 ? 'id:' . $receiptId : 'no:' . $receiptNo;
+
+                        if ($historyKey === 'no:') {
+                            $historyKey = 'row:' . count($receiptPaymentHistoryRows);
+                        }
+
+                        if (!isset($receiptPaymentHistoryRows[$historyKey])) {
+                            $receiptPaymentHistoryRows[$historyKey] = [
+                                'receiptNo' => $receiptNo,
+                                'receiptDate' => (string) ($historyRow['receiptDate'] ?? ''),
+                                'paymentReceivedDisplay' => $getOriginalReceiptPaymentDisplay($historyRow),
+                                'currencyTotals' => [],
+                                'isCurrentReceipt' => false,
+                            ];
+                        }
+
+                        $historyCurrency = (string) ($historyRow['receivableCurrency'] ?? $historyRow['currency'] ?? $receiptCurrency);
+                        $historyAmount = (float) ($historyRow['receivableAmountAllocated'] ?? $historyRow['allocatedAmount'] ?? 0);
+
+                        if ($historyCurrency !== '' && abs($historyAmount) > 0.005) {
+                            $receiptPaymentHistoryRows[$historyKey]['currencyTotals'][$historyCurrency] =
+                                (float) ($receiptPaymentHistoryRows[$historyKey]['currencyTotals'][$historyCurrency] ?? 0) + $historyAmount;
+                        }
+
+                        if ($isSelectedReceiptHistoryRow($historyRow)) {
+                            $receiptPaymentHistoryRows[$historyKey]['isCurrentReceipt'] = true;
+                        }
+                    }
+                    ?>
+
                     <h2 style="margin:0 0 12px;">Invoice Payment History</h2>
                     <table class="output-table receipt-table">
-                        <thead><tr><th>Receipt No.</th><th>Receipt Date</th><th>Payment Received</th><th>Invoice Payment</th><th>Current Receipt</th></tr></thead>                        <tbody>
-                        <?php if ($invoicePaymentHistoryRows === []): ?>
+                        <thead>
+                        <tr>
+                            <th>Receipt No.</th>
+                            <th>Receipt Date</th>
+                            <th>Payment Received</th>
+                            <th>Invoice Payment</th>
+                            <th>Current Receipt</th>
+                        </tr>
+                        </thead>
+                        <tbody>
+                        <?php if ($receiptPaymentHistoryRows === []): ?>
                             <tr><td colspan="5">No payment history is available for this invoice yet.</td></tr>
                         <?php endif; ?>
-                        <?php foreach ($invoicePaymentHistoryRows as $historyRow): ?>
-                            <?php
-                            $historyCurrency = (string) ($historyRow['receivableCurrency'] ?? $historyRow['currency'] ?? $receiptCurrency);
-                            $historyAmount = (float) ($historyRow['receivableAmountAllocated'] ?? $historyRow['allocatedAmount'] ?? 0);
-                            ?>
+                        <?php foreach ($receiptPaymentHistoryRows as $historyRow): ?>
                             <tr>
-    <td><?= e((string) ($historyRow['receiptNo'] ?? '')) ?></td>
-    <td><?= e((string) ($historyRow['receiptDate'] ?? '')) ?></td>
-    <td><?= e($getOriginalReceiptPaymentDisplay($historyRow)) ?></td>
-    <td><?= e($historyCurrency) ?> <?= e($formatMoney($historyAmount)) ?></td>
-    <td><?= e($isSelectedReceiptHistoryRow($historyRow) ? 'Current Receipt' : 'Previous Payment') ?></td>
-</tr>
+                                <td><?= e((string) ($historyRow['receiptNo'] ?? '')) ?></td>
+                                <td><?= e((string) ($historyRow['receiptDate'] ?? '')) ?></td>
+                                <td><?= e((string) ($historyRow['paymentReceivedDisplay'] ?? '')) ?></td>
+                                <td><?= e($formatCurrencyTotals($historyRow['currencyTotals'] ?? [])) ?></td>
+                                <td><?= e(($historyRow['isCurrentReceipt'] ?? false) ? 'Current Receipt' : 'Previous Payment') ?></td>
+                            </tr>
                         <?php endforeach; ?>
                         </tbody>
                     </table>
                 </section>
 
-                <section class="receipt-card">
-                    <h2 style="margin:0 0 12px;">Details</h2>
+                                <section class="receipt-card">
+                    <?php
+                    $currentReceiptAllocationsByLine = [];
+
+                    foreach ($invoicePaymentHistoryRows as $historyRow) {
+                        if (!$isSelectedReceiptHistoryRow($historyRow)) {
+                            continue;
+                        }
+
+                        $lineReference = trim((string) ($historyRow['serviceLineReference'] ?? ''));
+                        if ($lineReference === '') {
+                            $lineReference = 'allocation:' . count($currentReceiptAllocationsByLine);
+                        }
+
+                        if (!isset($currentReceiptAllocationsByLine[$lineReference])) {
+                            $currentReceiptAllocationsByLine[$lineReference] = [
+                                'totals' => [],
+                            ];
+                        }
+
+                        $allocationCurrency = (string) ($historyRow['receivableCurrency'] ?? $historyRow['currency'] ?? $receiptCurrency);
+                        $allocationAmount = (float) ($historyRow['receivableAmountAllocated'] ?? $historyRow['allocatedAmount'] ?? 0);
+
+                        if ($allocationCurrency !== '' && abs($allocationAmount) > 0.005) {
+                            $currentReceiptAllocationsByLine[$lineReference]['totals'][$allocationCurrency] =
+                                (float) ($currentReceiptAllocationsByLine[$lineReference]['totals'][$allocationCurrency] ?? 0) + $allocationAmount;
+                        }
+                    }
+                    ?>
+
+                    <h2 style="margin:0 0 12px;">Service Payment Details</h2>
                     <table class="output-table receipt-table">
-                        <thead><tr><th>#</th><th>Invoice No.</th><th>Service</th><th>Passenger</th><th>Type</th><th>Currency</th><th>Amount</th><th>Balance After Allocation</th></tr></thead>
+                        <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>Service Ref.</th>
+                            <th>Service</th>
+                            <th>Passenger</th>
+                            <th>Currency</th>
+                            <th>Service Amount</th>
+                            <th>Applied From This Receipt</th>
+                            <th>Status</th>
+                        </tr>
+                        </thead>
                         <tbody>
-                        <?php if ($receiptAllocations === []): ?>
-                            <tr><td colspan="8">No allocation rows were posted for this receipt yet.</td></tr>
+                        <?php if ($services === []): ?>
+                            <tr><td colspan="8">No service lines recorded for this booking yet.</td></tr>
                         <?php endif; ?>
-                        <?php foreach ($receiptAllocations as $index => $allocation): ?>
+                        <?php foreach ($services as $serviceIndex => $service): ?>
                             <?php
-                            $allocationCurrency = (string) ($allocation['receivableCurrency'] ?? $allocation['currency'] ?? $receiptCurrency);
-                            $allocationAmount = (float) ($allocation['receivableAmountAllocated'] ?? $allocation['allocatedAmount'] ?? 0);
-                            $remainingAmount = (float) ($allocation['remainingAfterAllocation'] ?? 0);
-                            $allocationType = (string) ($allocation['allocationType'] ?? 'Allocated');
-                            $allocationPassenger = trim((string) ($allocation['passengerName'] ?? ''));
-                            $allocationReceiptStatusRaw = str_replace(' ', '_', mb_strtolower(trim((string) ($allocation['receiptStatusRaw'] ?? ''))));
+                            $lineReference = trim((string) ($service['line_reference'] ?? ''));
+                            $serviceCurrency = (string) ($service['currency'] ?? $receiptCurrency);
+                            $servicePassenger = trim((string) ($service['passenger_name'] ?? ''));
+                            $serviceFinalSale = (float) ($service['final_sale_price'] ?? 0);
+                            $serviceAmount = abs($serviceFinalSale) > 0.005
+                                ? $serviceFinalSale
+                                : (float) ($service['sale_price'] ?? 0)
+                                    + (float) ($service['service_charge'] ?? 0)
+                                    - (float) ($service['discount_amount'] ?? 0);
+
+                            $appliedTotals = $lineReference !== '' && isset($currentReceiptAllocationsByLine[$lineReference])
+                                ? (array) ($currentReceiptAllocationsByLine[$lineReference]['totals'] ?? [])
+                                : [];
+
+                            $appliedTotalAmount = array_sum(array_map('floatval', $appliedTotals));
+                            $appliedDisplayTotals = $appliedTotals !== [] ? $appliedTotals : [$serviceCurrency => 0];
                             ?>
                             <tr>
-                                <td><?= e((string) ($index + 1)) ?></td>
-                                <td><?= e((string) ($allocation['bookingReference'] ?? 'N/A')) ?></td>
-                                <td><?= e((string) ($allocation['serviceType'] ?? 'Service')) ?></td>
-                                <td><?= e($allocationPassenger !== '' ? $allocationPassenger : $customerName) ?></td>
-                                <td><?= e($allocationType === 'Previous Outstanding' ? 'Previous Balance' : ($allocationType === 'Customer Credit / Unallocated' ? 'Customer Credit' : $allocationType)) ?></td>
-                                <td><?= e($allocationCurrency) ?></td>
-                                <td><?= e($allocationCurrency) ?> <?= e($formatMoney($allocationAmount)) ?></td>
-                                <td><?php if ($allocationReceiptStatusRaw === 'void'): ?>VOIDED<?php else: ?><?= e($allocationCurrency) ?> <?= e($formatMoney($remainingAmount)) ?><?php endif; ?></td>
+                                <td><?= e((string) ($serviceIndex + 1)) ?></td>
+                                <td><?= e($lineReference !== '' ? $lineReference : 'N/A') ?></td>
+                                <td><?= e(ucwords((string) ($service['service_type'] ?? 'Service'))) ?></td>
+                                <td><?= e($servicePassenger !== '' ? $servicePassenger : $customerName) ?></td>
+                                <td><?= e($serviceCurrency) ?></td>
+                                <td><?= e($formatMoney($serviceAmount)) ?></td>
+                                <td><?= e($formatCurrencyTotals($appliedDisplayTotals)) ?></td>
+                                <td><?= e(abs($appliedTotalAmount) > 0.005 ? 'Applied in this receipt' : 'Not applied in this receipt') ?></td>
                             </tr>
                         <?php endforeach; ?>
                         </tbody>

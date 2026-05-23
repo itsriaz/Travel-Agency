@@ -422,7 +422,10 @@ final class CommercialObligationSyncService extends Service
             return $this->airTicketPayableAmount($service);
         }
 
-        return round((float) ($service['purchase_cost'] ?? 0), 2);
+        $purchaseCost = round((float) ($service['purchase_cost'] ?? 0), 2);
+        $mktFare = round((float) ($service['sale_price'] ?? 0), 2);
+
+        return $purchaseCost > 0.005 ? $purchaseCost : $mktFare;
     }
 
     private function airTicketPayableAmount(array $service): float

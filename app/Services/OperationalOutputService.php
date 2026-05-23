@@ -16,6 +16,7 @@ final class OperationalOutputService extends Service
     private const OUTPUT_TYPES = [
         'invoice' => 'Customer Invoice',
         'customer_receipt' => 'Customer Receipt',
+        'booking_summary_receipt' => 'Booking Summary Receipt',
         'service_refund_receipt' => 'Cancellation / Refund Receipt',
         'supplier_voucher' => 'Supplier Voucher / Payment Document',
         'account_statement' => 'Account Statement',

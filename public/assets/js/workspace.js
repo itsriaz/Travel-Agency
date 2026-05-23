@@ -595,7 +595,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     });
                     clearPaymentDetailHiddenFields();
                     closePaymentDetailModal();
-                    showFeedback('New service row ready. Passenger name is ready and editable.');
+                    showFeedback('Service line is ready. Confirm passenger details and continue.');
                     if (servicePassengerNameField instanceof HTMLElement) {
                         servicePassengerNameField.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
                         window.setTimeout(() => {
@@ -2956,11 +2956,6 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             const receivedAmount = Math.max(toNumber(receivedNowInput?.value || 0), 0);
-            if (receivedAmount <= 0.005) {
-                showFeedback('Please enter a valid received amount.');
-                receivedNowInput?.focus();
-                return;
-            }
 
             clearExchangeSettlementFields();
 
@@ -2987,6 +2982,73 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             }
 
+            if (receivedAmount <= 0.005) {
+                if (receivedNowInput) {
+                    receivedNowInput.value = '0.00';
+                }
+                if (quickReceiveInput) {
+                    quickReceiveInput.value = '0.00';
+                }
+
+                paymentSubmitDebug.currentBookingId = currentBookingId();
+                paymentSubmitDebug.parsedAmountReceiving = 0;
+                paymentSubmitDebug.paymentCurrency = selectedPaymentCurrency;
+                paymentSubmitDebug.invoiceCurrency = invoiceSnapshot.invoiceCurrency;
+                paymentSubmitDebug.dueDate = paymentDueDateInput?.value || '';
+                paymentSubmitDebug.lastAttemptedPayload = {
+                    booking_id: currentBookingId(),
+                    received_amount: '0.00',
+                    receipt_action: 'no_receipt',
+                };
+
+                if (paymentPrimarySaveButton) {
+                    paymentPrimarySaveButton.disabled = true;
+                    paymentPrimarySaveButton.textContent = 'Saving...';
+                }
+
+                try {
+                    if (typeof serviceAutosaveReady === 'function' && serviceAutosaveReady()) {
+                        const servicePayload = await persistServiceAutosave();
+                        if (servicePayload) {
+                            refreshSettlementDataFromPayload(servicePayload);
+                            refreshPaymentHistoryFromPayload(servicePayload);
+                            applyAutosavePaymentFoundation(servicePayload, { syncCommercialEditor: false });
+                        }
+                    }
+
+                    if (typeof autosaveBookingReady === 'function' && autosaveBookingReady()) {
+                        const invoicePayload = await persistInvoiceAutosave({ force: true });
+                        if (invoicePayload) {
+                            refreshSettlementDataFromPayload(invoicePayload);
+                            refreshPaymentHistoryFromPayload(invoicePayload);
+                            applyAutosavePaymentFoundation(invoicePayload, { syncCommercialEditor: false });
+                        }
+                    }
+                } catch (zeroPaymentSaveError) {
+                    throw new Error(zeroPaymentSaveError instanceof Error ? zeroPaymentSaveError.message : 'Booking could not be updated without payment.');
+                }
+
+                clearPaymentDetailHiddenFields();
+                closePaymentDetailModal();
+                clearSavedPaymentState({
+                    clearAmount: false,
+                    resetPaymentCurrency: false,
+                    closeExchange: true,
+                    showReadyMessage: false,
+                });
+                refreshPaymentPreview();
+                syncSavedPaymentUiState();
+
+                showFeedback('No payment recorded. Booking remains outstanding and can be paid later.');
+                station.dispatchEvent(new CustomEvent('workspace:payment-zero-saved', {
+                    bubbles: true,
+                    detail: {
+                        booking_id: currentBookingId(),
+                        received_amount: 0,
+                    },
+                }));
+                return;
+            }
             if (!ensurePaymentDetailReadyForSave()) {
                 return;
             }
@@ -4132,7 +4194,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         return isAirTicket
             ? roundToTwo(toNumber(serviceMetricInputs.sale?.value) + currentServiceTaxTotal())
-            : roundToTwo(toNumber(serviceMetricInputs.cost?.value));
+            : roundToTwo(toNumber(serviceMetricInputs.sale?.value));
     };
 
     const defaultFinalSalePrice = (receivableBaseOverride = null) => {
@@ -4208,6 +4270,17 @@ document.addEventListener('DOMContentLoaded', () => {
         if (activeServiceType) {
             activeServiceType.textContent = serviceTypeField.value.replace(/\b\w/g, (character) => character.toUpperCase());
         }
+    };
+
+    const serviceLinePayableAmount = (serviceLine) => {
+        const serviceType = String(serviceLine?.type || 'air ticket');
+        const purchaseCost = toNumber(serviceLine?.purchaseCost);
+
+        if (serviceType === 'air ticket') {
+            return purchaseCost;
+        }
+
+        return purchaseCost > 0.005 ? purchaseCost : toNumber(serviceLine?.salePrice);
     };
 
     const serviceReceivableAmount = (serviceLine) => {
@@ -4318,10 +4391,12 @@ document.addEventListener('DOMContentLoaded', () => {
         refreshAirlineCommissionTotal();
         const isAirTicket = isAirTicketServiceType();
         const taxTotal = currentServiceTaxTotal();
-        const airlinePayable = currentServicePayableAmount();
-        const otherPayable = 0;
+        const supplierPayable = currentServicePayableAmount();
+        const airlinePayable = isAirTicket ? supplierPayable : 0;
+        const otherPayable = isAirTicket ? 0 : supplierPayable;
+        const totalPayable = airlinePayable + otherPayable;
         const currentManualOverride = finalSalePriceInput.dataset.manualOverride === '1';
-        const suggestedFinalSalePrice = defaultFinalSalePrice(isAirTicket ? airlinePayable : toNumber(serviceMetricInputs.sale?.value));
+        const suggestedFinalSalePrice = defaultFinalSalePrice(totalPayable);
         updateCommercialTrace({
             lastMktFareRead: toNumber(serviceMetricInputs.sale?.value).toFixed(2),
             lastServAmountRead: toNumber(serviceMetricInputs.serviceCharge?.value).toFixed(2),
@@ -4342,12 +4417,12 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         const finalSalePrice = toNumber(finalSalePriceInput.value);
         const receivable = finalSalePrice;
-        const profit = receivable - airlinePayable - otherPayable;
-        const lossAmount = Math.max(airlinePayable - finalSalePrice, 0);
+        const profit = receivable - totalPayable;
+        const lossAmount = Math.max(totalPayable - finalSalePrice, 0);
         const hasLoss = lossAmount > 0.005;
 
         if (serviceMetricInputs.cost) {
-            serviceMetricInputs.cost.value = airlinePayable.toFixed(2);
+            serviceMetricInputs.cost.value = supplierPayable.toFixed(2);
             updateCommercialTrace({
                 lastFieldWritten: `purchase_cost=${serviceMetricInputs.cost.value}`,
                 lastOverwriteSource: source,
@@ -4401,7 +4476,7 @@ document.addEventListener('DOMContentLoaded', () => {
             bottomTotalFields.receivable.value = formatMoney(receivable);
         }
         if (bottomTotalFields.payable) {
-            bottomTotalFields.payable.value = formatMoney(airlinePayable);
+            bottomTotalFields.payable.value = formatMoney(totalPayable);
         }
         if (bottomTotalFields.profit) {
             bottomTotalFields.profit.value = formatMoney(profit);
@@ -4705,7 +4780,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 : serviceReceivableAmount(serviceLine);
             const linePayable = Math.abs(toNumber(serviceLine.rowPayable)) > 0.005
                 ? toNumber(serviceLine.rowPayable)
-                : toNumber(serviceLine.purchaseCost);
+                : serviceLinePayableAmount(serviceLine);
             const lineProfit = Math.abs(toNumber(serviceLine.rowProfit)) > 0.005
                 ? toNumber(serviceLine.rowProfit)
                 : (lineReceivable - linePayable);
@@ -4799,7 +4874,7 @@ document.addEventListener('DOMContentLoaded', () => {
             : serviceReceivableAmount(mergedLine);
         mergedLine.rowPayable = Math.abs(toNumber(mergedLine.rowPayable)) > 0.005
             ? toNumber(mergedLine.rowPayable)
-            : toNumber(mergedLine.purchaseCost);
+            : serviceLinePayableAmount(mergedLine);
         mergedLine.rowSpTotal = Math.abs(toNumber(mergedLine.rowSpTotal)) > 0.005
             ? toNumber(mergedLine.rowSpTotal)
             : mergedLine.rowReceivable;
@@ -5345,6 +5420,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const otherCurrencyPreviousBalanceMap = totals.other_currency_previous_balance_map && typeof totals.other_currency_previous_balance_map === 'object'
             ? totals.other_currency_previous_balance_map
             : null;
+        const airlinePayable = toNumber(totals.airline_payable || 0);
+        const otherPayable = toNumber(totals.other_payable || 0);
 
         if (syncCommercialEditor) {
             [airlinePayableField, airlinePayableFinancialField, airlinePayableSummary, ticketValueField].forEach((node) => {
@@ -5353,9 +5430,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
 
                 if ('value' in node) {
-                    node.value = formatMoney(payable);
+                    node.value = formatMoney(airlinePayable);
                 } else {
-                    node.textContent = formatMoney(payable);
+                    node.textContent = formatMoney(airlinePayable);
                 }
             });
             [clientReceivableField, clientReceivableSummary, totalSpField].forEach((node) => {
@@ -5370,7 +5447,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             });
             if (otherPayableSummary) {
-                otherPayableSummary.textContent = formatMoney(toNumber(totals.other_payable || 0));
+                otherPayableSummary.textContent = formatMoney(otherPayable);
             }
             if (serviceProfit) {
                 serviceProfit.textContent = formatMoney(profit);

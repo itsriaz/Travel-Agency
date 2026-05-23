@@ -1663,6 +1663,8 @@ final class WorkspaceController extends BaseController
         $totalOther = 0.0;
         $totalReceivable = 0.0;
         $totalPayable = 0.0;
+        $airlinePayable = 0.0;
+        $otherPayable = 0.0;
         $profitLoss = 0.0;
 
         foreach ($activeServices as $serviceRow) {
@@ -1684,7 +1686,11 @@ final class WorkspaceController extends BaseController
                     2
                 );
 
-            $payableAmount = (float) ($serviceRow['purchase_cost'] ?? 0);
+            $isAirTicket = (string) ($serviceRow['service_type'] ?? 'air ticket') === 'air ticket';
+            $storedPurchaseCost = (float) ($serviceRow['purchase_cost'] ?? 0);
+            $payableAmount = $isAirTicket
+                ? $storedPurchaseCost
+                : ($storedPurchaseCost > 0.005 ? $storedPurchaseCost : (float) ($serviceRow['sale_price'] ?? 0));
             $receivableAmount = $finalSalePrice;
 
             $totalFare += (float) (($serviceRow['fare'] ?? 0) !== null && (float) ($serviceRow['fare'] ?? 0) > 0
@@ -1694,6 +1700,11 @@ final class WorkspaceController extends BaseController
             $totalOther += (float) ($serviceRow['service_charge'] ?? 0);
             $totalReceivable += $receivableAmount;
             $totalPayable += $payableAmount;
+            if ($isAirTicket) {
+                $airlinePayable += $payableAmount;
+            } else {
+                $otherPayable += $payableAmount;
+            }
             $profitLoss += $receivableAmount - $payableAmount;
         }
 
@@ -1754,9 +1765,9 @@ final class WorkspaceController extends BaseController
         );
 
         return [
-            'airline_payable' => round($totalPayable, 2),
+            'airline_payable' => round($airlinePayable, 2),
             'receivable_client' => round($totalReceivable, 2),
-            'other_payable' => 0.0,
+            'other_payable' => round($otherPayable, 2),
             'profit_loss' => round($profitLoss, 2),
             'total_fare' => round($totalFare, 2),
             'total_taxes' => round($totalTaxes, 2),
@@ -1787,9 +1798,12 @@ final class WorkspaceController extends BaseController
         $finalSalePrice = array_key_exists('final_sale_price', $serviceRow) && $serviceRow['final_sale_price'] !== null
             ? (float) $serviceRow['final_sale_price']
             : $derivedFinalSalePrice;
+        $payableAmount = $isAirTicket
+            ? (float) ($serviceRow['purchase_cost'] ?? 0)
+            : ((float) ($serviceRow['purchase_cost'] ?? 0) > 0.005 ? (float) ($serviceRow['purchase_cost'] ?? 0) : (float) ($serviceRow['sale_price'] ?? 0));
         $profit = array_key_exists('net_profit_loss', $serviceRow)
             ? (float) ($serviceRow['net_profit_loss'] ?? 0)
-            : round($finalSalePrice - (float) ($serviceRow['purchase_cost'] ?? 0), 2);
+            : round($finalSalePrice - $payableAmount, 2);
 
         return [
             'serviceId' => (int) ($serviceRow['id'] ?? 0),
@@ -1801,7 +1815,7 @@ final class WorkspaceController extends BaseController
             'passengerName' => (string) ($serviceRow['passenger_name'] ?? $serviceRow['passenger_name_snapshot'] ?? ''),
             'currency' => (string) ($serviceRow['currency'] ?? 'PKR'),
             'salePrice' => (float) ($serviceRow['sale_price'] ?? 0),
-            'purchaseCost' => (float) ($serviceRow['purchase_cost'] ?? 0),
+            'purchaseCost' => $payableAmount,
             'taxes' => (float) ($serviceRow['taxes'] ?? 0),
             'otherFare' => (float) ($serviceRow['other_fare'] ?? 0),
             'sotoFare' => (float) ($serviceRow['soto_fare'] ?? 0),

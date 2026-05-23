@@ -878,6 +878,8 @@ final class ServiceWorkspaceService extends Service
 
         if ($serviceType === 'air ticket') {
             $master['purchase_cost'] = $this->airTicketPayableAmount($master);
+        } else {
+            $master['purchase_cost'] = $master['sale_price'];
         }
 
         $master['final_sale_price'] = $this->finalSalePriceAmount($master, $input);
