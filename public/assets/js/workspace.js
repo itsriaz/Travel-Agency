@@ -587,8 +587,26 @@ document.addEventListener('DOMContentLoaded', () => {
                     break;
                 case 'add-service':
                     resetServiceLine();
-                    showFeedback('New service row ready. Enter details in the service band.');
-                    focusTarget('[data-service-field="type"]');
+                    clearSavedPaymentState({
+                        clearAmount: true,
+                        resetPaymentCurrency: true,
+                        closeExchange: true,
+                        showReadyMessage: false,
+                    });
+                    clearPaymentDetailHiddenFields();
+                    closePaymentDetailModal();
+                    showFeedback('New service row ready. Passenger name is ready and editable.');
+                    if (servicePassengerNameField instanceof HTMLElement) {
+                        servicePassengerNameField.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+                        window.setTimeout(() => {
+                            servicePassengerNameField.focus();
+                            if (servicePassengerNameField instanceof HTMLInputElement) {
+                                servicePassengerNameField.select();
+                            }
+                        }, 80);
+                    } else {
+                        focusTarget('[data-service-passenger-name]');
+                    }
                     break;
                 case 'add-payment':
                     activateDock('payments', {
@@ -5609,6 +5627,24 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     };
 
+    const forceElementsEnabled = (elements) => {
+        elements.forEach((element) => {
+            if (element instanceof HTMLAnchorElement) {
+                element.classList.remove('is-disabled');
+                element.setAttribute('aria-disabled', 'false');
+                element.removeAttribute('tabindex');
+                return;
+            }
+
+            if (element instanceof HTMLButtonElement
+                || element instanceof HTMLInputElement
+                || element instanceof HTMLSelectElement
+                || element instanceof HTMLTextAreaElement) {
+                element.dataset.workflowOriginalDisabled = '0';
+                element.disabled = false;
+            }
+        });
+    };
     updateWorkflowState = () => {
         const customerReady = hasSelectedCustomer();
         const hasPersistedService = currentPersistedServiceId() > 0
@@ -5621,6 +5657,9 @@ document.addEventListener('DOMContentLoaded', () => {
         setGateState(workflowGates.postService, postServiceReady);
         setGateState(workflowGates.paymentStage, true);
         setElementsEnabled(addServiceButtons, postServiceReady);
+        if (postServiceReady) {
+            forceElementsEnabled(addServiceButtons);
+        }
         setElementsEnabled(paymentHistoryButtons, true);
         setElementsEnabled(paymentSubmitButtons, true);
     };
