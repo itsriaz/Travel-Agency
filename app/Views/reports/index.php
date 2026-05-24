@@ -43,6 +43,7 @@ $asOfDate = (string) ($filters['asOfDate'] ?? date('Y-m-d'));
 $selectedBranchId = (int) ($filters['branchId'] ?? 0);
 $selectedCurrency = (string) ($filters['currency'] ?? '');
 $advanceBalanceView = (string) ($filters['advanceBalanceView'] ?? 'all');
+$showAdvanceBalanceViewFilter = in_array($selectedReport, ['prepaid_supplier_ledger', 'supplier_postpaid_payments', 'supplier_prepaid_payments', 'supplier_all_payments'], true);
 $selectedBranchLabel = 'All Accessible Branches';
 
 if ($selectedBranchId > 0) {
@@ -270,14 +271,16 @@ $exportQuery = http_build_query([
                 <?php endforeach; ?>
             </select>
         </label>
-        <label class="station-field span-2">
-            <span>Balance View</span>
-            <select name="advance_balance_view" data-report-filter="immediate">
-                <option value="all" <?= $advanceBalanceView === 'all' ? 'selected' : '' ?>>All advance suppliers</option>
-                <option value="only_available" <?= $advanceBalanceView === 'only_available' ? 'selected' : '' ?>>Only available balance</option>
-                <option value="fully_used" <?= $advanceBalanceView === 'fully_used' ? 'selected' : '' ?>>Only fully used advances</option>
-            </select>
-        </label>
+        <?php if ($showAdvanceBalanceViewFilter): ?>
+            <label class="station-field span-2">
+                <span>Balance View</span>
+                <select name="advance_balance_view" data-report-filter="immediate">
+                    <option value="all" <?= $advanceBalanceView === 'all' ? 'selected' : '' ?>>All advance suppliers</option>
+                    <option value="only_available" <?= $advanceBalanceView === 'only_available' ? 'selected' : '' ?>>Only available balance</option>
+                    <option value="fully_used" <?= $advanceBalanceView === 'fully_used' ? 'selected' : '' ?>>Only fully used advances</option>
+                </select>
+            </label>
+        <?php endif; ?>
         <div class="station-command-buttons span-6 top-gap">
             <button class="btn btn-primary btn-sm" type="submit" id="reports-run-button">Run Report</button>
         </div>
