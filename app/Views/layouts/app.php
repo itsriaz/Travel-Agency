@@ -51,6 +51,7 @@ $isWorkspacePage = str_contains($requestPath, '/workspace');
                     <a class="nav-link" href="<?= e(url('/admin/security')) ?>">Admin Security</a>
                     <a class="nav-link" href="<?= e(url('/master-data')) ?>">Master Data</a>
                     <a class="nav-link" href="<?= e(url('/accounting-engine')) ?>">Accounting Engine</a>
+                    <a class="nav-link" href="<?= e(url('/treasury/accounts')) ?>">Treasury Accounts</a>
                 <?php endif; ?>
             </div>
         </aside>

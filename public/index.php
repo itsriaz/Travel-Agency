@@ -9,6 +9,7 @@ use App\Controllers\HealthController;
 use App\Controllers\OfflineController;
 use App\Controllers\ReportsController;
 use App\Controllers\SecurityController;
+use App\Controllers\TreasuryController;
 use App\Controllers\WorkspaceController;
 use App\Core\App;
 use App\Core\Router;
@@ -52,6 +53,7 @@ $router->post('/security/backup-codes/regenerate', [SecurityController::class, '
 $router->get('/admin/security', [SecurityController::class, 'adminPanel'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class, SuperAdminMiddleware::class]);
 $router->get('/master-data', [ControlController::class, 'masterData'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class, SuperAdminMiddleware::class]);
 $router->get('/accounting-engine', [ControlController::class, 'accountingEngine'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class, SuperAdminMiddleware::class]);
+$router->get('/treasury/accounts', [TreasuryController::class, 'accounts'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class, SuperAdminMiddleware::class]);
 $router->get('/expenses', [ControlController::class, 'expenses'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class, SuperAdminMiddleware::class]);
 $router->get('/expenses/attachment/download', [ControlController::class, 'downloadExpenseAttachment'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class, SuperAdminMiddleware::class]);
 $router->get('/reports', [ReportsController::class, 'index'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class]);
@@ -60,6 +62,7 @@ $router->get('/reports/supplier-prepaid-receipt', [ReportsController::class, 'su
 $router->post('/master-data/save', [ControlController::class, 'saveMasterData'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class, SuperAdminMiddleware::class]);
 $router->post('/master-data/delete', [ControlController::class, 'deleteMasterData'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class, SuperAdminMiddleware::class]);
 $router->post('/accounting-engine/save', [ControlController::class, 'saveAccountingEngine'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class, SuperAdminMiddleware::class]);
+$router->post('/treasury/accounts/save', [TreasuryController::class, 'saveAccount'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class, SuperAdminMiddleware::class]);
 $router->post('/accounting-engine/delete', [ControlController::class, 'deleteAccountingEngine'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class, SuperAdminMiddleware::class]);
 $router->post('/expenses/save', [ControlController::class, 'saveExpenses'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class, SuperAdminMiddleware::class]);
 $router->post('/expenses/delete', [ControlController::class, 'deleteExpenses'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class, SuperAdminMiddleware::class]);
