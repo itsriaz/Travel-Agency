@@ -862,37 +862,8 @@ openReceivables: <?= e(json_encode($receiptDebug['openReceivables'], JSON_PRETTY
                     </table>
                 </section>
 
-                                <section class="receipt-card">
-                    <?php
-                    $currentReceiptAllocationsByLine = [];
-
-                    foreach ($invoicePaymentHistoryRows as $historyRow) {
-                        if (!$isSelectedReceiptHistoryRow($historyRow)) {
-                            continue;
-                        }
-
-                        $lineReference = trim((string) ($historyRow['serviceLineReference'] ?? ''));
-                        if ($lineReference === '') {
-                            $lineReference = 'allocation:' . count($currentReceiptAllocationsByLine);
-                        }
-
-                        if (!isset($currentReceiptAllocationsByLine[$lineReference])) {
-                            $currentReceiptAllocationsByLine[$lineReference] = [
-                                'totals' => [],
-                            ];
-                        }
-
-                        $allocationCurrency = (string) ($historyRow['receivableCurrency'] ?? $historyRow['currency'] ?? $receiptCurrency);
-                        $allocationAmount = (float) ($historyRow['receivableAmountAllocated'] ?? $historyRow['allocatedAmount'] ?? 0);
-
-                        if ($allocationCurrency !== '' && abs($allocationAmount) > 0.005) {
-                            $currentReceiptAllocationsByLine[$lineReference]['totals'][$allocationCurrency] =
-                                (float) ($currentReceiptAllocationsByLine[$lineReference]['totals'][$allocationCurrency] ?? 0) + $allocationAmount;
-                        }
-                    }
-                    ?>
-
-                    <h2 style="margin:0 0 12px;">Service Payment Details</h2>
+                                                <section class="receipt-card">
+                    <h2 style="margin:0 0 12px;">Service Details</h2>
                     <table class="output-table receipt-table">
                         <thead>
                         <tr>
@@ -902,13 +873,11 @@ openReceivables: <?= e(json_encode($receiptDebug['openReceivables'], JSON_PRETTY
                             <th>Passenger</th>
                             <th>Currency</th>
                             <th>Service Amount</th>
-                            <th>Applied From This Receipt</th>
-                            <th>Status</th>
                         </tr>
                         </thead>
                         <tbody>
                         <?php if ($services === []): ?>
-                            <tr><td colspan="8">No service lines recorded for this booking yet.</td></tr>
+                            <tr><td colspan="6">No service lines recorded for this booking yet.</td></tr>
                         <?php endif; ?>
                         <?php foreach ($services as $serviceIndex => $service): ?>
                             <?php
@@ -921,13 +890,6 @@ openReceivables: <?= e(json_encode($receiptDebug['openReceivables'], JSON_PRETTY
                                 : (float) ($service['sale_price'] ?? 0)
                                     + (float) ($service['service_charge'] ?? 0)
                                     - (float) ($service['discount_amount'] ?? 0);
-
-                            $appliedTotals = $lineReference !== '' && isset($currentReceiptAllocationsByLine[$lineReference])
-                                ? (array) ($currentReceiptAllocationsByLine[$lineReference]['totals'] ?? [])
-                                : [];
-
-                            $appliedTotalAmount = array_sum(array_map('floatval', $appliedTotals));
-                            $appliedDisplayTotals = $appliedTotals !== [] ? $appliedTotals : [$serviceCurrency => 0];
                             ?>
                             <tr>
                                 <td><?= e((string) ($serviceIndex + 1)) ?></td>
@@ -936,8 +898,6 @@ openReceivables: <?= e(json_encode($receiptDebug['openReceivables'], JSON_PRETTY
                                 <td><?= e($servicePassenger !== '' ? $servicePassenger : $customerName) ?></td>
                                 <td><?= e($serviceCurrency) ?></td>
                                 <td><?= e($formatMoney($serviceAmount)) ?></td>
-                                <td><?= e($formatCurrencyTotals($appliedDisplayTotals)) ?></td>
-                                <td><?= e(abs($appliedTotalAmount) > 0.005 ? 'Applied in this receipt' : 'Not applied in this receipt') ?></td>
                             </tr>
                         <?php endforeach; ?>
                         </tbody>
