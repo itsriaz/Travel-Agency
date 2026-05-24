@@ -112,6 +112,110 @@ final class TreasuryRepository extends BaseRepository
         return $statement->fetchAll(PDO::FETCH_ASSOC) ?: [];
     }
 
+    private function linkedLedgerAccountIdForType(string $accountType): ?int
+    {
+        $codeMap = [
+            'cash' => 'CASH_ON_HAND',
+            'bank' => 'BANK_CLEARING',
+            'wallet' => 'BANK_CLEARING',
+            'bank_clearing' => 'BANK_CLEARING',
+            'card_clearing' => 'CARD_CLEARING',
+        ];
+
+        $code = $codeMap[$accountType] ?? '';
+
+        if ($code === '') {
+            return null;
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT id
+             FROM chart_of_accounts
+             WHERE code = :code
+               AND is_active = 1
+             LIMIT 1'
+        );
+        $statement->execute([
+            'code' => $code,
+        ]);
+
+        $id = $statement->fetchColumn();
+
+        return $id !== false ? (int) $id : null;
+    }
+
+    private function accountTypeSupportsBankDetails(string $accountType): bool
+    {
+        return in_array($accountType, ['bank', 'wallet'], true);
+    }
+
+    private function normalizeAccountCodePart(string $value, int $maxLength = 48): string
+    {
+        $value = strtoupper(trim($value));
+        $value = preg_replace('/[^A-Z0-9]+/', '_', $value) ?? '';
+        $value = preg_replace('/_+/', '_', $value) ?? '';
+        $value = trim($value, '_');
+
+        if ($value === '') {
+            $value = 'ACCOUNT';
+        }
+
+        if (mb_strlen($value) > $maxLength) {
+            $value = rtrim((string) mb_substr($value, 0, $maxLength), '_');
+        }
+
+        return $value !== '' ? $value : 'ACCOUNT';
+    }
+
+    private function baseAccountCodeFor(string $accountType, string $accountName, string $currency): string
+    {
+        $normalizedCurrency = $this->normalizeAccountCodePart($currency, 12);
+        $normalizedAccountName = $this->normalizeAccountCodePart($accountName, 48);
+
+        return match ($accountType) {
+            'cash' => 'CASH_' . $normalizedAccountName . '_' . $normalizedCurrency,
+            'bank' => 'BANK_' . $normalizedAccountName . '_' . $normalizedCurrency,
+            'wallet' => 'WALLET_' . $normalizedAccountName . '_' . $normalizedCurrency,
+            'bank_clearing' => 'BANK_CLEARING_' . $normalizedCurrency,
+            'card_clearing' => 'CARD_CLEARING_' . $normalizedCurrency,
+            default => 'TREASURY_' . $normalizedAccountName . '_' . $normalizedCurrency,
+        };
+    }
+
+    private function uniqueAccountCode(string $baseCode, ?int $excludeId = null): string
+    {
+        $baseCode = $this->normalizeAccountCodePart($baseCode, 72);
+        $suffix = 1;
+        $candidate = $baseCode;
+
+        while (true) {
+            $statement = $this->db->prepare(
+                'SELECT id
+                 FROM treasury_accounts
+                 WHERE account_code = :account_code'
+                 . ($excludeId !== null ? ' AND id <> :exclude_id' : '')
+                 . ' LIMIT 1'
+            );
+
+            $params = ['account_code' => $candidate];
+            if ($excludeId !== null) {
+                $params['exclude_id'] = $excludeId;
+            }
+
+            $statement->execute($params);
+            $existingId = $statement->fetchColumn();
+
+            if ($existingId === false) {
+                return $candidate;
+            }
+
+            $suffix++;
+            $suffixText = '_' . $suffix;
+            $prefixLimit = 80 - strlen($suffixText);
+            $candidate = rtrim(substr($baseCode, 0, $prefixLimit), '_') . $suffixText;
+        }
+    }
+
     public function saveAccount(array $data, array $branchIds): int
     {
         $branchIds = array_values(array_map('intval', $branchIds));
@@ -137,20 +241,20 @@ final class TreasuryRepository extends BaseRepository
                 throw new RuntimeException('Please enter account name.');
             }
 
-            $accountCode = strtoupper(trim((string) ($data['account_code'] ?? '')));
-
-            if ($accountCode === '') {
-                throw new RuntimeException('Please enter account code.');
-            }
-
             $currency = strtoupper(trim((string) ($data['currency'] ?? 'PKR')));
 
             if ($currency === '') {
                 $currency = 'PKR';
             }
 
-            $linkedAccountId = (int) ($data['linked_account_id'] ?? 0);
-            $linkedAccountId = $linkedAccountId > 0 ? $linkedAccountId : null;
+            $linkedAccountId = $this->linkedLedgerAccountIdForType($accountType);
+
+            if ($linkedAccountId === null) {
+                throw new RuntimeException('Linked ledger account is missing for the selected treasury account type.');
+            }
+
+            $supportsBankDetails = $this->accountTypeSupportsBankDetails($accountType);
+            $baseAccountCode = $this->baseAccountCodeFor($accountType, $accountName, $currency);
 
             $openingBalance = round((float) ($data['opening_balance'] ?? 0), 2);
             $openingBalanceDate = trim((string) ($data['opening_balance_date'] ?? ''));
@@ -161,11 +265,10 @@ final class TreasuryRepository extends BaseRepository
                 'linked_account_id' => $linkedAccountId,
                 'account_type' => $accountType,
                 'account_name' => $accountName,
-                'account_code' => $accountCode,
                 'currency' => $currency,
-                'bank_name' => trim((string) ($data['bank_name'] ?? '')) ?: null,
-                'account_number' => trim((string) ($data['account_number'] ?? '')) ?: null,
-                'iban' => trim((string) ($data['iban'] ?? '')) ?: null,
+                'bank_name' => $supportsBankDetails ? (trim((string) ($data['bank_name'] ?? '')) ?: null) : null,
+                'account_number' => $supportsBankDetails ? (trim((string) ($data['account_number'] ?? '')) ?: null) : null,
+                'iban' => $supportsBankDetails ? (trim((string) ($data['iban'] ?? '')) ?: null) : null,
                 'opening_balance' => $openingBalance,
                 'opening_balance_date' => $openingBalanceDate,
                 'is_default' => isset($data['is_default']) ? 1 : 0,
@@ -179,6 +282,11 @@ final class TreasuryRepository extends BaseRepository
                 if ($existing === null) {
                     throw new RuntimeException('Treasury account not found.');
                 }
+
+                $existingAccountCode = strtoupper(trim((string) ($existing['account_code'] ?? '')));
+                $payload['account_code'] = $existingAccountCode !== ''
+                    ? $existingAccountCode
+                    : $this->uniqueAccountCode($baseAccountCode, $id);
 
                 $statement = $this->db->prepare(
                     'UPDATE treasury_accounts
@@ -206,6 +314,7 @@ final class TreasuryRepository extends BaseRepository
             }
 
             $payload['created_by_user_id'] = $data['created_by_user_id'] ?? null;
+            $payload['account_code'] = $this->uniqueAccountCode($baseAccountCode);
 
             $statement = $this->db->prepare(
                 'INSERT INTO treasury_accounts (

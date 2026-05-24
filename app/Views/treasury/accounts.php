@@ -7,6 +7,7 @@ $editAccount = $editAccount ?? null;
 $accountTypes = $accountTypes ?? [];
 
 $formTitle = $editAccount ? 'Edit Treasury Account' : 'Add Treasury Account';
+$showBankFields = in_array((string) ($editAccount['account_type'] ?? 'cash'), ['bank', 'wallet'], true);
 ?>
 
 <section class="page-head">
@@ -54,7 +55,7 @@ $formTitle = $editAccount ? 'Edit Treasury Account' : 'Add Treasury Account';
 
         <label class="station-field span-2">
             <span>Account Type</span>
-            <select name="account_type" required>
+            <select name="account_type" required data-treasury-account-type>
                 <?php foreach ($accountTypes as $typeCode => $typeLabel): ?>
                     <option value="<?= e((string) $typeCode) ?>" <?= (string) ($editAccount['account_type'] ?? '') === (string) $typeCode ? 'selected' : '' ?>>
                         <?= e((string) $typeLabel) ?>
@@ -79,36 +80,19 @@ $formTitle = $editAccount ? 'Edit Treasury Account' : 'Add Treasury Account';
             <input type="text" name="account_name" maxlength="190" required value="<?= e((string) ($editAccount['account_name'] ?? '')) ?>" placeholder="Main Cash Counter / HBL Account">
         </label>
 
-        <label class="station-field span-2">
-            <span>Account Code</span>
-            <input type="text" name="account_code" maxlength="80" required value="<?= e((string) ($editAccount['account_code'] ?? '')) ?>" placeholder="CASH_MAIN / HBL_PKR">
-        </label>
-
-        <label class="station-field span-2">
-            <span>Linked Ledger Account</span>
-            <select name="linked_account_id">
-                <option value="">Not linked yet</option>
-                <?php foreach ($ledgerAccounts as $ledgerAccount): ?>
-                    <option value="<?= e((string) $ledgerAccount['id']) ?>" <?= (int) ($editAccount['linked_account_id'] ?? 0) === (int) $ledgerAccount['id'] ? 'selected' : '' ?>>
-                        <?= e((string) $ledgerAccount['code']) ?> - <?= e((string) $ledgerAccount['name']) ?>
-                    </option>
-                <?php endforeach; ?>
-            </select>
-        </label>
-
-        <label class="station-field span-2">
+        <label class="station-field span-2" data-bank-detail-field data-bank-detail-visible="<?= $showBankFields ? '1' : '0' ?>"<?= $showBankFields ? '' : ' hidden' ?> style="<?= $showBankFields ? '' : 'display:none;' ?>">
             <span>Bank Name</span>
-            <input type="text" name="bank_name" maxlength="190" value="<?= e((string) ($editAccount['bank_name'] ?? '')) ?>" placeholder="HBL / Meezan / UBL">
+            <input type="text" name="bank_name" maxlength="190" value="<?= e((string) ($editAccount['bank_name'] ?? '')) ?>" placeholder="HBL / Meezan / UBL"<?= $showBankFields ? '' : ' disabled' ?>>
         </label>
 
-        <label class="station-field span-2">
+        <label class="station-field span-2" data-bank-detail-field data-bank-detail-visible="<?= $showBankFields ? '1' : '0' ?>"<?= $showBankFields ? '' : ' hidden' ?> style="<?= $showBankFields ? '' : 'display:none;' ?>">
             <span>Account No.</span>
-            <input type="text" name="account_number" maxlength="120" value="<?= e((string) ($editAccount['account_number'] ?? '')) ?>">
+            <input type="text" name="account_number" maxlength="120" value="<?= e((string) ($editAccount['account_number'] ?? '')) ?>"<?= $showBankFields ? '' : ' disabled' ?>>
         </label>
 
-        <label class="station-field span-2">
+        <label class="station-field span-2" data-bank-detail-field data-bank-detail-visible="<?= $showBankFields ? '1' : '0' ?>"<?= $showBankFields ? '' : ' hidden' ?> style="<?= $showBankFields ? '' : 'display:none;' ?>">
             <span>IBAN</span>
-            <input type="text" name="iban" maxlength="120" value="<?= e((string) ($editAccount['iban'] ?? '')) ?>">
+            <input type="text" name="iban" maxlength="120" value="<?= e((string) ($editAccount['iban'] ?? '')) ?>"<?= $showBankFields ? '' : ' disabled' ?>>
         </label>
 
         <label class="station-field span-2">
@@ -160,14 +144,13 @@ $formTitle = $editAccount ? 'Edit Treasury Account' : 'Add Treasury Account';
                 <th>Currency</th>
                 <th>Bank</th>
                 <th>Opening Balance</th>
-                <th>Linked Ledger</th>
                 <th>Status</th>
                 <th></th>
             </tr>
             </thead>
             <tbody>
             <?php if ($accounts === []): ?>
-                <tr><td colspan="10">No treasury accounts have been configured yet.</td></tr>
+                <tr><td colspan="9">No treasury accounts have been configured yet.</td></tr>
             <?php endif; ?>
             <?php foreach ($accounts as $account): ?>
                 <tr>
@@ -178,7 +161,6 @@ $formTitle = $editAccount ? 'Edit Treasury Account' : 'Add Treasury Account';
                     <td><?= e((string) ($account['currency'] ?? 'PKR')) ?></td>
                     <td><?= e((string) ($account['bank_name'] ?? '')) ?></td>
                     <td><?= e(number_format((float) ($account['opening_balance'] ?? 0), 2)) ?></td>
-                    <td><?= e(trim((string) (($account['linked_account_code'] ?? '') . ' ' . ($account['linked_account_name'] ?? '')))) ?></td>
                     <td><?= ((int) ($account['is_active'] ?? 0) === 1) ? 'Active' : 'Inactive' ?></td>
                     <td><a class="btn btn-sm" href="<?= e(url('/treasury/accounts?id=' . (int) $account['id'])) ?>">Edit</a></td>
                 </tr>
@@ -187,3 +169,27 @@ $formTitle = $editAccount ? 'Edit Treasury Account' : 'Add Treasury Account';
         </table>
     </div>
 </section>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    const treasuryAccountType = document.querySelector('[data-treasury-account-type]');
+    const bankDetailFields = Array.from(document.querySelectorAll('[data-bank-detail-field]'));
+
+    const syncBankDetailsVisibility = () => {
+        const selectedType = String(treasuryAccountType?.value || '');
+        const showBankDetails = selectedType === 'bank' || selectedType === 'wallet';
+
+        bankDetailFields.forEach((field) => {
+            field.style.display = showBankDetails ? '' : 'none';
+            field.hidden = !showBankDetails;
+            field.dataset.bankDetailVisible = showBankDetails ? '1' : '0';
+            field.querySelectorAll('input, select, textarea').forEach((input) => {
+                input.disabled = !showBankDetails;
+            });
+        });
+    };
+
+    treasuryAccountType?.addEventListener('change', syncBankDetailsVisibility);
+    syncBankDetailsVisibility();
+});
+</script>
