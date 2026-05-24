@@ -6,6 +6,56 @@ namespace App\Repositories;
 
 final class ReportRepository extends BaseRepository
 {
+
+    public function cashBankPosition(array $branchIds, string $asOfDate, string $currency = ''): array
+    {
+        [$clause, $params] = $this->branchScope($branchIds);
+
+        $params['as_of_date'] = $asOfDate;
+        $currencyClause = '';
+
+        if (trim($currency) !== '') {
+            $currencyClause = ' AND je.currency = :currency';
+            $params['currency'] = strtoupper(trim($currency));
+        }
+
+        return $this->fetchRows(
+            'SELECT
+                je.branch_id,
+                br.name AS branch_name,
+                je.currency,
+                coa.code AS account_code,
+                coa.name AS account_name,
+                CASE
+                    WHEN coa.code = "CASH_ON_HAND" THEN "Cash"
+                    WHEN coa.code = "BANK_CLEARING" THEN "Bank / Clearing"
+                    WHEN coa.code = "CARD_CLEARING" THEN "Card / Clearing"
+                    ELSE "Other"
+                END AS account_group,
+                ROUND(SUM(COALESCE(jel.debit_amount, 0)), 2) AS total_debit,
+                ROUND(SUM(COALESCE(jel.credit_amount, 0)), 2) AS total_credit,
+                ROUND(SUM(COALESCE(jel.debit_amount, 0) - COALESCE(jel.credit_amount, 0)), 2) AS balance
+             FROM journal_entry_lines jel
+             INNER JOIN journal_entries je ON je.id = jel.journal_entry_id
+             INNER JOIN chart_of_accounts coa ON coa.id = jel.account_id
+             INNER JOIN branches br ON br.id = je.branch_id
+             WHERE je.branch_id ' . $clause . '
+               AND je.entry_date <= :as_of_date
+               AND coa.code IN ("CASH_ON_HAND", "BANK_CLEARING", "CARD_CLEARING")' . $currencyClause . '
+             GROUP BY
+                je.branch_id,
+                br.name,
+                je.currency,
+                coa.code,
+                coa.name
+             ORDER BY
+                br.name ASC,
+                je.currency ASC,
+                FIELD(coa.code, "CASH_ON_HAND", "BANK_CLEARING", "CARD_CLEARING"),
+                coa.name ASC',
+            $params
+        );
+    }
     public function cashFlow(array $branchIds, ?string $dateFrom, ?string $dateTo): array
     {
         [$clause, $params] = $this->branchScope($branchIds);

@@ -15,6 +15,7 @@ final class ReportService extends Service
 {
     private const REPORTS = [
         'cash_flow' => 'Cash Flow / Cash Movement',
+        'cash_bank_position' => 'Cash and Bank Position',
         'management_summary' => 'Management Summary',
         'prepaid_supplier_ledger' => 'Prepaid Supplier Ledger',
         'supplier_postpaid_payments' => 'Supplier Payments - Postpaid',
@@ -59,6 +60,25 @@ final class ReportService extends Service
         $receivableAgingSummaryColumns = [];
 
         switch ($filters['report']) {
+
+            case 'cash_bank_position':
+                $reportData = $repository->cashBankPosition(
+                    $filters['branchScopeIds'],
+                    $filters['asOfDate'],
+                    $filters['currency']
+                );
+                [$rows, $summaryCards] = $this->cashBankPositionReport($reportData);
+                $columns = [
+                    ['key' => 'branch_name', 'label' => 'Branch'],
+                    ['key' => 'currency', 'label' => 'Currency'],
+                    ['key' => 'account_group', 'label' => 'Account Type'],
+                    ['key' => 'account_code', 'label' => 'Account Code'],
+                    ['key' => 'account_name', 'label' => 'Account Name'],
+                    ['key' => 'total_debit', 'label' => 'Debit'],
+                    ['key' => 'total_credit', 'label' => 'Credit'],
+                    ['key' => 'balance', 'label' => 'Balance'],
+                ];
+                break;
             case 'cash_flow':
                 $reportData = $repository->cashFlow($filters['branchScopeIds'], $filters['dateFrom'], $filters['dateTo']);
                 [$rows, $summaryCards] = $this->cashFlowReport(
@@ -1442,6 +1462,50 @@ final class ReportService extends Service
         }
 
         return $label;
+    }
+
+
+    private function cashBankPositionReport(array $data): array
+    {
+        $reportRows = [];
+        $cashTotals = [];
+        $bankTotals = [];
+        $cardTotals = [];
+        $netTotals = [];
+
+        foreach ($data as $row) {
+            $currency = (string) ($row['currency'] ?? 'PKR');
+            $accountCode = (string) ($row['account_code'] ?? '');
+            $balance = (float) ($row['balance'] ?? 0);
+
+            if ($accountCode === 'CASH_ON_HAND') {
+                $cashTotals[$currency] = ($cashTotals[$currency] ?? 0.0) + $balance;
+            } elseif ($accountCode === 'BANK_CLEARING') {
+                $bankTotals[$currency] = ($bankTotals[$currency] ?? 0.0) + $balance;
+            } elseif ($accountCode === 'CARD_CLEARING') {
+                $cardTotals[$currency] = ($cardTotals[$currency] ?? 0.0) + $balance;
+            }
+
+            $netTotals[$currency] = ($netTotals[$currency] ?? 0.0) + $balance;
+
+            $reportRows[] = [
+                'branch_name' => (string) ($row['branch_name'] ?? ''),
+                'currency' => $currency,
+                'account_group' => (string) ($row['account_group'] ?? ''),
+                'account_code' => $accountCode,
+                'account_name' => (string) ($row['account_name'] ?? ''),
+                'total_debit' => $this->money((float) ($row['total_debit'] ?? 0)),
+                'total_credit' => $this->money((float) ($row['total_credit'] ?? 0)),
+                'balance' => $this->money($balance),
+            ];
+        }
+
+        return [$reportRows, array_merge(
+            $this->currencySummaryCards('Cash on Hand', $cashTotals),
+            $this->currencySummaryCards('Bank Clearing', $bankTotals),
+            $this->currencySummaryCards('Card Clearing', $cardTotals),
+            $this->currencySummaryCards('Net Liquid Position', $netTotals)
+        )];
     }
 
     private function cashFlowReport(array $data, array $pkrRates): array
