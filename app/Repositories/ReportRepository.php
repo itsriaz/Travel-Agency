@@ -24,9 +24,20 @@ final class ReportRepository extends BaseRepository
                 je.branch_id,
                 br.name AS branch_name,
                 je.currency,
-                coa.code AS account_code,
-                coa.name AS account_name,
                 CASE
+                    WHEN ta.id IS NOT NULL THEN ta.account_code
+                    ELSE coa.code
+                END AS account_code,
+                CASE
+                    WHEN ta.id IS NOT NULL THEN ta.account_name
+                    ELSE coa.name
+                END AS account_name,
+                CASE
+                    WHEN ta.account_type = "cash" THEN "Cash Counter"
+                    WHEN ta.account_type = "bank" THEN "Bank Account"
+                    WHEN ta.account_type = "wallet" THEN "Wallet / Mobile"
+                    WHEN ta.account_type = "bank_clearing" THEN "Bank / Clearing"
+                    WHEN ta.account_type = "card_clearing" THEN "Card / Clearing"
                     WHEN coa.code = "CASH_ON_HAND" THEN "Cash"
                     WHEN coa.code = "BANK_CLEARING" THEN "Bank / Clearing"
                     WHEN coa.code = "CARD_CLEARING" THEN "Card / Clearing"
@@ -39,6 +50,8 @@ final class ReportRepository extends BaseRepository
              INNER JOIN journal_entries je ON je.id = jel.journal_entry_id
              INNER JOIN chart_of_accounts coa ON coa.id = jel.account_id
              INNER JOIN branches br ON br.id = je.branch_id
+             LEFT JOIN customer_receipts cr ON cr.id = jel.customer_receipt_id
+             LEFT JOIN treasury_accounts ta ON ta.id = cr.treasury_account_id
              WHERE je.branch_id ' . $clause . '
                AND je.entry_date <= :as_of_date
                AND coa.code IN ("CASH_ON_HAND", "BANK_CLEARING", "CARD_CLEARING")' . $currencyClause . '
@@ -46,13 +59,47 @@ final class ReportRepository extends BaseRepository
                 je.branch_id,
                 br.name,
                 je.currency,
-                coa.code,
-                coa.name
+                CASE
+                    WHEN ta.id IS NOT NULL THEN ta.account_code
+                    ELSE coa.code
+                END,
+                CASE
+                    WHEN ta.id IS NOT NULL THEN ta.account_name
+                    ELSE coa.name
+                END,
+                CASE
+                    WHEN ta.account_type = "cash" THEN "Cash Counter"
+                    WHEN ta.account_type = "bank" THEN "Bank Account"
+                    WHEN ta.account_type = "wallet" THEN "Wallet / Mobile"
+                    WHEN ta.account_type = "bank_clearing" THEN "Bank / Clearing"
+                    WHEN ta.account_type = "card_clearing" THEN "Card / Clearing"
+                    WHEN coa.code = "CASH_ON_HAND" THEN "Cash"
+                    WHEN coa.code = "BANK_CLEARING" THEN "Bank / Clearing"
+                    WHEN coa.code = "CARD_CLEARING" THEN "Card / Clearing"
+                    ELSE "Other"
+                END
              ORDER BY
                 br.name ASC,
                 je.currency ASC,
-                FIELD(coa.code, "CASH_ON_HAND", "BANK_CLEARING", "CARD_CLEARING"),
-                coa.name ASC',
+                FIELD(
+                    CASE
+                        WHEN ta.account_type = "cash" THEN "cash"
+                        WHEN ta.account_type = "bank" THEN "bank"
+                        WHEN ta.account_type = "wallet" THEN "wallet"
+                        WHEN ta.account_type = "bank_clearing" THEN "bank_clearing"
+                        WHEN ta.account_type = "card_clearing" THEN "card_clearing"
+                        ELSE coa.code
+                    END,
+                    "cash",
+                    "CASH_ON_HAND",
+                    "bank",
+                    "wallet",
+                    "BANK_CLEARING",
+                    "bank_clearing",
+                    "CARD_CLEARING",
+                    "card_clearing"
+                ),
+                account_name ASC',
             $params
         );
     }

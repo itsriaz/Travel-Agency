@@ -17,6 +17,7 @@ final class TreasuryController extends BaseController
     {
         $repository = new TreasuryRepository($this->app);
         $accessibleBranchIds = Authorization::accessibleBranchIds();
+        $returnTo = $this->sanitizeReturnTo((string) ($_GET['return_to'] ?? ''));
 
         $editId = (int) ($_GET['id'] ?? 0);
         $editAccount = $editId > 0
@@ -30,6 +31,7 @@ final class TreasuryController extends BaseController
             'currencies' => $repository->currencies(),
             'ledgerAccounts' => $repository->assetLedgerAccounts(),
             'editAccount' => $editAccount,
+            'returnTo' => $returnTo,
             'accountTypes' => [
                 'cash' => 'Cash Counter',
                 'bank' => 'Bank Account',
@@ -43,6 +45,7 @@ final class TreasuryController extends BaseController
     public function saveAccount(): never
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);
+        $returnTo = $this->sanitizeReturnTo((string) ($_POST['return_to'] ?? ''));
 
         try {
             $repository = new TreasuryRepository($this->app);
@@ -54,10 +57,62 @@ final class TreasuryController extends BaseController
             );
 
             Flash::success('Treasury account saved successfully.');
+            if ($returnTo !== '') {
+                $this->closeAndReturn($returnTo);
+            }
         } catch (RuntimeException $exception) {
             Flash::error($exception->getMessage());
+            $query = $returnTo !== '' ? '?return_to=' . rawurlencode($returnTo) : '';
+            $this->redirect('/treasury/accounts' . $query);
         }
 
-        $this->redirect('/treasury/accounts');
+        $this->redirect($returnTo !== '' ? $returnTo : '/treasury/accounts');
+    }
+
+    private function sanitizeReturnTo(string $value): string
+    {
+        $value = trim($value);
+        if ($value === '') {
+            return '';
+        }
+
+        if (str_starts_with($value, '/')) {
+            return app_path($value);
+        }
+
+        $parts = parse_url($value);
+        if ($parts === false) {
+            return '';
+        }
+
+        $path = (string) ($parts['path'] ?? '');
+        if ($path === '' || ! str_starts_with($path, '/')) {
+            return '';
+        }
+
+        $query = isset($parts['query']) && $parts['query'] !== '' ? '?' . $parts['query'] : '';
+        $fragment = isset($parts['fragment']) && $parts['fragment'] !== '' ? '#' . $parts['fragment'] : '';
+
+        return app_path($path) . $query . $fragment;
+    }
+
+    private function closeAndReturn(string $returnTo): never
+    {
+        $destination = url($returnTo);
+        header('Content-Type: text/html; charset=UTF-8');
+        echo '<!doctype html><html><head><meta charset="utf-8"><title>Returning...</title></head><body>';
+        echo '<script>';
+        echo 'try {';
+        echo 'if (window.opener && !window.opener.closed) {';
+        echo 'window.opener.location.href = ' . json_encode($destination, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . ';';
+        echo 'window.close();';
+        echo '} else {';
+        echo 'window.location.href = ' . json_encode($destination, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . ';';
+        echo '}';
+        echo '} catch (error) { window.location.href = ' . json_encode($destination, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . '; }';
+        echo '</script>';
+        echo '<noscript><meta http-equiv="refresh" content="0;url=' . e($destination) . '"></noscript>';
+        echo '</body></html>';
+        exit;
     }
 }

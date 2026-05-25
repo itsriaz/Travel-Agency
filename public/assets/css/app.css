@@ -4476,14 +4476,23 @@ textarea {
 }
 
 .legacy-payment-panel__body--actions .legacy-payment-actions {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
     justify-content: start;
     padding: 0;
     border: 0;
     background: transparent;
 }
 
-.legacy-payment-panel__body--actions .legacy-payment-actions .btn {
+.legacy-payment-panel__body--actions .legacy-payment-actions__row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 4px;
+}
+
+.legacy-payment-panel__body--actions .legacy-payment-actions .btn,
+.legacy-payment-panel__body--actions .legacy-payment-actions a[href] {
     justify-self: start;
     width: 100%;
 }
@@ -4550,9 +4559,16 @@ textarea {
 }
 
 .legacy-payment-strip--rail .legacy-payment-actions {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    display: flex;
+    flex-direction: column;
     gap: 4px;
     padding-top: 4px;
+}
+
+.legacy-payment-strip--rail .legacy-payment-actions__row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 4px;
 }
 
 .legacy-payment-strip--rail .legacy-payment-actions .btn {
@@ -4680,14 +4696,21 @@ textarea {
 }
 
 .legacy-payment-actions {
-    display: grid;
-    grid-template-columns: 110px 122px 145px 98px;
+    display: flex;
+    flex-direction: column;
     gap: 5px;
     align-items: end;
     align-self: end;
     padding: 4px;
     border: 1px solid #b9c7d4;
     background: #edf4fa;
+}
+
+.legacy-payment-actions__row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 5px;
+    width: 100%;
 }
 
 .legacy-payment-actions .btn {

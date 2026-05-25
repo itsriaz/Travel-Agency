@@ -1476,13 +1476,19 @@ final class ReportService extends Service
         foreach ($data as $row) {
             $currency = (string) ($row['currency'] ?? 'PKR');
             $accountCode = (string) ($row['account_code'] ?? '');
+            $accountGroup = (string) ($row['account_group'] ?? '');
             $balance = (float) ($row['balance'] ?? 0);
 
-            if ($accountCode === 'CASH_ON_HAND') {
+            if ($accountGroup === 'Cash' || $accountGroup === 'Cash Counter' || $accountCode === 'CASH_ON_HAND') {
                 $cashTotals[$currency] = ($cashTotals[$currency] ?? 0.0) + $balance;
-            } elseif ($accountCode === 'BANK_CLEARING') {
+            } elseif (
+                $accountGroup === 'Bank Account'
+                || $accountGroup === 'Wallet / Mobile'
+                || $accountGroup === 'Bank / Clearing'
+                || $accountCode === 'BANK_CLEARING'
+            ) {
                 $bankTotals[$currency] = ($bankTotals[$currency] ?? 0.0) + $balance;
-            } elseif ($accountCode === 'CARD_CLEARING') {
+            } elseif ($accountGroup === 'Card / Clearing' || $accountCode === 'CARD_CLEARING') {
                 $cardTotals[$currency] = ($cardTotals[$currency] ?? 0.0) + $balance;
             }
 
