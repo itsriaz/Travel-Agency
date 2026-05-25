@@ -6,6 +6,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     const pendingFreshCustomerKey = 'travel_ops_pending_fresh_customer';
+    const pendingTreasuryWorkspaceStateKey = 'travel_ops_pending_treasury_workspace_state';
 
     const feedback = station.querySelector('[data-workspace-feedback]');
     const quickSearch = station.querySelector('#workspace-search');
@@ -76,6 +77,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const supplierAdvanceMessage = station.querySelector('[data-supplier-advance-message]');
     const supplierInput = station.querySelector('[data-service-supplier-input]');
     const supplierOptionsNode = document.getElementById('workspace-service-suppliers-data');
+    const paymentTreasuryAccountsNode = document.getElementById('workspace-payment-treasury-accounts-data');
     const supplierOptionsList = document.getElementById('service-supplier-options');
     const addSupplierOptionValue = '__add_supplier__';
     const supplierAddModal = station.querySelector('[data-service-supplier-add-modal]');
@@ -308,6 +310,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const paymentMethodSelect = paymentForm?.elements?.namedItem('payment_method') instanceof HTMLSelectElement
         ? paymentForm.elements.namedItem('payment_method')
         : null;
+    const paymentTreasuryAccountSelect = paymentForm?.elements?.namedItem('treasury_account_id') instanceof HTMLSelectElement
+        ? paymentForm.elements.namedItem('treasury_account_id')
+        : null;
+    const paymentTreasuryAccountRow = station.querySelector('[data-payment-treasury-row]');
     const paymentReferenceInput = paymentForm?.elements?.namedItem('reference_number') instanceof HTMLInputElement
         ? paymentForm.elements.namedItem('reference_number')
         : null;
@@ -427,6 +433,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const normalizedPath = '/' + String(path || '').replace(/^\/+/, '');
         return `${paymentRouteBasePath}${normalizedPath}`;
     };
+    const paymentExchangeRateSaveUrl = buildWorkspacePathUrl('/workspace/payments/exchange-rate/save');
 
     const showFeedback = (message) => {
         if (!feedback) {
@@ -459,6 +466,7 @@ document.addEventListener('DOMContentLoaded', () => {
         paymentExchangeFeedback.textContent = '';
         paymentExchangeFeedback.hidden = true;
     };
+
 
     const focusTarget = (selector) => {
         if (!selector) {
@@ -548,8 +556,32 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
+    const prepareNewServiceEntry = () => {
+        resetServiceLine();
+        clearSavedPaymentState({
+            clearAmount: true,
+            resetPaymentCurrency: true,
+            closeExchange: true,
+            showReadyMessage: false,
+        });
+        clearPaymentDetailHiddenFields();
+        closePaymentDetailModal();
+        showFeedback('Service line is ready. Confirm passenger details and continue.');
+        if (servicePassengerNameField instanceof HTMLElement) {
+            servicePassengerNameField.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+            window.setTimeout(() => {
+                servicePassengerNameField.focus();
+                if (servicePassengerNameField instanceof HTMLInputElement) {
+                    servicePassengerNameField.select();
+                }
+            }, 80);
+        } else {
+            focusTarget('[data-service-passenger-name]');
+        }
+    };
+
     actionButtons.forEach((button) => {
-        button.addEventListener('click', () => {
+        button.addEventListener('click', async () => {
             switch (button.dataset.workspaceAction) {
                 case 'new-booking':
                     window.location.href = station.dataset.newBookingUrl || '/workspace?new=1';
@@ -586,26 +618,17 @@ document.addEventListener('DOMContentLoaded', () => {
                     openSupplierHistoryModal();
                     break;
                 case 'add-service':
-                    resetServiceLine();
-                    clearSavedPaymentState({
-                        clearAmount: true,
-                        resetPaymentCurrency: true,
-                        closeExchange: true,
-                        showReadyMessage: false,
-                    });
-                    clearPaymentDetailHiddenFields();
-                    closePaymentDetailModal();
-                    showFeedback('Service line is ready. Confirm passenger details and continue.');
-                    if (servicePassengerNameField instanceof HTMLElement) {
-                        servicePassengerNameField.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
-                        window.setTimeout(() => {
-                            servicePassengerNameField.focus();
-                            if (servicePassengerNameField instanceof HTMLInputElement) {
-                                servicePassengerNameField.select();
+                    {
+                        const enteredPaymentAmount = Math.max(toNumber(receivedNowInput?.value || 0), 0);
+                        if (!currentSavedPaymentApplies() && enteredPaymentAmount > 0.005) {
+                            await performSameCurrencyPaymentSave();
+                            const remainingEnteredAmount = Math.max(toNumber(receivedNowInput?.value || 0), 0);
+                            if (!currentSavedPaymentApplies() && remainingEnteredAmount > 0.005) {
+                                return;
                             }
-                        }, 80);
-                    } else {
-                        focusTarget('[data-service-passenger-name]');
+                        }
+
+                        prepareNewServiceEntry();
                     }
                     break;
                 case 'add-payment':
@@ -801,6 +824,310 @@ document.addEventListener('DOMContentLoaded', () => {
         paymentDetailModal.setAttribute('aria-hidden', 'true');
     };
 
+    let paymentTreasuryAccounts = [];
+    try {
+        paymentTreasuryAccounts = JSON.parse(paymentTreasuryAccountsNode?.textContent || '[]');
+    } catch (error) {
+        paymentTreasuryAccounts = [];
+    }
+
+    const addPaymentTreasuryAccountValue = '__add_treasury_account__';
+    const captureFormState = (form) => {
+        if (!(form instanceof HTMLFormElement)) {
+            return [];
+        }
+
+        return Array.from(form.elements)
+            .filter((field) => field instanceof HTMLInputElement || field instanceof HTMLSelectElement || field instanceof HTMLTextAreaElement)
+            .filter((field) => field.name && field.name !== '_token' && field.type !== 'file')
+            .map((field) => ({
+                name: field.name,
+                type: field.type || field.tagName.toLowerCase(),
+                value: field.value,
+                checked: 'checked' in field ? Boolean(field.checked) : false,
+            }));
+    };
+    const restoreFormState = (form, entries = []) => {
+        if (!(form instanceof HTMLFormElement) || !Array.isArray(entries)) {
+            return;
+        }
+
+        entries.forEach((entry) => {
+            const field = form.elements.namedItem(entry.name);
+            if (!field) {
+                return;
+            }
+
+            const applyField = (target) => {
+                if (!(target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement)) {
+                    return;
+                }
+
+                if (target.type === 'checkbox' || target.type === 'radio') {
+                    target.checked = Boolean(entry.checked);
+                    target.dispatchEvent(new Event('change', { bubbles: true }));
+                    return;
+                }
+
+                target.value = String(entry.value ?? '');
+                target.dispatchEvent(new Event('input', { bubbles: true }));
+                target.dispatchEvent(new Event('change', { bubbles: true }));
+            };
+
+            if (field instanceof RadioNodeList) {
+                Array.from(field).forEach(applyField);
+                return;
+            }
+
+            applyField(field);
+        });
+    };
+    const workspaceReturnUrlForTreasury = () => {
+        try {
+            const url = new URL(window.location.href);
+            const bookingId = currentBookingId();
+            if (bookingId > 0) {
+                url.searchParams.set('booking_id', String(bookingId));
+            }
+
+            return url;
+        } catch (error) {
+            return null;
+        }
+    };
+    const persistWorkspaceStateForTreasuryReturn = () => {
+        try {
+            const returnUrl = workspaceReturnUrlForTreasury();
+            const payload = {
+                route: returnUrl ? `${returnUrl.pathname}${returnUrl.search}` : `${window.location.pathname}${window.location.search}`,
+                invoice: captureFormState(invoiceForm),
+                service: captureFormState(serviceForm),
+                payment: captureFormState(paymentForm),
+            };
+            window.localStorage.setItem(pendingTreasuryWorkspaceStateKey, JSON.stringify(payload));
+        } catch (error) {
+            // Best-effort only.
+        }
+    };
+    const restoreWorkspaceStateAfterTreasuryReturn = () => {
+        let raw = '';
+        try {
+            raw = window.localStorage.getItem(pendingTreasuryWorkspaceStateKey) || '';
+        } catch (error) {
+            return;
+        }
+
+        if (raw.trim() === '') {
+            return;
+        }
+
+        try {
+            const payload = JSON.parse(raw);
+            const currentRoute = `${window.location.pathname}${window.location.search}`;
+            if (!payload || payload.route !== currentRoute) {
+                return;
+            }
+
+            window.localStorage.removeItem(pendingTreasuryWorkspaceStateKey);
+            restoreFormState(invoiceForm, payload.invoice);
+            restoreFormState(serviceForm, payload.service);
+            restoreFormState(paymentForm, payload.payment);
+
+            window.setTimeout(() => {
+                if (typeof refreshSubtypeVisibility === 'function') {
+                    refreshSubtypeVisibility();
+                }
+                if (typeof refreshProfit === 'function') {
+                    refreshProfit('restore-treasury-return');
+                }
+                if (typeof syncServiceCurrencyMirror === 'function') {
+                    syncServiceCurrencyMirror();
+                }
+                if (typeof syncPaymentTreasurySelector === 'function') {
+                    syncPaymentTreasurySelector();
+                }
+                if (typeof refreshPaymentPreview === 'function') {
+                    refreshPaymentPreview();
+                }
+                if (typeof updateWorkflowState === 'function') {
+                    updateWorkflowState();
+                }
+                if (receivedNowInput instanceof HTMLInputElement) {
+                    receivedNowInput.focus();
+                    receivedNowInput.select();
+                }
+            }, 80);
+        } catch (error) {
+            try {
+                window.localStorage.removeItem(pendingTreasuryWorkspaceStateKey);
+            } catch (cleanupError) {
+                // ignore
+            }
+        }
+    };
+    const paymentMethodRequiresTreasurySelection = (method) => ['cash', 'bank_transfer'].includes(String(method || '').trim());
+    const treasuryAccountsUrl = station.dataset.treasuryAccountsUrl || '';
+    const paymentTreasuryTypesForMethod = (method) => {
+        switch (String(method || '').trim()) {
+            case 'cash':
+                return ['cash'];
+            case 'bank_transfer':
+                return ['bank'];
+            default:
+                return [];
+        }
+    };
+    const buildPaymentTreasuryLabel = (account) => {
+        const label = String(account?.label || account?.accountName || '').trim();
+        const currency = String(account?.currency || '').trim();
+        return currency !== '' ? `${label} (${currency})` : label;
+    };
+    const openTreasuryAccountSetup = (method = '') => {
+        if (treasuryAccountsUrl === '') {
+            return false;
+        }
+
+        persistWorkspaceStateForTreasuryReturn();
+
+        const normalizedMethod = String(method || paymentMethodSelect?.value || '').trim();
+        const branchField = paymentForm?.elements?.namedItem('branch_id');
+        const branchId = branchField instanceof HTMLInputElement || branchField instanceof HTMLSelectElement
+            ? String(branchField.value || '').trim()
+            : '';
+        const currency = String(paymentCurrencySelect?.value || '').trim().toUpperCase();
+        const params = new URLSearchParams();
+        const returnUrl = workspaceReturnUrlForTreasury();
+        params.set('return_to', returnUrl ? returnUrl.toString() : window.location.href);
+
+        if (branchId !== '') {
+            params.set('branch_id', branchId);
+        }
+
+        if (currency !== '') {
+            params.set('currency', currency);
+        }
+
+        if (normalizedMethod === 'bank_transfer') {
+            params.set('account_type', 'bank');
+        } else if (normalizedMethod === 'cash') {
+            params.set('account_type', 'cash');
+        }
+
+        window.open(`${treasuryAccountsUrl}?${params.toString()}`, 'travel_ops_treasury_setup');
+        return true;
+    };
+    const eligiblePaymentTreasuryAccounts = () => {
+        const method = String(paymentMethodSelect?.value || '').trim();
+        const currency = String(paymentCurrencySelect?.value || '').trim().toUpperCase();
+        const branchField = paymentForm?.elements?.namedItem('branch_id');
+        const branchId = branchField instanceof HTMLInputElement || branchField instanceof HTMLSelectElement
+            ? Number.parseInt(String(branchField.value || '0'), 10) || 0
+            : 0;
+        const compatibleTypes = paymentTreasuryTypesForMethod(method);
+
+        return paymentTreasuryAccounts.filter((account) => {
+            return (branchId <= 0 || Number.parseInt(String(account?.branchId || 0), 10) === branchId)
+                && compatibleTypes.includes(String(account?.accountType || '').trim())
+                && String(account?.currency || '').trim().toUpperCase() === currency;
+        });
+    };
+    const defaultPaymentTreasuryAccount = (accounts) => {
+        const eligible = Array.isArray(accounts) ? accounts : [];
+        const explicitDefault = eligible.find((account) => account && account.isDefault);
+        if (explicitDefault) {
+            return explicitDefault;
+        }
+
+        return eligible.length > 0 ? eligible[0] : null;
+    };
+    const syncPaymentTreasurySelector = () => {
+        if (!paymentTreasuryAccountSelect || !paymentTreasuryAccountRow || !paymentMethodSelect) {
+            return;
+        }
+
+        const method = String(paymentMethodSelect.value || '').trim();
+        const requiresTreasury = paymentMethodRequiresTreasurySelection(method);
+        const eligibleAccounts = requiresTreasury ? eligiblePaymentTreasuryAccounts() : [];
+        const selectedBefore = String(paymentTreasuryAccountSelect.value || paymentTreasuryAccountSelect.dataset.initialValue || '').trim();
+        const preferredAccount = defaultPaymentTreasuryAccount(eligibleAccounts);
+
+        paymentTreasuryAccountSelect.innerHTML = '';
+
+        if (!requiresTreasury) {
+            paymentTreasuryAccountSelect.dataset.initialValue = '';
+            paymentTreasuryAccountRow.hidden = true;
+            return;
+        }
+
+        const promptOption = document.createElement('option');
+        promptOption.value = '';
+        promptOption.textContent = eligibleAccounts.length > 0
+            ? (method === 'cash' ? 'Select cash account' : 'Select bank account')
+            : 'No eligible account configured';
+        paymentTreasuryAccountSelect.appendChild(promptOption);
+
+        eligibleAccounts.forEach((account) => {
+            const option = document.createElement('option');
+            option.value = String(account.id || '');
+            option.textContent = buildPaymentTreasuryLabel(account);
+            paymentTreasuryAccountSelect.appendChild(option);
+        });
+
+        if (method === 'bank_transfer') {
+            const addOption = document.createElement('option');
+            addOption.value = addPaymentTreasuryAccountValue;
+            addOption.textContent = '+ Add bank account...';
+            paymentTreasuryAccountSelect.appendChild(addOption);
+        }
+
+        let nextValue = '';
+        if (selectedBefore !== '' && eligibleAccounts.some((account) => String(account.id) === selectedBefore)) {
+            nextValue = selectedBefore;
+        } else if (preferredAccount) {
+            nextValue = String(preferredAccount.id || '');
+        }
+        paymentTreasuryAccountSelect.value = nextValue;
+        paymentTreasuryAccountSelect.dataset.initialValue = '';
+
+        if (method === 'cash' && eligibleAccounts.length > 0) {
+            paymentTreasuryAccountRow.hidden = true;
+            return;
+        }
+
+        paymentTreasuryAccountRow.hidden = false;
+    };
+    const promptTreasuryAccountSetupIfMissing = (method) => {
+        const normalizedMethod = String(method || '').trim();
+        if (!paymentMethodRequiresTreasurySelection(normalizedMethod)) {
+            return false;
+        }
+
+        const eligibleAccounts = eligiblePaymentTreasuryAccounts();
+        if (eligibleAccounts.length > 0) {
+            return false;
+        }
+
+        const accountLabel = normalizedMethod === 'bank_transfer' ? 'bank account' : 'cash account';
+        const message = `No eligible ${accountLabel} is configured for this branch and currency. Open Treasury Accounts now to add it?`;
+        showFeedback(`Please configure a ${accountLabel} for this branch and currency.`);
+
+        if (window.confirm(message)) {
+            openTreasuryAccountSetup(normalizedMethod);
+        }
+
+        return true;
+    };
+    if (paymentTreasuryAccountSelect) {
+        paymentTreasuryAccountSelect.addEventListener('change', () => {
+            if (paymentTreasuryAccountSelect.value !== addPaymentTreasuryAccountValue) {
+                return;
+            }
+
+            paymentTreasuryAccountSelect.value = '';
+            openTreasuryAccountSetup(paymentMethodSelect?.value || '');
+        });
+    }
+
     const clearPaymentDetailHiddenFields = () => {
         if (paymentReferenceInput) {
             paymentReferenceInput.value = '';
@@ -852,7 +1179,26 @@ document.addEventListener('DOMContentLoaded', () => {
         return true;
     };
 
-    const applyPaymentDetailModalValues = () => {
+    let paymentDetailCloseFocusMode = 'method';
+    const focusAfterPaymentDetailModalClose = () => {
+        const treasuryVisible = paymentTreasuryAccountSelect
+            && paymentTreasuryAccountRow
+            && !paymentTreasuryAccountRow.hidden
+            && !paymentTreasuryAccountSelect.disabled;
+
+        const nextTarget = treasuryVisible
+            ? paymentTreasuryAccountSelect
+            : paymentPrimarySaveButton;
+
+        if (nextTarget instanceof HTMLElement) {
+            nextTarget.focus();
+            if (typeof nextTarget.select === 'function' && nextTarget.tagName.toLowerCase() === 'input') {
+                nextTarget.select();
+            }
+        }
+    };
+
+    const applyPaymentDetailModalValues = ({ close = true } = {}) => {
         if (paymentReferenceInput) {
             paymentReferenceInput.value = String(paymentDetailReferenceInput?.value || '').trim();
         }
@@ -866,7 +1212,9 @@ document.addEventListener('DOMContentLoaded', () => {
             paymentRemarksInput.value = String(paymentDetailRemarksInput?.value || '').trim();
         }
 
-        closePaymentDetailModal();
+        if (close) {
+            closePaymentDetailModal();
+        }
         showFeedback(`${currentPaymentMethodLabel()} details applied.`);
     };
 
@@ -1428,7 +1776,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        const hasValidPreview = Boolean(preview)
+        const hasSettlementReady = Boolean(preview)
             && preview.paymentAmount > 0.005
             && preview.targetSettled > 0.005
             && preview.paymentConsumed > 0.005
@@ -1436,9 +1784,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 preview.target.currency === preview.quote.paymentCurrency
                 || toNumber(preview.quote.exchangeRate || 0) > 0.005
             );
+        const hasRateOnlySave = Boolean(preview)
+            && preview.target.currency !== preview.quote.paymentCurrency
+            && toNumber(preview.quote.exchangeRate || 0) > 0.005;
 
-        paymentExchangeConfirmButton.disabled = !hasValidPreview;
-        paymentExchangeConfirmButton.textContent = 'Confirm Settlement';
+        paymentExchangeConfirmButton.disabled = !(hasSettlementReady || hasRateOnlySave);
+        paymentExchangeConfirmButton.textContent = hasSettlementReady
+            ? 'Confirm Settlement'
+            : (hasRateOnlySave ? 'Save Rate' : 'Confirm Settlement');
     };
 
     const focusExchangeConfirmWhenReady = (preview = null) => {
@@ -1454,8 +1807,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         const activeElement = document.activeElement;
-        const focusCameFromSettlementInput = activeElement === paymentExchangeRateInput
-            || activeElement === receivedNowInput;
+        const focusCameFromSettlementInput = activeElement === receivedNowInput;
         if (!focusCameFromSettlementInput) {
             return;
         }
@@ -2542,11 +2894,13 @@ document.addEventListener('DOMContentLoaded', () => {
     if (paymentCurrencySelect) {
         paymentCurrencySelect.addEventListener('change', async () => {
             if (noteSavedPaymentEditAttempt()) {
+                syncPaymentTreasurySelector();
                 syncPaymentCurrencyLabels(paymentCurrencySelect.value);
                 refreshPaymentPreview();
                 return;
             }
 
+            syncPaymentTreasurySelector();
             syncPaymentCurrencyLabels(paymentCurrencySelect.value);
             refreshPaymentPreview();
 
@@ -2571,27 +2925,42 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
-            const invoiceSnapshot = currentInvoiceSnapshot();
-            const selectedPaymentCurrency = paymentCurrencySelect?.value || invoiceSnapshot.invoiceCurrency || 'PKR';
-            if (invoiceSnapshot.invoiceBalance <= 0.005) {
-                showFeedback('No current invoice balance is available for exchange settlement.');
-                return;
-            }
             await openExchangeSettlementModal();
         });
     }
 
     if (paymentPrintReceiptButton) {
-        paymentPrintReceiptButton.addEventListener('click', () => {
-            const receiptId = Number.parseInt(String(paymentPrintReceiptButton.dataset.paymentLatestReceiptId || 0), 10) || 0;
-            const printUrl = String(paymentPrintReceiptButton.dataset.paymentPrintUrl || '').trim();
+        paymentPrintReceiptButton.addEventListener('click', async () => {
+            const openLatestReceipt = () => {
+                const receiptId = Number.parseInt(String(paymentPrintReceiptButton.dataset.paymentLatestReceiptId || 0), 10) || 0;
+                const printUrl = String(paymentPrintReceiptButton.dataset.paymentPrintUrl || '').trim();
 
-            if (receiptId <= 0 || printUrl === '') {
+                if (receiptId <= 0 || printUrl === '') {
+                    return false;
+                }
+
+                window.open(printUrl, '_blank', 'noopener');
+                return true;
+            };
+
+            if (openLatestReceipt()) {
+                return;
+            }
+
+            const enteredPaymentAmount = Math.max(toNumber(receivedNowInput?.value || 0), 0);
+            if (enteredPaymentAmount <= 0.005) {
                 showFeedback('No receipt has been saved yet. Please save payment first.');
                 return;
             }
 
-            window.open(printUrl, '_blank', 'noopener');
+            const payload = await performSameCurrencyPaymentSave();
+            if (payload && openLatestReceipt()) {
+                return;
+            }
+
+            if (!openLatestReceipt()) {
+                showFeedback('Receipt could not be opened yet. Please review the payment and try again.');
+            }
         });
     }
 
@@ -2619,6 +2988,15 @@ document.addEventListener('DOMContentLoaded', () => {
             paymentExchangeConfirmFocusDone = false;
             exchangeSettlementPreview();
         });
+        paymentExchangeRateInput.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter' && event.code !== 'NumpadEnter') {
+                return;
+            }
+
+            event.preventDefault();
+            event.stopPropagation();
+            void confirmExchangeSettlement();
+        });
     }
 
     if (receivedNowInput) {
@@ -2628,9 +3006,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
-            if (isCurrentInvoiceCrossCurrencySelection()) {
-                await maybeOpenExchangeSettlementModal({ requireAmount: true });
-            }
             if (paymentExchangeModal && !paymentExchangeModal.hidden) {
                 exchangeSettlementPreview();
             }
@@ -2641,162 +3016,260 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
-            if (isCurrentInvoiceCrossCurrencySelection()) {
-                await maybeOpenExchangeSettlementModal({ requireAmount: true });
-            }
             if (paymentExchangeModal && !paymentExchangeModal.hidden) {
                 exchangeSettlementPreview();
             }
         });
     }
 
-    if (paymentExchangeConfirmButton) {
-        paymentExchangeConfirmButton.addEventListener('click', async () => {
-            if (paymentExchangeConfirmInFlight) {
-                return;
-            }
+    const syncSettlementRateFieldsFromPreview = (preview) => {
+        if (!preview) {
+            return;
+        }
 
-            if (currentSavedPaymentApplies()) {
-                showExchangeFeedback(savedPaymentLockedMessage());
-                syncSavedPaymentUiState();
-                return;
-            }
+        if (paymentSettlementRateFromInput) {
+            paymentSettlementRateFromInput.value = String(preview.quote.rateFromCurrency || preview.target.currency || 'PKR');
+        }
+        if (paymentSettlementRateToInput) {
+            paymentSettlementRateToInput.value = String(preview.quote.rateToCurrency || preview.quote.paymentCurrency || 'PKR');
+        }
+        if (paymentSettlementRateInput) {
+            paymentSettlementRateInput.value = toNumber(preview.quote.exchangeRate || 0) > 0.005
+                ? Number(preview.quote.exchangeRate).toFixed(8)
+                : '';
+        }
+        if (paymentSettlementRateDateInput) {
+            paymentSettlementRateDateInput.value = preview.rateDate;
+        }
+    };
 
-            clearExchangeFeedback();
-            const preview = exchangeSettlementPreview();
-            if (!preview) {
-                showExchangeFeedback('Choose a settlement target first.');
-                return;
-            }
+    const applyExchangeSettlementPayloadFromPreview = (preview, options = {}) => {
+        const { rateOnly = false } = options;
+        if (!preview) {
+            return;
+        }
 
-            if (preview.paymentAmount <= 0.005) {
-                showExchangeFeedback('Enter the payment in the main Amount Receiving field before confirming exchange settlement.');
-                receivedNowInput?.focus();
-                return;
-            }
+        if (paymentSettlementModeInput) {
+            paymentSettlementModeInput.value = rateOnly ? 'normal' : 'exchange';
+        }
+        if (paymentSettlementTargetIdInput) {
+            paymentSettlementTargetIdInput.value = rateOnly ? '' : String(preview.target.id || 0);
+        }
+        if (paymentSettlementTargetCurrencyInput) {
+            paymentSettlementTargetCurrencyInput.value = rateOnly ? '' : String(preview.target.currency || 'PKR');
+        }
+        if (paymentSettlementTargetReceivableAmountInput) {
+            paymentSettlementTargetReceivableAmountInput.value = rateOnly ? '' : preview.targetSettled.toFixed(2);
+        }
+        if (paymentSettlementTargetPaymentAmountInput) {
+            paymentSettlementTargetPaymentAmountInput.value = rateOnly ? '' : preview.paymentConsumed.toFixed(2);
+        }
+        syncSettlementRateFieldsFromPreview(preview);
+    };
 
-            if (preview.target.currency !== preview.quote.paymentCurrency && toNumber(preview.quote.exchangeRate || 0) <= 0.005) {
-                showExchangeFeedback('Today\'s exchange rate is required before settlement can continue.');
+    const saveExchangeSettlementRateOnly = async (preview) => {
+        if (!(paymentForm instanceof HTMLFormElement)) {
+            throw new Error('Payment form is not available.');
+        }
+
+        syncSettlementRateFieldsFromPreview(preview);
+        const formData = new FormData();
+        const csrfToken = paymentForm.elements.namedItem('_token');
+        if (csrfToken instanceof HTMLInputElement) {
+            formData.append('_token', csrfToken.value);
+        }
+
+        [
+            'booking_id',
+            'branch_id',
+            'settlement_rate_from_currency',
+            'settlement_rate_to_currency',
+            'settlement_exchange_rate',
+            'settlement_exchange_rate_effective_date',
+        ].forEach((name) => {
+            const field = paymentForm.elements.namedItem(name);
+            if (field instanceof HTMLInputElement || field instanceof HTMLSelectElement) {
+                formData.append(name, field.value);
+            }
+        });
+
+        const response = await fetch(paymentExchangeRateSaveUrl, {
+            method: 'POST',
+            body: formData,
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest',
+            },
+            credentials: 'same-origin',
+        });
+
+        const payload = await response.json().catch(() => ({
+            ok: false,
+            message: 'The server returned an invalid exchange-rate response.',
+        }));
+
+        if (!response.ok || payload.ok === false) {
+            throw new Error(String(payload.message || 'Today\'s exchange rate could not be saved.'));
+        }
+
+        const rate = payload.rate || {};
+        const fromCurrency = String(rate.from_currency || preview.quote.rateFromCurrency || '');
+        const toCurrency = String(rate.to_currency || preview.quote.rateToCurrency || '');
+        const exchangeRate = toNumber(rate.exchange_rate || preview.quote.exchangeRate || 0);
+        const effectiveDate = String(rate.effective_date || preview.rateDate || '');
+        if (fromCurrency !== '' && toCurrency !== '' && exchangeRate > 0.005) {
+            dailySettlementRates[`${fromCurrency}->${toCurrency}`] = {
+                fromCurrency,
+                toCurrency,
+                exchangeRate,
+                effectiveDate,
+                isDerived: false,
+            };
+        }
+
+        return payload;
+    };
+
+    const confirmExchangeSettlement = async () => {
+        if (paymentExchangeConfirmInFlight) {
+            return;
+        }
+
+        if (currentSavedPaymentApplies()) {
+            showExchangeFeedback(savedPaymentLockedMessage());
+            syncSavedPaymentUiState();
+            return;
+        }
+
+        clearExchangeFeedback();
+        const preview = exchangeSettlementPreview();
+        if (!preview) {
+            showExchangeFeedback('Choose a settlement target first.');
+            return;
+        }
+
+        if (preview.target.currency !== preview.quote.paymentCurrency && toNumber(preview.quote.exchangeRate || 0) <= 0.005) {
+            showExchangeFeedback('Today\'s exchange rate is required before settlement can continue.');
+            paymentExchangeRateInput?.focus();
+            return;
+        }
+
+        const storedQuote = preferredSettlementQuote(
+            String(preview.target.currency || 'PKR'),
+            String(preview.quote.paymentCurrency || 'PKR'),
+            dailySettlementRates,
+            preview.rateDate
+        );
+        const storedRate = toNumber(storedQuote.exchangeRate || 0);
+        const chosenRate = toNumber(preview.quote.exchangeRate || 0);
+        if (
+            preview.target.currency !== preview.quote.paymentCurrency
+            && storedRate > 0.005
+            && Math.abs(storedRate - chosenRate) > 0.00000001
+        ) {
+            const confirmed = window.confirm(
+                `Update today's exchange rate from ${storedRate.toFixed(8)} to ${chosenRate.toFixed(8)} for new settlements?`
+            );
+            if (!confirmed) {
                 paymentExchangeRateInput?.focus();
                 return;
             }
+        }
 
-            const storedQuote = preferredSettlementQuote(
-                String(preview.target.currency || 'PKR'),
-                String(preview.quote.paymentCurrency || 'PKR'),
-                dailySettlementRates,
-                preview.rateDate
-            );
-            const storedRate = toNumber(storedQuote.exchangeRate || 0);
-            const chosenRate = toNumber(preview.quote.exchangeRate || 0);
-            if (
-                preview.target.currency !== preview.quote.paymentCurrency
-                && storedRate > 0.005
-                && Math.abs(storedRate - chosenRate) > 0.00000001
-            ) {
-                const confirmed = window.confirm(
-                    `Update today's exchange rate from ${storedRate.toFixed(8)} to ${chosenRate.toFixed(8)} for new settlements?`
-                );
-                if (!confirmed) {
-                    paymentExchangeRateInput?.focus();
-                    return;
-                }
-            }
+        const isRateOnlySave = preview.paymentAmount <= 0.005;
+        if (!isRateOnlySave && (preview.targetSettled <= 0.005 || preview.paymentConsumed <= 0.005)) {
+            showExchangeFeedback('The entered payment does not settle any amount on the selected target.');
+            return;
+        }
 
-            if (preview.targetSettled <= 0.005 || preview.paymentConsumed <= 0.005) {
-                showExchangeFeedback('The entered payment does not settle any amount on the selected target.');
+        applyExchangeSettlementPayloadFromPreview(preview, { rateOnly: isRateOnlySave });
+
+        if (!(paymentForm instanceof HTMLFormElement)) {
+            showExchangeFeedback('Payment form is not available.');
+            return;
+        }
+
+        if (!isRateOnlySave && !ensurePaymentDetailReadyForSave()) {
+            showExchangeFeedback(`Enter ${currentPaymentMethodLabel()} details before saving payment.`);
+            return;
+        }
+
+        if (!isRateOnlySave && receivedNowInput) {
+            receivedNowInput.value = preview.paymentAmount.toFixed(2);
+        }
+
+        paymentExchangeConfirmInFlight = true;
+        paymentExchangeConfirmButton.disabled = true;
+        paymentExchangeConfirmButton.textContent = isRateOnlySave ? 'Saving Rate...' : 'Saving...';
+
+        try {
+            const payload = isRateOnlySave
+                ? await saveExchangeSettlementRateOnly(preview)
+                : await (async () => {
+                    const response = await fetch(paymentForm.action, {
+                        method: 'POST',
+                        body: new FormData(paymentForm),
+                        headers: {
+                            'X-Requested-With': 'XMLHttpRequest',
+                        },
+                        credentials: 'same-origin',
+                    });
+
+                    const receiptPayload = await response.json().catch(() => ({
+                        ok: false,
+                        message: 'The server returned an invalid exchange settlement response.',
+                    }));
+
+                    if (!response.ok || receiptPayload.ok === false) {
+                        throw new Error(String(receiptPayload.message || 'Exchange settlement could not be saved.'));
+                    }
+
+                    return receiptPayload;
+                })();
+
+            if (isRateOnlySave) {
+                exchangeSettlementPreview();
+                triggerExchangeSettlementClose();
+                window.setTimeout(() => {
+                    syncPaymentCurrencyLabels(paymentCurrencySelect?.value || preview.quote.paymentCurrency || 'PKR');
+                    receivedNowInput?.focus();
+                }, 20);
+                showFeedback(String(payload.message || 'Today\'s exchange rate saved.'));
                 return;
             }
 
-            if (paymentSettlementModeInput) {
-                paymentSettlementModeInput.value = 'exchange';
+            syncBookingIdFields(Number.parseInt(String(payload.booking_id || 0), 10));
+            applyAutosavedCustomer(payload.customer || null);
+            if (payload.invoice_no) {
+                setInvoiceNumber(payload.invoice_no);
             }
-            if (paymentSettlementTargetIdInput) {
-                paymentSettlementTargetIdInput.value = String(preview.target.id || 0);
-            }
-            if (paymentSettlementTargetCurrencyInput) {
-                paymentSettlementTargetCurrencyInput.value = String(preview.target.currency || 'PKR');
-            }
-            if (paymentSettlementTargetReceivableAmountInput) {
-                paymentSettlementTargetReceivableAmountInput.value = preview.targetSettled.toFixed(2);
-            }
-            if (paymentSettlementTargetPaymentAmountInput) {
-                paymentSettlementTargetPaymentAmountInput.value = preview.paymentConsumed.toFixed(2);
-            }
-            if (paymentSettlementRateFromInput) {
-                paymentSettlementRateFromInput.value = String(preview.quote.rateFromCurrency || preview.target.currency || 'PKR');
-            }
-            if (paymentSettlementRateToInput) {
-                paymentSettlementRateToInput.value = String(preview.quote.rateToCurrency || preview.quote.paymentCurrency || 'PKR');
-            }
-            if (paymentSettlementRateInput) {
-                paymentSettlementRateInput.value = toNumber(preview.quote.exchangeRate || 0) > 0.005
-                    ? Number(preview.quote.exchangeRate).toFixed(8)
-                    : '';
-            }
-            if (paymentSettlementRateDateInput) {
-                paymentSettlementRateDateInput.value = preview.rateDate;
-            }
+            applyAutosavePaymentFoundation(payload);
+            updatePrintReceiptTarget(payload.receipt_id || 0, payload.booking_id || currentBookingId());
+            lockSavedPaymentStateFromPayload(payload, 'exchange');
+            refreshPaymentPreview();
+            const receiptSummary = currentReceiptSummary(payload);
+            const successMessage = receiptSummary.receiptNo !== ''
+                ? `Payment saved: ${receiptSummary.receiptNo}`
+                : (payload.message || 'Exchange settlement recorded successfully.');
+            showFeedback(successMessage);
+            window.setTimeout(() => {
+                triggerExchangeSettlementClose();
+                const returnFocusTarget = paymentPrintReceiptButton && !paymentPrintReceiptButton.disabled
+                    ? paymentPrintReceiptButton
+                    : paymentPrimarySaveButton;
+                returnFocusTarget?.focus({ preventScroll: true });
+            }, 20);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Exchange settlement could not be saved.';
+            showExchangeFeedback(message);
+        } finally {
+            paymentExchangeConfirmInFlight = false;
+            syncSavedPaymentUiState();
+        }
+    };
 
-            if (!(paymentForm instanceof HTMLFormElement)) {
-                showExchangeFeedback('Payment form is not available.');
-                return;
-            }
-
-            if (!ensurePaymentDetailReadyForSave()) {
-                showExchangeFeedback(`Enter ${currentPaymentMethodLabel()} details before saving payment.`);
-                return;
-            }
-
-            if (receivedNowInput) {
-                receivedNowInput.value = preview.paymentAmount.toFixed(2);
-            }
-
-            paymentExchangeConfirmInFlight = true;
-            paymentExchangeConfirmButton.disabled = true;
-            paymentExchangeConfirmButton.textContent = 'Saving...';
-
-            try {
-                const response = await fetch(paymentForm.action, {
-                    method: 'POST',
-                    body: new FormData(paymentForm),
-                    headers: {
-                        'X-Requested-With': 'XMLHttpRequest',
-                    },
-                    credentials: 'same-origin',
-                });
-
-                const payload = await response.json().catch(() => ({
-                    ok: false,
-                    message: 'The server returned an invalid exchange settlement response.',
-                }));
-
-                if (!response.ok || payload.ok === false) {
-                    throw new Error(String(payload.message || 'Exchange settlement could not be saved.'));
-                }
-
-                syncBookingIdFields(Number.parseInt(String(payload.booking_id || 0), 10));
-                applyAutosavedCustomer(payload.customer || null);
-                if (payload.invoice_no) {
-                    setInvoiceNumber(payload.invoice_no);
-                }
-                applyAutosavePaymentFoundation(payload);
-                updatePrintReceiptTarget(payload.receipt_id || 0, payload.booking_id || currentBookingId());
-                lockSavedPaymentStateFromPayload(payload, 'exchange');
-                refreshPaymentPreview();
-                const receiptSummary = currentReceiptSummary(payload);
-                const successMessage = receiptSummary.receiptNo !== ''
-                    ? `Payment saved: ${receiptSummary.receiptNo}`
-                    : (payload.message || 'Exchange settlement recorded successfully.');
-                showExchangeFeedback(successMessage);
-                showFeedback(successMessage);
-            } catch (error) {
-                const message = error instanceof Error ? error.message : 'Exchange settlement could not be saved.';
-                showExchangeFeedback(message);
-            } finally {
-                paymentExchangeConfirmInFlight = false;
-                syncSavedPaymentUiState();
-            }
+    if (paymentExchangeConfirmButton) {
+        paymentExchangeConfirmButton.addEventListener('click', () => {
+            void confirmExchangeSettlement();
         });
     }
 
@@ -2819,6 +3292,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
+            syncPaymentTreasurySelector();
+            if (promptTreasuryAccountSetupIfMissing(paymentMethodSelect.value)) {
+                return;
+            }
+
             if (isNonCashPaymentMethod(paymentMethodSelect.value)) {
                 openPaymentDetailModal();
                 return;
@@ -2833,6 +3311,16 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             event.preventDefault();
+            if (
+                paymentTreasuryAccountSelect
+                && paymentTreasuryAccountRow
+                && !paymentTreasuryAccountRow.hidden
+                && !paymentTreasuryAccountSelect.disabled
+            ) {
+                paymentTreasuryAccountSelect.focus();
+                return;
+            }
+
             if (paymentPrimarySaveButton) {
                 paymentPrimarySaveButton.focus();
             }
@@ -2842,16 +3330,75 @@ document.addEventListener('DOMContentLoaded', () => {
     paymentDetailCloseButtons.forEach((button) => {
         button.addEventListener('click', () => {
             closePaymentDetailModal();
+            if (paymentDetailCloseFocusMode === 'after-save') {
+                paymentDetailCloseFocusMode = 'method';
+                focusAfterPaymentDetailModalClose();
+                return;
+            }
+
+            paymentDetailCloseFocusMode = 'method';
             paymentMethodSelect?.focus();
         });
     });
 
     if (paymentDetailApplyButton) {
         paymentDetailApplyButton.addEventListener('click', () => {
-            applyPaymentDetailModalValues();
-            paymentPrimarySaveButton?.focus();
+            paymentDetailCloseFocusMode = 'after-save';
+            applyPaymentDetailModalValues({ close: false });
+            triggerPaymentDetailCloseButton();
         });
     }
+
+    const paymentDetailFields = [
+        paymentDetailReferenceInput,
+        paymentDetailBankCardInput,
+        paymentDetailChargesInput,
+        paymentDetailRemarksInput,
+    ].filter((field) => field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement);
+
+    const triggerPaymentDetailCloseButton = () => {
+        const preferredCloseButton = paymentDetailCloseButtons.find((button) =>
+            button instanceof HTMLButtonElement
+            && button.closest('[data-payment-detail-modal]') === paymentDetailModal
+        );
+
+        if (preferredCloseButton instanceof HTMLButtonElement) {
+            preferredCloseButton.click();
+            return;
+        }
+
+        closePaymentDetailModal();
+    };
+
+    paymentDetailFields.forEach((field, index) => {
+        field.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter') {
+                return;
+            }
+
+            event.preventDefault();
+            event.stopPropagation();
+
+            const nextField = paymentDetailFields[index + 1];
+            if (nextField) {
+                nextField.focus();
+                if (typeof nextField.select === 'function') {
+                    nextField.select();
+                }
+                return;
+            }
+
+            if (paymentDetailApplyButton instanceof HTMLButtonElement) {
+                paymentDetailApplyButton.click();
+            } else {
+                paymentDetailCloseFocusMode = 'after-save';
+                applyPaymentDetailModalValues({ close: false });
+                triggerPaymentDetailCloseButton();
+            }
+        });
+    });
+
+    syncPaymentTreasurySelector();
 
     if (paymentDueDatePicker && paymentDueDateInput) {
         paymentDueDatePicker.addEventListener('change', () => {
@@ -2890,11 +3437,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const performSameCurrencyPaymentSave = async () => {
         if (!(paymentForm instanceof HTMLFormElement)) {
-            return;
+            return null;
         }
 
         if (paymentSubmitValidationInFlight) {
-            return;
+            return null;
         }
 
         paymentSubmitValidationInFlight = true;
@@ -2904,17 +3451,18 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             if (currentBookingId() <= 0) {
                 showFeedback('Customer-level payment without an open booking is not supported yet. Open an existing booking first.');
-                return;
+                return null;
             }
 
             if (currentSavedPaymentApplies()) {
                 showFeedback(savedPaymentLockedMessage());
                 syncSavedPaymentUiState();
-                return;
+                return null;
             }
 
             const isExchangeSettlement = paymentSettlementModeInput?.value === 'exchange';
             const selectedPaymentCurrency = paymentCurrencySelect?.value || paymentCurrentInvoiceInput?.dataset.paymentCurrency || 'PKR';
+            const receivedAmount = Math.max(toNumber(receivedNowInput?.value || 0), 0);
             const sameCurrencyDueNow = Math.max(
                 toNumber(paymentTotalOutstandingInput?.dataset.paymentTotalDueNow || paymentTotalOutstandingInput?.value || 0),
                 0
@@ -2924,13 +3472,30 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (selectedPaymentCurrency !== invoiceSnapshot.invoiceCurrency) {
                 if (invoiceSnapshot.invoiceBalance > 0.005) {
-                    clearExchangeSettlementFields();
-                    await openExchangeSettlementModal();
-                    return;
-                }
+                    if (receivedAmount <= 0.005) {
+                        showFeedback('Enter the receiving amount first, or use Exchange Settlement only to save today\'s rate.');
+                        return null;
+                    }
 
-                showFeedback('Cross-currency settlement is under final testing. Please use same-currency payment for now.');
-                return;
+                    const crossCurrencyPreview = exchangeSettlementPreview();
+                    if (!crossCurrencyPreview) {
+                        showFeedback('Open Exchange Settlement first after changing payment currency, then save the payment or receipt.');
+                        return null;
+                    }
+                    if (crossCurrencyPreview.target.currency !== crossCurrencyPreview.quote.paymentCurrency && toNumber(crossCurrencyPreview.quote.exchangeRate || 0) <= 0.005) {
+                        showFeedback('Open Exchange Settlement first after changing payment currency, then save the payment or receipt.');
+                        return null;
+                    }
+                    if (crossCurrencyPreview.targetSettled <= 0.005 || crossCurrencyPreview.paymentConsumed <= 0.005) {
+                        showFeedback('The entered payment does not settle any amount on the current invoice.');
+                        return null;
+                    }
+
+                    applyExchangeSettlementPayloadFromPreview(crossCurrencyPreview, { rateOnly: false });
+                } else {
+                    showFeedback('Cross-currency settlement is under final testing. Please use same-currency payment for now.');
+                    return null;
+                }
             }
 
             if (isExchangeSettlement) {
@@ -2939,7 +3504,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (sameCurrencyDueNow <= 0.005) {
                 showFeedback('No open balance exists in the selected payment currency.');
-                return;
+                return null;
             }
 
             const currentServiceId = currentPersistedServiceId();
@@ -2952,12 +3517,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (!paymentReady && sameCurrencyDueNow <= 0.005) {
                 showFeedback('No open balance exists in the selected payment currency.');
-                return;
+                return null;
             }
 
-            const receivedAmount = Math.max(toNumber(receivedNowInput?.value || 0), 0);
+            if (selectedPaymentCurrency === invoiceSnapshot.invoiceCurrency) {
+                clearExchangeSettlementFields();
+            }
 
-            clearExchangeSettlementFields();
+            if (promptTreasuryAccountSetupIfMissing(paymentMethodSelect?.value || '')) {
+                return null;
+            }
 
             const needsDueDate = paymentDueRow && !paymentDueRow.hidden && paymentDueDateInput && !paymentDueDateInput.disabled;
             if (paymentDueDateInput) {
@@ -2971,7 +3540,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     if (!normalizedDate) {
                         paymentDueDateInput.focus();
                         showFeedback('Enter a valid due date as YYYY-MM-DD or DD/MM/YYYY.');
-                        return;
+                        return null;
                     }
 
                     paymentDueDateInput.value = normalizedDate;
@@ -3047,10 +3616,10 @@ document.addEventListener('DOMContentLoaded', () => {
                         received_amount: 0,
                     },
                 }));
-                return;
+                return null;
             }
             if (!ensurePaymentDetailReadyForSave()) {
-                return;
+                return null;
             }
             const csrfField = paymentForm.elements.namedItem('_token');
             const csrfToken = csrfField instanceof HTMLInputElement ? csrfField.value.trim() : '';
@@ -3103,9 +3672,11 @@ document.addEventListener('DOMContentLoaded', () => {
             const receiptSummary = currentReceiptSummary(payload);
             showFeedback(receiptSummary.receiptNo !== '' ? `Payment saved: ${receiptSummary.receiptNo}` : (payload.message || 'Customer receipt recorded successfully.'));
             station.dispatchEvent(new CustomEvent('workspace:payment-saved', { bubbles: true, detail: payload }));
+            return payload;
         } catch (error) {
             paymentSubmitDebug.lastBackendError = error instanceof Error ? error.message : 'Customer receipt could not be saved.';
             showFeedback(paymentSubmitDebug.lastBackendError);
+            return null;
         } finally {
             paymentSubmitValidationInFlight = false;
             syncSavedPaymentUiState();
@@ -6685,16 +7256,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
         clearExchangeSettlementFields();
         paymentExchangeConfirmFocusDone = false;
+        paymentExchangeModal.style.removeProperty('display');
         paymentExchangeModal.hidden = false;
         paymentExchangeModal.setAttribute('aria-hidden', 'false');
         exchangeSettlementPreview();
         window.setTimeout(() => {
-            if (Math.max(toNumber(receivedNowInput?.value || 0), 0) <= 0.005) {
-                receivedNowInput?.focus();
-                return;
-            }
             if (paymentExchangeRateInput && !paymentExchangeRateRow?.hidden && toNumber(paymentExchangeRateInput.value || 0) <= 0.005) {
                 paymentExchangeRateInput.focus();
+                return;
+            }
+            if (Math.max(toNumber(receivedNowInput?.value || 0), 0) <= 0.005) {
+                paymentExchangeRateInput?.focus();
                 return;
             }
             paymentExchangeConfirmButton?.focus();
@@ -6707,12 +7279,27 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         const { clear = true } = options;
+        paymentExchangeModal.style.display = 'none';
         paymentExchangeModal.hidden = true;
         paymentExchangeModal.setAttribute('aria-hidden', 'true');
         paymentExchangeConfirmFocusDone = false;
         if (clear) {
             clearExchangeSettlementFields();
         }
+    }
+
+    const triggerExchangeSettlementClose = () => {
+        const preferredCloseButton = paymentExchangeCloseButtons.find((button) =>
+            button instanceof HTMLButtonElement
+            && button.closest('[data-payment-exchange-modal]') === paymentExchangeModal
+        );
+
+        if (preferredCloseButton) {
+            preferredCloseButton.click();
+            return;
+        }
+
+        closeExchangeSettlementModal();
     }
 
     const loadTraveler = (index) => {
@@ -6967,7 +7554,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     paymentExchangeCloseButtons.forEach((button) => {
-        button.addEventListener('click', closeExchangeSettlementModal);
+        button.addEventListener('click', () => {
+            closeExchangeSettlementModal();
+        });
     });
 
     if (customerAutocompletePanel) {
@@ -7319,4 +7908,5 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     restorePendingFreshWorkspaceCustomer();
+    restoreWorkspaceStateAfterTreasuryReturn();
 });

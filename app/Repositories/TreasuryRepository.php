@@ -112,6 +112,119 @@ final class TreasuryRepository extends BaseRepository
         return $statement->fetchAll(PDO::FETCH_ASSOC) ?: [];
     }
 
+    public function eligiblePaymentTreasuryAccounts(int $branchId, string $currency, string $paymentMethod): array
+    {
+        $compatibleTypes = $this->compatibleTreasuryTypesForPaymentMethod($paymentMethod);
+        if ($branchId <= 0 || $currency === '' || $compatibleTypes === []) {
+            return [];
+        }
+
+        $placeholders = implode(',', array_fill(0, count($compatibleTypes), '?'));
+        $params = array_merge([$branchId, strtoupper(trim($currency))], $compatibleTypes);
+
+        $statement = $this->db->prepare(
+            "SELECT
+                id,
+                branch_id,
+                account_type,
+                account_name,
+                account_code,
+                currency,
+                bank_name,
+                account_number,
+                iban,
+                is_default,
+                is_active
+             FROM treasury_accounts
+             WHERE branch_id = ?
+               AND currency = ?
+               AND is_active = 1
+               AND account_type IN ({$placeholders})
+             ORDER BY is_default DESC, account_name ASC, id ASC"
+        );
+        $statement->execute($params);
+
+        return $statement->fetchAll(PDO::FETCH_ASSOC) ?: [];
+    }
+
+    public function defaultTreasuryAccountForPayment(int $branchId, string $currency, string $paymentMethod): ?array
+    {
+        $eligible = $this->eligiblePaymentTreasuryAccounts($branchId, $currency, $paymentMethod);
+        if ($eligible === []) {
+            return null;
+        }
+
+        foreach ($eligible as $account) {
+            if ((int) ($account['is_default'] ?? 0) === 1) {
+                return $account;
+            }
+        }
+
+        return count($eligible) === 1 ? $eligible[0] : null;
+    }
+
+    public function validatePaymentTreasuryAccount(int $treasuryAccountId, int $branchId, string $currency, string $paymentMethod): array
+    {
+        if ($treasuryAccountId <= 0) {
+            throw new RuntimeException('Please configure/select a cash or bank account for this payment.');
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT
+                id,
+                branch_id,
+                account_type,
+                account_name,
+                account_code,
+                currency,
+                bank_name,
+                account_number,
+                iban,
+                is_default,
+                is_active
+             FROM treasury_accounts
+             WHERE id = :id
+             LIMIT 1'
+        );
+        $statement->execute([
+            'id' => $treasuryAccountId,
+        ]);
+
+        $account = $statement->fetch(PDO::FETCH_ASSOC);
+        if ($account === false) {
+            throw new RuntimeException('Please configure/select a cash or bank account for this payment.');
+        }
+
+        if ((int) ($account['is_active'] ?? 0) !== 1) {
+            throw new RuntimeException('Selected cash or bank account is inactive.');
+        }
+
+        if ((int) ($account['branch_id'] ?? 0) !== $branchId) {
+            throw new RuntimeException('Selected cash or bank account does not belong to this branch.');
+        }
+
+        if (strtoupper((string) ($account['currency'] ?? '')) !== strtoupper(trim($currency))) {
+            throw new RuntimeException('Selected cash or bank account does not match the payment currency.');
+        }
+
+        $compatibleTypes = $this->compatibleTreasuryTypesForPaymentMethod($paymentMethod);
+        if (! in_array((string) ($account['account_type'] ?? ''), $compatibleTypes, true)) {
+            throw new RuntimeException('Selected cash or bank account is not valid for this payment method.');
+        }
+
+        return $account;
+    }
+
+    private function compatibleTreasuryTypesForPaymentMethod(string $paymentMethod): array
+    {
+        return match (str_replace(' ', '_', mb_strtolower(trim($paymentMethod)))) {
+            'cash' => ['cash'],
+            'bank_transfer' => ['bank'],
+            'wallet', 'wallet_mobile', 'mobile_wallet' => ['wallet'],
+            default => [],
+        };
+    }
+
     private function linkedLedgerAccountIdForType(string $accountType): ?int
     {
         $codeMap = [

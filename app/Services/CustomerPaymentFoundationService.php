@@ -8,6 +8,7 @@ use App\Repositories\AccountingRepository;
 use App\Repositories\BookingServiceRepository;
 use App\Repositories\CustomerPaymentRepository;
 use App\Repositories\ExchangeRateRepository;
+use App\Repositories\TreasuryRepository;
 
 final class CustomerPaymentFoundationService extends Service
 {
@@ -54,6 +55,9 @@ final class CustomerPaymentFoundationService extends Service
                     'allocatedAmount' => (float) $row['allocated_amount'],
                     'unallocatedAmount' => (float) $row['unallocated_amount'],
                     'paymentMethod' => (string) $row['payment_method'],
+                    'treasuryAccountId' => (int) ($row['treasury_account_id'] ?? 0),
+                    'treasuryAccountName' => (string) ($row['treasury_account_name'] ?? ''),
+                    'treasuryAccountType' => (string) ($row['treasury_account_type'] ?? ''),
                     'referenceNumber' => (string) ($row['reference_number'] ?? ''),
                     'bankCardDetail' => (string) ($row['bank_card_detail'] ?? ''),
                     'chargesAmount' => (float) ($row['charges_amount'] ?? 0),
@@ -355,6 +359,37 @@ final class CustomerPaymentFoundationService extends Service
             static fn (array $row): bool => (float) ($row['unallocatedAmount'] ?? 0) > 0 && mb_strtolower((string) ($row['status'] ?? '')) !== 'void'
         ));
 
+        $paymentTreasuryAccounts = [];
+        $currentBranchId = (int) ($currentBookingContext['branch_id'] ?? 0);
+        if ($currentBranchId <= 0 && $accessibleBranchIds !== []) {
+            $currentBranchId = (int) $accessibleBranchIds[0];
+        }
+        if ($currentBranchId > 0) {
+            $paymentTreasuryAccounts = array_map(
+                static function (array $row): array {
+                    $bankName = trim((string) ($row['bank_name'] ?? ''));
+                    $label = (string) ($row['account_name'] ?? '');
+                    if ($bankName !== '' && $bankName !== $label) {
+                        $label .= ' - ' . $bankName;
+                    }
+
+                    return [
+                        'id' => (int) ($row['id'] ?? 0),
+                        'branchId' => (int) ($row['branch_id'] ?? 0),
+                        'accountName' => (string) ($row['account_name'] ?? ''),
+                        'accountType' => (string) ($row['account_type'] ?? ''),
+                        'currency' => (string) ($row['currency'] ?? 'PKR'),
+                        'isDefault' => (int) ($row['is_default'] ?? 0) === 1,
+                        'label' => trim($label),
+                    ];
+                },
+                array_values(array_filter(
+                    (new TreasuryRepository($this->app))->accounts([$currentBranchId]),
+                    static fn (array $row): bool => (int) ($row['is_active'] ?? 0) === 1
+                ))
+            );
+        }
+
         return [
             'bookingReference' => $bookingReference,
             'serviceReceivables' => $serviceReceivables,
@@ -365,6 +400,7 @@ final class CustomerPaymentFoundationService extends Service
             'allocatableReceipts' => $allocatableReceipts,
             'allocations' => $allocations,
             'dailySettlementRates' => $dailySettlementRates,
+            'paymentTreasuryAccounts' => $paymentTreasuryAccounts,
             'summary' => $summary,
             'rules' => [
                 'Payment is captured first at booking level, then allocated to service receivable items.',
@@ -395,6 +431,7 @@ final class CustomerPaymentFoundationService extends Service
             'booking_id' => (int) ($currentBookingContext['booking_id'] ?? 0),
             'booking_reference' => trim((string) ($currentBookingContext['booking_reference'] ?? $bookingReference)),
             'booking_date' => trim((string) ($currentBookingContext['booking_date'] ?? '')),
+            'branch_id' => (int) ($currentBookingContext['branch_id'] ?? 0),
         ];
     }
 }

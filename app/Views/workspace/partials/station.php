@@ -155,6 +155,11 @@ $refundCreditHintDisplay = $invoiceCurrency . ' ' . number_format($sameCurrencyC
 $paidOnCurrentInvoiceDisplay = $invoiceCurrency . ' ' . number_format($currentReceivedPersistedAmount, 2);
 $hasCurrentInvoiceAmount = $currentInvoiceAmountValue > 0.005 || $currentReceivedPersistedAmount > 0.005 || $effectiveCurrentInvoiceDueValue > 0.005;
 $paymentCurrency = $invoiceCurrency;
+$paymentTreasuryAccountsJson = json_encode(
+    $customerPaymentFoundation['paymentTreasuryAccounts'] ?? [],
+    JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
+) ?: '[]';
+$receiptDraftTreasuryAccountId = (int) ($receiptRecreateDraft['treasuryAccountId'] ?? 0);
 $totalOutstandingAmount = $sameCurrencyPreviousBalanceAmount + $effectiveCurrentInvoiceDueValue;
 $totalOutstanding = $invoiceCurrency . ' ' . number_format($totalOutstandingAmount, 2);
 $currentInvoiceBalancePkrRate = is_numeric($customerPaymentFoundation['summary']['invoiceOutstandingPkrRate'] ?? null)
@@ -297,7 +302,7 @@ $latestRefundPrintUrl = (int) ($workspaceBooking['id'] ?? 0) > 0 && (int) ($acti
     : '';
 ?>
 
-<section class="legacy-workspace" data-workspace-station data-service-engine data-has-services="<?= $hasActiveServices ? '1' : '0' ?>" data-has-selected-customer="<?= ((int) ($selectedTravelerProfile['id'] ?? 0) > 0 || trim((string) ($workspaceBooking['lead'] ?? '')) !== '') ? '1' : '0' ?>" data-new-booking-url="<?= e(url('/workspace?new=1&focus=customer')) ?>" data-autosave-invoice-url="<?= e(url('/workspace/autosave/invoice')) ?>" data-autosave-service-url="<?= e(url('/workspace/autosave/service')) ?>" data-supplier-register-url="<?= e(url('/workspace/suppliers/register')) ?>" data-supplier-advance-lookup-url="<?= e(url('/suppliers/advances/available')) ?>" data-can-void-financials="<?= $canPostServiceEvents ? '1' : '0' ?>" data-debug-tools-enabled="<?= $showWorkspaceDebug ? '1' : '0' ?>">
+<section class="legacy-workspace" data-workspace-station data-service-engine data-has-services="<?= $hasActiveServices ? '1' : '0' ?>" data-has-selected-customer="<?= ((int) ($selectedTravelerProfile['id'] ?? 0) > 0 || trim((string) ($workspaceBooking['lead'] ?? '')) !== '') ? '1' : '0' ?>" data-new-booking-url="<?= e(url('/workspace?new=1&focus=customer')) ?>" data-autosave-invoice-url="<?= e(url('/workspace/autosave/invoice')) ?>" data-autosave-service-url="<?= e(url('/workspace/autosave/service')) ?>" data-supplier-register-url="<?= e(url('/workspace/suppliers/register')) ?>" data-supplier-advance-lookup-url="<?= e(url('/suppliers/advances/available')) ?>" data-treasury-accounts-url="<?= e(url('/treasury/accounts')) ?>" data-can-void-financials="<?= $canPostServiceEvents ? '1' : '0' ?>" data-debug-tools-enabled="<?= $showWorkspaceDebug ? '1' : '0' ?>">
     <div class="workspace-feedback" data-workspace-feedback aria-live="polite"></div>
     <?php if ($showWorkspaceDebug && $serviceSaveDebugJson !== null): ?>
         <pre class="commercial-debug-block" style="margin:8px 0 12px; white-space:pre-wrap;">Service save debug
@@ -797,6 +802,7 @@ Kept here in case manual service save is needed again later.
         <form class="legacy-payment-strip legacy-payment-strip--rail" method="post" action="<?= e(url('/workspace/payments/receipts/save')) ?>">
             <?= \App\Helpers\Csrf::input() ?>
             <input type="hidden" name="booking_id" value="<?= e((string) $workspaceBooking['id']) ?>">
+            <input type="hidden" name="branch_id" value="<?= e((string) $workspaceBooking['branchId']) ?>">
             <input type="hidden" value="<?= e($invoiceCurrency . ' ' . number_format($sameCurrencyPreviousBalanceAmount, 2)) ?>" data-payment-previous-balance="<?= e((string) $sameCurrencyPreviousBalanceAmount) ?>" data-payment-previous-balance-map="<?= e(json_encode($previousBalanceTotals, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?: '{}') ?>" data-payment-open-balance-map="<?= e(json_encode($customerOpenBalanceTotals, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?: '{}') ?>">
             <?php if ($receiptRecreateDraft !== null): ?>
                 <div class="workspace-feedback workspace-feedback--inline" style="display:block;margin-bottom:12px;">
@@ -861,17 +867,30 @@ Kept here in case manual service save is needed again later.
                         </label>
                         <label data-payment-return-row hidden><span>Return Amount</span><input id="commercial-payment-return-amount" class="legacy-red-text" type="text" value="PKR 0.00" readonly data-payment-return-amount></label>
                         <label><span>Payment Method</span><select name="payment_method"><?php foreach (['cash' => 'Cash', 'bank_transfer' => 'Bank Transfer', 'debit_card' => 'Debit Card', 'credit_card' => 'Credit Card'] as $paymentMethodValue => $paymentMethodLabel): ?><option value="<?= e($paymentMethodValue) ?>" <?= $receiptDraftMethod === $paymentMethodValue ? 'selected' : '' ?>><?= e($paymentMethodLabel) ?></option><?php endforeach; ?></select></label>
+                        <label data-payment-treasury-row hidden>
+                            <span>Cash / Bank Account</span>
+                            <select name="treasury_account_id" data-payment-treasury-select data-initial-value="<?= e((string) $receiptDraftTreasuryAccountId) ?>">
+                                <option value="">Select account</option>
+                            </select>
+                        </label>
                     </div>
                 </section>
                 <section class="legacy-payment-panel legacy-payment-panel--actions">
                     <div class="legacy-payment-panel__title">ACTIONS</div>
                     <div class="legacy-payment-panel__body legacy-payment-panel__body--actions">
                         <div class="legacy-payment-actions">
-                            <button class="btn btn-primary btn-sm legacy-payment-primary" type="button" name="receipt_action" value="save" data-payment-submit-action="save" data-payment-action="save-payment">Save Payment</button>
-                            <button class="btn btn-success btn-sm legacy-payment-receipt" type="button" data-payment-action="print-receipt" data-payment-print-url="<?= e($latestReceiptUrl) ?>" data-payment-latest-receipt-id="<?= e((string) $latestReceiptId) ?>">Print Receipt</button>
-                            <button class="btn btn-sm" type="button" data-workspace-action="payment-history" data-workflow-control="payment-history" data-payment-action="payment-history">Payment History</button>
-                            <a class="btn btn-sm" href="<?= e($ledgerUrl) ?>" <?= $workspaceBooking['id'] > 0 ? 'target="_blank" rel="noopener"' : '' ?> data-payment-action="customer-ledger" data-customer-ledger-link>View Customer Ledger</a>
-                            <button class="btn btn-sm" type="button" data-payment-exchange-settlement data-payment-action="exchange-settlement">Exchange Settlement</button>
+                            <div class="legacy-payment-actions__row legacy-payment-actions__row--primary">
+                                <button class="btn btn-primary btn-sm legacy-payment-primary" type="button" name="receipt_action" value="save" data-payment-submit-action="save" data-payment-action="save-payment">Save Payment</button>
+                                <button class="btn btn-success btn-sm legacy-payment-receipt" type="button" data-payment-action="print-receipt" data-payment-print-url="<?= e($latestReceiptUrl) ?>" data-payment-latest-receipt-id="<?= e((string) $latestReceiptId) ?>">Print Receipt</button>
+                            </div>
+                            <div class="legacy-payment-actions__row">
+                                <button class="btn btn-sm" type="button" data-workspace-action="payment-history" data-workflow-control="payment-history" data-payment-action="payment-history">Payment History</button>
+                                <a class="btn btn-sm" href="<?= e($ledgerUrl) ?>" <?= $workspaceBooking['id'] > 0 ? 'target="_blank" rel="noopener"' : '' ?> data-payment-action="customer-ledger" data-customer-ledger-link>View Customer Ledger</a>
+                            </div>
+                            <div class="legacy-payment-actions__row">
+                                <button class="btn btn-sm" type="button" data-workspace-action="add-service" data-workflow-control="add-service" <?= $hasActiveServices ? '' : 'disabled' ?>>Add Service</button>
+                                <button class="btn btn-sm" type="button" data-payment-exchange-settlement data-payment-action="exchange-settlement">Exchange Settlement</button>
+                            </div>
                         </div>
                     </div>
                 </section>
@@ -921,7 +940,7 @@ Kept here in case manual service save is needed again later.
                     </label>
                 </div>
                 <div class="modal-actions">
-                    <button type="button" class="btn btn-primary btn-sm" data-payment-detail-apply>Apply Details</button>
+                    <button type="button" class="btn btn-primary btn-sm" data-payment-detail-apply>Save</button>
                     <button type="button" class="btn btn-sm" data-payment-detail-close>Cancel</button>
                 </div>
             </div>
@@ -1141,7 +1160,6 @@ Kept here in case manual service save is needed again later.
                 <div class="workspace-feedback workspace-feedback--inline" data-payment-exchange-feedback hidden></div>
                 <div class="legacy-modal-grid top-gap">
                     <article>
-                        <h3>Actions</h3>
                         <div class="station-command-buttons">
                             <button class="btn btn-primary btn-sm" type="button" data-payment-exchange-confirm>Confirm Settlement</button>
                             <button class="btn btn-sm" type="button" data-payment-exchange-close>Cancel</button>
@@ -1468,6 +1486,7 @@ Kept here in case manual service save is needed again later.
     <script id="workspace-daily-settlement-rates-data" type="application/json"><?= $dailySettlementRatesJson ?></script>
     <script id="workspace-payment-receipts-data" type="application/json"><?= $paymentReceiptsJson ?></script>
     <script id="workspace-payment-allocations-data" type="application/json"><?= $paymentAllocationsJson ?></script>
+    <script id="workspace-payment-treasury-accounts-data" type="application/json"><?= $paymentTreasuryAccountsJson ?></script>
     <script id="workspace-service-suppliers-data" type="application/json"><?= $serviceSupplierOptionsJson ?></script>
     <script>
         (function () {
@@ -2370,6 +2389,12 @@ Kept here in case manual service save is needed again later.
                 if (
                     typeof target.closest === 'function' &&
                     target.closest('[data-service-supplier-add-form], [data-global-prepaid-supplier-form]')
+                ) {
+                    return;
+                }
+                if (
+                    typeof target.closest === 'function' &&
+                    target.closest('[data-payment-exchange-modal], [data-payment-detail-modal]')
                 ) {
                     return;
                 }

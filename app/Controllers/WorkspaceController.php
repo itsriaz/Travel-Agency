@@ -101,6 +101,7 @@ final class WorkspaceController extends BaseController
             'booking_id' => (int) ($workspaceState['currentBooking']['id'] ?? 0),
             'booking_reference' => $bookingReference,
             'booking_date' => (string) ($workspaceState['currentBooking']['booking_date'] ?? ''),
+            'branch_id' => (int) ($workspaceState['currentBooking']['branch_id'] ?? 0),
         ];
         $responsibleCustomerId = (int) ($workspaceState['currentBooking']['lead_traveler_id'] ?? ($selectedTravelerProfile['id'] ?? 0));
         $customerPaymentService = new CustomerPaymentFoundationService($this->app);
@@ -872,6 +873,7 @@ final class WorkspaceController extends BaseController
                         'booking_id' => (int) ($savedBooking['id'] ?? 0),
                         'booking_reference' => (string) ($savedBooking['booking_reference'] ?? ''),
                         'booking_date' => (string) ($savedBooking['booking_date'] ?? ''),
+                        'branch_id' => (int) ($savedBooking['branch_id'] ?? 0),
                     ]
                 );
                 $serviceDebug['customerPaymentPreview'] = [
@@ -1032,6 +1034,46 @@ final class WorkspaceController extends BaseController
                     'message' => $exception->getMessage(),
                 ], 422);
             }
+            Flash::error($exception->getMessage());
+            $this->redirect('/workspace?booking_id=' . (int) ($_POST['booking_id'] ?? 0) . '#dock-panel-payments');
+        }
+    }
+
+    public function saveExchangeRate(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+        $isAjax = strtolower((string) ($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '')) === 'xmlhttprequest';
+
+        try {
+            $result = (new CustomerReceiptWorkspaceService($this->app))->saveSettlementExchangeRate(
+                $_POST,
+                (int) Auth::id(),
+                Authorization::accessibleBranchIds()
+            );
+
+            if ($isAjax) {
+                $this->jsonResponse([
+                    'ok' => true,
+                    'rate' => [
+                        'from_currency' => $result['rate_from_currency'],
+                        'to_currency' => $result['rate_to_currency'],
+                        'exchange_rate' => $result['exchange_rate'],
+                        'effective_date' => $result['exchange_rate_effective_date'],
+                    ],
+                    'message' => 'Today\'s exchange rate saved.',
+                ]);
+            }
+
+            Flash::success('Today\'s exchange rate saved.');
+            $this->redirect('/workspace?booking_id=' . (int) ($_POST['booking_id'] ?? 0) . '#dock-panel-payments');
+        } catch (RuntimeException $exception) {
+            if ($isAjax) {
+                $this->jsonResponse([
+                    'ok' => false,
+                    'message' => $exception->getMessage(),
+                ], 422);
+            }
+
             Flash::error($exception->getMessage());
             $this->redirect('/workspace?booking_id=' . (int) ($_POST['booking_id'] ?? 0) . '#dock-panel-payments');
         }
@@ -1615,6 +1657,7 @@ final class WorkspaceController extends BaseController
                 'booking_id' => (int) ($booking['id'] ?? 0),
                 'booking_reference' => (string) ($booking['booking_reference'] ?? ''),
                 'booking_date' => (string) ($booking['booking_date'] ?? ''),
+                'branch_id' => (int) ($booking['branch_id'] ?? 0),
             ]
         );
         $supplierFoundation = (new SupplierFoundationService($this->app))->buildWorkspacePreview(

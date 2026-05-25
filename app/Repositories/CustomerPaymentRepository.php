@@ -51,13 +51,25 @@ final class CustomerPaymentRepository extends BaseRepository
 
     public function findReceiptById(int $receiptId): ?array
     {
+        $treasurySelect = $this->columnExists('customer_receipts', 'treasury_account_id')
+            ? ', customer_receipts.treasury_account_id,
+                    ta.account_name AS treasury_account_name,
+                    ta.account_type AS treasury_account_type'
+            : ', NULL AS treasury_account_id,
+                    NULL AS treasury_account_name,
+                    NULL AS treasury_account_type';
+        $treasuryJoin = $this->columnExists('customer_receipts', 'treasury_account_id')
+            ? ' LEFT JOIN treasury_accounts ta ON ta.id = customer_receipts.treasury_account_id'
+            : '';
+
         $statement = $this->db->prepare(
-            'SELECT id, branch_id, booking_reference, receipt_no, receipt_date, currency, received_amount, allocated_amount,
-                    unallocated_amount, payment_method, reference_number, bank_card_detail, charges_amount, status,
-                    exchange_rate_to_booking, remarks,
+            'SELECT customer_receipts.id, customer_receipts.branch_id, customer_receipts.booking_reference, customer_receipts.receipt_no, customer_receipts.receipt_date, customer_receipts.currency, customer_receipts.received_amount, customer_receipts.allocated_amount,
+                    customer_receipts.unallocated_amount, customer_receipts.payment_method, customer_receipts.reference_number, customer_receipts.bank_card_detail, customer_receipts.charges_amount, customer_receipts.status,
+                    customer_receipts.exchange_rate_to_booking, customer_receipts.remarks' . $treasurySelect . ',
                     ' . $this->customerReceiptVoidMetadataSelect() . '
              FROM customer_receipts
-             WHERE id = :id
+             ' . $treasuryJoin . '
+             WHERE customer_receipts.id = :id
              LIMIT 1'
         );
         $statement->execute(['id' => $receiptId]);
@@ -850,21 +862,24 @@ final class CustomerPaymentRepository extends BaseRepository
     {
         return $this->transaction(function () use ($data): int {
             $receivedAmount = (float) $data['received_amount'];
+            $hasTreasuryAccountLink = $this->columnExists('customer_receipts', 'treasury_account_id');
 
             $statement = $this->db->prepare(
                 'INSERT INTO customer_receipts (
                     branch_id, booking_reference, receipt_no, receipt_date, currency,
                     received_amount, allocated_amount, unallocated_amount, payment_method,
-                    reference_number, bank_card_detail, charges_amount, status, exchange_rate_to_booking,
+                    reference_number, bank_card_detail, charges_amount, status, exchange_rate_to_booking'
+                    . ($hasTreasuryAccountLink ? ', treasury_account_id' : '') . ',
                     remarks, created_by_user_id
                  ) VALUES (
                     :branch_id, :booking_reference, :receipt_no, :receipt_date, :currency,
                     :received_amount, 0, :unallocated_amount, :payment_method,
-                    :reference_number, :bank_card_detail, :charges_amount, :status, :exchange_rate_to_booking,
+                    :reference_number, :bank_card_detail, :charges_amount, :status, :exchange_rate_to_booking'
+                    . ($hasTreasuryAccountLink ? ', :treasury_account_id' : '') . ',
                     :remarks, :created_by_user_id
                  )'
             );
-            $statement->execute([
+            $params = [
                 'branch_id' => $data['branch_id'],
                 'booking_reference' => $data['booking_reference'],
                 'receipt_no' => $data['receipt_no'],
@@ -880,7 +895,11 @@ final class CustomerPaymentRepository extends BaseRepository
                 'exchange_rate_to_booking' => $data['exchange_rate_to_booking'] ?? null,
                 'remarks' => $data['remarks'] ?? null,
                 'created_by_user_id' => $data['actor_user_id'] ?? null,
-            ]);
+            ];
+            if ($hasTreasuryAccountLink) {
+                $params['treasury_account_id'] = $data['treasury_account_id'] ?? null;
+            }
+            $statement->execute($params);
 
             $receiptId = (int) $this->db->lastInsertId();
 
@@ -892,6 +911,7 @@ final class CustomerPaymentRepository extends BaseRepository
                 'currency' => $data['currency'],
                 'received_amount' => $receivedAmount,
                 'payment_method' => $data['payment_method'],
+                'treasury_account_id' => $data['treasury_account_id'] ?? null,
             ]);
 
             return $receiptId;
@@ -1236,26 +1256,38 @@ final class CustomerPaymentRepository extends BaseRepository
 
     public function receiptHistory(string $bookingReference): array
     {
+        $treasurySelect = $this->columnExists('customer_receipts', 'treasury_account_id')
+            ? ', cr.treasury_account_id,
+                ta.account_name AS treasury_account_name,
+                ta.account_type AS treasury_account_type'
+            : ', NULL AS treasury_account_id,
+                NULL AS treasury_account_name,
+                NULL AS treasury_account_type';
+        $treasuryJoin = $this->columnExists('customer_receipts', 'treasury_account_id')
+            ? ' LEFT JOIN treasury_accounts ta ON ta.id = cr.treasury_account_id'
+            : '';
+
         $statement = $this->db->prepare(
             'SELECT
-                id,
-                receipt_no,
-                receipt_date,
-                currency,
-                received_amount,
-                allocated_amount,
-                unallocated_amount,
-                payment_method,
-                reference_number,
-                bank_card_detail,
-                charges_amount,
-                status,
-                exchange_rate_to_booking,
-                remarks,
-                ' . $this->customerReceiptVoidMetadataSelect() . '
-             FROM customer_receipts
-             WHERE booking_reference = :booking_reference
-             ORDER BY receipt_date DESC, id DESC'
+                cr.id,
+                cr.receipt_no,
+                cr.receipt_date,
+                cr.currency,
+                cr.received_amount,
+                cr.allocated_amount,
+                cr.unallocated_amount,
+                cr.payment_method,
+                cr.reference_number,
+                cr.bank_card_detail,
+                cr.charges_amount,
+                cr.status,
+                cr.exchange_rate_to_booking,
+                cr.remarks' . $treasurySelect . ',
+                ' . $this->customerReceiptVoidMetadataSelect('cr') . '
+             FROM customer_receipts cr
+             ' . $treasuryJoin . '
+             WHERE cr.booking_reference = :booking_reference
+             ORDER BY cr.receipt_date DESC, cr.id DESC'
         );
         $statement->execute(['booking_reference' => $bookingReference]);
 

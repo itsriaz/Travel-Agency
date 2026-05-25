@@ -9,6 +9,7 @@ use App\Repositories\AccountingRepository;
 use App\Repositories\BookingRepository;
 use App\Repositories\CustomerPaymentRepository;
 use App\Repositories\ExchangeRateRepository;
+use App\Repositories\TreasuryRepository;
 use PDO;
 use RuntimeException;
 
@@ -17,6 +18,23 @@ final class CustomerReceiptWorkspaceService extends Service
     private const ALLOWED_CURRENCIES = ['PKR', 'AED', 'USD'];
     private const ALLOWED_METHODS = ['cash', 'bank_transfer', 'debit_card', 'credit_card'];
     private const ALLOWED_STATUSES = ['received', 'void'];
+
+    public function saveSettlementExchangeRate(array $input, int $actorUserId, array $accessibleBranchIds): array
+    {
+        $payload = $this->validatedSettlementRatePayload($input, $accessibleBranchIds);
+        $exchangeRateRepository = new ExchangeRateRepository($this->app);
+
+        $exchangeRateRepository->upsertDailyRate(
+            $payload['rate_from_currency'],
+            $payload['rate_to_currency'],
+            $payload['exchange_rate_effective_date'],
+            $payload['exchange_rate'],
+            $payload['branch_id'],
+            $actorUserId
+        );
+
+        return $payload;
+    }
 
     public function saveReceipt(array $input, int $actorUserId, array $accessibleBranchIds): array
     {
@@ -38,6 +56,11 @@ final class CustomerReceiptWorkspaceService extends Service
         }
 
         $payload = $this->validatedReceiptPayload($input);
+        $payload['treasury_account_id'] = $this->resolveReceiptTreasuryAccountId(
+            $input,
+            $payload,
+            (int) $booking['branch_id']
+        );
         if ($payload['status'] === 'void') {
             $this->assertFinancialAdminActor($actorUserId, 'Only super admin or branch admin can create a void customer receipt.');
         }
@@ -411,6 +434,7 @@ final class CustomerReceiptWorkspaceService extends Service
             'received_amount' => $receivedAmount,
             'due_date' => $this->normalizeOptionalDate((string) ($input['due_date'] ?? '')),
             'payment_method' => $paymentMethod,
+            'treasury_account_id' => max(0, (int) ($input['treasury_account_id'] ?? 0)) ?: null,
             'reference_number' => $this->optionalText($input['reference_number'] ?? null, 100),
             'bank_card_detail' => $this->optionalText($input['bank_card_detail'] ?? null, 190),
             'charges_amount' => $chargesAmount,
@@ -418,6 +442,52 @@ final class CustomerReceiptWorkspaceService extends Service
             'exchange_rate_to_booking' => $exchangeRate,
             'remarks' => $this->optionalText($input['receipt_remarks'] ?? null, 4000),
         ];
+    }
+
+    private function resolveReceiptTreasuryAccountId(array $input, array $payload, int $branchId): ?int
+    {
+        $paymentMethod = (string) ($payload['payment_method'] ?? '');
+        if (! $this->paymentMethodRequiresTreasuryAccount($paymentMethod)) {
+            return null;
+        }
+
+        $treasuryRepository = new TreasuryRepository($this->app);
+        $currency = (string) ($payload['currency'] ?? 'PKR');
+        $submittedTreasuryAccountId = max(
+            0,
+            (int) ($input['treasury_account_id'] ?? 0),
+            (int) ($payload['treasury_account_id'] ?? 0)
+        );
+
+        if ($submittedTreasuryAccountId > 0) {
+            return (int) ($treasuryRepository->validatePaymentTreasuryAccount(
+                $submittedTreasuryAccountId,
+                $branchId,
+                $currency,
+                $paymentMethod
+            )['id'] ?? 0);
+        }
+
+        $defaultAccount = $treasuryRepository->defaultTreasuryAccountForPayment($branchId, $currency, $paymentMethod);
+        if ($defaultAccount !== null) {
+            return (int) ($defaultAccount['id'] ?? 0);
+        }
+
+        $eligibleAccounts = $treasuryRepository->eligiblePaymentTreasuryAccounts($branchId, $currency, $paymentMethod);
+        if ($eligibleAccounts === []) {
+            throw new RuntimeException('Please configure/select a cash or bank account for this payment.');
+        }
+
+        if ($paymentMethod === 'cash') {
+            return (int) ($eligibleAccounts[0]['id'] ?? 0);
+        }
+
+        throw new RuntimeException('Please configure/select a cash or bank account for this payment.');
+    }
+
+    private function paymentMethodRequiresTreasuryAccount(string $paymentMethod): bool
+    {
+        return in_array($paymentMethod, ['cash', 'bank_transfer'], true);
     }
 
     private function normalizedAllocationLines(array $input): array
@@ -471,6 +541,11 @@ final class CustomerReceiptWorkspaceService extends Service
         }
 
         $payload = $this->validatedReceiptPayload($input);
+        $payload['treasury_account_id'] = $this->resolveReceiptTreasuryAccountId(
+            $input,
+            $payload,
+            (int) $booking['branch_id']
+        );
         if ($payload['status'] === 'void') {
             $this->assertFinancialAdminActor($actorUserId, 'Only super admin or branch admin can create a void customer receipt.');
         }
@@ -664,6 +739,45 @@ final class CustomerReceiptWorkspaceService extends Service
             'payment_currency' => $paymentCurrency,
             'target_receivable_amount_to_settle' => $targetReceivableAmount,
             'target_payment_amount_to_consume' => $targetPaymentAmount,
+            'rate_from_currency' => $rateFromCurrency,
+            'rate_to_currency' => $rateToCurrency,
+            'exchange_rate' => $exchangeRate,
+            'exchange_rate_effective_date' => $rateDate,
+        ];
+    }
+
+    private function validatedSettlementRatePayload(array $input, array $accessibleBranchIds): array
+    {
+        $bookingId = (int) ($input['booking_id'] ?? 0);
+        $branchId = (int) ($input['branch_id'] ?? 0);
+
+        if ($branchId <= 0 && $bookingId > 0) {
+            $booking = (new BookingRepository($this->app))->findBookingById($bookingId);
+            $branchId = (int) ($booking['branch_id'] ?? 0);
+        }
+
+        if ($branchId <= 0 || ! in_array($branchId, $accessibleBranchIds, true)) {
+            throw new RuntimeException('Please select a valid branch before saving today\'s exchange rate.');
+        }
+
+        $rateDate = $this->normalizeDate(
+            (string) ($input['settlement_exchange_rate_effective_date'] ?? date('Y-m-d')),
+            'Settlement rate date'
+        );
+        $rateFromCurrency = $this->normalizeCurrency((string) ($input['settlement_rate_from_currency'] ?? ''));
+        $rateToCurrency = $this->normalizeCurrency((string) ($input['settlement_rate_to_currency'] ?? ''));
+
+        if ($rateFromCurrency === $rateToCurrency) {
+            throw new RuntimeException('Today\'s exchange rate is only needed when the currencies are different.');
+        }
+
+        $exchangeRate = $this->normalizeOptionalExchangeRate((string) ($input['settlement_exchange_rate'] ?? ''));
+        if ($exchangeRate === null) {
+            throw new RuntimeException('Today\'s exchange rate is required.');
+        }
+
+        return [
+            'branch_id' => $branchId,
             'rate_from_currency' => $rateFromCurrency,
             'rate_to_currency' => $rateToCurrency,
             'exchange_rate' => $exchangeRate,
