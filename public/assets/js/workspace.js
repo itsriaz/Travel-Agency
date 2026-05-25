@@ -847,10 +847,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 checked: 'checked' in field ? Boolean(field.checked) : false,
             }));
     };
-    const restoreFormState = (form, entries = []) => {
+    const restoreFormState = (form, entries = [], options = {}) => {
         if (!(form instanceof HTMLFormElement) || !Array.isArray(entries)) {
             return;
         }
+
+        const suppressedEventNames = options.suppressedEventNames instanceof Set
+            ? options.suppressedEventNames
+            : new Set(Array.isArray(options.suppressedEventNames) ? options.suppressedEventNames : []);
 
         entries.forEach((entry) => {
             const field = form.elements.namedItem(entry.name);
@@ -870,6 +874,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
 
                 target.value = String(entry.value ?? '');
+                if (suppressedEventNames.has(String(entry.name || ''))) {
+                    return;
+                }
                 target.dispatchEvent(new Event('input', { bubbles: true }));
                 target.dispatchEvent(new Event('change', { bubbles: true }));
             };
@@ -889,10 +896,31 @@ document.addEventListener('DOMContentLoaded', () => {
             if (bookingId > 0) {
                 url.searchParams.set('booking_id', String(bookingId));
             }
+            url.searchParams.delete('focus');
 
             return url;
         } catch (error) {
             return null;
+        }
+    };
+    const hasPendingTreasuryWorkspaceStateForCurrentRoute = () => {
+        let raw = '';
+        try {
+            raw = window.localStorage.getItem(pendingTreasuryWorkspaceStateKey) || '';
+        } catch (error) {
+            return false;
+        }
+
+        if (raw.trim() === '') {
+            return false;
+        }
+
+        try {
+            const payload = JSON.parse(raw);
+            const currentRoute = `${window.location.pathname}${window.location.search}`;
+            return Boolean(payload && payload.route === currentRoute);
+        } catch (error) {
+            return false;
         }
     };
     const persistWorkspaceStateForTreasuryReturn = () => {
@@ -929,7 +957,10 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             window.localStorage.removeItem(pendingTreasuryWorkspaceStateKey);
-            restoreFormState(invoiceForm, payload.invoice);
+            station.dataset.suppressDueDateAutoOpen = '1';
+            restoreFormState(invoiceForm, payload.invoice, {
+                suppressedEventNames: ['lead_traveler_name'],
+            });
             restoreFormState(serviceForm, payload.service);
             restoreFormState(paymentForm, payload.payment);
 
@@ -952,12 +983,23 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (typeof updateWorkflowState === 'function') {
                     updateWorkflowState();
                 }
-                if (receivedNowInput instanceof HTMLInputElement) {
+                const treasuryFocusTarget = paymentTreasuryAccountSelect instanceof HTMLSelectElement
+                    && paymentTreasuryAccountRow instanceof HTMLElement
+                    && !paymentTreasuryAccountRow.hidden
+                    && !paymentTreasuryAccountSelect.disabled
+                    ? paymentTreasuryAccountSelect
+                    : null;
+
+                if (treasuryFocusTarget) {
+                    treasuryFocusTarget.focus();
+                } else if (receivedNowInput instanceof HTMLInputElement) {
                     receivedNowInput.focus();
                     receivedNowInput.select();
                 }
+                delete station.dataset.suppressDueDateAutoOpen;
             }, 80);
         } catch (error) {
+            delete station.dataset.suppressDueDateAutoOpen;
             try {
                 window.localStorage.removeItem(pendingTreasuryWorkspaceStateKey);
             } catch (cleanupError) {
@@ -1089,11 +1131,6 @@ document.addEventListener('DOMContentLoaded', () => {
         paymentTreasuryAccountSelect.value = nextValue;
         paymentTreasuryAccountSelect.dataset.initialValue = '';
 
-        if (method === 'cash' && eligibleAccounts.length > 0) {
-            paymentTreasuryAccountRow.hidden = true;
-            return;
-        }
-
         paymentTreasuryAccountRow.hidden = false;
     };
     const promptTreasuryAccountSetupIfMissing = (method) => {
@@ -1125,6 +1162,27 @@ document.addEventListener('DOMContentLoaded', () => {
 
             paymentTreasuryAccountSelect.value = '';
             openTreasuryAccountSetup(paymentMethodSelect?.value || '');
+        });
+        paymentTreasuryAccountSelect.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter') {
+                return;
+            }
+
+            event.preventDefault();
+            event.stopPropagation();
+
+            if (paymentTreasuryAccountSelect.value === addPaymentTreasuryAccountValue) {
+                paymentTreasuryAccountSelect.value = '';
+                openTreasuryAccountSetup(paymentMethodSelect?.value || '');
+                return;
+            }
+
+            if (paymentPrimarySaveButton instanceof HTMLButtonElement) {
+                paymentPrimarySaveButton.focus();
+                window.setTimeout(() => {
+                    paymentPrimarySaveButton.click();
+                }, 60);
+            }
         });
     }
 
@@ -3311,6 +3369,15 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             event.preventDefault();
+            if (noteSavedPaymentEditAttempt()) {
+                return;
+            }
+
+            syncPaymentTreasurySelector();
+            if (promptTreasuryAccountSetupIfMissing(paymentMethodSelect.value)) {
+                return;
+            }
+
             if (
                 paymentTreasuryAccountSelect
                 && paymentTreasuryAccountRow
@@ -5383,6 +5450,34 @@ document.addEventListener('DOMContentLoaded', () => {
         serviceRows = Array.from(station.querySelectorAll('[data-service-row]'));
     };
 
+    const isActiveServiceEditorElement = (element) => {
+        if (!(element instanceof HTMLElement)) {
+            return false;
+        }
+
+        if (element.closest('[data-payment-exchange-modal], [data-payment-detail-modal]')) {
+            return false;
+        }
+
+        if (serviceForm && serviceForm.contains(element)) {
+            return true;
+        }
+
+        const formAttribute = element.getAttribute('form');
+        return formAttribute === 'legacy-service-form';
+    };
+
+    const isActivelyEditingServiceForm = () => {
+        const activeElement = document.activeElement;
+        if (!isActiveServiceEditorElement(activeElement)) {
+            return false;
+        }
+
+        return activeElement instanceof HTMLInputElement
+            || activeElement instanceof HTMLSelectElement
+            || activeElement instanceof HTMLTextAreaElement;
+    };
+
     const bindServiceRowClicks = () => {
         serviceRows.forEach((row) => {
             row.onclick = () => {
@@ -5394,10 +5489,12 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     };
 
-    const upsertAutosavedServiceLine = (serviceLine) => {
+    const upsertAutosavedServiceLine = (serviceLine, options = {}) => {
         if (!serviceLine) {
             return;
         }
+
+        const reloadEditor = options.reloadEditor !== false;
 
         const serviceId = Number.parseInt(String(serviceLine.serviceId || 0), 10);
         const existingIndex = serviceLines.findIndex((line) => Number.parseInt(String(line.serviceId || 0), 10) === serviceId && serviceId > 0);
@@ -5416,9 +5513,22 @@ document.addEventListener('DOMContentLoaded', () => {
         renderServiceRows(serviceId);
         bindServiceRowClicks();
         const activeIndex = serviceLines.findIndex((line) => Number.parseInt(String(line.serviceId || 0), 10) === serviceId);
-        if (activeIndex >= 0) {
+        if (reloadEditor && activeIndex >= 0) {
             loadServiceLine(activeIndex);
+            return;
         }
+
+        if (activeIndex >= 0) {
+            serviceRows.forEach((item, rowIndex) => {
+                item.classList.toggle('is-active', rowIndex === activeIndex);
+            });
+        }
+
+        if (activeServiceReference) {
+            activeServiceReference.textContent = serviceLine.lineNumber || '';
+        }
+
+        updateServiceActionState(serviceLine);
     };
 
     const normalizeAutosavedServiceLine = (serviceLine, payload = {}) => {
@@ -5491,7 +5601,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (normalizedServiceLine) {
             fillValue(serviceFields.lineNumber, normalizedServiceLine.lineNumber || 'SV-DRAFT');
-            upsertAutosavedServiceLine(normalizedServiceLine);
+            upsertAutosavedServiceLine(normalizedServiceLine, {
+                reloadEditor: !isActivelyEditingServiceForm(),
+            });
             updateServiceActionState(normalizedServiceLine);
         }
 
@@ -6421,6 +6533,10 @@ document.addEventListener('DOMContentLoaded', () => {
         hideCustomerAutocomplete();
         showFeedback(`${customer.full_name || 'Customer'} loaded into the booking form.`);
         closeCustomerPicker();
+        station.dispatchEvent(new CustomEvent('workspace:customer-selected', {
+            bubbles: true,
+            detail: customer || {},
+        }));
         if (autosaveInvoiceUrl !== '') {
             void persistInvoiceAutosave({ force: true });
         }
@@ -6474,11 +6590,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const newBookingUrl = station.dataset.newBookingUrl || '/workspace?new=1';
         try {
+            const normalizedUrl = new URL(newBookingUrl, window.location.origin);
+            normalizedUrl.searchParams.delete('focus');
             window.sessionStorage.setItem(pendingFreshCustomerKey, JSON.stringify(customer));
-            window.location.href = newBookingUrl;
+            window.location.href = `${normalizedUrl.pathname}${normalizedUrl.search}`;
         } catch (error) {
             applyCustomerToForms(customer);
-            focusTarget('[data-service-passenger-name]');
         }
     };
 
@@ -6501,7 +6618,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
             applyCustomerToForms(customer);
-            window.setTimeout(() => focusTarget('[data-service-passenger-name]'), 80);
+            window.setTimeout(() => {
+                focusTarget('.legacy-invoice-header__remarks input[name="remarks"]');
+            }, 120);
         } catch (error) {
             window.sessionStorage.removeItem(pendingFreshCustomerKey);
         }
@@ -6801,7 +6920,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
             closeNewCustomerModal();
             showFeedback(payload.message || 'Customer saved.');
-            station.dispatchEvent(new CustomEvent('workspace:customer-selected', { bubbles: true, detail: customer || {} }));
         } catch (error) {
             showFeedback(error.message || 'Customer could not be saved.');
         } finally {
@@ -7893,18 +8011,43 @@ document.addEventListener('DOMContentLoaded', () => {
         openSupplierSettlementModal();
     }
 
-    const focusMode = new URLSearchParams(window.location.search).get('focus');
-    if (focusMode === 'customer' && bookingLeadField) {
-        window.setTimeout(() => {
-            bookingLeadField.focus();
-            bookingLeadField.select();
-            filterAutocompleteCustomers();
-        }, 120);
-    } else if (quickSearch) {
-        window.setTimeout(() => {
-            quickSearch.focus();
-            quickSearch.select();
-        }, 120);
+    if (!hasPendingTreasuryWorkspaceStateForCurrentRoute()) {
+        let navigationType = '';
+        try {
+            const navigationEntry = performance.getEntriesByType('navigation')[0];
+            navigationType = String(navigationEntry?.type || '').trim().toLowerCase();
+        } catch (error) {
+            navigationType = '';
+        }
+
+        const focusParams = new URLSearchParams(window.location.search);
+        const focusMode = focusParams.get('focus');
+        const shouldHonorCustomerFocus = focusMode === 'customer' && navigationType !== 'reload';
+
+        if (focusMode === 'customer' && bookingLeadField) {
+            if (shouldHonorCustomerFocus) {
+                window.setTimeout(() => {
+                    bookingLeadField.focus();
+                    bookingLeadField.select();
+                    filterAutocompleteCustomers();
+                }, 120);
+            }
+        } else if (quickSearch) {
+            window.setTimeout(() => {
+                quickSearch.focus();
+                quickSearch.select();
+            }, 120);
+        }
+
+        if (focusMode !== null) {
+            try {
+                const cleanedUrl = new URL(window.location.href);
+                cleanedUrl.searchParams.delete('focus');
+                window.history.replaceState({}, '', `${cleanedUrl.pathname}${cleanedUrl.search}${cleanedUrl.hash}`);
+            } catch (error) {
+                // Ignore URL cleanup errors.
+            }
+        }
     }
 
     restorePendingFreshWorkspaceCustomer();

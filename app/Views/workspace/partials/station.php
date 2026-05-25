@@ -322,7 +322,7 @@ $latestRefundPrintUrl = (int) ($workspaceBooking['id'] ?? 0) > 0 && (int) ($acti
         </div>
         <form id="workspace-search-form" class="legacy-quick-search" method="get" action="<?= e(url('/workspace')) ?>">
             <label for="workspace-search">Quick Search</label>
-            <input id="workspace-search" type="text" name="q" value="<?= e($currentSearchTerm) ?>" placeholder="Invoice / customer / mobile / passport / PNR / supplier">
+            <input id="workspace-search" type="text" name="q" value="<?= e($currentSearchTerm) ?>" placeholder="Invoice / receipt / customer / mobile / passport / PNR / supplier">
             <button class="btn btn-primary btn-sm" type="submit" accesskey="s" data-workspace-search-submit>Search</button>
         </form>
     </div>
@@ -2414,21 +2414,16 @@ Kept here in case manual service save is needed again later.
                     }
                     return;
                 }
-                
-                                if (target.matches('select[name="payment_method"]')) {
-                    event.preventDefault();
-                    event.stopPropagation();
-
-                    var saveButton = station.querySelector('[data-payment-submit-action="save"]');
-
-                    if (saveButton && !saveButton.disabled && isVisibleAction(saveButton)) {
-                        scrollAndFocus(saveButton);
-
-                        window.setTimeout(function () {
-                            saveButton.click();
-                        }, 140);
-                    }
-
+                if (
+                    target.matches('#workspace-search')
+                    || target.matches('[data-workspace-search-submit]')
+                ) {
+                    return;
+                }
+                if (
+                    target.matches('select[name="payment_method"]')
+                    || target.matches('[data-payment-treasury-select]')
+                ) {
                     return;
                 }
 
@@ -2565,6 +2560,10 @@ Kept here in case manual service save is needed again later.
             };
 
             var openDueDatePicker = function () {
+                if (station.dataset.suppressDueDateAutoOpen === '1') {
+                    return;
+                }
+
                 var receivedAmount = parseAmount(amountInput.value);
                 var invoiceDueAmount = getInvoiceDueAmount();
 

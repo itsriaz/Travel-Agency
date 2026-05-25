@@ -60,7 +60,16 @@ final class BookingWorkspaceService extends Service
         if (! $newMode && $currentBooking === null && $searchTerm !== '') {
             $exactReference = strtoupper($searchTerm);
             foreach ($searchResults as $searchResult) {
-                if (strtoupper((string) ($searchResult['booking_reference'] ?? '')) === $exactReference) {
+                $exactReceiptNo = strtoupper((string) ($searchResult['receipt_no'] ?? ''));
+                $exactTicketNo = strtoupper((string) ($searchResult['ticket_number'] ?? ''));
+                $exactPnr = strtoupper((string) ($searchResult['pnr'] ?? ''));
+
+                if (
+                    strtoupper((string) ($searchResult['booking_reference'] ?? '')) === $exactReference
+                    || $exactReceiptNo === $exactReference
+                    || $exactTicketNo === $exactReference
+                    || $exactPnr === $exactReference
+                ) {
                     $currentBooking = $repository->findBookingById((int) ($searchResult['id'] ?? 0));
                     break;
                 }

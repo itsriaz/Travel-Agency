@@ -249,6 +249,7 @@ final class BookingRepository extends BaseRepository
                     COALESCE(svc.ticket_number, '') AS ticket_number,
                     COALESCE(svc.pnr, '') AS pnr,
                     COALESCE(svc.supplier_name, '') AS supplier_name,
+                    COALESCE(rcpt.latest_receipt_no, '') AS receipt_no,
                     COALESCE(svc.booking_currency, recv.outstanding_currency, br.base_currency, 'PKR') AS booking_currency,
                     COALESCE(recv.total_outstanding, 0) AS total_outstanding
                 FROM bookings b
@@ -275,6 +276,13 @@ final class BookingRepository extends BaseRepository
                     FROM customer_receivable_items
                     GROUP BY booking_reference
                 ) recv ON recv.booking_reference = b.booking_reference
+                LEFT JOIN (
+                    SELECT
+                        booking_reference,
+                        MAX(receipt_no) AS latest_receipt_no
+                    FROM customer_receipts
+                    GROUP BY booking_reference
+                ) rcpt ON rcpt.booking_reference = b.booking_reference
                 WHERE b.branch_id IN ({$placeholders})";
 
         $params = array_map('intval', $accessibleBranchIds);
@@ -290,7 +298,16 @@ final class BookingRepository extends BaseRepository
                     OR COALESCE(svc.ticket_number, "") LIKE ?
                     OR COALESCE(svc.pnr, "") LIKE ?
                     OR COALESCE(svc.supplier_name, "") LIKE ?
+                    OR COALESCE(rcpt.latest_receipt_no, "") LIKE ?
+                    OR EXISTS (
+                        SELECT 1
+                        FROM customer_receipts crx
+                        WHERE crx.booking_reference = b.booking_reference
+                          AND crx.receipt_no LIKE ?
+                    )
                 )';
+            $params[] = $likeQuery;
+            $params[] = $likeQuery;
             $params[] = $likeQuery;
             $params[] = $likeQuery;
             $params[] = $likeQuery;
