@@ -108,15 +108,13 @@ final class SupplierRepository extends BaseRepository
             return [];
         }
 
-        $placeholders = implode(', ', array_fill(0, count($accessibleBranchIds), '?'));
         $statement = $this->db->prepare(
             "SELECT id, branch_id, code, name, supplier_mode, default_currency
              FROM suppliers
              WHERE is_active = 1
-               AND (branch_id IS NULL OR branch_id IN ({$placeholders}))
-             ORDER BY name ASC"
+             ORDER BY name ASC, id ASC"
         );
-        $statement->execute(array_map('intval', $accessibleBranchIds));
+        $statement->execute();
 
         return $statement->fetchAll() ?: [];
     }
@@ -128,16 +126,15 @@ final class SupplierRepository extends BaseRepository
             return null;
         }
 
-        $placeholders = implode(', ', array_fill(0, count($accessibleBranchIds), '?'));
         $statement = $this->db->prepare(
             "SELECT id, branch_id, code, name, supplier_mode, default_currency
              FROM suppliers
              WHERE is_active = 1
                AND name = ?
-               AND (branch_id IS NULL OR branch_id IN ({$placeholders}))
+             ORDER BY id ASC
              LIMIT 1"
         );
-        $statement->execute(array_merge([$trimmed], array_map('intval', $accessibleBranchIds)));
+        $statement->execute([$trimmed]);
         $row = $statement->fetch();
 
         return $row !== false ? $row : null;
@@ -146,75 +143,121 @@ final class SupplierRepository extends BaseRepository
     public function supplierHistoryFinderResults(string $query, array $accessibleBranchIds, int $limit = 50): array
     {
         $trimmed = trim($query);
-        if ($trimmed === '' || $accessibleBranchIds === []) {
+        if ($accessibleBranchIds === []) {
             return [];
         }
 
         $placeholders = implode(', ', array_fill(0, count($accessibleBranchIds), '?'));
+        $limit = max(1, min($limit, 100));
+        $bookingSearchSql = '';
+        $advanceSearchSql = '';
+        $bookingSearchParams = [];
+        $advanceSearchParams = [];
+        if ($trimmed !== '') {
+            $bookingSearchSql = "
+                  AND (
+                        s.name LIKE ?
+                     OR s.code LIKE ?
+                     OR seed.booking_reference LIKE ?
+                  )";
+            $advanceSearchSql = "
+                  AND (
+                        s.name LIKE ?
+                     OR s.code LIKE ?
+                     OR a.reference_no LIKE ?
+                  )";
+            $bookingSearchParams = ['%' . $trimmed . '%', '%' . $trimmed . '%', '%' . $trimmed . '%'];
+            $advanceSearchParams = ['%' . $trimmed . '%', '%' . $trimmed . '%', '%' . $trimmed . '%'];
+        }
+
         $sql = "
-            SELECT
-                b.id AS booking_id,
-                b.booking_reference,
-                b.booking_date,
-                br.name AS branch_name,
-                s.id AS supplier_id,
-                s.code AS supplier_code,
-                s.name AS supplier_name,
-                seed.currency,
-                COALESCE(ob.total_gross_amount, 0) AS total_gross_amount,
-                COALESCE(pay.total_paid_amount, 0) AS total_paid_amount,
-                COALESCE(ob.total_balance_amount, 0) AS total_balance_amount,
-                COALESCE(ob.latest_due_date, '') AS due_date
+            SELECT *
             FROM (
-                SELECT supplier_id, booking_reference, currency
-                FROM supplier_obligations
-                UNION
-                SELECT supplier_id, booking_reference, currency
-                FROM supplier_payments
-                WHERE status <> 'void'
-            ) seed
-            INNER JOIN suppliers s ON s.id = seed.supplier_id
-            INNER JOIN bookings b ON b.booking_reference = seed.booking_reference
-            INNER JOIN branches br ON br.id = b.branch_id
-            LEFT JOIN (
                 SELECT
-                    supplier_id,
-                    booking_reference,
-                    currency,
-                    SUM(gross_amount) AS total_gross_amount,
-                    SUM(net_payable_amount) AS total_balance_amount,
-                    MAX(COALESCE(due_date, '')) AS latest_due_date
-                FROM supplier_obligations
-                GROUP BY supplier_id, booking_reference, currency
-            ) ob ON ob.supplier_id = seed.supplier_id
-                AND ob.booking_reference = seed.booking_reference
-                AND ob.currency = seed.currency
-            LEFT JOIN (
+                    b.id AS booking_id,
+                    b.booking_reference,
+                    b.booking_date,
+                    br.name AS branch_name,
+                    s.id AS supplier_id,
+                    s.code AS supplier_code,
+                    s.name AS supplier_name,
+                    seed.currency,
+                    COALESCE(ob.total_gross_amount, 0) AS total_gross_amount,
+                    COALESCE(pay.total_paid_amount, 0) AS total_paid_amount,
+                    COALESCE(ob.total_balance_amount, 0) AS total_balance_amount,
+                    COALESCE(ob.latest_due_date, '') AS due_date,
+                    'booking_supplier' AS row_type
+                FROM (
+                    SELECT supplier_id, booking_reference, currency
+                    FROM supplier_obligations
+                    UNION
+                    SELECT supplier_id, booking_reference, currency
+                    FROM supplier_payments
+                    WHERE status <> 'void'
+                ) seed
+                INNER JOIN suppliers s ON s.id = seed.supplier_id
+                INNER JOIN bookings b ON b.booking_reference = seed.booking_reference
+                INNER JOIN branches br ON br.id = b.branch_id
+                LEFT JOIN (
+                    SELECT
+                        supplier_id,
+                        booking_reference,
+                        currency,
+                        SUM(gross_amount) AS total_gross_amount,
+                        SUM(net_payable_amount) AS total_balance_amount,
+                        MAX(COALESCE(due_date, '')) AS latest_due_date
+                    FROM supplier_obligations
+                    GROUP BY supplier_id, booking_reference, currency
+                ) ob ON ob.supplier_id = seed.supplier_id
+                    AND ob.booking_reference = seed.booking_reference
+                    AND ob.currency = seed.currency
+                LEFT JOIN (
+                    SELECT
+                        supplier_id,
+                        booking_reference,
+                        currency,
+                        SUM(paid_amount) AS total_paid_amount
+                    FROM supplier_payments
+                    WHERE status <> 'void'
+                    GROUP BY supplier_id, booking_reference, currency
+                ) pay ON pay.supplier_id = seed.supplier_id
+                    AND pay.booking_reference = seed.booking_reference
+                    AND pay.currency = seed.currency
+                WHERE b.branch_id IN ({$placeholders})
+                {$bookingSearchSql}
+
+                UNION ALL
+
                 SELECT
-                    supplier_id,
-                    booking_reference,
-                    currency,
-                    SUM(paid_amount) AS total_paid_amount
-                FROM supplier_payments
-                WHERE status <> 'void'
-                GROUP BY supplier_id, booking_reference, currency
-            ) pay ON pay.supplier_id = seed.supplier_id
-                AND pay.booking_reference = seed.booking_reference
-                AND pay.currency = seed.currency
-            WHERE b.branch_id IN ({$placeholders})
-              AND (
-                    s.name LIKE ?
-                 OR s.code LIKE ?
-                 OR seed.booking_reference LIKE ?
-              )
-            ORDER BY s.name ASC, b.booking_date DESC, seed.booking_reference DESC, seed.currency ASC
+                    0 AS booking_id,
+                    '' AS booking_reference,
+                    MAX(COALESCE(a.received_at, '')) AS booking_date,
+                    br.name AS branch_name,
+                    s.id AS supplier_id,
+                    s.code AS supplier_code,
+                    s.name AS supplier_name,
+                    a.currency,
+                    0 AS total_gross_amount,
+                    SUM(a.deposit_amount) AS total_paid_amount,
+                    SUM(a.available_amount) AS total_balance_amount,
+                    '' AS due_date,
+                    'supplier_advance' AS row_type
+                FROM supplier_advances a
+                INNER JOIN suppliers s ON s.id = a.supplier_id
+                INNER JOIN branches br ON br.id = a.branch_id
+                WHERE 1 = 1
+                {$advanceSearchSql}
+                GROUP BY a.supplier_id, a.branch_id, a.currency
+            ) results
+            ORDER BY supplier_name ASC, booking_date DESC, booking_reference DESC, currency ASC
             LIMIT {$limit}
         ";
 
         $statement = $this->db->prepare($sql);
         $statement->execute(array_merge(
             array_map('intval', $accessibleBranchIds),
-            ['%' . $trimmed . '%', '%' . $trimmed . '%', '%' . $trimmed . '%']
+            $bookingSearchParams,
+            $advanceSearchParams
         ));
 
         return $statement->fetchAll() ?: [];
@@ -320,17 +363,100 @@ final class SupplierRepository extends BaseRepository
             'SELECT COALESCE(SUM(available_amount), 0)
              FROM supplier_advances
              WHERE supplier_id = :supplier_id
-               AND branch_id = :branch_id
                AND currency = :currency
                AND available_amount > 0'
         );
         $statement->execute([
             'supplier_id' => $supplierId,
-            'branch_id' => $branchId,
             'currency' => strtoupper(trim($currency)),
         ]);
 
         return round((float) $statement->fetchColumn(), 2);
+    }
+
+    public function availableAdvanceBalanceForSupplierName(string $supplierName, string $currency): float
+    {
+        $name = trim($supplierName);
+        if ($name === '') {
+            return 0.0;
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT COALESCE(SUM(a.available_amount), 0)
+             FROM supplier_advances a
+             INNER JOIN suppliers s ON s.id = a.supplier_id
+             WHERE s.is_active = 1
+               AND s.name = :supplier_name
+               AND a.currency = :currency
+               AND a.available_amount > 0'
+        );
+        $statement->execute([
+            'supplier_name' => $name,
+            'currency' => strtoupper(trim($currency)),
+        ]);
+
+        return round((float) $statement->fetchColumn(), 2);
+    }
+
+    public function availableAdvanceBalancesForSupplierName(string $supplierName): array
+    {
+        $name = trim($supplierName);
+        if ($name === '') {
+            return [];
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT
+                a.currency,
+                COALESCE(SUM(a.available_amount), 0) AS available_amount
+             FROM supplier_advances a
+             INNER JOIN suppliers s ON s.id = a.supplier_id
+             WHERE s.is_active = 1
+               AND s.name = :supplier_name
+               AND a.available_amount > 0
+             GROUP BY a.currency
+             ORDER BY FIELD(a.currency, "PKR", "AED", "USD"), a.currency ASC'
+        );
+        $statement->execute(['supplier_name' => $name]);
+
+        $balances = [];
+        foreach ($statement->fetchAll() ?: [] as $row) {
+            $currency = strtoupper(trim((string) ($row['currency'] ?? '')));
+            $amount = round((float) ($row['available_amount'] ?? 0), 2);
+            if ($currency !== '' && $amount > 0.005) {
+                $balances[$currency] = $amount;
+            }
+        }
+
+        return $balances;
+    }
+
+    public function availableAdvanceCandidatesForSupplierName(string $supplierName): array
+    {
+        $name = trim($supplierName);
+        if ($name === '') {
+            return [];
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT
+                a.id,
+                a.supplier_id,
+                a.branch_id,
+                a.currency,
+                a.available_amount,
+                a.received_at,
+                s.name AS supplier_name
+             FROM supplier_advances a
+             INNER JOIN suppliers s ON s.id = a.supplier_id
+             WHERE s.is_active = 1
+               AND s.name = :supplier_name
+               AND a.available_amount > 0
+             ORDER BY a.received_at ASC, a.id ASC'
+        );
+        $statement->execute(['supplier_name' => $name]);
+
+        return $statement->fetchAll() ?: [];
     }
 
     public function registerObligation(array $data): int
@@ -485,23 +611,166 @@ final class SupplierRepository extends BaseRepository
         return $statement->fetchAll() ?: [];
     }
 
+    public function globalOpenObligations(int $branchId, int $supplierId, string $currency): array
+    {
+        if ($branchId <= 0 || $supplierId <= 0 || trim($currency) === '') {
+            return [];
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT
+                o.id,
+                o.supplier_id,
+                o.branch_id,
+                o.booking_reference,
+                o.service_line_reference,
+                o.currency,
+                o.gross_amount,
+                o.advance_applied_amount,
+                o.net_payable_amount,
+                o.due_date,
+                o.status,
+                o.remarks,
+                b.id AS booking_id,
+                b.booking_date,
+                s.name AS supplier_name,
+                s.supplier_mode
+             FROM supplier_obligations o
+             INNER JOIN suppliers s ON s.id = o.supplier_id
+             LEFT JOIN bookings b ON b.booking_reference = o.booking_reference
+             WHERE o.branch_id = :branch_id
+               AND o.supplier_id = :supplier_id
+               AND o.currency = :currency
+               AND o.status IN ("open", "partially_covered")
+               AND o.net_payable_amount > 0
+             ORDER BY o.due_date IS NULL, o.due_date ASC, o.booking_reference ASC, o.service_line_reference ASC, o.id ASC'
+        );
+        $statement->execute([
+            'branch_id' => $branchId,
+            'supplier_id' => $supplierId,
+            'currency' => strtoupper(trim($currency)),
+        ]);
+
+        return $statement->fetchAll() ?: [];
+    }
+
+    public function globalSettlementSupplierOptions(int $branchId): array
+    {
+        if ($branchId <= 0) {
+            return [];
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT
+                s.id,
+                s.branch_id,
+                s.code,
+                s.name,
+                s.supplier_mode,
+                s.default_currency,
+                COUNT(o.id) AS open_payable_count,
+                SUM(o.net_payable_amount) AS open_payable_amount
+             FROM supplier_obligations o
+             INNER JOIN suppliers s ON s.id = o.supplier_id
+             WHERE o.branch_id = :branch_id
+               AND o.status IN ("open", "partially_covered")
+               AND o.net_payable_amount > 0
+             GROUP BY s.id, s.branch_id, s.code, s.name, s.supplier_mode, s.default_currency
+             ORDER BY s.name ASC'
+        );
+        $statement->execute(['branch_id' => $branchId]);
+
+        return $statement->fetchAll() ?: [];
+    }
+
+    public function globalSettlementCurrencies(int $branchId, int $supplierId): array
+    {
+        if ($branchId <= 0 || $supplierId <= 0) {
+            return [];
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT
+                o.currency,
+                COUNT(o.id) AS open_payable_count,
+                SUM(o.net_payable_amount) AS open_payable_amount
+             FROM supplier_obligations o
+             WHERE o.branch_id = :branch_id
+               AND o.supplier_id = :supplier_id
+               AND o.status IN ("open", "partially_covered")
+               AND o.net_payable_amount > 0
+             GROUP BY o.currency
+             ORDER BY FIELD(o.currency, "PKR", "AED", "USD"), o.currency ASC'
+        );
+        $statement->execute([
+            'branch_id' => $branchId,
+            'supplier_id' => $supplierId,
+        ]);
+
+        return $statement->fetchAll() ?: [];
+    }
+
+    public function openGlobalObligationsForSettlement(array $obligationIds, int $branchId, int $supplierId, string $currency): array
+    {
+        $ids = array_values(array_unique(array_map('intval', $obligationIds)));
+        if ($ids === [] || $branchId <= 0 || $supplierId <= 0 || trim($currency) === '') {
+            return [];
+        }
+
+        $placeholders = implode(', ', array_fill(0, count($ids), '?'));
+        $statement = $this->db->prepare(
+            "SELECT
+                o.id,
+                o.supplier_id,
+                o.branch_id,
+                o.booking_reference,
+                o.service_line_reference,
+                o.currency,
+                o.gross_amount,
+                o.advance_applied_amount,
+                o.net_payable_amount,
+                o.due_date,
+                o.status,
+                o.remarks,
+                s.name AS supplier_name,
+                s.supplier_mode
+             FROM supplier_obligations o
+             INNER JOIN suppliers s ON s.id = o.supplier_id
+             WHERE o.branch_id = ?
+               AND o.supplier_id = ?
+               AND o.currency = ?
+               AND o.id IN ({$placeholders})
+               AND o.status IN ('open', 'partially_covered')
+               AND o.net_payable_amount > 0
+             ORDER BY o.due_date IS NULL, o.due_date ASC, o.booking_reference ASC, o.service_line_reference ASC, o.id ASC
+             FOR UPDATE"
+        );
+        $statement->execute(array_merge([$branchId, $supplierId, strtoupper(trim($currency))], $ids));
+
+        return $statement->fetchAll() ?: [];
+    }
+
     public function createSupplierPayment(array $data): int
     {
         return $this->transaction(function () use ($data): int {
             $paidAmount = (float) $data['paid_amount'];
+            $hasTreasuryAccountLink = $this->columnExists('supplier_payments', 'treasury_account_id');
+            $hasPaymentScope = $this->columnExists('supplier_payments', 'payment_scope');
 
             $statement = $this->db->prepare(
                 'INSERT INTO supplier_payments (
                     supplier_id, branch_id, booking_reference, payment_no, payment_date, currency,
-                    paid_amount, allocated_amount, unallocated_amount, payment_method,
+                    ' . ($hasPaymentScope ? 'payment_scope, ' : '') . 'paid_amount, allocated_amount, unallocated_amount, payment_method'
+                    . ($hasTreasuryAccountLink ? ', treasury_account_id' : '') . ',
                     reference_number, bank_card_detail, charges_amount, status, exchange_rate_to_booking, remarks, created_by_user_id
                  ) VALUES (
                     :supplier_id, :branch_id, :booking_reference, :payment_no, :payment_date, :currency,
-                    :paid_amount, 0, :unallocated_amount, :payment_method,
+                    ' . ($hasPaymentScope ? ':payment_scope, ' : '') . ':paid_amount, 0, :unallocated_amount, :payment_method'
+                    . ($hasTreasuryAccountLink ? ', :treasury_account_id' : '') . ',
                     :reference_number, :bank_card_detail, :charges_amount, :status, :exchange_rate_to_booking, :remarks, :created_by_user_id
                  )'
             );
-            $statement->execute([
+            $params = [
                 'supplier_id' => $data['supplier_id'],
                 'branch_id' => $data['branch_id'],
                 'booking_reference' => $data['booking_reference'],
@@ -518,7 +787,14 @@ final class SupplierRepository extends BaseRepository
                 'exchange_rate_to_booking' => $data['exchange_rate_to_booking'] ?? null,
                 'remarks' => $data['remarks'] ?? null,
                 'created_by_user_id' => $data['actor_user_id'] ?? null,
-            ]);
+            ];
+            if ($hasPaymentScope) {
+                $params['payment_scope'] = ($data['payment_scope'] ?? 'booking') === 'global' ? 'global' : 'booking';
+            }
+            if ($hasTreasuryAccountLink) {
+                $params['treasury_account_id'] = $data['treasury_account_id'] ?? null;
+            }
+            $statement->execute($params);
 
             $paymentId = (int) $this->db->lastInsertId();
 
@@ -538,16 +814,43 @@ final class SupplierRepository extends BaseRepository
 
     public function findSupplierPaymentById(int $paymentId): ?array
     {
+        $treasurySelect = $this->columnExists('supplier_payments', 'treasury_account_id')
+            ? ', treasury_account_id'
+            : ', NULL AS treasury_account_id';
+        $scopeSelect = $this->columnExists('supplier_payments', 'payment_scope')
+            ? ', payment_scope'
+            : ', "booking" AS payment_scope';
         $statement = $this->db->prepare(
             'SELECT id, supplier_id, branch_id, booking_reference, payment_no, payment_date, currency,
-                    paid_amount, allocated_amount, unallocated_amount, payment_method, reference_number, bank_card_detail,
-                    charges_amount, status, exchange_rate_to_booking, remarks,
+                    paid_amount, allocated_amount, unallocated_amount, payment_method' . $treasurySelect . ', reference_number, bank_card_detail,
+                    charges_amount, status, exchange_rate_to_booking, remarks' . $scopeSelect . ',
                     ' . $this->supplierPaymentVoidMetadataSelect() . '
              FROM supplier_payments
              WHERE id = :id
              LIMIT 1'
         );
         $statement->execute(['id' => $paymentId]);
+        $row = $statement->fetch();
+
+        return $row !== false ? $row : null;
+    }
+
+    public function findObligationByBookingAndServiceLine(string $bookingReference, string $serviceLineReference): ?array
+    {
+        $statement = $this->db->prepare(
+            'SELECT id, supplier_id, branch_id, booking_reference, service_line_reference, obligation_group, currency,
+                    gross_amount, advance_applied_amount, net_payable_amount, due_date, status, remarks
+             FROM supplier_obligations
+             WHERE booking_reference = :booking_reference
+               AND service_line_reference = :service_line_reference
+               AND status <> "cancelled"
+             ORDER BY id DESC
+             LIMIT 1'
+        );
+        $statement->execute([
+            'booking_reference' => $bookingReference,
+            'service_line_reference' => $serviceLineReference,
+        ]);
         $row = $statement->fetch();
 
         return $row !== false ? $row : null;
@@ -743,6 +1046,16 @@ final class SupplierRepository extends BaseRepository
 
     public function supplierPaymentHistory(string $bookingReference): array
     {
+        $treasurySelect = $this->columnExists('supplier_payments', 'treasury_account_id')
+            ? ', p.treasury_account_id,
+                ta.account_name AS treasury_account_name,
+                ta.account_type AS treasury_account_type'
+            : ', NULL AS treasury_account_id,
+                NULL AS treasury_account_name,
+                NULL AS treasury_account_type';
+        $treasuryJoin = $this->columnExists('supplier_payments', 'treasury_account_id')
+            ? ' LEFT JOIN treasury_accounts ta ON ta.id = p.treasury_account_id'
+            : '';
         $statement = $this->db->prepare(
             'SELECT
                 p.id,
@@ -753,6 +1066,7 @@ final class SupplierRepository extends BaseRepository
                 p.allocated_amount,
                 p.unallocated_amount,
                 p.payment_method,
+                ' . ltrim($treasurySelect, ', ') . ',
                 p.reference_number,
                 p.bank_card_detail,
                 p.charges_amount,
@@ -763,6 +1077,7 @@ final class SupplierRepository extends BaseRepository
                 s.name AS supplier_name
              FROM supplier_payments p
              INNER JOIN suppliers s ON s.id = p.supplier_id
+             ' . $treasuryJoin . '
              WHERE p.booking_reference = :booking_reference
              ORDER BY p.payment_date DESC, p.id DESC'
         );
@@ -775,7 +1090,8 @@ final class SupplierRepository extends BaseRepository
     {
         return $this->transaction(function () use ($paymentId, $obligationId, $amount, $exchangeRateUsed, $allocationNote, $actorUserId): int {
             $paymentStatement = $this->db->prepare(
-                'SELECT id, supplier_id, booking_reference, currency, unallocated_amount, allocated_amount, paid_amount, exchange_rate_to_booking
+                'SELECT id, supplier_id, branch_id, booking_reference, currency, unallocated_amount, allocated_amount, paid_amount, exchange_rate_to_booking,
+                        ' . ($this->columnExists('supplier_payments', 'payment_scope') ? 'payment_scope' : '"booking" AS payment_scope') . '
                  FROM supplier_payments
                  WHERE id = :payment_id
                  FOR UPDATE'
@@ -784,7 +1100,7 @@ final class SupplierRepository extends BaseRepository
             $payment = $paymentStatement->fetch();
 
             $obligationStatement = $this->db->prepare(
-                'SELECT id, supplier_id, booking_reference, currency, gross_amount, advance_applied_amount, net_payable_amount
+                'SELECT id, supplier_id, branch_id, booking_reference, currency, gross_amount, advance_applied_amount, net_payable_amount
                  FROM supplier_obligations
                  WHERE id = :obligation_id
                  FOR UPDATE'
@@ -800,8 +1116,14 @@ final class SupplierRepository extends BaseRepository
                 throw new \RuntimeException('Supplier payment and obligation supplier mismatch.');
             }
 
-            if ((string) $payment['booking_reference'] !== (string) $obligation['booking_reference']) {
+            $paymentScope = (string) ($payment['payment_scope'] ?? 'booking');
+            $isGlobalPayment = $paymentScope === 'global';
+            if (! $isGlobalPayment && (string) $payment['booking_reference'] !== (string) $obligation['booking_reference']) {
                 throw new \RuntimeException('Supplier payment and obligation booking mismatch.');
+            }
+
+            if ($isGlobalPayment && (int) ($payment['branch_id'] ?? 0) !== (int) ($obligation['branch_id'] ?? 0)) {
+                throw new \RuntimeException('Supplier payment and obligation branch mismatch.');
             }
 
             $paymentCurrency = (string) $payment['currency'];
@@ -917,7 +1239,7 @@ final class SupplierRepository extends BaseRepository
              INNER JOIN supplier_payments p ON p.id = a.supplier_payment_id
              INNER JOIN supplier_obligations o ON o.id = a.supplier_obligation_id
              INNER JOIN suppliers s ON s.id = p.supplier_id
-             WHERE p.booking_reference = :booking_reference
+             WHERE o.booking_reference = :booking_reference
              ORDER BY a.allocated_at DESC, a.id DESC'
         );
         $statement->execute(['booking_reference' => $bookingReference]);
@@ -946,8 +1268,12 @@ final class SupplierRepository extends BaseRepository
                 SELECT 1
                 FROM bookings b
                 INNER JOIN booking_services bs ON bs.booking_id = b.id
+                INNER JOIN suppliers booking_supplier ON booking_supplier.id = bs.supplier_id
                 WHERE b.booking_reference = :booking_reference
-                  AND bs.supplier_id = a.supplier_id
+                  AND (
+                    bs.supplier_id = a.supplier_id
+                    OR booking_supplier.name = s.name
+                  )
              )
              ORDER BY a.received_at DESC, a.id DESC'
         );
@@ -988,13 +1314,11 @@ final class SupplierRepository extends BaseRepository
                 COALESCE(SUM(available_amount), 0) AS total_available_amount
              FROM supplier_advances
              WHERE supplier_id = :supplier_id
-               AND branch_id = :branch_id
                AND currency = :currency
                AND available_amount > 0'
         );
         $summaryStatement->execute([
             'supplier_id' => $supplierId,
-            'branch_id' => $branchId,
             'currency' => $normalizedCurrency,
         ]);
         $summary = $summaryStatement->fetch() ?: [];
@@ -1003,7 +1327,6 @@ final class SupplierRepository extends BaseRepository
             'SELECT id, available_amount
              FROM supplier_advances
              WHERE supplier_id = :supplier_id
-               AND branch_id = :branch_id
                AND currency = :currency
                AND available_amount > 0
              ORDER BY received_at ASC, id ASC
@@ -1011,7 +1334,6 @@ final class SupplierRepository extends BaseRepository
         );
         $firstAdvanceStatement->execute([
             'supplier_id' => $supplierId,
-            'branch_id' => $branchId,
             'currency' => $normalizedCurrency,
         ]);
         $firstAdvance = $firstAdvanceStatement->fetch() ?: [];
@@ -1515,9 +1837,9 @@ final class SupplierRepository extends BaseRepository
         return 'open';
     }
 
-    public function applyAdvanceToObligation(int $advanceId, int $obligationId, float $amount, ?int $actorUserId = null): void
+    public function applyAdvanceToObligation(int $advanceId, int $obligationId, float $amount, ?int $actorUserId = null): float
     {
-        $this->transaction(function () use ($advanceId, $obligationId, $amount, $actorUserId): void {
+        return $this->transaction(function () use ($advanceId, $obligationId, $amount, $actorUserId): float {
             $advanceStatement = $this->db->prepare(
                 'SELECT id, supplier_id, currency, available_amount
                  FROM supplier_advances
@@ -1553,7 +1875,7 @@ final class SupplierRepository extends BaseRepository
             $applicableAmount = min($amount, $availableAmount, $remainingObligation);
 
             if ($applicableAmount <= 0) {
-                return;
+                return 0.0;
             }
 
             $updateAdvance = $this->db->prepare(
@@ -1585,18 +1907,40 @@ final class SupplierRepository extends BaseRepository
 
             $insertApplication = $this->db->prepare(
                 'INSERT INTO supplier_advance_applications (
-                    supplier_advance_id, supplier_obligation_id, applied_amount, created_by_user_id
+                    supplier_advance_id, supplier_obligation_id, applied_amount, application_type,
+                    advance_currency, advance_amount_consumed, obligation_currency, obligation_amount_applied,
+                    rate_from_currency, rate_to_currency, exchange_rate, exchange_rate_effective_date,
+                    created_by_user_id
                  ) VALUES (
-                    :supplier_advance_id, :supplier_obligation_id, :applied_amount, :created_by_user_id
+                    :supplier_advance_id, :supplier_obligation_id, :applied_amount, "same_currency_manual",
+                    :advance_currency, :advance_amount_consumed, :obligation_currency, :obligation_amount_applied,
+                    :rate_from_currency, :rate_to_currency, 1.00000000, :exchange_rate_effective_date,
+                    :created_by_user_id
                  )
                  ON DUPLICATE KEY UPDATE
                     applied_amount = applied_amount + VALUES(applied_amount),
+                    advance_amount_consumed = COALESCE(advance_amount_consumed, 0) + VALUES(advance_amount_consumed),
+                    obligation_amount_applied = COALESCE(obligation_amount_applied, 0) + VALUES(obligation_amount_applied),
+                    application_type = VALUES(application_type),
+                    advance_currency = VALUES(advance_currency),
+                    obligation_currency = VALUES(obligation_currency),
+                    rate_from_currency = VALUES(rate_from_currency),
+                    rate_to_currency = VALUES(rate_to_currency),
+                    exchange_rate = VALUES(exchange_rate),
+                    exchange_rate_effective_date = VALUES(exchange_rate_effective_date),
                     created_by_user_id = VALUES(created_by_user_id)'
             );
             $insertApplication->execute([
                 'supplier_advance_id' => $advanceId,
                 'supplier_obligation_id' => $obligationId,
                 'applied_amount' => $applicableAmount,
+                'advance_currency' => (string) $advance['currency'],
+                'advance_amount_consumed' => $applicableAmount,
+                'obligation_currency' => (string) $obligation['currency'],
+                'obligation_amount_applied' => $applicableAmount,
+                'rate_from_currency' => (string) $obligation['currency'],
+                'rate_to_currency' => (string) $advance['currency'],
+                'exchange_rate_effective_date' => date('Y-m-d'),
                 'created_by_user_id' => $actorUserId,
             ]);
 
@@ -1606,6 +1950,189 @@ final class SupplierRepository extends BaseRepository
                 'supplier_obligation_id' => $obligationId,
                 'applied_amount' => $applicableAmount,
             ]);
+
+            return round($applicableAmount, 2);
+        });
+    }
+
+    public function applyCrossCurrencyAdvanceToObligation(
+        int $advanceId,
+        int $obligationId,
+        float $obligationAmount,
+        string $rateFromCurrency,
+        string $rateToCurrency,
+        float $exchangeRate,
+        string $exchangeRateEffectiveDate,
+        ?string $applicationNote = null,
+        ?int $actorUserId = null
+    ): array {
+        return $this->transaction(function () use (
+            $advanceId,
+            $obligationId,
+            $obligationAmount,
+            $rateFromCurrency,
+            $rateToCurrency,
+            $exchangeRate,
+            $exchangeRateEffectiveDate,
+            $applicationNote,
+            $actorUserId
+        ): array {
+            $advanceStatement = $this->db->prepare(
+                'SELECT a.id, a.supplier_id, a.currency, a.available_amount, s.name AS supplier_name
+                 FROM supplier_advances a
+                 INNER JOIN suppliers s ON s.id = a.supplier_id
+                 WHERE a.id = :advance_id
+                 FOR UPDATE'
+            );
+            $advanceStatement->execute(['advance_id' => $advanceId]);
+            $advance = $advanceStatement->fetch();
+
+            $obligationStatement = $this->db->prepare(
+                'SELECT o.id, o.supplier_id, o.currency, o.gross_amount, o.advance_applied_amount, s.name AS supplier_name
+                 FROM supplier_obligations o
+                 INNER JOIN suppliers s ON s.id = o.supplier_id
+                 WHERE o.id = :obligation_id
+                 FOR UPDATE'
+            );
+            $obligationStatement->execute(['obligation_id' => $obligationId]);
+            $obligation = $obligationStatement->fetch();
+
+            if ($advance === false || $obligation === false) {
+                throw new \RuntimeException('Supplier advance or obligation not found.');
+            }
+
+            $advanceSupplierName = trim((string) ($advance['supplier_name'] ?? ''));
+            $obligationSupplierName = trim((string) ($obligation['supplier_name'] ?? ''));
+            $sameSupplierIdentity = (int) $advance['supplier_id'] === (int) $obligation['supplier_id']
+                || ($advanceSupplierName !== '' && strcasecmp($advanceSupplierName, $obligationSupplierName) === 0);
+
+            if (! $sameSupplierIdentity) {
+                throw new \RuntimeException('Advance and obligation supplier mismatch.');
+            }
+
+            $advanceCurrency = strtoupper((string) $advance['currency']);
+            $obligationCurrency = strtoupper((string) $obligation['currency']);
+            $rateFromCurrency = strtoupper(trim($rateFromCurrency));
+            $rateToCurrency = strtoupper(trim($rateToCurrency));
+
+            if ($advanceCurrency === $obligationCurrency) {
+                throw new \RuntimeException('Use the normal supplier advance application for same-currency advances.');
+            }
+
+            if ($rateFromCurrency !== $advanceCurrency || $rateToCurrency !== $obligationCurrency) {
+                throw new \RuntimeException('Supplier advance FX rate must be quoted as 1 advance currency to payable currency.');
+            }
+
+            if ($exchangeRate <= 0) {
+                throw new \RuntimeException('Exchange rate must be greater than zero.');
+            }
+
+            $remainingObligation = max(0, (float) $obligation['gross_amount'] - (float) $obligation['advance_applied_amount']);
+            $obligationAmountApplied = round(min($obligationAmount, $remainingObligation), 2);
+            if ($obligationAmountApplied <= 0) {
+                return [
+                    'applied_amount' => 0.0,
+                    'advance_amount_consumed' => 0.0,
+                ];
+            }
+
+            $advanceAmountConsumed = round($obligationAmountApplied / $exchangeRate, 2);
+            $availableAdvance = round((float) $advance['available_amount'], 2);
+            if ($advanceAmountConsumed > $availableAdvance + 0.005) {
+                throw new \RuntimeException('Supplier advance balance is not enough for this exchange-rate application.');
+            }
+
+            $updateAdvance = $this->db->prepare(
+                'UPDATE supplier_advances
+                 SET available_amount = GREATEST(0, available_amount - :advance_amount_consumed)
+                 WHERE id = :advance_id'
+            );
+            $updateAdvance->execute([
+                'advance_amount_consumed' => $advanceAmountConsumed,
+                'advance_id' => $advanceId,
+            ]);
+
+            $updateObligation = $this->db->prepare(
+                'UPDATE supplier_obligations
+                 SET advance_applied_amount = advance_applied_amount + :obligation_amount_applied,
+                     net_payable_amount = GREATEST(0, gross_amount - (advance_applied_amount + :net_payable_reduction)),
+                     status = CASE
+                         WHEN gross_amount - (advance_applied_amount + :status_reduction_amount) <= 0 THEN "covered_by_advance"
+                         ELSE "partially_covered"
+                     END
+                 WHERE id = :obligation_id'
+            );
+            $updateObligation->execute([
+                'obligation_amount_applied' => $obligationAmountApplied,
+                'net_payable_reduction' => $obligationAmountApplied,
+                'status_reduction_amount' => $obligationAmountApplied,
+                'obligation_id' => $obligationId,
+            ]);
+
+            $insertApplication = $this->db->prepare(
+                'INSERT INTO supplier_advance_applications (
+                    supplier_advance_id, supplier_obligation_id, applied_amount, application_type,
+                    advance_currency, advance_amount_consumed, obligation_currency, obligation_amount_applied,
+                    rate_from_currency, rate_to_currency, exchange_rate, exchange_rate_effective_date,
+                    application_note, created_by_user_id
+                 ) VALUES (
+                    :supplier_advance_id, :supplier_obligation_id, :applied_amount, "cross_currency_explicit",
+                    :advance_currency, :advance_amount_consumed, :obligation_currency, :obligation_amount_applied,
+                    :rate_from_currency, :rate_to_currency, :exchange_rate, :exchange_rate_effective_date,
+                    :application_note, :created_by_user_id
+                 )
+                 ON DUPLICATE KEY UPDATE
+                    applied_amount = applied_amount + VALUES(applied_amount),
+                    advance_amount_consumed = COALESCE(advance_amount_consumed, 0) + VALUES(advance_amount_consumed),
+                    obligation_amount_applied = COALESCE(obligation_amount_applied, 0) + VALUES(obligation_amount_applied),
+                    application_type = VALUES(application_type),
+                    advance_currency = VALUES(advance_currency),
+                    obligation_currency = VALUES(obligation_currency),
+                    rate_from_currency = VALUES(rate_from_currency),
+                    rate_to_currency = VALUES(rate_to_currency),
+                    exchange_rate = VALUES(exchange_rate),
+                    exchange_rate_effective_date = VALUES(exchange_rate_effective_date),
+                    application_note = VALUES(application_note),
+                    created_by_user_id = VALUES(created_by_user_id)'
+            );
+            $insertApplication->execute([
+                'supplier_advance_id' => $advanceId,
+                'supplier_obligation_id' => $obligationId,
+                'applied_amount' => $obligationAmountApplied,
+                'advance_currency' => $advanceCurrency,
+                'advance_amount_consumed' => $advanceAmountConsumed,
+                'obligation_currency' => $obligationCurrency,
+                'obligation_amount_applied' => $obligationAmountApplied,
+                'rate_from_currency' => $rateFromCurrency,
+                'rate_to_currency' => $rateToCurrency,
+                'exchange_rate' => round($exchangeRate, 8),
+                'exchange_rate_effective_date' => $exchangeRateEffectiveDate,
+                'application_note' => $applicationNote,
+                'created_by_user_id' => $actorUserId,
+            ]);
+
+            AuditLog::record($this->app, 'supplier.advance.fx_applied', [
+                'user_id' => $actorUserId,
+                'supplier_advance_id' => $advanceId,
+                'supplier_obligation_id' => $obligationId,
+                'advance_currency' => $advanceCurrency,
+                'advance_amount_consumed' => $advanceAmountConsumed,
+                'obligation_currency' => $obligationCurrency,
+                'obligation_amount_applied' => $obligationAmountApplied,
+                'rate_from_currency' => $rateFromCurrency,
+                'rate_to_currency' => $rateToCurrency,
+                'exchange_rate' => round($exchangeRate, 8),
+                'exchange_rate_effective_date' => $exchangeRateEffectiveDate,
+            ]);
+
+            return [
+                'applied_amount' => $obligationAmountApplied,
+                'advance_amount_consumed' => $advanceAmountConsumed,
+                'advance_currency' => $advanceCurrency,
+                'obligation_currency' => $obligationCurrency,
+                'exchange_rate' => round($exchangeRate, 8),
+                'exchange_rate_effective_date' => $exchangeRateEffectiveDate,
+            ];
         });
     }
 
@@ -1629,6 +2156,7 @@ final class SupplierRepository extends BaseRepository
 
             $supplierId = (int) ($obligation['supplier_id'] ?? 0);
             $branchId = (int) ($obligation['branch_id'] ?? 0);
+            $obligationCurrency = strtoupper((string) ($obligation['currency'] ?? ''));
             $grossAmount = round((float) ($obligation['gross_amount'] ?? 0), 2);
 
             $this->supplierAdvanceTraceLog('autoApplyAvailableAdvanceToObligation', 'method_entered', [
@@ -1641,7 +2169,7 @@ final class SupplierRepository extends BaseRepository
                 'service_line_reference' => (string) ($obligation['service_line_reference'] ?? ''),
                 'obligation_id' => $obligationId,
                 'action' => 'reconcile_entered',
-                'reason' => 'currency_ignored_for_auto_apply',
+                'reason' => 'same_currency_only_for_auto_apply',
             ]);
 
             $applicationStatement = $this->db->prepare(
@@ -1649,6 +2177,8 @@ final class SupplierRepository extends BaseRepository
                     aa.id AS application_id,
                     aa.supplier_advance_id,
                     aa.applied_amount,
+                    aa.application_type,
+                    aa.advance_amount_consumed,
                     a.supplier_id,
                     a.branch_id,
                     a.currency,
@@ -1672,7 +2202,7 @@ final class SupplierRepository extends BaseRepository
                 'SELECT id, supplier_id, branch_id, currency, available_amount, received_at
                  FROM supplier_advances
                  WHERE supplier_id = :supplier_id
-                   AND branch_id = :branch_id
+                   AND currency = :currency
                  ORDER BY received_at ASC, id ASC
                  FOR UPDATE'
             );
@@ -1680,7 +2210,7 @@ final class SupplierRepository extends BaseRepository
             if ($supplierId > 0 && $branchId > 0) {
                 $advanceStatement->execute([
                     'supplier_id' => $supplierId,
-                    'branch_id' => $branchId,
+                    'currency' => $obligationCurrency,
                 ]);
                 $advanceRows = $advanceStatement->fetchAll() ?: [];
             }
@@ -1698,7 +2228,7 @@ final class SupplierRepository extends BaseRepository
                     static fn (array $row): bool => round((float) ($row['available_amount'] ?? 0), 2) > 0
                 )),
                 'matching_advance_total' => round(array_reduce($advanceRows, static fn (float $carry, array $row): float => $carry + (float) ($row['available_amount'] ?? 0), 0.0), 2),
-                'reason' => 'supplier_and_branch_match_only',
+                'reason' => 'supplier_shared_same_currency_advance_pool',
             ]);
 
             $advanceRowsById = [];
@@ -1707,10 +2237,17 @@ final class SupplierRepository extends BaseRepository
             }
 
             $matchingAppliedAmount = 0.0;
+            $protectedAppliedAmount = 0.0;
             foreach ($applicationRows as $applicationRow) {
-                $matchesCurrentSupplierAndBranch = (int) ($applicationRow['supplier_id'] ?? 0) === $supplierId
-                    && (int) ($applicationRow['branch_id'] ?? 0) === $branchId;
-                if ($matchesCurrentSupplierAndBranch) {
+                $applicationCurrency = strtoupper((string) ($applicationRow['currency'] ?? ''));
+                $applicationType = (string) ($applicationRow['application_type'] ?? '');
+                $matchesCurrentSupplier = (int) ($applicationRow['supplier_id'] ?? 0) === $supplierId
+                    && $applicationCurrency === $obligationCurrency;
+                if ($applicationType === 'cross_currency_explicit') {
+                    $protectedAppliedAmount = round($protectedAppliedAmount + (float) ($applicationRow['applied_amount'] ?? 0), 2);
+                    continue;
+                }
+                if ($matchesCurrentSupplier) {
                     $matchingAppliedAmount = round($matchingAppliedAmount + (float) ($applicationRow['applied_amount'] ?? 0), 2);
                 }
             }
@@ -1721,7 +2258,7 @@ final class SupplierRepository extends BaseRepository
                 0.0
             ), 2);
             $desiredAppliedAmount = ($supplierId > 0 && $branchId > 0 && $grossAmount > 0)
-                ? round(min($grossAmount, $matchingAvailableAmount + $matchingAppliedAmount), 2)
+                ? round($protectedAppliedAmount + min(max(0, $grossAmount - $protectedAppliedAmount), $matchingAvailableAmount + $matchingAppliedAmount), 2)
                 : 0.0;
 
             $increaseAdvance = $this->db->prepare(
@@ -1737,6 +2274,8 @@ final class SupplierRepository extends BaseRepository
             $updateApplicationAmount = $this->db->prepare(
                 'UPDATE supplier_advance_applications
                  SET applied_amount = :applied_amount,
+                     advance_amount_consumed = :advance_amount_consumed,
+                     obligation_amount_applied = :obligation_amount_applied,
                      created_by_user_id = :created_by_user_id
                  WHERE id = :application_id'
             );
@@ -1746,12 +2285,27 @@ final class SupplierRepository extends BaseRepository
             );
             $insertApplication = $this->db->prepare(
                 'INSERT INTO supplier_advance_applications (
-                    supplier_advance_id, supplier_obligation_id, applied_amount, created_by_user_id
+                    supplier_advance_id, supplier_obligation_id, applied_amount, application_type,
+                    advance_currency, advance_amount_consumed, obligation_currency, obligation_amount_applied,
+                    rate_from_currency, rate_to_currency, exchange_rate, exchange_rate_effective_date,
+                    created_by_user_id
                  ) VALUES (
-                    :supplier_advance_id, :supplier_obligation_id, :applied_amount, :created_by_user_id
+                    :supplier_advance_id, :supplier_obligation_id, :applied_amount, "same_currency_auto",
+                    :advance_currency, :advance_amount_consumed, :obligation_currency, :obligation_amount_applied,
+                    :rate_from_currency, :rate_to_currency, 1.00000000, :exchange_rate_effective_date,
+                    :created_by_user_id
                  )
                  ON DUPLICATE KEY UPDATE
                     applied_amount = applied_amount + VALUES(applied_amount),
+                    advance_amount_consumed = COALESCE(advance_amount_consumed, 0) + VALUES(advance_amount_consumed),
+                    obligation_amount_applied = COALESCE(obligation_amount_applied, 0) + VALUES(obligation_amount_applied),
+                    application_type = VALUES(application_type),
+                    advance_currency = VALUES(advance_currency),
+                    obligation_currency = VALUES(obligation_currency),
+                    rate_from_currency = VALUES(rate_from_currency),
+                    rate_to_currency = VALUES(rate_to_currency),
+                    exchange_rate = VALUES(exchange_rate),
+                    exchange_rate_effective_date = VALUES(exchange_rate_effective_date),
                     created_by_user_id = VALUES(created_by_user_id)'
             );
             $updateObligation = $this->db->prepare(
@@ -1767,14 +2321,20 @@ final class SupplierRepository extends BaseRepository
 
             $rowsToUnapply = array_reverse($applicationRows);
             foreach ($rowsToUnapply as $applicationRow) {
-                $matchesCurrentSupplierAndBranch = (int) ($applicationRow['supplier_id'] ?? 0) === $supplierId
-                    && (int) ($applicationRow['branch_id'] ?? 0) === $branchId;
+                $applicationType = (string) ($applicationRow['application_type'] ?? '');
+                if ($applicationType === 'cross_currency_explicit') {
+                    continue;
+                }
+
+                $applicationCurrency = strtoupper((string) ($applicationRow['currency'] ?? ''));
+                $matchesCurrentSupplier = (int) ($applicationRow['supplier_id'] ?? 0) === $supplierId
+                    && $applicationCurrency === $obligationCurrency;
                 $applicationAmount = round((float) ($applicationRow['applied_amount'] ?? 0), 2);
                 if ($applicationAmount <= 0) {
                     continue;
                 }
 
-                $mustUnapplyAll = ! $matchesCurrentSupplierAndBranch;
+                $mustUnapplyAll = ! $matchesCurrentSupplier;
                 $excessAmount = round(max(0, $currentAppliedAmount - $desiredAppliedAmount), 2);
                 if (! $mustUnapplyAll && $excessAmount <= 0) {
                     continue;
@@ -1794,6 +2354,8 @@ final class SupplierRepository extends BaseRepository
                 if ($remainingApplicationAmount > 0) {
                     $updateApplicationAmount->execute([
                         'applied_amount' => $remainingApplicationAmount,
+                        'advance_amount_consumed' => $remainingApplicationAmount,
+                        'obligation_amount_applied' => $remainingApplicationAmount,
                         'created_by_user_id' => $actorUserId,
                         'application_id' => (int) $applicationRow['application_id'],
                     ]);
@@ -1816,7 +2378,7 @@ final class SupplierRepository extends BaseRepository
                     'supplier_advance_id' => (int) $applicationRow['supplier_advance_id'],
                     'supplier_obligation_id' => $obligationId,
                     'returned_amount' => $returnAmount,
-                    'reason' => $mustUnapplyAll ? 'supplier_or_branch_changed' : 'obligation_amount_reduced',
+                    'reason' => $mustUnapplyAll ? 'supplier_or_currency_changed' : 'obligation_amount_reduced',
                 ]);
 
                 $this->supplierAdvanceTraceLog('autoApplyAvailableAdvanceToObligation', 'advance_row_unapplied', [
@@ -1830,7 +2392,7 @@ final class SupplierRepository extends BaseRepository
                     'action' => 'advance_row_unapplied',
                     'returned_amount' => $returnAmount,
                     'remaining_application_amount' => $remainingApplicationAmount,
-                    'reason' => $mustUnapplyAll ? 'supplier_or_branch_changed' : 'obligation_amount_reduced',
+                    'reason' => $mustUnapplyAll ? 'supplier_or_currency_changed' : 'obligation_amount_reduced',
                 ]);
             }
 
@@ -1854,6 +2416,13 @@ final class SupplierRepository extends BaseRepository
                     'supplier_advance_id' => $advanceId,
                     'supplier_obligation_id' => $obligationId,
                     'applied_amount' => $appliedAmount,
+                    'advance_currency' => (string) ($advanceRow['currency'] ?? ''),
+                    'advance_amount_consumed' => $appliedAmount,
+                    'obligation_currency' => $obligationCurrency,
+                    'obligation_amount_applied' => $appliedAmount,
+                    'rate_from_currency' => $obligationCurrency,
+                    'rate_to_currency' => (string) ($advanceRow['currency'] ?? ''),
+                    'exchange_rate_effective_date' => date('Y-m-d'),
                     'created_by_user_id' => $actorUserId,
                 ]);
 

@@ -12,9 +12,26 @@ echo 'Started: ' . date(DATE_ATOM) . PHP_EOL . PHP_EOL;
 $commands = [
     'PHP syntax: public entrypoint' => [PHP_BINARY, '-l', BASE_PATH . '/public/index.php'],
     'PHP syntax: production readiness test' => [PHP_BINARY, '-l', BASE_PATH . '/tests/production_readiness.php'],
+    'PHP syntax: workspace/payment readiness test' => [PHP_BINARY, '-l', BASE_PATH . '/tests/workspace_payment_readiness.php'],
+    'PHP syntax: workspace master-data authority readiness test' => [PHP_BINARY, '-l', BASE_PATH . '/tests/workspace_master_data_authority.php'],
+    'PHP syntax: workspace document/reminder readiness test' => [PHP_BINARY, '-l', BASE_PATH . '/tests/workspace_document_reminder_readiness.php'],
+    'PHP syntax: workspace treasury refresh readiness test' => [PHP_BINARY, '-l', BASE_PATH . '/tests/workspace_treasury_refresh_readiness.php'],
+    'PHP syntax: accounting engine readiness test' => [PHP_BINARY, '-l', BASE_PATH . '/tests/accounting_engine_readiness.php'],
+    'PHP syntax: offline sync readiness test' => [PHP_BINARY, '-l', BASE_PATH . '/tests/offline_sync_readiness.php'],
+    'PHP syntax: security layer readiness test' => [PHP_BINARY, '-l', BASE_PATH . '/tests/security_layer_readiness.php'],
+    'PHP syntax: release hygiene audit' => [PHP_BINARY, '-l', BASE_PATH . '/scripts/release_hygiene_audit.php'],
     'PHP syntax: backup script' => [PHP_BINARY, '-l', BASE_PATH . '/scripts/backup_database.php'],
+    'PHP syntax: backup cycle script' => [PHP_BINARY, '-l', BASE_PATH . '/scripts/run_backup_cycle.php'],
     'Migration status' => [PHP_BINARY, BASE_PATH . '/database/migrate.php', 'status'],
     'Production readiness' => [PHP_BINARY, BASE_PATH . '/tests/production_readiness.php'],
+    'Workspace/payment readiness' => [PHP_BINARY, BASE_PATH . '/tests/workspace_payment_readiness.php'],
+    'Workspace master-data authority readiness' => [PHP_BINARY, BASE_PATH . '/tests/workspace_master_data_authority.php'],
+    'Workspace document/reminder readiness' => [PHP_BINARY, BASE_PATH . '/tests/workspace_document_reminder_readiness.php'],
+    'Workspace treasury refresh readiness' => [PHP_BINARY, BASE_PATH . '/tests/workspace_treasury_refresh_readiness.php'],
+    'Accounting engine readiness' => [PHP_BINARY, BASE_PATH . '/tests/accounting_engine_readiness.php'],
+    'Offline sync readiness' => [PHP_BINARY, BASE_PATH . '/tests/offline_sync_readiness.php'],
+    'Security layer readiness' => [PHP_BINARY, BASE_PATH . '/tests/security_layer_readiness.php'],
+    'Release hygiene audit' => [PHP_BINARY, BASE_PATH . '/scripts/release_hygiene_audit.php'],
 ];
 
 $failures = [];

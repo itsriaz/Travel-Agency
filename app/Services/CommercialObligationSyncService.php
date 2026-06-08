@@ -341,7 +341,7 @@ final class CommercialObligationSyncService extends Service
             'purchase_cost' => $payableAmount,
             'obligation_id' => $obligationId > 0 ? $obligationId : null,
             'action' => 'reference_only',
-            'reason' => 'supplier_application_method=SupplierRepository::autoApplyAvailableAdvanceToObligation; accounting_method=AccountingRepository::postSupplierAdvanceApplication; currency_rule=ignored_for_auto_apply',
+            'reason' => 'supplier_application_method=SupplierRepository::autoApplyAvailableAdvanceToObligation; accounting_method=AccountingRepository::postSupplierAdvanceApplication; currency_rule=same_currency_only_for_auto_apply',
         ]);
 
         $advanceCount = (int) ($advanceLookup['advance_row_count'] ?? 0);

@@ -11,7 +11,9 @@ use App\Helpers\Flash;
 use App\Helpers\Session;
 use App\Repositories\BookingRepository;
 use App\Repositories\BookingServiceRepository;
+use App\Repositories\MasterDataRepository;
 use App\Repositories\SupplierRepository;
+use App\Repositories\TreasuryRepository;
 use App\Repositories\TravelerRepository;
 use App\Services\AccountingFoundationService;
 use App\Services\BookingWorkspaceService;
@@ -43,6 +45,7 @@ final class WorkspaceController extends BaseController
         $searchTerm = trim((string) ($_GET['q'] ?? ''));
         $travelerSearchTerm = trim((string) ($_GET['traveler_q'] ?? ''));
         $editingReminderId = isset($_GET['reminder_edit']) ? (int) $_GET['reminder_edit'] : null;
+        $requestedServiceId = isset($_GET['service_id']) ? (int) $_GET['service_id'] : 0;
         $newMode = isset($_GET['new']) && $_GET['new'] === '1';
 
         try {
@@ -174,6 +177,7 @@ final class WorkspaceController extends BaseController
         $reminderState = (new ReminderWorkspaceService($this->app))->reminderState(
             $effectiveBookingId,
             $accessibleBranchIds,
+            $responsibleCustomerId > 0 ? $responsibleCustomerId : null,
             $workspaceState['currentBooking'],
             $travelerState['travelers'],
             $serviceState['services'],
@@ -183,12 +187,17 @@ final class WorkspaceController extends BaseController
             $editingReminderId,
             (int) Auth::id()
         );
+        $masterData = new MasterDataRepository($this->app);
+        $serviceTypeOptions = $this->workspaceServiceTypeOptions($masterData);
+        $paymentMethodOptions = $this->workspacePaymentMethodOptions($masterData);
+        $supplierModeOptions = $this->workspaceSupplierModeOptions($masterData);
 
         return $this->view('workspace/index', [
             'title' => 'Booking Workspace',
             'user' => Auth::user(),
             'accessibleBranchIds' => $accessibleBranchIds,
             'pageScript' => 'assets/js/workspace.js',
+            'paymentTreasuryAccountsUrl' => url('/workspace/payments/treasury-accounts'),
             'supplierFoundation' => $supplierFoundation,
             'customerPaymentFoundation' => $customerPaymentFoundation,
             'receiptRecreateDraft' => $receiptRecreateDraft,
@@ -204,10 +213,16 @@ final class WorkspaceController extends BaseController
             'travelerSearchResults' => $travelerSearchResults,
             'travelerSearchTerm' => $travelerState['travelerSearchTerm'],
             'bookingServices' => $serviceState['services'],
+            'requestedServiceId' => $requestedServiceId,
             'serviceSupplierOptions' => $serviceState['supplierOptions'],
+            'serviceTypeOptions' => $serviceTypeOptions,
+            'paymentMethodOptions' => $paymentMethodOptions,
+            'supplierModeOptions' => $supplierModeOptions,
             'documents' => $documentState['documents'],
             'documentTypeOptions' => $documentState['documentTypeOptions'],
+            'documentTypeDefinitions' => $documentState['documentTypeDefinitions'],
             'documentLinkTargets' => $documentState['documentLinkTargets'],
+            'documentTargetOptionsByType' => $documentState['documentTargetOptionsByType'],
             'replaceableDocuments' => $documentState['replaceableDocuments'],
             'reminders' => $reminderState['reminders'],
             'receivableAlerts' => $reminderState['receivableAlerts'],
@@ -217,6 +232,121 @@ final class WorkspaceController extends BaseController
             'editingReminder' => $reminderState['editingReminder'],
             'serviceSaveDebug' => is_array($serviceSaveDebug) ? $serviceSaveDebug : null,
         ]);
+    }
+
+    public function paymentTreasuryAccounts(): never
+    {
+        $accessibleBranchIds = Authorization::accessibleBranchIds();
+        $branchIds = array_values(array_unique(array_filter(
+            array_map('intval', $accessibleBranchIds),
+            static fn (int $branchId): bool => $branchId > 0
+        )));
+
+        $accounts = [];
+        if ($branchIds !== []) {
+            $accounts = array_map(
+                static function (array $row): array {
+                    $bankName = trim((string) ($row['bank_name'] ?? ''));
+                    $label = (string) ($row['account_name'] ?? '');
+                    if ($bankName !== '' && $bankName !== $label) {
+                        $label .= ' - ' . $bankName;
+                    }
+
+                    return [
+                        'id' => (int) ($row['id'] ?? 0),
+                        'branchId' => (int) ($row['branch_id'] ?? 0),
+                        'accountName' => (string) ($row['account_name'] ?? ''),
+                        'accountType' => (string) ($row['account_type'] ?? ''),
+                        'currency' => (string) ($row['currency'] ?? 'PKR'),
+                        'isDefault' => (int) ($row['is_default'] ?? 0) === 1,
+                        'label' => trim($label),
+                    ];
+                },
+                array_values(array_filter(
+                    (new TreasuryRepository($this->app))->accounts($branchIds),
+                    static fn (array $row): bool => (int) ($row['is_active'] ?? 0) === 1
+                ))
+            );
+        }
+
+        $this->jsonResponse([
+            'ok' => true,
+            'accounts' => $accounts,
+        ]);
+    }
+
+    private function workspaceServiceTypeOptions(MasterDataRepository $repository): array
+    {
+        $options = [];
+        $fallbackMap = [
+            'AIR' => 'air ticket',
+            'VISA' => 'visa',
+            'UMR' => 'umrah',
+            'HOT' => 'hotel',
+            'TRN' => 'transport',
+            'TOUR' => 'tourism',
+            'OTH' => 'other',
+        ];
+
+        foreach ($repository->activeRows('service_types') as $row) {
+            $code = strtoupper(trim((string) ($row['code'] ?? '')));
+            $name = trim((string) ($row['name'] ?? ''));
+            $runtimeKey = $fallbackMap[$code] ?? $this->workspaceServiceTypeRuntimeKey($name);
+            if ($runtimeKey === '') {
+                continue;
+            }
+
+            $options[$runtimeKey] = $name !== '' ? $name : ucwords($runtimeKey);
+        }
+
+        return $options !== [] ? $options : [
+            'air ticket' => 'Air Ticket',
+            'visa' => 'Visa',
+            'umrah' => 'Umrah',
+            'tourism' => 'Tourism',
+            'hotel' => 'Hotel',
+            'transport' => 'Transport',
+            'other' => 'Other Package',
+        ];
+    }
+
+    private function workspacePaymentMethodOptions(MasterDataRepository $repository): array
+    {
+        $options = $repository->activeCodeLabelMap('payment_methods');
+
+        return $options !== [] ? $options : [
+            'cash' => 'Cash',
+            'bank_transfer' => 'Bank Transfer',
+            'debit_card' => 'Debit Card',
+            'credit_card' => 'Credit Card',
+        ];
+    }
+
+    private function workspaceSupplierModeOptions(MasterDataRepository $repository): array
+    {
+        $options = $repository->activeCodeLabelMap('supplier_modes');
+
+        return $options !== [] ? $options : [
+            'normal_payable' => 'Normal Payable',
+            'running_balance' => 'Running Balance',
+        ];
+    }
+
+    private function workspaceServiceTypeRuntimeKey(string $name): string
+    {
+        $normalized = mb_strtolower(trim(str_replace(['-', '_'], ' ', $name)));
+        $normalized = preg_replace('/\s+/', ' ', $normalized ?? '') ?? '';
+
+        return match (trim($normalized)) {
+            'air ticket' => 'air ticket',
+            'visa' => 'visa',
+            'umrah' => 'umrah',
+            'tourism' => 'tourism',
+            'hotel' => 'hotel',
+            'transport' => 'transport',
+            'other package', 'other' => 'other',
+            default => '',
+        };
     }
 
     public function customerDuesFinder(): never
@@ -357,9 +487,12 @@ final class WorkspaceController extends BaseController
                 $grossAmount = round((float) ($row['total_gross_amount'] ?? 0), 2);
                 $paidAmount = round((float) ($row['total_paid_amount'] ?? 0), 2);
                 $balanceAmount = round((float) ($row['total_balance_amount'] ?? 0), 2);
+                $rowType = (string) ($row['row_type'] ?? 'booking_supplier');
                 $status = 'Recorded';
 
-                if ($balanceAmount <= 0.005 && $paidAmount > 0.005) {
+                if ($rowType === 'supplier_advance') {
+                    $status = $balanceAmount > 0.005 ? 'Prepaid Available' : 'Prepaid Used';
+                } elseif ($balanceAmount <= 0.005 && $paidAmount > 0.005) {
                     $status = 'Settled';
                 } elseif ($balanceAmount > 0.005 && $paidAmount > 0.005) {
                     $status = 'Partially Paid';
@@ -383,7 +516,7 @@ final class WorkspaceController extends BaseController
                     'status' => $status,
                     'open_url' => $bookingId > 0
                         ? url('/workspace?booking_id=' . $bookingId . '#dock-panel-suppliers')
-                        : '#',
+                        : ($rowType === 'supplier_advance' ? url('/reports?report=supplier_prepaid_payments') : '#'),
                 ];
             },
             $rows
@@ -394,6 +527,10 @@ final class WorkspaceController extends BaseController
             $message = $results === []
                 ? 'No supplier payment history matched this search.'
                 : 'Select Open History to jump into the booking supplier payment workspace.';
+        } else {
+            $message = $results === []
+                ? 'No recent supplier payment history is available.'
+                : 'Showing recent supplier payment and prepaid supplier records.';
         }
 
         $this->jsonResponse([
@@ -432,7 +569,12 @@ final class WorkspaceController extends BaseController
                 throw new RuntimeException('Please select a valid supplier currency.');
             }
 
-            if (! in_array($mode, ['normal_payable', 'running_balance'], true)) {
+            $validSupplierModes = array_keys((new MasterDataRepository($this->app))->activeCodeLabelMap('supplier_modes'));
+            if ($validSupplierModes === []) {
+                $validSupplierModes = ['normal_payable', 'running_balance'];
+            }
+
+            if (! in_array($mode, $validSupplierModes, true)) {
                 throw new RuntimeException('Please select a valid supplier type.');
             }
 
@@ -524,16 +666,17 @@ final class WorkspaceController extends BaseController
 
         $supplierRepository = new \App\Repositories\SupplierRepository($this->app);
         $supplier = null;
+        $availableAmount = 0.0;
 
         if ($supplierId > 0) {
             $supplier = $supplierRepository->findSupplierById($supplierId);
-            if ($supplier !== null) {
-                $supplierBranchId = isset($supplier['branch_id']) ? (int) $supplier['branch_id'] : 0;
-                $supplierAccessible = $supplierBranchId === 0 || in_array($supplierBranchId, $accessibleBranchIds, true);
-                if (! $supplierAccessible) {
-                    $supplier = null;
-                }
+            if ($supplier !== null && (int) ($supplier['is_active'] ?? 1) !== 1) {
+                $supplier = null;
             }
+        }
+
+        if ($supplier === null && $supplierName !== '') {
+            $availableAmount = $supplierRepository->availableAdvanceBalanceForSupplierName($supplierName, $currency);
         }
 
         if ($supplier === null && $supplierName !== '') {
@@ -554,37 +697,51 @@ final class WorkspaceController extends BaseController
             ]);
         }
 
-        $supplierBranchId = isset($supplier['branch_id']) ? (int) $supplier['branch_id'] : 0;
-        if ($supplierBranchId > 0 && $supplierBranchId !== $branchId) {
-            $this->jsonResponse([
-                'success' => true,
-                'available' => false,
-                'supplier_id' => (int) ($supplier['id'] ?? 0),
-                'supplier_name' => (string) ($supplier['name'] ?? $supplierName),
-                'branch_id' => $branchId,
-                'currency' => $currency,
-                'available_amount' => 0,
-                'formatted_available_amount' => $currency . ' 0.00',
-                'message' => 'No same-branch prepaid balance found.',
-            ]);
+        if ($availableAmount <= 0.005) {
+            $availableAmount = $supplierRepository->availableAdvanceBalanceForSupplier(
+                (int) ($supplier['id'] ?? 0),
+                $branchId,
+                $currency
+            );
         }
-
-        $availableAmount = $supplierRepository->availableAdvanceBalanceForSupplier(
-            (int) ($supplier['id'] ?? 0),
-            $branchId,
-            $currency
+        $availableBalances = $supplierRepository->availableAdvanceBalancesForSupplierName(
+            (string) ($supplier['name'] ?? $supplierName)
         );
+        $advanceCandidates = array_map(
+            static fn (array $row): array => [
+                'id' => (int) ($row['id'] ?? 0),
+                'currency' => (string) ($row['currency'] ?? ''),
+                'available_amount' => (float) ($row['available_amount'] ?? 0),
+            ],
+            $supplierRepository->availableAdvanceCandidatesForSupplierName((string) ($supplier['name'] ?? $supplierName))
+        );
+        if ($availableAmount > 0.005) {
+            $availableBalances[$currency] = $availableAmount;
+        }
+        $availableBalances = array_filter(
+            $availableBalances,
+            static fn (float $amount): bool => $amount > 0.005
+        );
+        $formattedBalances = [];
+        foreach ($availableBalances as $balanceCurrency => $balanceAmount) {
+            $formattedBalances[] = strtoupper((string) $balanceCurrency) . ' ' . number_format((float) $balanceAmount, 2);
+        }
+        $formattedAvailableAmount = $formattedBalances !== []
+            ? implode(' / ', $formattedBalances)
+            : $currency . ' 0.00';
 
         $this->jsonResponse([
             'success' => true,
-            'available' => $availableAmount > 0.005,
+            'available' => $availableBalances !== [],
             'supplier_id' => (int) ($supplier['id'] ?? 0),
             'supplier_name' => (string) ($supplier['name'] ?? $supplierName),
             'branch_id' => $branchId,
             'currency' => $currency,
             'available_amount' => $availableAmount,
-            'formatted_available_amount' => $currency . ' ' . number_format($availableAmount, 2),
-            'message' => $availableAmount > 0.005
+            'available_balances' => $availableBalances,
+            'advance_candidates' => $advanceCandidates,
+            'formatted_available_amount' => $formattedAvailableAmount,
+            'message' => $availableBalances !== []
                 ? 'Available prepaid supplier balance found.'
                 : 'No available prepaid supplier balance found.',
         ]);
@@ -672,6 +829,7 @@ final class WorkspaceController extends BaseController
                 (int) Auth::id(),
                 $accessibleBranchIds
             );
+            $this->applyServiceSupplierAdvanceFxIfRequested($_POST, $result, (int) Auth::id(), $accessibleBranchIds);
             $savedServiceId = (int) (($result['service']['id'] ?? 0));
             $savedService = $savedServiceId > 0
                 ? (new BookingServiceRepository($this->app))->findServiceById($savedServiceId)
@@ -835,6 +993,7 @@ final class WorkspaceController extends BaseController
                 (int) Auth::id(),
                 $accessibleBranchIds
             );
+            $this->applyServiceSupplierAdvanceFxIfRequested($_POST, $result, (int) Auth::id(), $accessibleBranchIds);
             $savedServiceId = (int) (($result['service']['id'] ?? 0));
             $savedService = $savedServiceId > 0
                 ? (new BookingServiceRepository($this->app))->findServiceById($savedServiceId)
@@ -921,7 +1080,9 @@ final class WorkspaceController extends BaseController
                 Authorization::accessibleBranchIds()
             );
             Flash::success('Service cancellation recorded. Financial refund or penalty posting still needs the refund workflow.');
-            $this->redirect('/workspace?booking_id=' . $bookingId . '#dock-panel-services');
+            $serviceId = (int) ($_POST['service_id'] ?? 0);
+            $serviceQuery = $serviceId > 0 ? '&service_id=' . $serviceId : '';
+            $this->redirect('/workspace?booking_id=' . $bookingId . $serviceQuery . '#dock-panel-services');
         } catch (RuntimeException $exception) {
             Flash::error($exception->getMessage());
             $this->redirect('/workspace?booking_id=' . (int) ($_POST['booking_id'] ?? 0) . '#dock-panel-services');
@@ -1310,6 +1471,69 @@ final class WorkspaceController extends BaseController
             Flash::error($exception->getMessage());
             $this->redirect('/workspace?booking_id=' . (int) ($_POST['booking_id'] ?? 0) . '#dock-panel-suppliers');
         }
+    }
+
+    public function applyCrossCurrencySupplierAdvance(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+
+        try {
+            $result = (new SupplierSettlementWorkspaceService($this->app))->applyCrossCurrencySupplierAdvance(
+                $_POST,
+                (int) Auth::id(),
+                Authorization::accessibleBranchIds()
+            );
+            Flash::success('Different-currency supplier advance applied successfully.');
+            $this->redirect('/workspace?booking_id=' . (int) $result['booking_id'] . '#dock-panel-suppliers');
+        } catch (RuntimeException $exception) {
+            Flash::error($exception->getMessage());
+            $this->redirect('/workspace?booking_id=' . (int) ($_POST['booking_id'] ?? 0) . '#dock-panel-suppliers');
+        }
+    }
+
+    private function applyServiceSupplierAdvanceFxIfRequested(array $input, array $serviceResult, int $actorUserId, array $accessibleBranchIds): void
+    {
+        if ((string) ($input['supplier_advance_fx_use'] ?? '') !== '1') {
+            return;
+        }
+
+        $advanceId = (int) ($input['supplier_advance_fx_advance_id'] ?? 0);
+        $rate = (float) ($input['supplier_advance_fx_rate'] ?? 0);
+        $rateDate = trim((string) ($input['supplier_advance_fx_rate_date'] ?? date('Y-m-d')));
+        if ($advanceId <= 0 || $rate <= 0) {
+            throw new RuntimeException('Different-currency supplier advance requires an advance and exchange rate.');
+        }
+
+        $bookingId = (int) ($serviceResult['booking_id'] ?? 0);
+        $service = is_array($serviceResult['service'] ?? null) ? $serviceResult['service'] : [];
+        $serviceLineReference = (string) ($service['line_reference'] ?? $service['lineReference'] ?? '');
+        $booking = (new BookingRepository($this->app))->findBookingById($bookingId);
+        if ($booking === null || $serviceLineReference === '') {
+            throw new RuntimeException('Saved service payable could not be found for supplier advance FX use.');
+        }
+
+        $obligation = (new SupplierRepository($this->app))->findObligationByBookingAndServiceLine(
+            (string) ($booking['booking_reference'] ?? ''),
+            $serviceLineReference
+        );
+        if ($obligation === null) {
+            throw new RuntimeException('Supplier payable was not created yet for supplier advance FX use.');
+        }
+
+        $amount = round((float) ($obligation['net_payable_amount'] ?? 0), 2);
+        if ($amount <= 0) {
+            return;
+        }
+
+        (new SupplierSettlementWorkspaceService($this->app))->applyCrossCurrencySupplierAdvance([
+            'booking_id' => $bookingId,
+            'supplier_advance_id' => $advanceId,
+            'supplier_obligation_id' => (int) ($obligation['id'] ?? 0),
+            'advance_apply_amount' => $amount,
+            'exchange_rate' => $rate,
+            'exchange_rate_effective_date' => $rateDate,
+            'application_note' => 'Confirmed during service entry',
+        ], $actorUserId, $accessibleBranchIds);
     }
 
     public function uploadDocument(): never

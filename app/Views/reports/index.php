@@ -37,12 +37,70 @@ $formatReportDate = static function (?string $value): string {
     return $timestamp !== false ? date('d M Y', $timestamp) : $date;
 };
 
+$normalizePhoneDigits = static function (?string $value, ?string $branchName = null): string {
+    $raw = trim((string) $value);
+    if ($raw === '' || $raw === '-') {
+        return '';
+    }
+
+    $digits = preg_replace('/\D+/', '', $raw) ?? '';
+    if ($digits === '') {
+        return '';
+    }
+
+    if (str_starts_with($digits, '00')) {
+        $digits = substr($digits, 2);
+    }
+
+    if (str_starts_with($digits, '92') || str_starts_with($digits, '971') || str_starts_with($digits, '964')) {
+        return $digits;
+    }
+
+    $branch = strtolower(trim((string) $branchName));
+    $isUaeBranch = $branch !== '' && (str_contains($branch, 'noble') || str_contains($branch, 'dubai') || str_contains($branch, 'uae'));
+    $isPakistanBranch = $branch !== '' && (str_contains($branch, 'imdad') || str_contains($branch, 'swat') || str_contains($branch, 'pakistan'));
+
+    if (str_starts_with($digits, '0')) {
+        $localDigits = ltrim($digits, '0');
+        if ($localDigits === '') {
+            return '';
+        }
+
+        if ($isUaeBranch) {
+            return '971' . $localDigits;
+        }
+
+        if ($isPakistanBranch) {
+            return '92' . $localDigits;
+        }
+
+        return $localDigits;
+    }
+
+    if ($isUaeBranch && strlen($digits) === 9 && str_starts_with($digits, '5')) {
+        return '971' . $digits;
+    }
+
+    if ($isPakistanBranch && strlen($digits) === 10 && str_starts_with($digits, '3')) {
+        return '92' . $digits;
+    }
+
+    return $digits;
+};
+
 $dateFrom = (string) ($filters['dateFrom'] ?? '');
 $dateTo = (string) ($filters['dateTo'] ?? '');
 $asOfDate = (string) ($filters['asOfDate'] ?? date('Y-m-d'));
 $selectedBranchId = (int) ($filters['branchId'] ?? 0);
 $selectedCurrency = (string) ($filters['currency'] ?? '');
 $advanceBalanceView = (string) ($filters['advanceBalanceView'] ?? 'all');
+$reminderStatus = (string) ($filters['reminderStatus'] ?? 'active');
+$reminderType = (string) ($filters['reminderType'] ?? '');
+$reminderServiceType = (string) ($filters['reminderServiceType'] ?? '');
+$reminderSearch = (string) ($filters['reminderSearch'] ?? '');
+$reminderStatusOptions = is_array($reminderStatusOptions ?? null) ? $reminderStatusOptions : [];
+$reminderTypeFilterOptions = is_array($reminderTypeFilterOptions ?? null) ? $reminderTypeFilterOptions : [];
+$reminderServiceTypeOptions = is_array($reminderServiceTypeOptions ?? null) ? $reminderServiceTypeOptions : [];
 $showAdvanceBalanceViewFilter = in_array($selectedReport, ['prepaid_supplier_ledger', 'supplier_postpaid_payments', 'supplier_prepaid_payments', 'supplier_all_payments'], true);
 $selectedBranchLabel = 'All Accessible Branches';
 
@@ -118,6 +176,10 @@ if ($selectedReport === 'receivable_aging') {
         . ' | Branch: ' . $selectedBranchLabel
         . ' | Currency: ' . $currencyLabel
         . ' | Scope: Finance-related audit events for receipts, supplier payments, supplier advances, allocations, metadata edits, and void actions.';
+} elseif ($selectedReport === 'reminder_hub') {
+    $reportContextLine = 'Due window: ' . $reportPeriodLabel
+        . ' | Branch: ' . $selectedBranchLabel
+        . ' | Scope: Global follow-up queue across reminders. Click customer for profile details, or use booking/open for the booking file.';
 } elseif ($selectedReport === 'accounting_integrity') {
     $reportContextLine = 'Branch: ' . $selectedBranchLabel
         . ' | Scope: Read-only accounting exception checks for journals, receivables, payables, receipts, supplier payments, and supplier advances.';
@@ -143,6 +205,10 @@ $exportQuery = http_build_query([
     'branch_id' => (int) ($filters['branchId'] ?? 0),
     'currency' => (string) ($filters['currency'] ?? ''),
     'advance_balance_view' => (string) ($filters['advanceBalanceView'] ?? 'all'),
+    'reminder_status' => (string) ($filters['reminderStatus'] ?? 'active'),
+    'reminder_type' => (string) ($filters['reminderType'] ?? ''),
+    'reminder_service_type' => (string) ($filters['reminderServiceType'] ?? ''),
+    'reminder_search' => (string) ($filters['reminderSearch'] ?? ''),
     'date_from' => (string) ($filters['dateFrom'] ?? ''),
     'date_to' => (string) ($filters['dateTo'] ?? ''),
     'as_of_date' => (string) ($filters['asOfDate'] ?? date('Y-m-d')),
@@ -150,6 +216,234 @@ $exportQuery = http_build_query([
 ?>
 
 <style>
+    .report-filter-panel--reminder-hub {
+        border-color: #cfe0f4;
+        background: linear-gradient(180deg, rgba(246, 250, 255, 0.96) 0%, rgba(255, 255, 255, 0.98) 100%);
+        box-shadow: 0 14px 32px rgba(20, 52, 94, 0.08);
+    }
+
+    .reminder-hub-filter-grid {
+        align-items: end;
+        gap: 0.75rem 1rem;
+    }
+
+    .reminder-hub-stat-grid .stat-card {
+        border: 1px solid #dbe7f5;
+        box-shadow: 0 14px 30px rgba(15, 48, 90, 0.08);
+        background: linear-gradient(180deg, #ffffff 0%, #f7fbff 100%);
+    }
+
+    .reminder-hub-stat-grid .stat-card .stat-label {
+        letter-spacing: 0.04em;
+    }
+
+    .reminder-hub-stat-grid .stat-card--reminder-active {
+        border-top: 4px solid #2563eb;
+    }
+
+    .reminder-hub-stat-grid .stat-card--reminder-due {
+        border-top: 4px solid #d97706;
+    }
+
+    .reminder-hub-stat-grid .stat-card--reminder-overdue {
+        border-top: 4px solid #dc2626;
+    }
+
+    .reminder-hub-stat-grid .stat-card--reminder-priority {
+        border-top: 4px solid #7c3aed;
+    }
+
+    .reminder-hub-stat-grid .stat-card--reminder-passport {
+        border-top: 4px solid #0f766e;
+    }
+
+    .report-panel--reminder-hub {
+        border-color: #d6e3f2;
+        box-shadow: 0 18px 40px rgba(13, 44, 84, 0.08);
+    }
+
+    .reminder-hub-table thead th {
+        background: linear-gradient(180deg, #eff5fb 0%, #e3edf8 100%);
+        border-bottom: 1px solid #d1dfef;
+    }
+
+    .reminder-hub-table th,
+    .reminder-hub-table td {
+        padding: 7px 9px;
+    }
+
+    .reminder-hub-table tbody tr:hover {
+        background: #f8fbff;
+    }
+
+    .reminder-hub-link {
+        font-weight: 700;
+        color: #123a66;
+    }
+
+    .reminder-hub-link--booking {
+        font-weight: 600;
+    }
+
+    .reminder-hub-action {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 72px;
+        padding: 0.45rem 0.8rem;
+        border-radius: 999px;
+        background: linear-gradient(180deg, #1d7aad 0%, #155d84 100%);
+        color: #fff;
+        text-decoration: none;
+        font-weight: 700;
+        box-shadow: 0 8px 18px rgba(20, 92, 132, 0.18);
+    }
+
+    .reminder-hub-action:hover,
+    .reminder-hub-action:focus {
+        color: #fff;
+        text-decoration: none;
+        filter: brightness(1.03);
+    }
+
+    .reminder-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        padding: 0.28rem 0.7rem;
+        border-radius: 999px;
+        border: 1px solid #d7e3f1;
+        background: #f7fbff;
+        color: #204b73;
+        font-size: 0.92rem;
+        font-weight: 700;
+        line-height: 1.2;
+        white-space: nowrap;
+    }
+
+    .reminder-pill--priority-high {
+        background: #f5ecff;
+        border-color: #dcc7ff;
+        color: #6d28d9;
+    }
+
+    .reminder-pill--priority-normal {
+        background: #eef7ff;
+        border-color: #cfe1f5;
+        color: #1d5f94;
+    }
+
+    .reminder-pill--status-overdue {
+        background: #fff1f2;
+        border-color: #fecdd3;
+        color: #be123c;
+    }
+
+    .reminder-pill--status-due {
+        background: #fff7ed;
+        border-color: #fed7aa;
+        color: #c2410c;
+    }
+
+    .reminder-pill--status-open {
+        background: #eff6ff;
+        border-color: #bfdbfe;
+        color: #1d4ed8;
+    }
+
+    .reminder-pill--status-completed {
+        background: #ecfdf3;
+        border-color: #bbf7d0;
+        color: #15803d;
+    }
+
+    .reminder-pill--status-dismissed {
+        background: #f4f4f5;
+        border-color: #e4e4e7;
+        color: #52525b;
+    }
+
+    .reminder-pill--type,
+    .reminder-pill--service,
+    .reminder-pill--linked {
+        font-weight: 600;
+    }
+
+    .reminder-contact {
+        color: #234b72;
+        font-weight: 600;
+    }
+
+    .reminder-contact-actions {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        flex-wrap: wrap;
+    }
+
+    .reminder-contact-call {
+        color: #123a66;
+        font-weight: 700;
+        text-decoration: none;
+    }
+
+    .reminder-contact-call:hover,
+    .reminder-contact-call:focus {
+        text-decoration: underline;
+    }
+
+    .reminder-contact-quicklink {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0.22rem 0.55rem;
+        border-radius: 999px;
+        border: 1px solid #cddfec;
+        background: #ffffff;
+        color: #1b4f78;
+        font-size: 0.82rem;
+        font-weight: 700;
+        text-decoration: none;
+        line-height: 1.1;
+    }
+
+    .reminder-contact-quicklink:hover,
+    .reminder-contact-quicklink:focus {
+        border-color: #0b6f9c;
+        background: #f3f9fd;
+        text-decoration: none;
+    }
+
+    .reminder-contact-quicklink--whatsapp {
+        border-color: #bde5c8;
+        color: #157347;
+        background: #f2fff6;
+    }
+
+    .reminder-task {
+        color: #102b46;
+        font-weight: 600;
+        line-height: 1.35;
+    }
+
+    .reminder-due-stack {
+        display: inline-grid;
+        gap: 0;
+        min-width: 74px;
+        line-height: 1.05;
+    }
+
+    .reminder-due-stack strong {
+        color: #12324e;
+        font-weight: 700;
+    }
+
+    .reminder-due-stack span {
+        color: #5a7187;
+        font-size: 0.88rem;
+        font-weight: 600;
+    }
+
     .report-booking-link {
         color: #0d6efd;
         text-decoration: underline;
@@ -214,7 +508,7 @@ $exportQuery = http_build_query([
     </div>
 </section>
 
-<section class="panel compact-panel">
+<section class="panel compact-panel<?= $selectedReport === 'reminder_hub' ? ' report-filter-panel--reminder-hub' : '' ?>">
     <div class="panel-header">
         <h2>Filters</h2>
         <div class="panel-meta">
@@ -225,7 +519,7 @@ $exportQuery = http_build_query([
         id="reports-filter-form"
         method="get"
         action="<?= e(url('/reports')) ?>"
-        class="station-form-grid station-form-grid--6 station-form-grid--inline"
+        class="station-form-grid station-form-grid--6 station-form-grid--inline<?= $selectedReport === 'reminder_hub' ? ' reminder-hub-filter-grid' : '' ?>"
         data-auto-submit="reports"
         data-export-url="<?= e(url('/reports/export.csv')) ?>"
     >
@@ -281,14 +575,53 @@ $exportQuery = http_build_query([
                 </select>
             </label>
         <?php endif; ?>
+        <?php if ($selectedReport === 'reminder_hub'): ?>
+            <label class="station-field span-2">
+                <span>Status</span>
+                <select name="reminder_status" data-report-filter="immediate">
+                    <?php foreach ($reminderStatusOptions as $optionValue => $optionLabel): ?>
+                        <option value="<?= e((string) $optionValue) ?>" <?= $reminderStatus === (string) $optionValue ? 'selected' : '' ?>><?= e((string) $optionLabel) ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </label>
+            <label class="station-field span-2">
+                <span>Reminder Type</span>
+                <select name="reminder_type" data-report-filter="immediate">
+                    <option value="" <?= $reminderType === '' ? 'selected' : '' ?>>All types</option>
+                    <?php foreach ($reminderTypeFilterOptions as $optionValue => $optionLabel): ?>
+                        <option value="<?= e((string) $optionValue) ?>" <?= $reminderType === (string) $optionValue ? 'selected' : '' ?>><?= e((string) $optionLabel) ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </label>
+            <label class="station-field span-2">
+                <span>Service</span>
+                <select name="reminder_service_type" data-report-filter="immediate">
+                    <option value="" <?= $reminderServiceType === '' ? 'selected' : '' ?>>All services</option>
+                    <?php foreach ($reminderServiceTypeOptions as $optionValue => $optionLabel): ?>
+                        <option value="<?= e((string) $optionValue) ?>" <?= $reminderServiceType === (string) $optionValue ? 'selected' : '' ?>><?= e((string) $optionLabel) ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </label>
+            <label class="station-field span-3">
+                <span>Search</span>
+                <input type="text" name="reminder_search" value="<?= e($reminderSearch) ?>" placeholder="Customer / mobile / booking / task / supplier" data-report-filter="debounced">
+            </label>
+        <?php endif; ?>
         <div class="station-command-buttons span-6 top-gap">
             <button class="btn btn-primary btn-sm" type="submit" id="reports-run-button">Run Report</button>
+            <?php if ($selectedReport === 'receivable_aging'): ?>
+                <a class="btn btn-sm" href="<?= e(url('/customers/settlements/global')) ?>">Global Customer Payment</a>
+            <?php endif; ?>
+            <?php if ($selectedReport === 'payable_aging'): ?>
+                <a class="btn btn-sm" href="<?= e(url('/suppliers/settlements/global')) ?>">Global Supplier Settlement</a>
+            <?php endif; ?>
         </div>
     </form>
 </section>
 
 <?php $renderSummaryCard = static function (array $summaryCard): void { ?>
-    <article class="stat-card <?= ! empty($summaryCard['lines']) ? 'stat-card--ledger' : '' ?> <?= (string) ($summaryCard['tone'] ?? '') === 'converted' ? 'stat-card--converted' : '' ?> <?= (string) ($summaryCard['tone'] ?? '') === 'branch-local' ? 'stat-card--branch-local' : '' ?>">
+    <?php $toneClass = trim((string) ($summaryCard['tone'] ?? '')); ?>
+    <article class="stat-card <?= ! empty($summaryCard['lines']) ? 'stat-card--ledger' : '' ?> <?= $toneClass !== '' ? 'stat-card--' . e($toneClass) : '' ?> <?= $toneClass === 'converted' ? 'stat-card--converted' : '' ?> <?= $toneClass === 'branch-local' ? 'stat-card--branch-local' : '' ?>">
         <div class="stat-label"><?= e((string) ($summaryCard['label'] ?? 'Summary')) ?></div>
         <?php if (is_array($summaryCard['lines'] ?? null) && $summaryCard['lines'] !== []): ?>
             <div class="stat-ledger-lines">
@@ -309,7 +642,7 @@ $exportQuery = http_build_query([
     </article>
 <?php }; ?>
 
-<section class="stat-grid">
+<section class="stat-grid<?= $selectedReport === 'reminder_hub' ? ' reminder-hub-stat-grid' : '' ?>">
     <?php foreach ($regularSummaryCards as $summaryCard): ?>
         <?php $renderSummaryCard($summaryCard); ?>
     <?php endforeach; ?>
@@ -333,7 +666,7 @@ $exportQuery = http_build_query([
     <?php endforeach; ?>
 <?php endif; ?>
 
-<section class="panel compact-panel">
+<section class="panel compact-panel<?= $selectedReport === 'reminder_hub' ? ' report-panel--reminder-hub' : '' ?>">
     <div class="panel-header">
         <h2><?= e((string) ($reportOptions[$selectedReport] ?? 'Report')) ?></h2>
     </div>
@@ -382,7 +715,7 @@ $exportQuery = http_build_query([
         </div>
     <?php endif; ?>
     <div class="dense-table-wrap receivable-aging-detail-section" id="receivable-aging-detail-section">
-        <table class="dense-table">
+        <table class="dense-table<?= $selectedReport === 'reminder_hub' ? ' reminder-hub-table' : '' ?>">
             <thead>
                 <tr>
                     <?php foreach ($columns as $column): ?>
@@ -405,8 +738,13 @@ $exportQuery = http_build_query([
                     >
                         <?php foreach ($columns as $column): ?>
                             <td>
+                                <?php
+                                $columnKey = (string) ($column['key'] ?? '');
+                                $cellValue = (string) ($row[$columnKey] ?? '');
+                                $cellHref = (string) ($row[$columnKey . '_href'] ?? '');
+                                ?>
                                 <?php if (in_array($selectedReport, ['receivable_aging', 'payable_aging'], true)
-                                    && (string) ($column['key'] ?? '') === 'booking_reference'
+                                    && $columnKey === 'booking_reference'
                                     && (int) ($row['booking_id'] ?? 0) > 0): ?>
                                     <a
                                         class="report-booking-link"
@@ -414,14 +752,61 @@ $exportQuery = http_build_query([
                                             ? url('/workspace?booking_id=' . (int) $row['booking_id'] . '#dock-panel-suppliers')
                                             : url('/workspace?booking_id=' . (int) $row['booking_id'])) ?>"
                                     >
-                                        <?= e((string) ($row[$column['key']] ?? '')) ?>
+                                        <?= e($cellValue) ?>
                                     </a>
-                                <?php elseif ((string) ($row[(string) ($column['key'] ?? '') . '_href'] ?? '') !== ''): ?>
-                                    <a class="report-booking-link" href="<?= e((string) $row[(string) $column['key'] . '_href']) ?>">
-                                        <?= e((string) ($row[$column['key']] ?? '')) ?>
+                                <?php elseif ($selectedReport === 'reminder_hub' && $columnKey === 'open_booking' && $cellHref !== ''): ?>
+                                    <a class="reminder-hub-action" href="<?= e($cellHref) ?>">
+                                        <?= e($cellValue) ?>
+                                    </a>
+                                <?php elseif ($selectedReport === 'reminder_hub' && $columnKey === 'priority'): ?>
+                                    <span class="reminder-pill reminder-pill--priority-<?= e(strtolower($cellValue)) ?>"><?= e($cellValue) ?></span>
+                                <?php elseif ($selectedReport === 'reminder_hub' && $columnKey === 'due_at'): ?>
+                                    <?php
+                                    $dueTimestamp = strtotime($cellValue);
+                                    $dueDateLabel = $dueTimestamp !== false ? date('Y-m-d', $dueTimestamp) : $cellValue;
+                                    $dueTimeLabel = $dueTimestamp !== false ? date('H:i', $dueTimestamp) : '';
+                                    ?>
+                                    <span class="reminder-due-stack">
+                                        <strong><?= e($dueDateLabel) ?></strong>
+                                        <?php if ($dueTimeLabel !== ''): ?>
+                                            <span><?= e($dueTimeLabel) ?></span>
+                                        <?php endif; ?>
+                                    </span>
+                                <?php elseif ($selectedReport === 'reminder_hub' && $columnKey === 'status'): ?>
+                                    <?php
+                                    $statusValue = strtolower($cellValue);
+                                    $statusTone = $statusValue;
+                                    if ($statusValue === 'open' && strtotime((string) ($row['due_at'] ?? '')) !== false && strtotime((string) ($row['due_at'] ?? '')) < time()) {
+                                        $statusTone = 'overdue';
+                                    }
+                                    ?>
+                                    <span class="reminder-pill reminder-pill--status-<?= e($statusTone) ?>"><?= e($cellValue) ?></span>
+                                <?php elseif ($selectedReport === 'reminder_hub' && $columnKey === 'reminder_type'): ?>
+                                    <span class="reminder-pill reminder-pill--type"><?= e($cellValue) ?></span>
+                                <?php elseif ($selectedReport === 'reminder_hub' && $columnKey === 'service_type' && $cellValue !== '-'): ?>
+                                    <span class="reminder-pill reminder-pill--service"><?= e($cellValue) ?></span>
+                                <?php elseif ($selectedReport === 'reminder_hub' && $columnKey === 'linked_to'): ?>
+                                    <span class="reminder-pill reminder-pill--linked"><?= e($cellValue) ?></span>
+                                <?php elseif ($selectedReport === 'reminder_hub' && $columnKey === 'contact_mobile' && $cellValue !== '-'): ?>
+                                    <?php $phoneDigits = $normalizePhoneDigits($cellValue, (string) ($row['branch_name'] ?? '')); ?>
+                                    <span class="reminder-contact-actions">
+                                        <span class="reminder-contact-call"><?= e($cellValue) ?></span>
+                                        <?php if ($phoneDigits !== ''): ?>
+                                            <a class="reminder-contact-quicklink reminder-contact-quicklink--whatsapp" href="<?= e('https://wa.me/' . $phoneDigits) ?>" target="_blank" rel="noopener">WhatsApp</a>
+                                        <?php endif; ?>
+                                    </span>
+                                <?php elseif ($selectedReport === 'reminder_hub' && $columnKey === 'title'): ?>
+                                    <span class="reminder-task"><?= e($cellValue) ?></span>
+                                <?php elseif ($selectedReport === 'reminder_hub' && $cellHref !== ''): ?>
+                                    <a class="report-booking-link reminder-hub-link<?= $columnKey === 'booking_reference' ? ' reminder-hub-link--booking' : '' ?>" href="<?= e($cellHref) ?>">
+                                        <?= e($cellValue) ?>
+                                    </a>
+                                <?php elseif ($cellHref !== ''): ?>
+                                    <a class="report-booking-link" href="<?= e($cellHref) ?>">
+                                        <?= e($cellValue) ?>
                                     </a>
                                 <?php else: ?>
-                                    <?= e((string) ($row[$column['key']] ?? '')) ?>
+                                    <?= e($cellValue) ?>
                                 <?php endif; ?>
                             </td>
                         <?php endforeach; ?>

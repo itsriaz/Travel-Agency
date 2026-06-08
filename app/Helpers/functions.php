@@ -125,6 +125,41 @@ function app_log_path(string $filename = 'app-runtime.log'): string
     return base_path('/storage/logs/' . ltrim($sanitized, '/'));
 }
 
+function app_request_id(): string
+{
+    static $requestId = null;
+
+    if ($requestId !== null) {
+        return $requestId;
+    }
+
+    $incoming = trim((string) ($_SERVER['HTTP_X_REQUEST_ID'] ?? $_SERVER['HTTP_X_CORRELATION_ID'] ?? ''));
+    if ($incoming !== '' && preg_match('/^[A-Za-z0-9._:-]{8,80}$/', $incoming) === 1) {
+        $requestId = $incoming;
+        return $requestId;
+    }
+
+    try {
+        $requestId = bin2hex(random_bytes(8));
+    } catch (\Throwable) {
+        $requestId = str_replace('.', '', uniqid('req', true));
+    }
+
+    return $requestId;
+}
+
+function app_request_log_context(): array
+{
+    return [
+        'request_id' => app_request_id(),
+        'url' => $_SERVER['REQUEST_URI'] ?? null,
+        'method' => $_SERVER['REQUEST_METHOD'] ?? null,
+        'ip' => $_SERVER['REMOTE_ADDR'] ?? null,
+        'user_agent' => isset($_SERVER['HTTP_USER_AGENT']) ? substr((string) $_SERVER['HTTP_USER_AGENT'], 0, 220) : null,
+        'referer' => isset($_SERVER['HTTP_REFERER']) ? substr((string) $_SERVER['HTTP_REFERER'], 0, 220) : null,
+    ];
+}
+
 function app_write_log(string $channel, string $message, array $context = []): void
 {
     $path = app_log_path();
@@ -161,14 +196,12 @@ function app_write_log(string $channel, string $message, array $context = []): v
 
 function app_log_exception(\Throwable $exception, string $channel = 'app.exception'): void
 {
-    app_write_log($channel, $exception->getMessage(), [
+    app_write_log($channel, $exception->getMessage(), array_merge(app_request_log_context(), [
         'type' => $exception::class,
         'file' => $exception->getFile(),
         'line' => $exception->getLine(),
-        'url' => $_SERVER['REQUEST_URI'] ?? null,
-        'method' => $_SERVER['REQUEST_METHOD'] ?? null,
         'trace' => app_debug_tools_enabled() ? $exception->getTraceAsString() : null,
-    ]);
+    ]));
 }
 
 function app_path(string $uri): string

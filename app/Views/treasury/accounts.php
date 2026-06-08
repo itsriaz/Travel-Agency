@@ -5,6 +5,8 @@ $currencies = $currencies ?? [];
 $ledgerAccounts = $ledgerAccounts ?? [];
 $editAccount = $editAccount ?? null;
 $accountTypes = $accountTypes ?? [];
+$transferAccounts = $transferAccounts ?? [];
+$recentTransfers = $recentTransfers ?? [];
 $returnTo = trim((string) ($returnTo ?? ''));
 $returnToQuery = $returnTo !== '' ? '?return_to=' . rawurlencode($returnTo) : '';
 $formAccount = is_array($editAccount) ? $editAccount : [
@@ -16,14 +18,151 @@ $formAccount = is_array($editAccount) ? $editAccount : [
 
 $formTitle = $editAccount ? 'Edit Treasury Account' : 'Add Treasury Account';
 $showBankFields = in_array((string) ($formAccount['account_type'] ?? 'cash'), ['bank', 'wallet'], true);
+$transferDraft = [
+    'branch_id' => (int) ($_GET['transfer_branch_id'] ?? ($branches[0]['id'] ?? 0)),
+    'transaction_type' => (string) ($_GET['transaction_type'] ?? 'cash_deposit_to_bank'),
+    'currency' => (string) ($_GET['transfer_currency'] ?? 'PKR'),
+    'transaction_date' => (string) ($_GET['transaction_date'] ?? date('Y-m-d')),
+];
+$activeAccountsCount = count(array_filter($accounts, static fn (array $row): bool => (int) ($row['is_active'] ?? 0) === 1));
+$defaultAccountsCount = count(array_filter($accounts, static fn (array $row): bool => (int) ($row['is_default'] ?? 0) === 1));
+$cashAccountsCount = count(array_filter($accounts, static fn (array $row): bool => (string) ($row['account_type'] ?? '') === 'cash'));
+$bankAccountsCount = count(array_filter($accounts, static fn (array $row): bool => (string) ($row['account_type'] ?? '') === 'bank'));
 ?>
 
 <style>
+.treasury-page {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+.treasury-hero {
+    position: relative;
+    overflow: hidden;
+    padding: 18px 20px 16px;
+    border: 1px solid #d6e3f0;
+    border-radius: 18px;
+    background:
+        radial-gradient(circle at top right, rgba(38, 121, 181, 0.14), transparent 34%),
+        linear-gradient(135deg, #ffffff 0%, #f7fbff 48%, #edf5fb 100%);
+    box-shadow: 0 14px 28px rgba(16, 30, 44, 0.08);
+}
+.treasury-hero::after {
+    content: "";
+    position: absolute;
+    inset: auto -60px -70px auto;
+    width: 220px;
+    height: 220px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(15, 95, 141, 0.12) 0%, rgba(15, 95, 141, 0) 72%);
+    pointer-events: none;
+}
+.treasury-hero-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 18px;
+}
+.treasury-kicker {
+    margin-bottom: 4px;
+    color: #4d7191;
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+.treasury-hero h1 {
+    margin: 0;
+    font-size: 20px;
+    line-height: 1.15;
+    color: #102c44;
+}
+.treasury-hero-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.treasury-stats {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+}
+.treasury-stat-card {
+    position: relative;
+    padding: 16px 16px 14px;
+    border: 1px solid #dbe6ef;
+    border-radius: 16px;
+    background: linear-gradient(180deg, #ffffff 0%, #fbfdff 100%);
+    box-shadow: 0 10px 22px rgba(16, 30, 44, 0.06);
+}
+.treasury-stat-card::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+    border-radius: 16px 16px 0 0;
+    background: linear-gradient(90deg, #0f5f8d 0%, #3c92c8 100%);
+}
+.treasury-stat-label {
+    color: #5a748d;
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+.treasury-stat-value {
+    margin-top: 10px;
+    color: #102c44;
+    font-size: 31px;
+    line-height: 1;
+    font-weight: 800;
+}
+.treasury-stat-note {
+    margin-top: 8px;
+    color: #6a8093;
+    font-size: 12px;
+}
+.treasury-panel {
+    border-radius: 16px;
+    border: 1px solid #d9e4ee;
+    background: linear-gradient(180deg, #ffffff 0%, #fcfdff 100%);
+    box-shadow: 0 10px 22px rgba(16, 30, 44, 0.06);
+}
+.treasury-panel .panel-header {
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    padding-bottom: 12px;
+    margin-bottom: 14px;
+    border-bottom: 1px solid #e7eef5;
+}
+.treasury-panel .panel-header h2 {
+    margin: 0;
+    color: #102c44;
+}
+.treasury-section-kicker {
+    margin-bottom: 5px;
+    color: #4d7191;
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
 .treasury-form-grid {
     gap: 12px;
 }
 .treasury-form-grid .station-field {
     gap: 5px;
+}
+.treasury-form-grid .station-field > span,
+.treasury-transfer-grid .station-field > span {
+    color: #506b85;
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
 }
 .treasury-form-grid .station-check {
     align-self: end;
@@ -40,7 +179,7 @@ $showBankFields = in_array((string) ($formAccount['account_type'] ?? 'cash'), ['
 }
 .treasury-table .table-wrap {
     border: 1px solid #dbe6ef;
-    border-radius: 14px;
+    border-radius: 16px;
     overflow: hidden;
     background: #fff;
     box-shadow: inset 0 1px 0 rgba(255,255,255,0.7);
@@ -51,16 +190,16 @@ $showBankFields = in_array((string) ($formAccount['account_type'] ?? 'cash'), ['
     border-spacing: 0;
 }
 .treasury-table .data-table thead th {
-    background: #f4f8fb;
-    color: #4f6980;
+    background: linear-gradient(180deg, #f7fbfe 0%, #edf4fa 100%);
+    color: #4b6982;
     font-size: 12px;
     font-weight: 800;
-    letter-spacing: 0.02em;
+    letter-spacing: 0.05em;
     text-transform: uppercase;
     border-bottom: 1px solid #dbe6ef;
 }
 .treasury-table .data-table tbody tr:nth-child(even) {
-    background: #fbfdff;
+    background: #fcfdff;
 }
 .treasury-table .data-table tbody tr:hover {
     background: #f4faff;
@@ -84,17 +223,6 @@ $showBankFields = in_array((string) ($formAccount['account_type'] ?? 'cash'), ['
     font-size: 12px;
     color: #6a8093;
 }
-.treasury-code {
-    font-family: "Consolas", "Courier New", monospace;
-    font-size: 12px;
-    font-weight: 700;
-    color: #35556f;
-    background: #f3f7fa;
-    border: 1px solid #dde8f0;
-    border-radius: 999px;
-    padding: 4px 10px;
-    display: inline-block;
-}
 .treasury-currency-badge {
     display: inline-flex;
     align-items: center;
@@ -105,7 +233,7 @@ $showBankFields = in_array((string) ($formAccount['account_type'] ?? 'cash'), ['
     font-size: 12px;
     font-weight: 800;
     color: #0f4f84;
-    background: #edf6fd;
+    background: linear-gradient(180deg, #f4fbff 0%, #e8f3fb 100%);
     border: 1px solid #cfe3f4;
 }
 .treasury-status-badge {
@@ -138,49 +266,159 @@ $showBankFields = in_array((string) ($formAccount['account_type'] ?? 'cash'), ['
 .treasury-type-badge {
     display: inline-flex;
     align-items: center;
-    padding: 3px 8px;
+    padding: 4px 9px;
     border-radius: 999px;
     font-size: 12px;
     font-weight: 700;
     color: #0b4d78;
-    background: #eef6fc;
+    background: linear-gradient(180deg, #f5fbff 0%, #ebf5fc 100%);
     border: 1px solid #cfe2f1;
-}
-.treasury-cash-note {
-    color: #5b7083;
-    font-weight: 600;
 }
 .treasury-table .btn.btn-sm {
     min-width: 66px;
 }
+.treasury-transfer-grid {
+    gap: 12px;
+}
+.treasury-transfer-grid .station-field,
+.treasury-transfer-grid .station-check {
+    gap: 5px;
+}
+.treasury-transfer-helper {
+    font-size: 12px;
+    color: #6a8093;
+}
+.treasury-transfer-grid .station-command-buttons {
+    margin-top: 2px;
+}
+.treasury-transfer-table .data-table th,
+.treasury-transfer-table .data-table td {
+    white-space: nowrap;
+    padding: 10px 12px;
+    vertical-align: middle;
+}
+.treasury-transfer-table .table-wrap {
+    border: 1px solid #dbe6ef;
+    border-radius: 16px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    background: #fff;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.7);
+}
+.treasury-transfer-type {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 800;
+    background: linear-gradient(180deg, #f5fbff 0%, #ebf5fc 100%);
+    color: #0b4d78;
+    border: 1px solid #cfe2f1;
+}
+.treasury-transfer-amount {
+    font-weight: 700;
+    color: #14324a;
+}
+.treasury-status-inline {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 800;
+    border: 1px solid transparent;
+}
+.treasury-status-inline--posted {
+    background: #edf9f1;
+    border-color: #cdebd5;
+    color: #0b6a2e;
+}
+.treasury-status-inline--void {
+    background: #fff2f4;
+    border-color: #f1c8cf;
+    color: #8a2432;
+}
+.treasury-void-form {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.treasury-transfer-actions {
+    min-width: 280px;
+}
+.treasury-transfer-actions--head {
+    width: 280px;
+}
+.treasury-void-form input[type="text"] {
+    flex: 1 1 180px;
+    min-width: 180px;
+}
+.treasury-void-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 12px;
+    color: #6a8093;
+}
+@media (max-width: 1220px) {
+    .treasury-stats {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+@media (max-width: 860px) {
+    .treasury-hero-head {
+        flex-direction: column;
+    }
+    .treasury-hero-actions {
+        width: 100%;
+        flex-wrap: wrap;
+    }
+    .treasury-stats {
+        grid-template-columns: 1fr;
+    }
+}
 </style>
 
-<section class="page-head">
-    <div>
-        <h1>Treasury Accounts</h1>
-        <p class="muted-text">Create cash counters, bank accounts, wallets, and clearing accounts for treasury tracking.</p>
-    </div>
-    <div class="page-actions">
-        <a class="btn" href="<?= e(url('/reports?report=cash_bank_position')) ?>">Cash and Bank Position</a>
-        <a class="btn btn-primary" href="<?= e(url('/treasury/accounts' . $returnToQuery)) ?>">New Account</a>
+<div class="treasury-page">
+<section class="treasury-hero">
+    <div class="treasury-hero-head">
+        <div>
+            <div class="treasury-kicker">Treasury Control</div>
+            <h1>Treasury Accounts</h1>
+        </div>
+        <div class="treasury-hero-actions">
+            <a class="btn" href="<?= e(url('/reports?report=cash_bank_position')) ?>">Cash and Bank Position</a>
+            <a class="btn btn-primary" href="<?= e(url('/treasury/accounts' . $returnToQuery)) ?>">New Account</a>
+        </div>
     </div>
 </section>
 
-<section class="stat-grid">
-    <article class="stat-card">
-        <div class="stat-label">Total Accounts</div>
-        <div class="stat-value"><?= e((string) count($accounts)) ?></div>
+<section class="treasury-stats">
+    <article class="treasury-stat-card">
+        <div class="treasury-stat-label">Total Accounts</div>
+        <div class="treasury-stat-value"><?= e((string) count($accounts)) ?></div>
     </article>
-    <article class="stat-card">
-        <div class="stat-label">Active Accounts</div>
-        <div class="stat-value"><?= e((string) count(array_filter($accounts, static fn (array $row): bool => (int) ($row['is_active'] ?? 0) === 1))) ?></div>
+    <article class="treasury-stat-card">
+        <div class="treasury-stat-label">Active Accounts</div>
+        <div class="treasury-stat-value"><?= e((string) $activeAccountsCount) ?></div>
+    </article>
+    <article class="treasury-stat-card">
+        <div class="treasury-stat-label">Default Accounts</div>
+        <div class="treasury-stat-value"><?= e((string) $defaultAccountsCount) ?></div>
+    </article>
+    <article class="treasury-stat-card">
+        <div class="treasury-stat-label">Cash / Bank Mix</div>
+        <div class="treasury-stat-value"><?= e((string) $cashAccountsCount) ?><span style="font-size:18px;color:#6a8093;font-weight:700;"> / <?= e((string) $bankAccountsCount) ?></span></div>
     </article>
 </section>
 
-<section class="panel compact-panel">
+<section class="panel compact-panel treasury-panel">
     <div class="panel-header">
-        <h2><?= e($formTitle) ?></h2>
-        <div class="panel-meta">Account setup only. Deposits and withdrawals will be added later.</div>
+        <div>
+            <div class="treasury-section-kicker">Account Setup</div>
+            <h2><?= e($formTitle) ?></h2>
+        </div>
     </div>
 
     <form method="post" action="<?= e(url('/treasury/accounts/save')) ?>" class="station-form-grid station-form-grid--6 treasury-form-grid" data-treasury-account-form>
@@ -273,9 +511,98 @@ $showBankFields = in_array((string) ($formAccount['account_type'] ?? 'cash'), ['
     </form>
 </section>
 
-<section class="panel compact-panel treasury-table">
+<section class="panel compact-panel treasury-panel">
     <div class="panel-header">
-        <h2>Treasury Accounts</h2>
+        <div>
+            <div class="treasury-section-kicker">Treasury Movement</div>
+            <h2>Internal Treasury Transfer</h2>
+        </div>
+        <div class="treasury-panel-meta">Move money between treasury accounts without turning the movement into a fake sale, expense, or customer transaction.</div>
+    </div>
+
+    <form method="post" action="<?= e(url('/treasury/transfers/save')) ?>" class="station-form-grid station-form-grid--6 treasury-transfer-grid" data-treasury-transfer-form>
+        <?= \App\Helpers\Csrf::input() ?>
+
+        <label class="station-field span-2">
+            <span>Branch</span>
+            <select name="branch_id" required data-transfer-branch>
+                <?php foreach ($branches as $branch): ?>
+                    <option value="<?= e((string) $branch['id']) ?>" <?= (int) $transferDraft['branch_id'] === (int) $branch['id'] ? 'selected' : '' ?>>
+                        <?= e((string) $branch['name']) ?>
+                    </option>
+                <?php endforeach; ?>
+            </select>
+        </label>
+
+        <label class="station-field span-2">
+            <span>Operation</span>
+            <select name="transaction_type" required data-transfer-type>
+                <option value="cash_deposit_to_bank" <?= $transferDraft['transaction_type'] === 'cash_deposit_to_bank' ? 'selected' : '' ?>>Cash Deposit to Bank</option>
+                <option value="bank_withdrawal_to_cash" <?= $transferDraft['transaction_type'] === 'bank_withdrawal_to_cash' ? 'selected' : '' ?>>Bank Withdrawal to Cash</option>
+                <option value="bank_to_bank_transfer" <?= $transferDraft['transaction_type'] === 'bank_to_bank_transfer' ? 'selected' : '' ?>>Bank to Bank Transfer</option>
+                <option value="cash_to_cash_transfer" <?= $transferDraft['transaction_type'] === 'cash_to_cash_transfer' ? 'selected' : '' ?>>Cash to Cash Transfer</option>
+            </select>
+        </label>
+
+        <label class="station-field span-2">
+            <span>Currency</span>
+            <select name="currency" required data-transfer-currency>
+                <?php foreach ($currencies as $currency): ?>
+                    <option value="<?= e((string) $currency['code']) ?>" <?= (string) $transferDraft['currency'] === (string) $currency['code'] ? 'selected' : '' ?>>
+                        <?= e((string) $currency['code']) ?> - <?= e((string) $currency['name']) ?>
+                    </option>
+                <?php endforeach; ?>
+            </select>
+        </label>
+
+        <label class="station-field span-2">
+            <span>Date</span>
+            <input type="date" name="transaction_date" value="<?= e((string) $transferDraft['transaction_date']) ?>" required>
+        </label>
+
+        <label class="station-field span-2">
+            <span data-transfer-from-label>From Cash Account</span>
+            <select name="from_treasury_account_id" required data-transfer-from-account>
+                <option value="">Select source account</option>
+            </select>
+            <small class="treasury-transfer-helper" data-transfer-from-helper>Cash will reduce from this account.</small>
+        </label>
+
+        <label class="station-field span-2">
+            <span data-transfer-to-label>To Bank Account</span>
+            <select name="to_treasury_account_id" required data-transfer-to-account>
+                <option value="">Select destination account</option>
+            </select>
+            <small class="treasury-transfer-helper" data-transfer-to-helper>Bank will increase in this account.</small>
+        </label>
+
+        <label class="station-field span-2">
+            <span>Amount</span>
+            <input type="number" name="amount" min="0.01" step="0.01" value="" placeholder="0.00" required>
+        </label>
+
+        <label class="station-field span-2">
+            <span>Reference No.</span>
+            <input type="text" name="reference_no" maxlength="100" value="" placeholder="Deposit slip / cheque / advice ref.">
+        </label>
+
+        <label class="station-field span-2">
+            <span>Narration</span>
+            <input type="text" name="narration" maxlength="500" value="" placeholder="Short note for this transfer">
+        </label>
+
+        <div class="station-command-buttons span-6">
+            <button class="btn btn-primary btn-sm" type="submit" data-treasury-transfer-save-button>Post Transfer</button>
+        </div>
+    </form>
+</section>
+
+<section class="panel compact-panel treasury-panel treasury-table">
+    <div class="panel-header">
+        <div>
+            <div class="treasury-section-kicker">Account Register</div>
+            <h2>Treasury Accounts</h2>
+        </div>
         <div class="panel-meta"><?= e((string) count($accounts)) ?> account(s)</div>
     </div>
 
@@ -286,17 +613,16 @@ $showBankFields = in_array((string) ($formAccount['account_type'] ?? 'cash'), ['
                 <th>Branch</th>
                 <th>Type</th>
                 <th>Name</th>
-                <th>Code</th>
                 <th>Currency</th>
-                <th>Bank</th>
                 <th>Opening Balance</th>
+                <th>Current Balance</th>
                 <th>Status</th>
-                <th></th>
+                <th class="treasury-transfer-actions--head"></th>
             </tr>
             </thead>
             <tbody>
             <?php if ($accounts === []): ?>
-                <tr><td colspan="9">No treasury accounts have been configured yet.</td></tr>
+                <tr><td colspan="8">No treasury accounts have been configured yet.</td></tr>
             <?php endif; ?>
             <?php foreach ($accounts as $account): ?>
                 <tr>
@@ -308,10 +634,9 @@ $showBankFields = in_array((string) ($formAccount['account_type'] ?? 'cash'), ['
                             <small><?= (int) ($account['is_default'] ?? 0) === 1 ? 'Default account' : 'Operational account' ?></small>
                         </div>
                     </td>
-                    <td><span class="treasury-code"><?= e((string) ($account['account_code'] ?? '')) ?></span></td>
                     <td><span class="treasury-currency-badge"><?= e((string) ($account['currency'] ?? 'PKR')) ?></span></td>
-                    <td><?php if ((string) ($account['account_type'] ?? '') === 'cash'): ?><span class="treasury-cash-note">Cash Counter</span><?php else: ?><?= e((string) ($account['bank_name'] ?? '')) ?><?php endif; ?></td>
                     <td><span class="treasury-balance"><?= e(number_format((float) ($account['opening_balance'] ?? 0), 2)) ?></span></td>
+                    <td><span class="treasury-balance"><?= e(number_format((float) ($account['current_balance'] ?? 0), 2)) ?></span></td>
                     <td><span class="treasury-status-badge <?= (int) ($account['is_active'] ?? 0) === 1 ? 'treasury-status-badge--active' : 'treasury-status-badge--inactive' ?>"><?= ((int) ($account['is_active'] ?? 0) === 1) ? 'Active' : 'Inactive' ?></span></td>
                     <td><a class="btn btn-sm" href="<?= e(url('/treasury/accounts?id=' . (int) $account['id'] . ($returnTo !== '' ? '&return_to=' . rawurlencode($returnTo) : ''))) ?>">Edit</a></td>
                 </tr>
@@ -321,12 +646,111 @@ $showBankFields = in_array((string) ($formAccount['account_type'] ?? 'cash'), ['
     </div>
 </section>
 
+<section class="panel compact-panel treasury-panel treasury-transfer-table">
+    <div class="panel-header">
+        <div>
+            <div class="treasury-section-kicker">Transfer History</div>
+            <h2>Recent Internal Transfers</h2>
+        </div>
+        <div class="panel-meta"><?= e((string) count($recentTransfers)) ?> recent transfer(s)</div>
+    </div>
+
+    <div class="table-wrap">
+        <table class="data-table">
+            <thead>
+            <tr>
+                <th>Date</th>
+                <th>Branch</th>
+                <th>Type</th>
+                <th>From</th>
+                <th>To</th>
+                <th>Amount</th>
+                <th>Reference</th>
+                <th>Status</th>
+                <th>By</th>
+                <th></th>
+            </tr>
+            </thead>
+            <tbody>
+            <?php if ($recentTransfers === []): ?>
+                <tr><td colspan="10">No internal treasury transfers posted yet.</td></tr>
+            <?php endif; ?>
+            <?php foreach ($recentTransfers as $transfer): ?>
+                <?php
+                $typeLabel = match ((string) ($transfer['transaction_type'] ?? '')) {
+                    'cash_deposit_to_bank' => 'Cash -> Bank',
+                    'bank_withdrawal_to_cash' => 'Bank -> Cash',
+                    'bank_to_bank_transfer' => 'Bank -> Bank',
+                    'cash_to_cash_transfer' => 'Cash -> Cash',
+                    default => ucwords(str_replace('_', ' ', (string) ($transfer['transaction_type'] ?? ''))),
+                };
+                ?>
+                <tr>
+                    <td><?= e((string) ($transfer['transaction_date'] ?? '')) ?></td>
+                    <td><?= e((string) ($transfer['branch_name'] ?? '')) ?></td>
+                    <td><span class="treasury-transfer-type"><?= e($typeLabel) ?></span></td>
+                    <td><?= e((string) ($transfer['from_account_name'] ?? '')) ?></td>
+                    <td><?= e((string) ($transfer['to_account_name'] ?? '')) ?></td>
+                    <td><span class="treasury-transfer-amount"><?= e(number_format((float) ($transfer['amount'] ?? 0), 2)) ?></span> <?= e((string) ($transfer['currency'] ?? 'PKR')) ?></td>
+                    <td><?= e((string) ($transfer['reference_no'] ?? '')) ?></td>
+                    <td>
+                        <span class="treasury-status-inline <?= (string) ($transfer['status'] ?? 'posted') === 'void' ? 'treasury-status-inline--void' : 'treasury-status-inline--posted' ?>">
+                            <?= e((string) ($transfer['status'] ?? 'posted') === 'void' ? 'Void' : 'Posted') ?>
+                        </span>
+                    </td>
+                    <td><?= e((string) ($transfer['created_by_username'] ?? '')) ?></td>
+                    <td class="treasury-transfer-actions">
+                        <?php if ((string) ($transfer['status'] ?? 'posted') === 'void'): ?>
+                            <div class="treasury-void-meta">
+                                <span><?= e((string) ($transfer['void_reason'] ?? '')) ?></span>
+                                <span>Reversal Journal #<?= e((string) ((int) ($transfer['reversal_journal_entry_id'] ?? 0))) ?></span>
+                            </div>
+                        <?php else: ?>
+                            <form method="post" action="<?= e(url('/treasury/transfers/void')) ?>" class="treasury-void-form">
+                                <?= \App\Helpers\Csrf::input() ?>
+                                <input type="hidden" name="treasury_transaction_id" value="<?= e((string) ($transfer['id'] ?? 0)) ?>">
+                                <input type="text" name="void_reason" maxlength="500" required placeholder="Void reason">
+                                <button class="btn btn-sm" type="submit">Void</button>
+                            </form>
+                        <?php endif; ?>
+                    </td>
+                </tr>
+            <?php endforeach; ?>
+            </tbody>
+        </table>
+    </div>
+</section>
+</div>
+
 <script>
 document.addEventListener('DOMContentLoaded', () => {
     const treasuryForm = document.querySelector('[data-treasury-account-form]');
     const treasuryAccountType = document.querySelector('[data-treasury-account-type]');
     const treasurySaveButton = document.querySelector('[data-treasury-save-button]');
     const bankDetailFields = Array.from(document.querySelectorAll('[data-bank-detail-field]'));
+    const transferForm = document.querySelector('[data-treasury-transfer-form]');
+    const transferBranch = document.querySelector('[data-transfer-branch]');
+    const transferType = document.querySelector('[data-transfer-type]');
+    const transferCurrency = document.querySelector('[data-transfer-currency]');
+    const transferFromAccount = document.querySelector('[data-transfer-from-account]');
+    const transferToAccount = document.querySelector('[data-transfer-to-account]');
+    const transferFromLabel = document.querySelector('[data-transfer-from-label]');
+    const transferToLabel = document.querySelector('[data-transfer-to-label]');
+    const transferFromHelper = document.querySelector('[data-transfer-from-helper]');
+    const transferToHelper = document.querySelector('[data-transfer-to-helper]');
+    const transferSaveButton = document.querySelector('[data-treasury-transfer-save-button]');
+    const transferAccounts = <?= json_encode(array_map(static function (array $account): array {
+        return [
+            'id' => (int) ($account['id'] ?? 0),
+            'branch_id' => (int) ($account['branch_id'] ?? 0),
+            'account_type' => (string) ($account['account_type'] ?? ''),
+            'account_name' => (string) ($account['account_name'] ?? ''),
+            'account_code' => (string) ($account['account_code'] ?? ''),
+            'currency' => (string) ($account['currency'] ?? 'PKR'),
+            'is_default' => (int) ($account['is_default'] ?? 0),
+            'current_balance' => number_format((float) ($account['current_balance'] ?? 0), 2, '.', ''),
+        ];
+    }, $transferAccounts), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>;
 
     const syncBankDetailsVisibility = () => {
         const selectedType = String(treasuryAccountType?.value || '');
@@ -417,6 +841,163 @@ document.addEventListener('DOMContentLoaded', () => {
         if (treasurySaveButton instanceof HTMLButtonElement) {
             treasurySaveButton.focus();
             treasurySaveButton.click();
+        }
+    }, true);
+
+    const transferOperationConfig = () => {
+        const operation = String(transferType?.value || 'cash_deposit_to_bank');
+        if (operation === 'bank_withdrawal_to_cash') {
+            return {
+                fromType: 'bank',
+                toType: 'cash',
+                fromLabel: 'From Bank Account',
+                toLabel: 'To Cash Account',
+                fromHelper: 'Bank will reduce from this account.',
+                toHelper: 'Cash will increase in this account.',
+            };
+        }
+
+        if (operation === 'bank_to_bank_transfer') {
+            return {
+                fromType: 'bank',
+                toType: 'bank',
+                fromLabel: 'From Bank Account',
+                toLabel: 'To Bank Account',
+                fromHelper: 'Money will move out from this bank account.',
+                toHelper: 'Money will move into this bank account.',
+            };
+        }
+
+        if (operation === 'cash_to_cash_transfer') {
+            return {
+                fromType: 'cash',
+                toType: 'cash',
+                fromLabel: 'From Cash Account',
+                toLabel: 'To Cash Account',
+                fromHelper: 'Cash will reduce from this counter.',
+                toHelper: 'Cash will increase in this counter.',
+            };
+        }
+
+        return {
+            fromType: 'cash',
+            toType: 'bank',
+            fromLabel: 'From Cash Account',
+            toLabel: 'To Bank Account',
+            fromHelper: 'Cash will reduce from this account.',
+            toHelper: 'Bank will increase in this account.',
+        };
+    };
+
+    const syncTransferAccounts = () => {
+        if (!(transferFromAccount instanceof HTMLSelectElement) || !(transferToAccount instanceof HTMLSelectElement)) {
+            return;
+        }
+
+        const branchId = Number(transferBranch?.value || 0);
+        const currency = String(transferCurrency?.value || 'PKR').trim().toUpperCase();
+        const config = transferOperationConfig();
+        const previousFrom = transferFromAccount.value;
+        const previousTo = transferToAccount.value;
+
+        if (transferFromLabel) {
+            transferFromLabel.textContent = config.fromLabel;
+        }
+        if (transferToLabel) {
+            transferToLabel.textContent = config.toLabel;
+        }
+        if (transferFromHelper) {
+            transferFromHelper.textContent = config.fromHelper;
+        }
+        if (transferToHelper) {
+            transferToHelper.textContent = config.toHelper;
+        }
+
+        const buildOptions = (accountType, placeholder) => {
+            const matches = transferAccounts.filter((account) =>
+                Number(account.branch_id || 0) === branchId
+                && String(account.currency || '').toUpperCase() === currency
+                && String(account.account_type || '') === accountType
+            );
+
+            return {
+                options: matches,
+                html: ['<option value="">' + placeholder + '</option>'].concat(matches.map((account) => {
+                    const suffix = Number(account.is_default || 0) === 1 ? ' [Default]' : '';
+                    return '<option value="' + String(account.id) + '">' +
+                        String(account.account_name) + ' (' + String(account.currency) + ') - Bal ' + String(account.current_balance) + suffix +
+                        '</option>';
+                })).join(''),
+            };
+        };
+
+        const fromData = buildOptions(config.fromType, 'Select source account');
+        const toData = buildOptions(config.toType, 'Select destination account');
+        transferFromAccount.innerHTML = fromData.html;
+        transferToAccount.innerHTML = toData.html;
+
+        if (fromData.options.some((account) => String(account.id) === previousFrom)) {
+            transferFromAccount.value = previousFrom;
+        } else if (fromData.options.length === 1) {
+            transferFromAccount.value = String(fromData.options[0].id);
+        }
+
+        if (toData.options.some((account) => String(account.id) === previousTo)) {
+            transferToAccount.value = previousTo;
+        } else if (toData.options.length === 1) {
+            transferToAccount.value = String(toData.options[0].id);
+        }
+    };
+
+    [transferBranch, transferType, transferCurrency].forEach((field) => field?.addEventListener('change', syncTransferAccounts));
+    syncTransferAccounts();
+
+    transferForm?.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter') {
+            return;
+        }
+
+        const target = event.target;
+        if (!(target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement || target instanceof HTMLButtonElement)) {
+            return;
+        }
+
+        if (target instanceof HTMLTextAreaElement && !event.ctrlKey && !event.metaKey) {
+            event.preventDefault();
+        } else if (!(target instanceof HTMLButtonElement)) {
+            event.preventDefault();
+        }
+
+        const fields = Array.from(transferForm.querySelectorAll('input, select, textarea, button[type="submit"]')).filter((field) => {
+            if (!(field instanceof HTMLElement)) {
+                return false;
+            }
+
+            if (field instanceof HTMLInputElement && (field.type === 'hidden' || field.disabled)) {
+                return false;
+            }
+
+            if ((field instanceof HTMLSelectElement || field instanceof HTMLTextAreaElement || field instanceof HTMLButtonElement) && field.disabled) {
+                return false;
+            }
+
+            const style = window.getComputedStyle(field);
+            return style.display !== 'none' && style.visibility !== 'hidden';
+        });
+
+        const currentIndex = fields.indexOf(target);
+        const nextField = currentIndex >= 0 ? fields[currentIndex + 1] : null;
+        if (nextField instanceof HTMLElement) {
+            nextField.focus();
+            if ((nextField instanceof HTMLInputElement || nextField instanceof HTMLTextAreaElement) && typeof nextField.select === 'function') {
+                nextField.select();
+            }
+            return;
+        }
+
+        if (transferSaveButton instanceof HTMLButtonElement) {
+            transferSaveButton.focus();
+            transferSaveButton.click();
         }
     }, true);
 });

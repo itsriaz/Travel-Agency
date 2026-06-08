@@ -58,6 +58,30 @@ final class MasterDataRepository extends BaseRepository
         return $statement->fetchAll() ?: [];
     }
 
+    public function activeRows(string $register): array
+    {
+        return array_values(array_filter(
+            $this->rows($register),
+            static fn (array $row): bool => (int) ($row['is_active'] ?? 0) === 1
+        ));
+    }
+
+    public function activeCodeLabelMap(string $register): array
+    {
+        $options = [];
+
+        foreach ($this->activeRows($register) as $row) {
+            $code = trim((string) ($row['code'] ?? ''));
+            if ($code === '') {
+                continue;
+            }
+
+            $options[$code] = trim((string) ($row['name'] ?? $code));
+        }
+
+        return $options;
+    }
+
     public function find(string $register, int $id): ?array
     {
         $config = $this->config($register);

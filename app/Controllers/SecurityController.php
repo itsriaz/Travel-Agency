@@ -103,6 +103,54 @@ final class SecurityController extends BaseController
         }
     }
 
+    public function adminCreateUser(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+
+        try {
+            $targetUserId = (new SecuritySettingsService($this->app))->adminCreateUser((int) Auth::id(), $_POST);
+            Flash::success('User created successfully.');
+            $this->redirect('/admin/security?user_id=' . $targetUserId);
+        } catch (\Throwable $exception) {
+            Flash::error($exception->getMessage());
+            $this->redirect('/admin/security');
+        }
+    }
+
+    public function adminUpdateUserIdentity(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+
+        try {
+            $targetUserId = (new SecuritySettingsService($this->app))->adminUpdateUserIdentity((int) Auth::id(), $_POST);
+            Flash::success('User details updated.');
+            $this->redirect('/admin/security?user_id=' . $targetUserId);
+        } catch (\Throwable $exception) {
+            Flash::error($exception->getMessage());
+            $targetUserId = (int) ($_POST['target_user_id'] ?? 0);
+            $this->redirect('/admin/security' . ($targetUserId > 0 ? '?user_id=' . $targetUserId : ''));
+        }
+    }
+
+    public function adminSetUserStatus(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+
+        try {
+            $targetUserId = (new SecuritySettingsService($this->app))->adminSetUserActiveStatus(
+                (int) Auth::id(),
+                (int) ($_POST['target_user_id'] ?? 0),
+                ((string) ($_POST['is_active'] ?? '0')) === '1'
+            );
+            Flash::success('User status updated.');
+            $this->redirect('/admin/security?user_id=' . $targetUserId);
+        } catch (\Throwable $exception) {
+            Flash::error($exception->getMessage());
+            $targetUserId = (int) ($_POST['target_user_id'] ?? 0);
+            $this->redirect('/admin/security' . ($targetUserId > 0 ? '?user_id=' . $targetUserId : ''));
+        }
+    }
+
     public function adminForcePasswordReset(): never
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);
@@ -111,10 +159,15 @@ final class SecurityController extends BaseController
         $temporaryPassword = (string) ($_POST['temporary_password'] ?? '');
 
         (new PasswordSecurityService($this->app))->adminResetPassword((int) Auth::id(), $targetUserId, $temporaryPassword);
+        $repository = new UserRepository($this->app);
+        $actor = $repository->findById((int) Auth::id());
+        $target = $repository->findById($targetUserId);
         AuditLog::record($this->app, 'auth.super_admin.security_action', [
             'user_id' => (int) Auth::id(),
+            'actor_username' => (string) ($actor['username'] ?? ''),
             'action' => 'force_password_reset',
             'target_user_id' => $targetUserId,
+            'target_username' => (string) ($target['username'] ?? ''),
         ]);
 
         Flash::success('Password reset forced for the selected user.');
@@ -127,10 +180,15 @@ final class SecurityController extends BaseController
 
         $targetUserId = (int) ($_POST['target_user_id'] ?? 0);
         (new TwoFactorService($this->app))->adminResetTwoFactor((int) Auth::id(), $targetUserId);
+        $repository = new UserRepository($this->app);
+        $actor = $repository->findById((int) Auth::id());
+        $target = $repository->findById($targetUserId);
         AuditLog::record($this->app, 'auth.super_admin.security_action', [
             'user_id' => (int) Auth::id(),
+            'actor_username' => (string) ($actor['username'] ?? ''),
             'action' => 'reset_2fa',
             'target_user_id' => $targetUserId,
+            'target_username' => (string) ($target['username'] ?? ''),
         ]);
 
         Flash::success('2FA reset for the selected user.');
@@ -143,10 +201,15 @@ final class SecurityController extends BaseController
 
         $targetUserId = (int) ($_POST['target_user_id'] ?? 0);
         (new TrustedDeviceService($this->app))->revokeAllForUser($targetUserId, 'admin', (int) Auth::id());
+        $repository = new UserRepository($this->app);
+        $actor = $repository->findById((int) Auth::id());
+        $target = $repository->findById($targetUserId);
         AuditLog::record($this->app, 'auth.super_admin.security_action', [
             'user_id' => (int) Auth::id(),
+            'actor_username' => (string) ($actor['username'] ?? ''),
             'action' => 'revoke_trusted_devices',
             'target_user_id' => $targetUserId,
+            'target_username' => (string) ($target['username'] ?? ''),
         ]);
 
         Flash::success('Trusted devices revoked for the selected user.');

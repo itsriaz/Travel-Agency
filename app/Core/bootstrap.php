@@ -162,11 +162,14 @@ register_shutdown_function(static function (): void {
     }
 
     app_write_log('app.shutdown_fatal', (string) ($lastError['message'] ?? 'Fatal shutdown error'), [
+        'request_id' => function_exists('app_request_id') ? app_request_id() : null,
         'type' => (int) ($lastError['type'] ?? 0),
         'file' => (string) ($lastError['file'] ?? ''),
         'line' => (int) ($lastError['line'] ?? 0),
         'url' => $_SERVER['REQUEST_URI'] ?? null,
         'method' => $_SERVER['REQUEST_METHOD'] ?? null,
+        'ip' => $_SERVER['REMOTE_ADDR'] ?? null,
+        'user_agent' => isset($_SERVER['HTTP_USER_AGENT']) ? substr((string) $_SERVER['HTTP_USER_AGENT'], 0, 220) : null,
     ]);
 });
 

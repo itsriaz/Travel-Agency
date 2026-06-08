@@ -1,6 +1,16 @@
 <?php
 
-$activeService = $serviceLines[0] ?? [];
+$requestedServiceId = (int) ($requestedServiceId ?? 0);
+$activeServiceIndex = 0;
+if ($requestedServiceId > 0) {
+    foreach ($serviceLines as $serviceLineIndex => $serviceLine) {
+        if ((int) ($serviceLine['serviceId'] ?? 0) === $requestedServiceId) {
+            $activeServiceIndex = (int) $serviceLineIndex;
+            break;
+        }
+    }
+}
+$activeService = $serviceLines[$activeServiceIndex] ?? ($serviceLines[0] ?? []);
 $receiptRecreateDraft = is_array($receiptRecreateDraft ?? null) ? $receiptRecreateDraft : null;
 $supplierPaymentRecreateDraft = is_array($supplierPaymentRecreateDraft ?? null) ? $supplierPaymentRecreateDraft : null;
 $formatStatusLabel = static function (?string $status): string {
@@ -24,7 +34,31 @@ if ($invoiceDueDate === '') {
     $invoiceDueDate = (string) ($activeService['dueDate'] ?? '');
 }
 
-$latestReceipt = ($customerPaymentFoundation['receipts'] ?? [])[0] ?? null;
+$currentBookingReceiptIds = [];
+foreach (($customerPaymentFoundation['allocations'] ?? []) as $allocationRow) {
+    if ((string) ($allocationRow['bookingReference'] ?? '') !== (string) ($workspaceBooking['number'] ?? '')) {
+        continue;
+    }
+
+    $receiptStatusRaw = str_replace(' ', '_', mb_strtolower(trim((string) ($allocationRow['receiptStatusRaw'] ?? ''))));
+    if ($receiptStatusRaw === 'void') {
+        continue;
+    }
+
+    $receiptId = (int) ($allocationRow['receiptId'] ?? 0);
+    $allocatedAmount = (float) ($allocationRow['receivableAmountAllocated'] ?? $allocationRow['allocatedAmount'] ?? 0);
+    if ($receiptId > 0 && abs($allocatedAmount) > 0.005) {
+        $currentBookingReceiptIds[$receiptId] = true;
+    }
+}
+$latestReceipt = null;
+foreach (($customerPaymentFoundation['receipts'] ?? []) as $receiptCandidate) {
+    $receiptId = (int) ($receiptCandidate['id'] ?? 0);
+    if ($receiptId > 0 && isset($currentBookingReceiptIds[$receiptId])) {
+        $latestReceipt = $receiptCandidate;
+        break;
+    }
+}
 $latestReceiptId = is_array($latestReceipt) ? (int) ($latestReceipt['id'] ?? 0) : 0;
 $receiptNo = is_array($latestReceipt) ? (string) ($latestReceipt['receiptNo'] ?? '0') : '0';
 $latestReceiptUrl = $latestReceiptId > 0 && (int) ($workspaceBooking['id'] ?? 0) > 0
@@ -50,6 +84,10 @@ $globalPrepaidDefaultBranchId = (int) ($workspaceBooking['branchId'] ?? 0);
 if ($globalPrepaidDefaultBranchId <= 0) {
     $globalPrepaidDefaultBranchId = (int) ($accessibleBranchIds[0] ?? ($branchOptions[0]['id'] ?? 0));
 }
+$globalCustomerPaymentUrl = url('/customers/settlements/global')
+    . ($globalPrepaidDefaultBranchId > 0 ? '?' . http_build_query(['branch_id' => $globalPrepaidDefaultBranchId]) : '');
+$globalSupplierPaymentUrl = url('/suppliers/settlements/global')
+    . ($globalPrepaidDefaultBranchId > 0 ? '?' . http_build_query(['branch_id' => $globalPrepaidDefaultBranchId]) : '');
 $clientCode = (int) ($leadTraveler['travelerId'] ?? 0) > 0 ? (string) $leadTraveler['travelerId'] : '-';
 $familyId = trim((string) ($leadTraveler['familyId'] ?? ''));
 $familyId = $familyId !== '' ? $familyId : '-';
@@ -194,6 +232,115 @@ $supplierDraftReferenceNumber = (string) ($supplierPaymentRecreateDraft['referen
 $supplierDraftBankCardDetail = (string) ($supplierPaymentRecreateDraft['bankCardDetail'] ?? '');
 $supplierDraftRemarks = (string) ($supplierPaymentRecreateDraft['remarks'] ?? '');
 $supplierRecreateClearUrl = url('/workspace?booking_id=' . (int) ($workspaceBooking['id'] ?? 0) . '#dock-panel-suppliers');
+$remindersReady = (int) ($workspaceBooking['id'] ?? 0) > 0;
+$reminderEditResetUrl = url('/workspace?booking_id=' . (int) ($workspaceBooking['id'] ?? 0) . '#dock-panel-reminders');
+$receivableAlertScopeLabels = [
+    'customer' => 'This Customer',
+    'booking' => 'This Booking',
+];
+$receivableAlertSections = [
+    'overdue' => 'Overdue',
+    'dueToday' => 'Due Today',
+    'pending' => 'Upcoming',
+    'missingDueDate' => 'Missing Due Date',
+];
+$receivableAlertScopes = is_array($receivableAlerts['scopes'] ?? null) ? $receivableAlerts['scopes'] : [
+    'customer' => [
+        'overdue' => $receivableAlerts['overdue'] ?? [],
+        'dueToday' => $receivableAlerts['dueToday'] ?? [],
+        'pending' => $receivableAlerts['pending'] ?? [],
+        'missingDueDate' => $receivableAlerts['missingDueDate'] ?? [],
+        'counts' => $receivableAlerts['counts'] ?? [
+            'overdue' => 0,
+            'dueToday' => 0,
+            'pending' => 0,
+            'missingDueDate' => 0,
+            'total' => 0,
+        ],
+    ],
+    'booking' => [
+        'overdue' => [],
+        'dueToday' => [],
+        'pending' => [],
+        'missingDueDate' => [],
+        'counts' => [
+            'overdue' => 0,
+            'dueToday' => 0,
+            'pending' => 0,
+            'missingDueDate' => 0,
+            'total' => 0,
+        ],
+    ],
+];
+$defaultReceivableAlertScope = in_array((string) ($receivableAlerts['defaultScope'] ?? 'customer'), ['customer', 'booking'], true)
+    ? (string) $receivableAlerts['defaultScope']
+    : 'customer';
+$receivableAlertCountsByScope = [];
+$receivableAlertRowsByScope = [];
+foreach ($receivableAlertScopes as $scopeKey => $scopeAlerts) {
+    $receivableAlertCountsByScope[$scopeKey] = is_array($scopeAlerts['counts'] ?? null) ? $scopeAlerts['counts'] : [
+        'overdue' => 0,
+        'dueToday' => 0,
+        'pending' => 0,
+        'missingDueDate' => 0,
+        'total' => 0,
+    ];
+    $receivableAlertRowsByScope[$scopeKey] = [];
+    foreach ($receivableAlertSections as $alertKey => $alertLabel) {
+        foreach (($scopeAlerts[$alertKey] ?? []) as $alertRow) {
+            $receivableAlertRowsByScope[$scopeKey][] = [
+            'category' => $alertLabel,
+            'bookingReference' => (string) ($alertRow['bookingReference'] ?? ''),
+            'customerName' => (string) ($alertRow['customerName'] ?? ''),
+            'branchName' => trim((string) (($alertRow['branchName'] ?? '') . (! empty($alertRow['branchCity']) ? ', ' . $alertRow['branchCity'] : ''))),
+            'currency' => (string) ($alertRow['currency'] ?? 'PKR'),
+            'outstandingAmount' => (float) ($alertRow['outstandingAmount'] ?? 0),
+            'dueDate' => (string) ($alertRow['dueDate'] ?? ''),
+            'daysLabel' => (string) ($alertRow['daysLabel'] ?? ''),
+            'serviceSummary' => (string) ($alertRow['serviceSummary'] ?? ''),
+            'openUrl' => url('/workspace?booking_id=' . (int) ($alertRow['bookingId'] ?? 0)),
+            'isCurrentBooking' => ! empty($alertRow['isCurrentBooking']),
+            ];
+        }
+    }
+}
+$receivableAlertRows = $receivableAlertRowsByScope[$defaultReceivableAlertScope] ?? [];
+$activeReceivableAlertCounts = $receivableAlertCountsByScope[$defaultReceivableAlertScope] ?? [
+    'overdue' => 0,
+    'dueToday' => 0,
+    'pending' => 0,
+    'missingDueDate' => 0,
+    'total' => 0,
+];
+$serviceTypeOptions = is_array($serviceTypeOptions ?? null) ? $serviceTypeOptions : [];
+$paymentMethodOptions = is_array($paymentMethodOptions ?? null) ? $paymentMethodOptions : [];
+if ($serviceTypeOptions === []) {
+    $serviceTypeOptions = [
+        'air ticket' => 'Air Ticket',
+        'visa' => 'Visa',
+        'umrah' => 'Umrah',
+        'tourism' => 'Tourism',
+        'hotel' => 'Hotel',
+        'transport' => 'Transport',
+        'other' => 'Other Package',
+    ];
+}
+if ($paymentMethodOptions === []) {
+    $paymentMethodOptions = [
+        'cash' => 'Cash',
+        'bank_transfer' => 'Bank Transfer',
+        'debit_card' => 'Debit Card',
+        'credit_card' => 'Credit Card',
+    ];
+}
+if (! array_key_exists((string) ($activeService['type'] ?? ''), $serviceTypeOptions) && (string) ($activeService['type'] ?? '') !== '') {
+    $serviceTypeOptions[(string) $activeService['type']] = ucwords((string) $activeService['type']);
+}
+foreach ([$receiptDraftMethod, $supplierDraftMethod] as $knownPaymentMethod) {
+    if ($knownPaymentMethod !== '' && ! array_key_exists($knownPaymentMethod, $paymentMethodOptions)) {
+        $paymentMethodOptions[$knownPaymentMethod] = ucwords(str_replace('_', ' ', $knownPaymentMethod));
+    }
+}
 $customerOpenReceivablesJson = json_encode(
     $customerPaymentFoundation['customerOpenReceivables'] ?? [],
     JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
@@ -258,6 +405,7 @@ $canPostServiceEvents = in_array((string) ($user['roleCode'] ?? $user['role_code
 $invoiceOutstandingAmount = $sameCurrencyPreviousBalanceAmount + $effectiveCurrentInvoiceDueValue;
 $invoiceReceivedAmount = $currentReceivedPersistedAmount;
 $hasRealInvoiceState = $currentInvoiceAmountValue > 0.005 || $effectiveCurrentInvoiceDueValue > 0.005 || $hasActiveServices;
+$documentsReady = (int) ($workspaceBooking['id'] ?? 0) > 0;
 $paymentStatus = 'Draft';
 $paymentStatusClass = 'draft';
 if ($workspaceBooking['id'] > 0 || $hasRealInvoiceState || $sameCurrencyPreviousBalanceAmount > 0.005) {
@@ -302,7 +450,7 @@ $latestRefundPrintUrl = (int) ($workspaceBooking['id'] ?? 0) > 0 && (int) ($acti
     : '';
 ?>
 
-<section class="legacy-workspace" data-workspace-station data-service-engine data-has-services="<?= $hasActiveServices ? '1' : '0' ?>" data-has-selected-customer="<?= ((int) ($selectedTravelerProfile['id'] ?? 0) > 0 || trim((string) ($workspaceBooking['lead'] ?? '')) !== '') ? '1' : '0' ?>" data-new-booking-url="<?= e(url('/workspace?new=1&focus=customer')) ?>" data-autosave-invoice-url="<?= e(url('/workspace/autosave/invoice')) ?>" data-autosave-service-url="<?= e(url('/workspace/autosave/service')) ?>" data-supplier-register-url="<?= e(url('/workspace/suppliers/register')) ?>" data-supplier-advance-lookup-url="<?= e(url('/suppliers/advances/available')) ?>" data-treasury-accounts-url="<?= e(url('/treasury/accounts')) ?>" data-can-void-financials="<?= $canPostServiceEvents ? '1' : '0' ?>" data-debug-tools-enabled="<?= $showWorkspaceDebug ? '1' : '0' ?>">
+<section class="legacy-workspace" data-workspace-station data-service-engine data-has-services="<?= $hasActiveServices ? '1' : '0' ?>" data-has-selected-customer="<?= ((int) ($selectedTravelerProfile['id'] ?? 0) > 0 || trim((string) ($workspaceBooking['lead'] ?? '')) !== '') ? '1' : '0' ?>" data-workspace-opened-existing-booking="<?= !empty($workspaceIsNew) ? '0' : ((int) ($workspaceBooking['id'] ?? 0) > 0 ? '1' : '0') ?>" data-new-booking-url="<?= e(url('/workspace?new=1&focus=customer')) ?>" data-autosave-invoice-url="<?= e(url('/workspace/autosave/invoice')) ?>" data-autosave-service-url="<?= e(url('/workspace/autosave/service')) ?>" data-supplier-register-url="<?= e(url('/workspace/suppliers/register')) ?>" data-supplier-advance-lookup-url="<?= e(url('/suppliers/advances/available')) ?>" data-treasury-accounts-url="<?= e(url('/treasury/accounts')) ?>" data-payment-treasury-accounts-url="<?= e((string) ($paymentTreasuryAccountsUrl ?? '')) ?>" data-offline-ping-url="<?= e(url('/offline/ping')) ?>" data-offline-snapshot-url="<?= e(url('/offline/snapshot')) ?>" data-offline-sync-url="<?= e(url('/offline/drafts/sync')) ?>" data-csrf-token="<?= e(\App\Helpers\Csrf::token()) ?>" data-can-void-financials="<?= $canPostServiceEvents ? '1' : '0' ?>" data-debug-tools-enabled="<?= $showWorkspaceDebug ? '1' : '0' ?>">
     <div class="workspace-feedback" data-workspace-feedback aria-live="polite"></div>
     <?php if ($showWorkspaceDebug && $serviceSaveDebugJson !== null): ?>
         <pre class="commercial-debug-block" style="margin:8px 0 12px; white-space:pre-wrap;">Service save debug
@@ -318,7 +466,12 @@ $latestRefundPrintUrl = (int) ($workspaceBooking['id'] ?? 0) > 0 && (int) ($acti
             <button class="btn btn-sm" type="button" data-workspace-action="supplier-history-finder">Find Supplier Payment</button>
             <button class="btn btn-sm" type="button" data-global-prepaid-supplier-open>Prepaid Supplier Payment</button>
             <button class="btn btn-sm" type="button" data-workspace-action="add-service" data-workflow-control="add-service" <?= $hasActiveServices ? '' : 'disabled' ?>>Add Service</button>
-            <button class="btn btn-sm" type="button" data-workspace-action="print">Print</button>
+            <button class="btn btn-sm" type="button" data-workspace-action="add-reminder">Reminders</button>
+        </div>
+        <div class="legacy-command-group legacy-command-group--offline">
+            <button class="btn btn-sm" type="button" data-offline-action="snapshot">Offline Snapshot</button>
+            <button class="btn btn-sm" type="button" data-offline-action="sync">Sync Offline</button>
+            <button class="legacy-offline-status" type="button" data-offline-status aria-expanded="false" aria-controls="offline-queue-preview">Offline queue empty</button>
         </div>
         <form id="workspace-search-form" class="legacy-quick-search" method="get" action="<?= e(url('/workspace')) ?>">
             <label for="workspace-search">Quick Search</label>
@@ -326,6 +479,43 @@ $latestRefundPrintUrl = (int) ($workspaceBooking['id'] ?? 0) > 0 && (int) ($acti
             <button class="btn btn-primary btn-sm" type="submit" accesskey="s" data-workspace-search-submit>Search</button>
         </form>
     </div>
+    <div class="workspace-feedback workspace-feedback--inline legacy-offline-edit-lock" data-offline-edit-lock hidden>
+        Offline mode: customer search and new customer capture are available. Booking, service, and payment changes are locked until connection returns.
+    </div>
+
+    <section id="offline-queue-preview" class="legacy-band legacy-offline-queue-preview" data-offline-queue-preview hidden>
+        <div class="legacy-service-context legacy-offline-queue-preview__header">
+            <strong>Offline Queue</strong>
+            <span data-offline-queue-count>0 draft(s)</span>
+        </div>
+        <div class="legacy-offline-queue-preview__list" data-offline-queue-list></div>
+    </section>
+
+    <section class="legacy-band legacy-search-results" data-offline-search-results hidden>
+        <div class="legacy-service-context legacy-search-results__header">
+            <strong data-offline-search-title>Offline Snapshot Results</strong>
+            <span data-offline-search-count>0 matches</span>
+        </div>
+        <div class="workspace-feedback workspace-feedback--inline legacy-search-results__empty" data-offline-search-empty hidden style="display:block;">No cached offline result matched this search.</div>
+        <div class="legacy-search-results__table-wrap" data-offline-search-table-wrap hidden>
+            <table class="legacy-search-results__table">
+                <thead>
+                <tr>
+                    <th>Invoice No.</th>
+                    <th>Customer</th>
+                    <th>Branch</th>
+                    <th>Date</th>
+                    <th>Currency</th>
+                    <th>Outstanding</th>
+                    <th>Service Ref.</th>
+                    <th>Ticket / PNR</th>
+                    <th>Open</th>
+                </tr>
+                </thead>
+                <tbody data-offline-search-results-body></tbody>
+            </table>
+        </div>
+    </section>
 
     <?php if ($currentSearchTerm !== '' && count($bookingSearchResults) !== 1): ?>
         <section class="legacy-band legacy-search-results">
@@ -388,7 +578,7 @@ $latestRefundPrintUrl = (int) ($workspaceBooking['id'] ?? 0) > 0 && (int) ($acti
         <?= \App\Helpers\Csrf::input() ?>
         <input type="hidden" name="booking_id" value="<?= e((string) $workspaceBooking['id']) ?>">
         <input type="hidden" name="selected_customer_id" value="<?= e((string) ($selectedTravelerProfile['id'] ?? 0)) ?>" data-booking-selected-customer-id>
-        <input type="hidden" name="branch_id" value="<?= e((string) $workspaceBooking['branchId']) ?>">
+        <label class="legacy-field legacy-invoice-header__branch"><span>Branch</span><select name="branch_id"><?php foreach ($branchOptions as $branchRow): ?><option value="<?= e((string) $branchRow['id']) ?>" <?= (int) $branchRow['id'] === (int) $workspaceBooking['branchId'] ? 'selected' : '' ?>><?= e((string) $branchRow['name']) ?></option><?php endforeach; ?></select></label>
         <input type="hidden" name="due_date" value="<?= e($invoiceDueDate) ?>" data-booking-due-date-field>
         <input type="hidden" name="contact_mobile" value="<?= e($workspaceBooking['mobile']) ?>" data-booking-mobile-field>
         <input type="hidden" name="passport_number" value="<?= e($workspaceBooking['passport']) ?>" data-booking-passport-field>
@@ -445,7 +635,7 @@ $latestRefundPrintUrl = (int) ($workspaceBooking['id'] ?? 0) > 0 && (int) ($acti
 
         <label class="legacy-field legacy-field--passenger"><span>Passenger Name</span><input id="active-service-passenger-name" type="text" name="service_passenger_name" list="service-passenger-options" value="<?= e($passengerName) ?>" data-service-passenger-name autocomplete="off"><input type="hidden" name="service_traveler_id" value="<?= e((string) ($activeService['travelerId'] ?? 0)) ?>" data-service-field="travelerId"></label>
         <label class="legacy-field legacy-field--xs"><span>Mode</span><input type="text" value="P" readonly></label>
-        <label class="legacy-field legacy-field--service-type"><span>Service Type</span><select name="service_type" data-service-field="type"><?php foreach ($serviceTypeOptions as $serviceTypeOption): ?><option value="<?= e($serviceTypeOption) ?>" <?= $serviceTypeOption === ($activeService['type'] ?? 'air ticket') ? 'selected' : '' ?>><?= e(ucwords($serviceTypeOption)) ?></option><?php endforeach; ?></select></label>
+        <label class="legacy-field legacy-field--service-type"><span>Service Type</span><select name="service_type" data-service-field="type"><?php foreach ($serviceTypeOptions as $serviceTypeValue => $serviceTypeLabel): ?><option value="<?= e((string) $serviceTypeValue) ?>" <?= (string) $serviceTypeValue === (string) ($activeService['type'] ?? 'air ticket') ? 'selected' : '' ?>><?= e((string) $serviceTypeLabel) ?></option><?php endforeach; ?></select></label>
         <label class="legacy-field legacy-field--ticket-ref"><span data-service-ref-label>Ticket No. / Ref No.</span><input type="text" name="ticket_number" data-ticket-field="ticket_number" value="<?= e($serviceReference) ?>"></label>
         <label class="legacy-field legacy-field--pnr"><span data-service-second-ref-label>PNR.#</span><input type="text" name="ticket_pnr" data-ticket-field="pnr" value="<?= e((string) ($activeService['pnr'] ?? '')) ?>"></label>
         <label class="legacy-field legacy-field--supplier"><span data-service-supplier-label>Tkt.Purchase From</span><select name="supplier_name" data-service-field="supplier" data-service-supplier-input>
@@ -486,7 +676,7 @@ $latestRefundPrintUrl = (int) ($workspaceBooking['id'] ?? 0) > 0 && (int) ($acti
         <label class="legacy-field legacy-field--attach" data-air-only><span>Attach Last Ticket #</span><input type="text" value="" readonly></label>
         <label class="legacy-field legacy-field--place" data-air-only><span>Place of services (VAT)</span><input type="text" value="OTHER" readonly></label>
         <label class="legacy-field legacy-field--airline" data-air-only><span>Airline/Agent (CR)</span><input type="text" name="ticket_airline" data-ticket-field="airline" value="<?= e((string) ($activeService['airline'] ?? '')) ?>"></label>
-       <label class="legacy-field legacy-field--sales"><span>Sales Person</span><input type="text" value="<?= e((string) ($user['username'] ?? $user['email'] ?? '')) ?>" readonly></label>
+       <label class="legacy-field legacy-field--sales" hidden aria-hidden="true"><span>Sales Person</span><input type="text" value="<?= e((string) ($user['username'] ?? $user['email'] ?? '')) ?>" readonly></label>
 
         <label class="legacy-field legacy-field--xs" data-air-only><span>XO</span><input type="text" value="" readonly></label>
         <label class="legacy-field legacy-field--date"><span>Validation Date</span><input type="date" name="due_date" data-service-field="due_date" value="<?= e((string) ($activeService['dueDate'] ?? '')) ?>"></label>
@@ -556,7 +746,12 @@ $latestRefundPrintUrl = (int) ($workspaceBooking['id'] ?? 0) > 0 && (int) ($acti
         </div>
         <div class="legacy-inline-note legacy-inline-note--supplier-advance" data-supplier-advance-note hidden>
             <strong data-supplier-advance-summary></strong>
+            <span data-supplier-advance-message></span>
         </div>
+        <input type="hidden" name="supplier_advance_fx_use" value="" data-supplier-advance-fx-use>
+        <input type="hidden" name="supplier_advance_fx_advance_id" value="" data-supplier-advance-fx-advance-id>
+        <input type="hidden" name="supplier_advance_fx_rate" value="" data-supplier-advance-fx-rate>
+        <input type="hidden" name="supplier_advance_fx_rate_date" value="<?= e(date('Y-m-d')) ?>" data-supplier-advance-fx-rate-date>
         <input type="hidden" name="ticket_return_date" data-ticket-field="return_date" value="<?= e((string) ($activeService['returnDate'] ?? '')) ?>">
         <input type="hidden" name="ticket_sector_from" data-ticket-field="sector_from" value="<?= e((string) ($activeService['sectorFrom'] ?? '')) ?>">
         <input type="hidden" name="ticket_sector_to" data-ticket-field="sector_to" value="<?= e((string) ($activeService['sectorTo'] ?? '')) ?>">
@@ -575,23 +770,25 @@ Kept here in case manual service save is needed again later.
     <?php if ($canPostServiceEvents): ?>
     <?php
         $activeServiceId = (int) ($activeService['serviceId'] ?? 0);
-        $activeServiceStatus = strtolower(trim((string) ($activeService['status'] ?? '')));
+        $activeServiceStatus = str_replace(' ', '_', strtolower(trim((string) ($activeService['status'] ?? ''))));
+        $activeServiceHasCancellationEvent = (bool) ($activeService['hasCancellationEvent'] ?? false);
         $activeServiceType = strtolower(trim((string) ($activeService['type'] ?? '')));
-        $showCancelAction = $activeServiceId > 0;
-        $showRefundAction = $activeServiceId > 0;
-        $showSettlementAction = $activeServiceId > 0 && $activeServiceStatus === 'cancelled';
-        $showReissueAction = $activeServiceId > 0 && $activeServiceType === 'air ticket';
+        $serviceEventsAllowedInThisSession = ! $workspaceIsNew && (int) ($workspaceBooking['id'] ?? 0) > 0;
+        $showCancelAction = $serviceEventsAllowedInThisSession && $activeServiceId > 0;
+        $showRefundAction = $serviceEventsAllowedInThisSession && $activeServiceId > 0;
+        $showSettlementAction = $serviceEventsAllowedInThisSession && $activeServiceId > 0 && ($activeServiceStatus === 'cancelled' || $activeServiceHasCancellationEvent);
+        $showReissueAction = $serviceEventsAllowedInThisSession && $activeServiceId > 0 && $activeServiceType === 'air ticket';
     ?>
-    <form class="legacy-service-event-bar" method="post" action="<?= e(url('/workspace/services/cancel')) ?>" data-service-event-bar="cancel" data-workflow-gate="service-entry" <?= $showCancelAction ? '' : 'hidden' ?> onsubmit="return confirm('Record cancellation for this service line? This will not post a refund yet.');">
+    <form class="legacy-service-event-bar" method="post" action="<?= e(url('/workspace/services/cancel')) ?>" data-service-event-bar="cancel" <?= $showCancelAction ? '' : 'hidden' ?>>
         <?= \App\Helpers\Csrf::input() ?>
         <input type="hidden" name="booking_id" value="<?= e((string) $workspaceBooking['id']) ?>">
         <input type="hidden" name="service_id" value="<?= e((string) ($activeService['serviceId'] ?? 0)) ?>" data-service-cancel-id>
         <label class="legacy-service-event-field"><span>Date</span><input type="date" name="cancel_event_date" value="<?= e(date('Y-m-d')) ?>" aria-label="Cancellation date"></label>
         <label class="legacy-service-event-field"><span>Reason</span><input type="text" name="cancel_reason" value="" placeholder="Cancellation reason" minlength="5" maxlength="1000" required></label>
         <label class="legacy-service-event-field"><span>Note</span><input type="text" name="cancel_notes" value="" placeholder="Optional note" maxlength="4000"></label>
-        <button class="btn btn-sm legacy-service-event-action" type="submit" data-service-cancel-button <?= (int) ($activeService['serviceId'] ?? 0) > 0 && (string) ($activeService['status'] ?? '') !== 'Cancelled' ? '' : 'disabled' ?>>Cancel Service</button>
+        <button class="btn btn-sm legacy-service-event-action" type="submit" data-service-cancel-button <?= $showCancelAction && $activeServiceStatus !== 'cancelled' ? '' : 'disabled' ?>>Cancel Service</button>
     </form>
-    <form class="legacy-service-event-bar legacy-service-event-bar--settlement" method="post" action="<?= e(url('/workspace/services/cancellation-financials')) ?>" data-service-event-bar="settlement" data-workflow-gate="service-entry" <?= $showSettlementAction ? '' : 'hidden' ?> onsubmit="return confirm('Post cancellation financial adjustment for this service line?');">
+    <form class="legacy-service-event-bar legacy-service-event-bar--settlement" method="post" action="<?= e(url('/workspace/services/cancellation-financials')) ?>" data-service-event-bar="settlement" <?= $showSettlementAction ? '' : 'hidden' ?>>
         <?= \App\Helpers\Csrf::input() ?>
         <input type="hidden" name="booking_id" value="<?= e((string) $workspaceBooking['id']) ?>">
         <input type="hidden" name="service_id" value="<?= e((string) ($activeService['serviceId'] ?? 0)) ?>" data-service-settlement-id>
@@ -599,29 +796,39 @@ Kept here in case manual service save is needed again later.
         <label class="legacy-service-event-field"><span>Date</span><input type="date" name="settlement_event_date" value="<?= e(date('Y-m-d')) ?>" aria-label="Settlement date"></label>
         <label class="legacy-service-event-field"><span>Customer Penalty</span><input type="number" name="customer_penalty_amount" value="0.00" min="0" step="0.01" aria-label="Customer penalty amount"></label>
         <label class="legacy-service-event-field"><span>Supplier Penalty</span><input type="number" name="supplier_penalty_amount" value="0.00" min="0" step="0.01" aria-label="Supplier penalty amount"></label>
-        <label class="legacy-service-event-field"><span>Reason</span><input type="text" name="settlement_reason" value="" placeholder="Settlement reason" minlength="5" maxlength="1000" required></label>
-        <button class="btn btn-sm legacy-service-event-action" type="submit" data-service-settlement-button <?= (int) ($activeService['serviceId'] ?? 0) > 0 && (string) ($activeService['status'] ?? '') === 'Cancelled' ? '' : 'disabled' ?>>Settle Cancel</button>
+        <label class="legacy-service-event-field"><span>Reason</span><input type="text" name="settlement_reason" value="" placeholder="Settlement reason" minlength="5" maxlength="1000" data-service-settlement-reason></label>
+        <button class="btn btn-sm legacy-service-event-action" type="submit" data-service-settlement-button <?= $showSettlementAction ? '' : 'disabled' ?>>Settle Cancel</button>
     </form>
-    <form class="legacy-service-event-bar legacy-service-event-bar--refund" method="post" action="<?= e(url('/workspace/services/refund')) ?>" data-service-event-bar="refund" data-workflow-gate="service-entry" <?= $showRefundAction ? '' : 'hidden' ?> onsubmit="return confirm('Post refund for this service line? This will create accounting journal entries.');">
+    <form class="legacy-service-event-bar legacy-service-event-bar--refund" method="post" action="<?= e(url('/workspace/services/refund')) ?>" data-service-event-bar="refund" <?= $showRefundAction ? '' : 'hidden' ?>>
         <?= \App\Helpers\Csrf::input() ?>
         <input type="hidden" name="booking_id" value="<?= e((string) $workspaceBooking['id']) ?>">
         <input type="hidden" name="service_id" value="<?= e((string) ($activeService['serviceId'] ?? 0)) ?>" data-service-refund-id>
+        <input type="hidden" name="refund_branch_id" value="<?= e((string) $workspaceBooking['branchId']) ?>" data-service-refund-branch-id>
+        <input type="hidden" name="refund_currency" value="<?= e((string) ($activeService['currency'] ?? $invoiceCurrency)) ?>" data-service-refund-currency>
         <div class="legacy-service-event-note">Available refund credit in <?= e($invoiceCurrency) ?>: <strong><?= e($refundCreditHintDisplay) ?></strong></div>
         <label class="legacy-service-event-field"><span>Date</span><input type="date" name="refund_event_date" value="<?= e(date('Y-m-d')) ?>" aria-label="Refund date"></label>
         <label class="legacy-service-event-field"><span>Customer Refund</span><input type="number" name="customer_refund_amount" value="0.00" min="0" step="0.01" aria-label="Customer refund amount"></label>
         <label class="legacy-service-event-field"><span>Supplier Refund</span><input type="number" name="supplier_refund_amount" value="0.00" min="0" step="0.01" aria-label="Supplier refund received"></label>
-        <label class="legacy-service-event-field"><span>Method</span><select name="refund_payment_method" aria-label="Refund payment method">
-            <?php foreach (['cash' => 'Cash', 'bank_transfer' => 'Bank', 'debit_card' => 'Debit Card', 'credit_card' => 'Credit Card'] as $refundMethodValue => $refundMethodLabel): ?>
+        <label class="legacy-service-event-field"><span>Method</span><select name="refund_payment_method" aria-label="Refund payment method" data-service-refund-method>
+            <?php foreach ($paymentMethodOptions as $refundMethodValue => $refundMethodLabel): ?>
                 <option value="<?= e($refundMethodValue) ?>"><?= e($refundMethodLabel) ?></option>
             <?php endforeach; ?>
         </select></label>
-        <label class="legacy-service-event-field"><span>Reason</span><input type="text" name="refund_reason" value="" placeholder="Refund reason" minlength="5" maxlength="1000" required></label>
-        <button class="btn btn-sm legacy-service-event-action" type="submit" data-service-refund-button <?= (int) ($activeService['serviceId'] ?? 0) > 0 ? '' : 'disabled' ?>>Post Refund</button>
+        <label class="legacy-service-event-field" data-service-refund-treasury-row hidden><span>Source Account</span><select name="refund_treasury_account_id" data-service-refund-treasury-select aria-label="Refund source account"><option value="">Select refund account</option></select></label>
+        <label class="legacy-service-event-field" data-service-refund-destination-row hidden><span>Customer Bank</span><input type="text" name="customer_bank_name" value="" maxlength="190" placeholder="Customer bank name" aria-label="Customer bank name"></label>
+        <label class="legacy-service-event-field" data-service-refund-destination-row hidden><span>Account Title</span><input type="text" name="customer_bank_account_title" value="" maxlength="190" placeholder="Account title" aria-label="Customer bank account title"></label>
+        <label class="legacy-service-event-field" data-service-refund-destination-row hidden><span>Account No.</span><input type="text" name="customer_bank_account_no" value="" maxlength="120" placeholder="Account no." aria-label="Customer bank account number"></label>
+        <label class="legacy-service-event-field" data-service-refund-destination-row hidden><span>IBAN</span><input type="text" name="customer_bank_iban" value="" maxlength="120" placeholder="IBAN" aria-label="Customer bank IBAN"></label>
+        <label class="legacy-service-event-field" data-service-refund-destination-row hidden><span>Transaction ID / Ref.</span><input type="text" name="transfer_reference" value="" maxlength="190" placeholder="Bank transaction ID, cheque no., or transfer reference" aria-label="Refund transaction ID or transfer reference"></label>
+        <label class="legacy-service-event-field" data-service-refund-destination-row hidden><span>Charges</span><input type="number" name="refund_charges" value="0.00" min="0" step="0.01" aria-label="Refund transfer charges"></label>
+        <label class="legacy-service-event-field" data-service-refund-reason><span>Reason</span><input type="text" name="refund_reason" value="" placeholder="Refund reason" minlength="5" maxlength="1000" required></label>
+        <label class="legacy-service-event-field" data-service-refund-remarks><span>Remarks</span><input type="text" name="refund_notes" value="" placeholder="Refund remarks / destination note" maxlength="4000" aria-label="Refund remarks"></label>
+        <button class="btn btn-sm legacy-service-event-action" type="submit" data-service-refund-button data-service-refund-submit <?= (int) ($activeService['serviceId'] ?? 0) > 0 ? '' : 'disabled' ?>>Post Refund</button>
         <?php if ($latestRefundPrintUrl !== ''): ?>
             <a class="btn btn-sm legacy-service-event-action legacy-service-event-action--secondary" href="<?= e($latestRefundPrintUrl) ?>" target="_blank" rel="noopener">Print Refund</a>
         <?php endif; ?>
     </form>
-    <form class="legacy-service-event-bar legacy-service-event-bar--reissue" method="post" action="<?= e(url('/workspace/services/reissue')) ?>" data-service-event-bar="reissue" data-workflow-gate="service-entry" <?= $showReissueAction ? '' : 'hidden' ?> onsubmit="return confirm('Record reissue for this service line?');">
+    <form class="legacy-service-event-bar legacy-service-event-bar--reissue" method="post" action="<?= e(url('/workspace/services/reissue')) ?>" data-service-event-bar="reissue" <?= $showReissueAction ? '' : 'hidden' ?>>
         <?= \App\Helpers\Csrf::input() ?>
         <input type="hidden" name="booking_id" value="<?= e((string) $workspaceBooking['id']) ?>">
         <input type="hidden" name="service_id" value="<?= e((string) ($activeService['serviceId'] ?? 0)) ?>" data-service-reissue-id>
@@ -643,7 +850,7 @@ Kept here in case manual service save is needed again later.
     </datalist>
     <section class="customer-picker-modal" data-service-supplier-add-modal hidden aria-hidden="true">
         <div class="customer-picker-modal__backdrop" data-service-supplier-add-close></div>
-        <div class="customer-picker-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="service-supplier-add-title" style="max-width:760px;">
+        <div class="customer-picker-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="service-supplier-add-title" style="max-width:1100px;">
             <header class="customer-picker-modal__header">
                 <div>
                     <strong id="service-supplier-add-title">Add Supplier</strong>
@@ -656,7 +863,7 @@ Kept here in case manual service save is needed again later.
                     <label class="station-field span-3"><span>Supplier Name</span><input type="text" name="supplier_name" value="" maxlength="190" required data-service-supplier-add-name></label>
                     <label class="station-field span-2"><span>Branch</span><select name="branch_id" data-service-supplier-add-branch><?php foreach ($branchOptions as $branchRow): ?><option value="<?= e((string) $branchRow['id']) ?>" <?= (int) $branchRow['id'] === (int) $workspaceBooking['branchId'] ? 'selected' : '' ?>><?= e((string) $branchRow['name']) ?></option><?php endforeach; ?></select></label>
                     <label class="station-field"><span>Currency</span><select name="default_currency" data-service-supplier-add-currency><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>" <?= $currencyOption === $invoiceCurrency ? 'selected' : '' ?>><?= e($currencyOption) ?></option><?php endforeach; ?></select></label>
-                    <label class="station-field span-2"><span>Supplier Type</span><select name="supplier_mode"><option value="normal_payable">Normal Payable</option><option value="running_balance">Running Balance</option></select></label>
+                    <label class="station-field span-2"><span>Supplier Type</span><select name="supplier_mode"><?php foreach ($supplierModeOptions as $modeCode => $modeLabel): ?><option value="<?= e((string) $modeCode) ?>"><?= e((string) $modeLabel) ?></option><?php endforeach; ?></select></label>
                     <label class="station-field span-4"><span>Notes</span><input type="text" name="notes" value="" maxlength="4000" placeholder="Optional"></label>
                 </div>
                 <div class="workspace-feedback workspace-feedback--inline" data-service-supplier-add-feedback hidden></div>
@@ -841,7 +1048,7 @@ Kept here in case manual service save is needed again later.
                     <div class="legacy-payment-panel__title">RECEIVE PAYMENT</div>
                     <div class="legacy-payment-panel__body legacy-payment-panel__body--form">
                         <label><span>Payment Currency</span><select name="receipt_currency" data-payment-currency-select><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>" <?= $currencyOption === $paymentCurrency ? 'selected' : '' ?>><?= e($currencyOption) ?></option><?php endforeach; ?></select></label>
-                        <label><span data-payment-balance-label>Balance in Payment Currency (<?= e($paymentCurrency) ?>)</span><input id="commercial-payment-total-outstanding" class="legacy-red-text" type="text" value="<?= e($totalOutstanding) ?>" data-payment-total-outstanding="<?= e((string) $totalOutstandingAmount) ?>" data-payment-total-due-now="<?= e((string) $totalOutstandingAmount) ?>" readonly></label>
+                        <label><span data-payment-balance-label>Balance in Payment Currency (<?= e($paymentCurrency) ?>)</span><input id="commercial-payment-total-outstanding" class="legacy-red-text" type="text" value="<?= e($totalOutstanding) ?>" data-payment-total-outstanding="<?= e((string) $totalOutstandingAmount) ?>" data-payment-total-due-now="<?= e((string) $effectiveCurrentInvoiceDueValue) ?>" readonly></label>
                         <label<?= $showCurrentInvoiceBalancePkrEquivalent ? '' : ' hidden' ?> data-payment-current-balance-pkr-row><span>PKR Equivalent of Current Balance</span><input id="commercial-payment-current-balance-pkr" type="text" value="<?= e($currentInvoiceBalancePkrEquivalent) ?>" data-payment-current-balance-pkr data-payment-pkr-rate="<?= e((string) ($currentInvoiceBalancePkrRate ?? 0)) ?>" readonly></label>
                         <label>
                             <span>Amount Receiving</span>
@@ -866,7 +1073,7 @@ Kept here in case manual service save is needed again later.
                             >
                         </label>
                         <label data-payment-return-row hidden><span>Return Amount</span><input id="commercial-payment-return-amount" class="legacy-red-text" type="text" value="PKR 0.00" readonly data-payment-return-amount></label>
-                        <label><span>Payment Method</span><select name="payment_method"><?php foreach (['cash' => 'Cash', 'bank_transfer' => 'Bank Transfer', 'debit_card' => 'Debit Card', 'credit_card' => 'Credit Card'] as $paymentMethodValue => $paymentMethodLabel): ?><option value="<?= e($paymentMethodValue) ?>" <?= $receiptDraftMethod === $paymentMethodValue ? 'selected' : '' ?>><?= e($paymentMethodLabel) ?></option><?php endforeach; ?></select></label>
+                        <label><span>Payment Method</span><select name="payment_method"><?php foreach ($paymentMethodOptions as $paymentMethodValue => $paymentMethodLabel): ?><option value="<?= e((string) $paymentMethodValue) ?>" <?= $receiptDraftMethod === (string) $paymentMethodValue ? 'selected' : '' ?>><?= e((string) $paymentMethodLabel) ?></option><?php endforeach; ?></select></label>
                         <label data-payment-treasury-row hidden>
                             <span>Cash / Bank Account</span>
                             <select name="treasury_account_id" data-payment-treasury-select data-initial-value="<?= e((string) $receiptDraftTreasuryAccountId) ?>">
@@ -966,7 +1173,7 @@ Kept here in case manual service save is needed again later.
             <?php $lineReceivable = (float) ($serviceLine['rowReceivable'] ?? 0); ?>
             <?php $linePayable = (float) ($serviceLine['rowPayable'] ?? 0); ?>
             <?php $lineProfit = (float) ($serviceLine['rowProfit'] ?? $serviceLine['profit'] ?? 0); ?>
-            <tr class="<?= $serviceIndex === 0 ? 'is-active' : '' ?>" data-service-row data-service-index="<?= e((string) $serviceIndex) ?>">
+            <tr class="<?= $serviceIndex === $activeServiceIndex ? 'is-active' : '' ?>" data-service-row data-service-index="<?= e((string) $serviceIndex) ?>">
                 <td><?= e((string) ($serviceIndex + 1)) ?></td>
                 <td><?= e(ucwords((string) $serviceLine['type'])) ?></td>
                 <td><?= e($lineTicket) ?></td>
@@ -997,11 +1204,439 @@ Kept here in case manual service save is needed again later.
         <label><span>Total Payable</span><input id="commercial-bottom-payable" type="text" value="<?= e($airlinePayable) ?>" readonly></label>
     </div>
 
+    <div id="dock-panel-reminders" class="legacy-reminders-shell">
+        <section class="legacy-payment-panel legacy-reminders-panel">
+            <div class="legacy-payment-panel__title">REMINDERS</div>
+            <div class="legacy-payment-panel__body legacy-reminders-panel__body">
+                <div class="legacy-reminder-counts" data-reminder-summary>
+                    <div class="legacy-reminder-chip">
+                        <span>Total</span>
+                        <strong><?= e((string) ($reminderCounts['open'] + $reminderCounts['due'] + $reminderCounts['completed'] + $reminderCounts['dismissed'])) ?></strong>
+                    </div>
+                    <div class="legacy-reminder-chip legacy-reminder-chip--due">
+                        <span>Due</span>
+                        <strong><?= e((string) ($reminderCounts['due'] ?? 0)) ?></strong>
+                    </div>
+                    <div class="legacy-reminder-chip legacy-reminder-chip--overdue">
+                        <span>Overdue</span>
+                        <strong><?= e((string) ($reminderCounts['overdue'] ?? 0)) ?></strong>
+                    </div>
+                    <div class="legacy-reminder-chip">
+                        <span>Upcoming</span>
+                        <strong><?= e((string) ($reminderCounts['upcoming'] ?? 0)) ?></strong>
+                    </div>
+                    <div class="legacy-reminder-chip">
+                        <span>Receivable Alerts</span>
+                        <strong data-receivable-alert-count-total><?= e((string) ($activeReceivableAlertCounts['total'] ?? 0)) ?></strong>
+                    </div>
+                </div>
+
+                <form
+                    method="post"
+                    action="<?= e(url('/workspace/reminders/save')) ?>"
+                    class="legacy-reminder-form<?= $remindersReady ? '' : ' legacy-reminder-form--disabled' ?>"
+                    data-reminder-form
+                    aria-disabled="<?= $remindersReady ? 'false' : 'true' ?>"
+                >
+                    <?= \App\Helpers\Csrf::input() ?>
+                    <input type="hidden" name="booking_id" value="<?= e((string) ($workspaceBooking['id'] ?? 0)) ?>">
+                    <input type="hidden" name="reminder_id" value="<?= e((string) ($editingReminderForm['id'] ?? 0)) ?>">
+
+                    <label>
+                        <span>Reminder Type</span>
+                        <select name="reminder_type" <?= $remindersReady ? '' : 'disabled' ?>>
+                            <?php foreach ($reminderTypeOptions as $typeCode => $typeLabel): ?>
+                                <option value="<?= e((string) $typeCode) ?>" <?= (string) ($editingReminderForm['type'] ?? 'custom_manual') === (string) $typeCode ? 'selected' : '' ?>><?= e((string) $typeLabel) ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </label>
+
+                    <label>
+                        <span>Linked To</span>
+                        <select name="linked_target" <?= $remindersReady ? '' : 'disabled' ?>>
+                            <?php if ($reminderLinkTargets === []): ?>
+                                <option value="<?= e('booking:' . (int) ($workspaceBooking['id'] ?? 0)) ?>">Booking File</option>
+                            <?php else: ?>
+                                <?php foreach ($reminderLinkTargets as $target): ?>
+                                    <option value="<?= e((string) ($target['value'] ?? '')) ?>" <?= (string) ($editingReminderForm['linkedTarget'] ?? '') === (string) ($target['value'] ?? '') ? 'selected' : '' ?>><?= e((string) ($target['label'] ?? 'Booking File')) ?></option>
+                                <?php endforeach; ?>
+                            <?php endif; ?>
+                        </select>
+                    </label>
+
+                    <label>
+                        <span>Due</span>
+                        <input type="datetime-local" name="due_at" value="<?= e((string) ($editingReminderForm['dueAt'] ?? '')) ?>" <?= $remindersReady ? '' : 'disabled' ?>>
+                    </label>
+
+                    <label>
+                        <span>Channel</span>
+                        <select name="channel" <?= $remindersReady ? '' : 'disabled' ?>>
+                            <?php foreach ($reminderChannels as $channel): ?>
+                                <option value="<?= e((string) $channel) ?>" <?= (string) ($editingReminderForm['channel'] ?? 'Call') === (string) $channel ? 'selected' : '' ?>><?= e((string) $channel) ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </label>
+
+                    <label class="legacy-reminder-form__wide">
+                        <span>Task</span>
+                        <input type="text" name="title" maxlength="190" value="<?= e((string) ($editingReminderForm['title'] ?? '')) ?>" placeholder="Passport follow-up / supplier call / payment reminder" data-reminder-focus="task" <?= $remindersReady ? '' : 'disabled' ?>>
+                    </label>
+
+                    <label>
+                        <span>Owner</span>
+                        <input type="text" name="owner_label" maxlength="120" value="<?= e((string) ($editingReminderForm['owner'] ?? '')) ?>" placeholder="Operations Desk" <?= $remindersReady ? '' : 'disabled' ?>>
+                    </label>
+
+                    <label>
+                        <span>Priority</span>
+                        <select name="priority" <?= $remindersReady ? '' : 'disabled' ?>>
+                            <option value="normal" <?= (string) ($editingReminderForm['priority'] ?? 'normal') === 'normal' ? 'selected' : '' ?>>Normal</option>
+                            <option value="high" <?= (string) ($editingReminderForm['priority'] ?? 'normal') === 'high' ? 'selected' : '' ?>>High</option>
+                        </select>
+                    </label>
+
+                    <label class="legacy-reminder-form__wide legacy-reminder-form__notes">
+                        <span>Notes</span>
+                        <input type="text" name="reminder_note" maxlength="4000" value="<?= e((string) ($editingReminderForm['note'] ?? '')) ?>" placeholder="Optional follow-up note" <?= $remindersReady ? '' : 'disabled' ?>>
+                    </label>
+
+                    <div class="legacy-reminder-form__actions">
+                        <button class="btn btn-primary btn-sm" type="submit" <?= $remindersReady ? '' : 'disabled' ?>><?= (int) ($editingReminderForm['id'] ?? 0) > 0 ? 'Update Reminder' : 'Save Reminder' ?></button>
+                        <?php if ((int) ($editingReminderForm['id'] ?? 0) > 0): ?>
+                            <a class="btn btn-sm" href="<?= e($reminderEditResetUrl) ?>">Cancel Edit</a>
+                        <?php endif; ?>
+                    </div>
+                </form>
+            </div>
+        </section>
+
+        <section class="legacy-payment-panel legacy-reminders-panel legacy-reminders-panel--register">
+            <div class="legacy-payment-panel__title">OPEN REMINDERS</div>
+            <div class="legacy-payment-panel__body legacy-reminders-panel__body">
+                <table class="legacy-table legacy-reminders-table" data-reminder-table>
+                    <thead>
+                        <tr>
+                            <th>Type</th>
+                            <th>Task</th>
+                            <th>Linked To</th>
+                            <th>Due</th>
+                            <th>Channel</th>
+                            <th>Status</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php if ($openReminderRows === []): ?>
+                            <tr><td colspan="7" class="empty-cell">No open reminders linked to this booking right now.</td></tr>
+                        <?php endif; ?>
+                        <?php foreach ($openReminderRows as $reminderRow): ?>
+                            <?php
+                            $reminderStatusKey = (string) ($reminderRow['statusKey'] ?? 'open');
+                            $canTransitionReminder = in_array($reminderStatusKey, ['open', 'due'], true);
+                            $reminderEditUrl = url('/workspace?booking_id=' . (int) ($workspaceBooking['id'] ?? 0) . '&reminder_edit=' . (int) ($reminderRow['id'] ?? 0) . '#dock-panel-reminders');
+                            ?>
+                            <tr>
+                                <td>
+                                    <?= e((string) ($reminderRow['type'] ?? 'Reminder')) ?>
+                                    <?php if (!empty($reminderRow['isSystemGenerated'])): ?>
+                                        <br><small>System</small>
+                                    <?php endif; ?>
+                                </td>
+                                <td>
+                                    <?= e((string) ($reminderRow['title'] ?? '')) ?>
+                                    <?php if (trim((string) ($reminderRow['note'] ?? '')) !== ''): ?>
+                                        <br><small><?= e((string) ($reminderRow['note'] ?? '')) ?></small>
+                                    <?php endif; ?>
+                                </td>
+                                <td><?= e((string) ($reminderRow['linkedTo'] ?? 'Booking File')) ?></td>
+                                <td><?= e((string) ($reminderRow['dueAt'] ?? '')) ?></td>
+                                <td><?= e((string) ($reminderRow['channel'] ?? '')) ?></td>
+                                <td><?= e((string) ($reminderRow['status'] ?? 'Open')) ?></td>
+                                <td>
+                                    <div class="legacy-reminder-actions">
+                                        <?php if (empty($reminderRow['isSystemGenerated'])): ?>
+                                            <a class="btn btn-sm" href="<?= e($reminderEditUrl) ?>">Edit</a>
+                                        <?php endif; ?>
+                                        <?php if ($canTransitionReminder): ?>
+                                            <form method="post" action="<?= e(url('/workspace/reminders/complete')) ?>">
+                                                <?= \App\Helpers\Csrf::input() ?>
+                                                <input type="hidden" name="booking_id" value="<?= e((string) ($workspaceBooking['id'] ?? 0)) ?>">
+                                                <input type="hidden" name="reminder_id" value="<?= e((string) ($reminderRow['id'] ?? 0)) ?>">
+                                                <button class="btn btn-sm" type="submit">Complete</button>
+                                            </form>
+                                            <form method="post" action="<?= e(url('/workspace/reminders/dismiss')) ?>">
+                                                <?= \App\Helpers\Csrf::input() ?>
+                                                <input type="hidden" name="booking_id" value="<?= e((string) ($workspaceBooking['id'] ?? 0)) ?>">
+                                                <input type="hidden" name="reminder_id" value="<?= e((string) ($reminderRow['id'] ?? 0)) ?>">
+                                                <button class="btn btn-danger btn-sm" type="submit">Dismiss</button>
+                                            </form>
+                                        <?php else: ?>
+                                            <span class="muted-text">Closed</span>
+                                        <?php endif; ?>
+                                    </div>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="legacy-payment-panel legacy-reminders-panel legacy-reminders-panel--closed">
+            <div class="legacy-payment-panel__title">CLOSED REMINDERS</div>
+            <div class="legacy-payment-panel__body legacy-reminders-panel__body">
+                <table class="legacy-table legacy-reminders-table" data-reminder-closed-table>
+                    <thead>
+                        <tr>
+                            <th>Type</th>
+                            <th>Task</th>
+                            <th>Linked To</th>
+                            <th>Due</th>
+                            <th>Channel</th>
+                            <th>Status</th>
+                            <th>Closed</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php if ($closedReminderRows === []): ?>
+                            <tr><td colspan="7" class="empty-cell">No completed or dismissed reminders yet.</td></tr>
+                        <?php endif; ?>
+                        <?php foreach ($closedReminderRows as $reminderRow): ?>
+                            <tr>
+                                <td>
+                                    <?= e((string) ($reminderRow['type'] ?? 'Reminder')) ?>
+                                    <?php if (!empty($reminderRow['isSystemGenerated'])): ?>
+                                        <br><small>System</small>
+                                    <?php endif; ?>
+                                </td>
+                                <td>
+                                    <?= e((string) ($reminderRow['title'] ?? '')) ?>
+                                    <?php if (trim((string) ($reminderRow['note'] ?? '')) !== ''): ?>
+                                        <br><small><?= e((string) ($reminderRow['note'] ?? '')) ?></small>
+                                    <?php endif; ?>
+                                </td>
+                                <td><?= e((string) ($reminderRow['linkedTo'] ?? 'Booking File')) ?></td>
+                                <td><?= e((string) ($reminderRow['dueAt'] ?? '')) ?></td>
+                                <td><?= e((string) ($reminderRow['channel'] ?? '')) ?></td>
+                                <td><?= e((string) ($reminderRow['status'] ?? 'Closed')) ?></td>
+                                <td><span class="muted-text">Closed</span></td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="legacy-payment-panel legacy-reminders-panel legacy-reminders-panel--alerts">
+            <div class="legacy-payment-panel__title">RECEIVABLE ALERTS</div>
+            <div class="legacy-payment-panel__body legacy-reminders-panel__body">
+                <div
+                    class="legacy-receivable-alerts"
+                    data-receivable-alerts
+                    data-default-scope="<?= e($defaultReceivableAlertScope) ?>"
+                    data-counts-customer="<?= e(json_encode($receivableAlertCountsByScope['customer'] ?? ['total' => 0, 'overdue' => 0, 'dueToday' => 0, 'pending' => 0, 'missingDueDate' => 0], JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?: '{}') ?>"
+                    data-counts-booking="<?= e(json_encode($receivableAlertCountsByScope['booking'] ?? ['total' => 0, 'overdue' => 0, 'dueToday' => 0, 'pending' => 0, 'missingDueDate' => 0], JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?: '{}') ?>"
+                >
+                    <div class="legacy-receivable-alerts__toolbar">
+                        <div class="legacy-receivable-alerts__scope" role="group" aria-label="Receivable alert scope">
+                            <?php foreach ($receivableAlertScopeLabels as $scopeKey => $scopeLabel): ?>
+                                <button
+                                    class="legacy-scope-toggle<?= $defaultReceivableAlertScope === $scopeKey ? ' is-active' : '' ?>"
+                                    type="button"
+                                    data-receivable-alert-scope-toggle
+                                    data-scope="<?= e($scopeKey) ?>"
+                                    aria-pressed="<?= $defaultReceivableAlertScope === $scopeKey ? 'true' : 'false' ?>"
+                                ><?= e($scopeLabel) ?></button>
+                            <?php endforeach; ?>
+                        </div>
+                    </div>
+                <table class="legacy-table legacy-reminders-table" data-receivable-alert-table>
+                    <thead>
+                        <tr>
+                            <th>Status</th>
+                            <th>Booking</th>
+                            <th>Customer</th>
+                            <th>Branch</th>
+                            <th>Outstanding</th>
+                            <th>Due Date</th>
+                            <th>Service</th>
+                            <th>Open</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php if ($receivableAlertRows === []): ?>
+                            <tr data-receivable-alert-empty-row><td colspan="8" class="empty-cell">No receivable alerts right now.</td></tr>
+                        <?php endif; ?>
+                        <?php foreach ($receivableAlertRowsByScope as $scopeKey => $scopeRows): ?>
+                            <?php foreach ($scopeRows as $alertRow): ?>
+                            <tr
+                                data-receivable-alert-row
+                                data-receivable-alert-scope="<?= e($scopeKey) ?>"
+                                class="<?= ! empty($alertRow['isCurrentBooking']) ? 'legacy-reminders-table__row--current-booking' : '' ?>"
+                                <?= $defaultReceivableAlertScope === $scopeKey ? '' : 'hidden' ?>
+                            >
+                                <td><?= e((string) ($alertRow['category'] ?? 'Pending')) ?><br><small><?= e((string) ($alertRow['daysLabel'] ?? '')) ?></small></td>
+                                <td>
+                                    <?= e((string) ($alertRow['bookingReference'] ?? '')) ?>
+                                    <?php if (! empty($alertRow['isCurrentBooking'])): ?>
+                                        <br><small class="legacy-reminders-table__row-flag">Current Booking</small>
+                                    <?php endif; ?>
+                                </td>
+                                <td><?= e((string) ($alertRow['customerName'] ?? '')) ?></td>
+                                <td><?= e((string) ($alertRow['branchName'] ?? '')) ?></td>
+                                <td><?= e((string) ($alertRow['currency'] ?? 'PKR') . ' ' . $formatMoney((float) ($alertRow['outstandingAmount'] ?? 0))) ?></td>
+                                <td><?= e((string) (($alertRow['dueDate'] ?? '') !== '' ? $alertRow['dueDate'] : '-')) ?></td>
+                                <td><?= e((string) (($alertRow['serviceSummary'] ?? '') !== '' ? $alertRow['serviceSummary'] : '-')) ?></td>
+                                <td><a class="btn btn-sm" href="<?= e((string) ($alertRow['openUrl'] ?? '#')) ?>">Open</a></td>
+                            </tr>
+                            <?php endforeach; ?>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <div id="dock-panel-documents" class="legacy-documents-shell">
+        <section class="legacy-payment-panel legacy-documents-panel">
+            <div class="legacy-payment-panel__title">DOCUMENTS</div>
+            <div class="legacy-payment-panel__body legacy-documents-panel__body">
+                <form
+                    method="post"
+                    action="<?= e(url('/workspace/documents/upload')) ?>"
+                    enctype="multipart/form-data"
+                    class="legacy-documents-form<?= $documentsReady ? '' : ' legacy-documents-form--disabled' ?>"
+                    data-documents-upload-form
+                    aria-disabled="<?= $documentsReady ? 'false' : 'true' ?>"
+                >
+                    <?= \App\Helpers\Csrf::input() ?>
+                    <input type="hidden" name="booking_id" value="<?= e((string) ($workspaceBooking['id'] ?? 0)) ?>">
+
+                    <label>
+                        <span>Document Type</span>
+                        <select name="document_type" required data-document-type-select <?= $documentsReady ? '' : 'disabled' ?>>
+                            <?php foreach ($documentTypeOptions as $typeCode => $typeLabel): ?>
+                                <option value="<?= e((string) $typeCode) ?>"><?= e((string) $typeLabel) ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </label>
+
+                    <label class="legacy-documents-form__linked">
+                        <span>Linked To</span>
+                        <select name="linked_target" data-document-target-select <?= $documentsReady ? '' : 'disabled' ?>>
+                            <?php if ($documentLinkTargets === []): ?>
+                                <option value="<?= e('booking:' . (int) ($workspaceBooking['id'] ?? 0)) ?>">Booking File</option>
+                            <?php else: ?>
+                                <?php foreach ($documentLinkTargets as $target): ?>
+                                    <option value="<?= e((string) ($target['value'] ?? '')) ?>"><?= e((string) ($target['label'] ?? 'Booking File')) ?></option>
+                                <?php endforeach; ?>
+                            <?php endif; ?>
+                        </select>
+                    </label>
+
+                    <label class="legacy-documents-form__wide">
+                        <span>Document Title</span>
+                        <input type="text" name="document_title" maxlength="190" required placeholder="Passport front scan / visa page / ticket copy" <?= $documentsReady ? '' : 'disabled' ?>>
+                    </label>
+
+                    <label>
+                        <span>Replace Existing</span>
+                        <select name="replace_document_id" <?= $documentsReady ? '' : 'disabled' ?>>
+                            <option value="0">Add as new document</option>
+                            <?php foreach ($replaceableDocuments as $replaceableDocument): ?>
+                                <option value="<?= e((string) ($replaceableDocument['id'] ?? 0)) ?>">
+                                    <?= e((string) (($replaceableDocument['title'] ?? 'Document') . ' / ' . ($documentTypeOptions[(string) ($replaceableDocument['document_type'] ?? '')] ?? ucwords(str_replace('_', ' ', (string) ($replaceableDocument['document_type'] ?? 'Document')))))) ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </label>
+
+                    <label>
+                        <span>Choose File</span>
+                        <input type="file" name="document_file" accept=".pdf,.jpg,.jpeg,.png,.webp" required data-document-file-input <?= $documentsReady ? '' : 'disabled' ?>>
+                    </label>
+
+                    <label class="legacy-documents-form__wide legacy-documents-form__notes">
+                        <span>Notes</span>
+                        <input type="text" name="document_note" maxlength="4000" placeholder="Optional note about this file" <?= $documentsReady ? '' : 'disabled' ?>>
+                    </label>
+
+                    <div class="workspace-feedback workspace-feedback--inline legacy-documents-form__feedback" data-document-upload-feedback hidden></div>
+
+                    <div class="legacy-documents-form__actions legacy-documents-form__upload-action">
+                        <button class="btn btn-primary btn-sm" type="submit" <?= $documentsReady ? '' : 'disabled' ?>>Upload Document</button>
+                    </div>
+                </form>
+                <script id="workspace-document-target-map" type="application/json"><?= json_encode($documentTargetOptionsByType, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?></script>
+            </div>
+        </section>
+
+        <section class="legacy-payment-panel legacy-documents-panel legacy-documents-panel--register">
+            <div class="legacy-payment-panel__title">CURRENT DOCUMENTS</div>
+            <div class="legacy-payment-panel__body legacy-documents-panel__body">
+                <table class="legacy-table">
+                    <thead>
+                        <tr>
+                            <th>Type</th>
+                            <th>Title</th>
+                            <th>Linked To</th>
+                            <th>File</th>
+                            <th>Size</th>
+                            <th>Status</th>
+                            <th>Updated</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php if ($documentRows === []): ?>
+                            <tr><td colspan="8" class="empty-cell">No documents uploaded yet for this booking.</td></tr>
+                        <?php endif; ?>
+                        <?php foreach ($documentRows as $documentRow): ?>
+                            <?php $documentIsActive = (string) ($documentRow['statusRaw'] ?? 'active') === 'active'; ?>
+                            <tr>
+                                <td><?= e((string) ($documentRow['type'] ?? 'Document')) ?></td>
+                                <td>
+                                    <?= e((string) ($documentRow['title'] ?? '')) ?>
+                                    <?php if (trim((string) ($documentRow['notes'] ?? '')) !== ''): ?>
+                                        <br><small><?= e((string) $documentRow['notes']) ?></small>
+                                    <?php endif; ?>
+                                </td>
+                                <td><?= e((string) ($documentRow['linkedTo'] ?? 'Booking File')) ?></td>
+                                <td><?= e((string) ($documentRow['fileName'] ?? '')) ?></td>
+                                <td><?= e((string) ($documentRow['fileSize'] ?? '')) ?></td>
+                                <td><?= e((string) ($documentRow['status'] ?? 'Active')) ?></td>
+                                <td><?= e((string) ($documentRow['updatedAt'] ?? '')) ?></td>
+                                <td>
+                                    <div class="legacy-documents-actions">
+                                        <?php if ($documentIsActive): ?>
+                                            <a class="btn btn-sm" href="<?= e((string) ($documentRow['downloadUrl'] ?? '#')) ?>">Download</a>
+                                            <form method="post" action="<?= e(url('/workspace/documents/revoke')) ?>" onsubmit="return confirm('Revoke this document from active use?');">
+                                                <?= \App\Helpers\Csrf::input() ?>
+                                                <input type="hidden" name="booking_id" value="<?= e((string) ($workspaceBooking['id'] ?? 0)) ?>">
+                                                <input type="hidden" name="document_id" value="<?= e((string) ($documentRow['id'] ?? 0)) ?>">
+                                                <button class="btn btn-danger btn-sm" type="submit">Revoke</button>
+                                            </form>
+                                        <?php else: ?>
+                                            <span class="muted-text">No action</span>
+                                        <?php endif; ?>
+                                    </div>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </div>
+
     <div class="legacy-bottom-bar">
         <button class="legacy-bottom-button" type="button" data-workspace-action="new-booking">New</button>
         <button class="legacy-bottom-button" type="button" data-workspace-action="edit-booking" data-booking-gated-control <?= $workspaceBooking['id'] > 0 ? '' : 'disabled' ?>>Edit</button>
         <button class="legacy-bottom-button" type="button" data-workspace-action="delete-booking" data-booking-gated-control <?= $workspaceBooking['id'] > 0 ? '' : 'disabled' ?>>Delete</button>
         <button class="legacy-bottom-button" type="button" data-workspace-action="search-booking">Search</button>
+        <button class="legacy-bottom-button" type="button" data-workspace-action="add-reminder">Reminder</button>
         <button class="legacy-bottom-button" type="button" data-workspace-action="print">Print</button>
         <button class="legacy-bottom-button" type="button" data-workspace-action="invoice-status"><?= e($bookingStatusOptions[$workspaceBooking['status']] ?? 'Inv. Status') ?></button>
         <button class="legacy-bottom-button" type="button" data-workspace-action="detail-remarks">Detail Remarks</button>
@@ -1031,7 +1666,7 @@ Kept here in case manual service save is needed again later.
                     <article>
                         <h3>Receipt History</h3>
                         <table class="legacy-table">
-                            <thead><tr><th>Receipt</th><th>Date</th><th>Curr.</th><th>Payment Received</th><th>Applied</th><th>Credit / Return</th><th>Method</th><th>Status</th><th>Print</th><th>Meta Edit</th><th>Void</th><th>Recreate</th></tr></thead>
+                            <thead><tr><th>Receipt</th><th>Date</th><th>Curr.</th><th>Payment Received</th><th>Applied</th><th>Unallocated Credit</th><th>Method</th><th>Status</th><th>Print</th><th>Meta Edit</th><th>Void</th><th>Recreate</th></tr></thead>
                             <tbody data-payment-history-receipts-body>
                             <?php foreach ($customerPaymentFoundation['receipts'] ?? [] as $receiptRow): ?>
                                 <?php $receiptPrintUrl = $workspaceBooking['id'] > 0 ? url('/workspace/output?booking_id=' . $workspaceBooking['id'] . '&doc=customer_receipt&receipt_id=' . (int) ($receiptRow['id'] ?? 0)) : ''; ?>
@@ -1072,7 +1707,10 @@ Kept here in case manual service save is needed again later.
                 <div>
                     <strong id="customer-dues-title">Customer Dues Finder</strong>
                 </div>
-                <button class="btn btn-sm" type="button" data-customer-dues-close>Close</button>
+                <div class="customer-picker-modal__actions">
+                    <a class="btn btn-primary btn-sm" href="<?= e($globalCustomerPaymentUrl) ?>">Global Customer Payment</a>
+                    <button class="btn btn-sm" type="button" data-customer-dues-close>Close</button>
+                </div>
             </header>
             <div class="customer-picker-modal__body">
                 <div class="station-form-grid station-form-grid--6 station-form-grid--inline">
@@ -1113,7 +1751,10 @@ Kept here in case manual service save is needed again later.
                     <strong id="supplier-history-title">Supplier Payment Finder</strong>
                     <span>Search supplier name, supplier code, or booking reference, then open the booking supplier history even if the payable is already fully settled.</span>
                 </div>
-                <button class="btn btn-sm" type="button" data-supplier-history-close>Close</button>
+                <div class="customer-picker-modal__actions">
+                    <a class="btn btn-primary btn-sm" href="<?= e($globalSupplierPaymentUrl) ?>">Global Supplier Payment</a>
+                    <button class="btn btn-sm" type="button" data-supplier-history-close>Close</button>
+                </div>
             </header>
             <div class="customer-picker-modal__body">
                 <div class="station-form-grid station-form-grid--6 station-form-grid--inline">
@@ -1152,9 +1793,10 @@ Kept here in case manual service save is needed again later.
                     <label class="station-field span-6" hidden><span>Settlement Target</span><select data-payment-exchange-target></select></label>
                     <label class="station-field span-2"><span>Target Currency</span><input type="text" value="" readonly data-payment-exchange-target-currency></label>
                     <label class="station-field span-2"><span>Target Balance</span><input type="text" value="" readonly data-payment-exchange-target-balance></label>
-                    <label class="station-field span-2"><span>Payment Currency</span><input type="text" value="" readonly data-payment-exchange-payment-currency></label>
-                    <label class="station-field span-3"><span>Rate Date</span><input type="text" value="<?= e(date('Y-m-d')) ?>" readonly data-payment-exchange-rate-date-display></label>
-                    <label class="station-field span-6" data-payment-exchange-rate-row hidden><span data-payment-exchange-rate-label>Exchange Rate</span><input type="number" step="0.00000001" value="" data-payment-exchange-rate-input></label>
+                    <label class="station-field span-2"><span>Payment Currency</span><select data-payment-exchange-payment-currency><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>"><?= e($currencyOption) ?></option><?php endforeach; ?></select></label>
+                    <label class="station-field span-2"><span>Rate Date</span><input type="text" value="<?= e(date('Y-m-d')) ?>" readonly data-payment-exchange-rate-date-display></label>
+                    <label class="station-field span-2" data-payment-exchange-rate-row hidden><span data-payment-exchange-rate-label>Exchange Rate</span><input type="number" step="0.00000001" value="" data-payment-exchange-rate-input></label>
+                    <label class="station-field span-2" data-payment-exchange-payment-amount-row hidden><span data-payment-exchange-payment-amount-label>Amount to Pay</span><input type="text" value="" readonly data-payment-exchange-payment-amount></label>
                 </div>
                 <div class="workspace-feedback workspace-feedback--inline" data-payment-exchange-rate-help hidden></div>
                 <div class="workspace-feedback workspace-feedback--inline" data-payment-exchange-feedback hidden></div>
@@ -1186,24 +1828,26 @@ Kept here in case manual service save is needed again later.
                         <div class="legacy-highlight-strip">
                             <div class="legacy-highlight legacy-highlight--red"><span>Total Supplier Payable</span><strong><?= e($formatCurrencyTotals($supplierGrossTotals)) ?></strong></div>
                             <div class="legacy-highlight legacy-highlight--orange"><span>Advance Used</span><strong><?= e($formatCurrencyTotals($supplierAdvanceAppliedTotals)) ?></strong></div>
+                            <div class="legacy-highlight legacy-highlight--green"><span>Prepaid Available</span><strong><?= e($formatCurrencyTotals($supplierAdvanceBalanceTotals)) ?></strong></div>
                             <div class="legacy-highlight legacy-highlight--pink"><span>Paid to Supplier</span><strong><?= e($formatCurrencyTotals($supplierPaidTotals)) ?></strong></div>
                             <div class="legacy-highlight legacy-highlight--red"><span>Supplier Balance</span><strong><?= e($formatCurrencyTotals($supplierOutstandingTotals)) ?></strong></div>
                         </div>
                         <table class="legacy-table">
-                            <thead><tr><th>Code</th><th>Supplier</th><th>Mode</th><th>Curr.</th><th>Gross</th><th>Paid</th><th>Balance</th></tr></thead>
+                            <thead><tr><th>Code</th><th>Supplier</th><th>Mode</th><th>Curr.</th><th>Gross</th><th>Prepaid Available</th><th>Paid</th><th>Balance</th></tr></thead>
                             <tbody>
                             <?php foreach (($supplierFoundation['suppliers'] ?? []) as $supplierRow): ?>
                                 <tr>
                                     <td><?= e((string) ($supplierRow['code'] ?? '')) ?></td>
                                     <td><?= e((string) ($supplierRow['name'] ?? '')) ?></td>
-                                    <td><?= e((string) (($supplierRow['mode'] ?? '') === 'running_balance' ? 'Running Balance' : 'Normal Payable')) ?></td>
+                                    <td><?= e((string) ($supplierModeOptions[(string) ($supplierRow['mode'] ?? '')] ?? ucwords(str_replace('_', ' ', (string) ($supplierRow['mode'] ?? ''))))) ?></td>
                                     <td><?= e((string) ($supplierRow['currency'] ?? '')) ?></td>
                                     <td><?= e($formatMoney((float) ($supplierRow['grossObligation'] ?? 0))) ?></td>
+                                    <td><?= e($formatMoney((float) ($supplierRow['advanceBalance'] ?? 0))) ?></td>
                                     <td><?= e($formatMoney((float) ($supplierRow['totalPaid'] ?? 0))) ?></td>
                                     <td><?= e($formatMoney((float) ($supplierRow['balanceDue'] ?? 0))) ?></td>
                                 </tr>
                             <?php endforeach; ?>
-                            <?php if (($supplierFoundation['suppliers'] ?? []) === []): ?><tr><td colspan="7" class="empty-cell">No suppliers linked to this invoice yet.</td></tr><?php endif; ?>
+                            <?php if (($supplierFoundation['suppliers'] ?? []) === []): ?><tr><td colspan="8" class="empty-cell">No suppliers linked to this invoice yet.</td></tr><?php endif; ?>
                             </tbody>
                         </table>
                     </article>
@@ -1241,9 +1885,10 @@ Kept here in case manual service save is needed again later.
                         <form method="post" action="<?= e(url('/workspace/suppliers/payments/simple-save')) ?>" data-simple-postpaid-form>
                             <?= \App\Helpers\Csrf::input() ?>
                             <input type="hidden" name="booking_id" value="<?= e((string) $workspaceBooking['id']) ?>">
+                            <input type="hidden" name="branch_id" value="<?= e((string) $workspaceBooking['branchId']) ?>">
                             <input type="hidden" name="supplier_payment_currency" value="" data-simple-postpaid-currency-input>
                             <table class="legacy-table top-gap">
-                                <thead><tr><th>Select</th><th>Supplier</th><th>Svc Line</th><th>Curr.</th><th>Due</th><th>Outstanding</th></tr></thead>
+                                <thead><tr><th><label class="global-settlement-select-all">Select <input type="checkbox" data-simple-postpaid-select-all aria-label="Select all supplier payable rows"></label></th><th>Supplier</th><th>Svc Line</th><th>Curr.</th><th>Due</th><th>Outstanding</th></tr></thead>
                                 <tbody>
                                 <?php foreach (($supplierFoundation['openObligations'] ?? []) as $openObligation): ?>
                                     <tr>
@@ -1264,7 +1909,8 @@ Kept here in case manual service save is needed again later.
                                 <label class="station-field span-2"><span>Date</span><input type="date" name="supplier_payment_date" value="<?= e($supplierDraftDate) ?>"></label>
                                 <label class="station-field span-1"><span>Currency</span><input type="text" value="" data-simple-postpaid-currency-display readonly placeholder="--"></label>
                                 <label class="station-field span-2"><span>Amount</span><input type="number" step="0.01" name="supplier_paid_amount" value="<?= e($supplierDraftAmount) ?>" data-simple-postpaid-amount></label>
-                                <label class="station-field span-2"><span>Method</span><select name="supplier_payment_method"><?php foreach (['cash' => 'Cash', 'bank_transfer' => 'Bank Transfer', 'debit_card' => 'Debit Card', 'credit_card' => 'Credit Card'] as $paymentMethodValue => $paymentMethodLabel): ?><option value="<?= e($paymentMethodValue) ?>" <?= $supplierDraftMethod === $paymentMethodValue ? 'selected' : '' ?>><?= e($paymentMethodLabel) ?></option><?php endforeach; ?></select></label>
+                                <label class="station-field span-2"><span>Method</span><select name="supplier_payment_method"><?php foreach ($paymentMethodOptions as $paymentMethodValue => $paymentMethodLabel): ?><option value="<?= e((string) $paymentMethodValue) ?>" <?= $supplierDraftMethod === (string) $paymentMethodValue ? 'selected' : '' ?>><?= e((string) $paymentMethodLabel) ?></option><?php endforeach; ?></select></label>
+                                <label class="station-field span-2" data-supplier-treasury-row hidden><span>Source Account</span><select name="supplier_treasury_account_id" data-supplier-treasury-select><option value="">Select account</option></select></label>
                                 <label class="station-field span-2"><span>Reference</span><input type="text" name="supplier_reference_number" value="<?= e($supplierDraftReferenceNumber) ?>"></label>
                                 <label class="station-field span-3"><span>Bank / Card Detail</span><input type="text" name="supplier_bank_card_detail" value="<?= e($supplierDraftBankCardDetail) ?>"></label>
                                 <label class="station-field span-3"><span>Remarks</span><input type="text" name="supplier_payment_remarks" value="<?= e($supplierDraftRemarks) ?>"></label>
@@ -1291,12 +1937,14 @@ Kept here in case manual service save is needed again later.
                                     <form method="post" action="<?= e(url('/workspace/suppliers/payments/save')) ?>">
                                         <?= \App\Helpers\Csrf::input() ?>
                                         <input type="hidden" name="booking_id" value="<?= e((string) $workspaceBooking['id']) ?>">
+                                        <input type="hidden" name="branch_id" value="<?= e((string) $workspaceBooking['branchId']) ?>">
                                         <div class="station-form-grid station-form-grid--6 station-form-grid--inline">
                                             <label class="station-field span-2"><span>Supplier</span><input type="text" name="supplier_name" list="service-supplier-options" value="<?= e($supplierDraftName) ?>"></label>
                                             <label class="station-field span-2"><span>Date</span><input type="date" name="supplier_payment_date" value="<?= e($supplierDraftDate) ?>"></label>
                                             <label class="station-field span-2"><span>Currency</span><select name="supplier_payment_currency"><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>" <?= $supplierDraftCurrency === $currencyOption ? 'selected' : '' ?>><?= e($currencyOption) ?></option><?php endforeach; ?></select></label>
                                             <label class="station-field span-2"><span>Amount</span><input type="number" step="0.01" name="supplier_paid_amount" value="<?= e($supplierDraftAmount) ?>"></label>
-                                            <label class="station-field span-2"><span>Method</span><select name="supplier_payment_method"><?php foreach (['cash' => 'Cash', 'bank_transfer' => 'Bank Transfer', 'debit_card' => 'Debit Card', 'credit_card' => 'Credit Card'] as $paymentMethodValue => $paymentMethodLabel): ?><option value="<?= e($paymentMethodValue) ?>" <?= $supplierDraftMethod === $paymentMethodValue ? 'selected' : '' ?>><?= e($paymentMethodLabel) ?></option><?php endforeach; ?></select></label>
+                                            <label class="station-field span-2"><span>Method</span><select name="supplier_payment_method"><?php foreach ($paymentMethodOptions as $paymentMethodValue => $paymentMethodLabel): ?><option value="<?= e((string) $paymentMethodValue) ?>" <?= $supplierDraftMethod === (string) $paymentMethodValue ? 'selected' : '' ?>><?= e((string) $paymentMethodLabel) ?></option><?php endforeach; ?></select></label>
+                                            <label class="station-field span-2" data-supplier-treasury-row hidden><span>Source Account</span><select name="supplier_treasury_account_id" data-supplier-treasury-select><option value="">Select account</option></select></label>
                                             <label class="station-field span-2"><span>Status</span><select name="supplier_payment_status"><option value="paid">Paid</option><?php if ($canPostServiceEvents): ?><option value="void">Void</option><?php endif; ?></select></label>
                                             <label class="station-field span-3"><span>Reference</span><input type="text" name="supplier_reference_number" value="<?= e($supplierDraftReferenceNumber) ?>"></label>
                                             <label class="station-field span-3"><span>Bank / Card Detail</span><input type="text" name="supplier_bank_card_detail" value="<?= e($supplierDraftBankCardDetail) ?>"></label>
@@ -1333,13 +1981,41 @@ Kept here in case manual service save is needed again later.
                                     <div class="station-command-buttons top-gap"><button class="btn btn-sm" type="submit" data-booking-gated-control <?= $workspaceBooking['id'] > 0 ? '' : 'disabled' ?>>Allocate Supplier Payment</button></div>
                                     </form>
                                 </article>
+                                <article>
+                                    <h3>Use Different-Currency Supplier Advance</h3>
+                                    <form method="post" action="<?= e(url('/workspace/suppliers/advances/apply-fx')) ?>" onsubmit="return confirm('Use a supplier advance in a different currency? Confirm the exact rate before posting.');">
+                                        <?= \App\Helpers\Csrf::input() ?>
+                                        <input type="hidden" name="booking_id" value="<?= e((string) $workspaceBooking['id']) ?>">
+                                        <div class="station-form-grid station-form-grid--6 station-form-grid--inline">
+                                            <label class="station-field span-3"><span>Payable to Cover</span><select name="supplier_obligation_id">
+                                                <?php foreach (($supplierFoundation['openObligations'] ?? []) as $openObligation): ?>
+                                                    <?php if ((float) ($openObligation['netPayableAmount'] ?? 0) > 0): ?>
+                                                        <option value="<?= e((string) ($openObligation['id'] ?? 0)) ?>"><?= e((string) (($openObligation['supplier'] ?? '') . ' / ' . ($openObligation['serviceLineReference'] ?? '') . ' / ' . ($openObligation['currency'] ?? '') . ' ' . $formatMoney((float) ($openObligation['netPayableAmount'] ?? 0)))) ?></option>
+                                                    <?php endif; ?>
+                                                <?php endforeach; ?>
+                                            </select></label>
+                                            <label class="station-field span-3"><span>Advance to Use</span><select name="supplier_advance_id">
+                                                <?php foreach (($supplierFoundation['advances'] ?? []) as $advanceRow): ?>
+                                                    <?php if ((float) ($advanceRow['availableAmount'] ?? 0) > 0): ?>
+                                                        <option value="<?= e((string) ($advanceRow['id'] ?? 0)) ?>"><?= e((string) (($advanceRow['supplier'] ?? '') . ' / ' . ($advanceRow['currency'] ?? '') . ' available ' . $formatMoney((float) ($advanceRow['availableAmount'] ?? 0)))) ?></option>
+                                                    <?php endif; ?>
+                                                <?php endforeach; ?>
+                                            </select></label>
+                                            <label class="station-field span-2"><span>Amount to Cover</span><input type="number" step="0.01" name="advance_apply_amount" value="0.00"></label>
+                                            <label class="station-field span-2"><span>Rate Date</span><input type="date" name="exchange_rate_effective_date" value="<?= e(date('Y-m-d')) ?>"></label>
+                                            <label class="station-field span-2"><span>Rate</span><input type="number" step="0.00000001" name="exchange_rate" value="0.00000000" placeholder="1 advance = payable"></label>
+                                            <label class="station-field span-6"><span>Note</span><input type="text" name="application_note" value="" placeholder="Example: Approved AED advance use for PKR payable"></label>
+                                        </div>
+                                        <div class="station-command-buttons top-gap"><button class="btn btn-sm" type="submit" data-booking-gated-control <?= $workspaceBooking['id'] > 0 ? '' : 'disabled' ?>>Apply Different-Currency Advance</button></div>
+                                    </form>
+                                </article>
                             </div>
                         </details>
                     </article>
                     <article>
                         <h3>Supplier Payments</h3>
                         <table class="legacy-table">
-                            <thead><tr><th>Payment No.</th><th>Supplier</th><th>Date</th><th>Curr.</th><th>Paid</th><th>Allocated</th><th>Open</th><th>Status</th><th>Print</th><th>Meta Edit</th><th>Void</th><th>Recreate</th></tr></thead>
+                            <thead><tr><th>Payment No.</th><th>Supplier</th><th>Date</th><th>Curr.</th><th>Paid</th><th>Allocated</th><th>Open</th><th>Source</th><th>Status</th><th>Print</th><th>Meta Edit</th><th>Void</th><th>Recreate</th></tr></thead>
                             <tbody>
                             <?php foreach (($supplierFoundation['payments'] ?? []) as $paymentRow): ?>
                                 <?php
@@ -1357,6 +2033,7 @@ Kept here in case manual service save is needed again later.
                                     <td><?= e($formatMoney((float) ($paymentRow['paidAmount'] ?? 0))) ?></td>
                                     <td><?= e($formatMoney((float) ($paymentRow['allocatedAmount'] ?? 0))) ?></td>
                                     <td><?= e($formatMoney((float) ($paymentRow['unallocatedAmount'] ?? 0))) ?></td>
+                                    <td><?= e((string) (($paymentRow['treasuryAccountName'] ?? '') !== '' ? $paymentRow['treasuryAccountName'] : ucwords(str_replace('_', ' ', (string) ($paymentRow['paymentMethod'] ?? ''))))) ?></td>
                                     <td><?= e($formatStatusLabel((string) ($paymentRow['statusRaw'] ?? $paymentRow['status'] ?? ''))) ?></td>
                                     <td><?php if ($supplierPaymentPrintUrl !== ''): ?><a href="<?= e($supplierPaymentPrintUrl) ?>" target="_blank" rel="noopener">Print</a><?php else: ?>-<?php endif; ?></td>
                                     <td><form method="post" action="<?= e(url('/workspace/suppliers/payments/metadata-save')) ?>" style="display:grid;gap:6px;min-width:190px;"><?= \App\Helpers\Csrf::input() ?><input type="hidden" name="booking_id" value="<?= e((string) ($workspaceBooking['id'] ?? 0)) ?>"><input type="hidden" name="supplier_payment_id" value="<?= e((string) ($paymentRow['id'] ?? 0)) ?>"><input type="text" name="supplier_reference_number" value="<?= e((string) ($paymentRow['referenceNumber'] ?? '')) ?>" placeholder="Reference" maxlength="100"><input type="text" name="supplier_bank_card_detail" value="<?= e((string) ($paymentRow['bankCardDetail'] ?? '')) ?>" placeholder="Bank / Card detail" maxlength="190"><input type="text" name="supplier_payment_remarks" value="<?= e((string) ($paymentRow['remarks'] ?? '')) ?>" placeholder="Remarks" maxlength="4000"><button class="btn btn-sm" type="submit">Save Notes</button></form></td>
@@ -1364,7 +2041,7 @@ Kept here in case manual service save is needed again later.
                                     <td><?php if ($supplierPaymentStatusRaw === 'void'): ?><a class="btn btn-sm" href="<?= e($supplierPaymentRecreateUrl) ?>">Recreate</a><?php else: ?>-<?php endif; ?></td>
                                 </tr>
                             <?php endforeach; ?>
-                            <?php if (($supplierFoundation['payments'] ?? []) === []): ?><tr><td colspan="12" class="empty-cell">No supplier payments recorded for this invoice yet.</td></tr><?php endif; ?>
+                            <?php if (($supplierFoundation['payments'] ?? []) === []): ?><tr><td colspan="13" class="empty-cell">No supplier payments recorded for this invoice yet.</td></tr><?php endif; ?>
                             </tbody>
                         </table>
                     </article>
@@ -1376,7 +2053,7 @@ Kept here in case manual service save is needed again later.
     <section class="customer-picker-modal customer-picker-modal--child" data-global-prepaid-supplier-modal hidden aria-hidden="true">
         <div class="customer-picker-modal__backdrop" data-global-prepaid-supplier-close></div>
         <div class="customer-picker-modal__dialog global-prepaid-supplier-modal" role="dialog" aria-modal="true" aria-labelledby="global-prepaid-supplier-title">
-            <header class="customer-picker-modal__header">
+            <header class="customer-picker-modal__header global-prepaid-supplier-modal__header">
                 <div>
                     <strong id="global-prepaid-supplier-title">Prepaid Supplier Payment</strong>
                 </div>
@@ -1390,7 +2067,16 @@ Kept here in case manual service save is needed again later.
                             <?= \App\Helpers\Csrf::input() ?>
                             <div class="station-form-grid station-form-grid--6 station-form-grid--inline">
                                 <label class="station-field span-2"><span>Branch</span><select name="branch_id" data-global-prepaid-branch><?php foreach ($branchOptions as $branchRow): ?><option value="<?= e((string) $branchRow['id']) ?>" <?= (int) $branchRow['id'] === $globalPrepaidDefaultBranchId ? 'selected' : '' ?>><?= e((string) $branchRow['name']) ?></option><?php endforeach; ?></select></label>
-                                <label class="station-field span-2"><span>Supplier</span><input type="text" name="supplier_name" list="service-supplier-options" value="" data-global-prepaid-supplier></label>
+                                <label class="station-field span-2"><span>Supplier</span><select name="supplier_name" data-global-prepaid-supplier>
+                                    <option value="">Select supplier</option>
+                                    <?php foreach ($serviceSupplierOptions as $supplierOption): ?>
+                                        <?php $supplierOptionName = trim((string) ($supplierOption['name'] ?? '')); ?>
+                                        <?php if ($supplierOptionName !== ''): ?>
+                                            <option value="<?= e($supplierOptionName) ?>"><?= e($supplierOptionName) ?></option>
+                                        <?php endif; ?>
+                                    <?php endforeach; ?>
+                                    <option value="__add_supplier__">+ Add new supplier...</option>
+                                </select></label>
                                 <label class="station-field span-2"><span>Currency</span><select name="advance_currency" data-global-prepaid-currency><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>"><?= e($currencyOption) ?></option><?php endforeach; ?></select></label>
                                 <label class="station-field span-2"><span>Payment Date</span><input type="date" name="advance_date" value="<?= e(date('Y-m-d')) ?>"></label>
                                 <label class="station-field span-2"><span>Advance Amount</span><input type="number" step="0.01" name="advance_amount" value="0.00" data-global-prepaid-amount></label>
@@ -1411,21 +2097,21 @@ Kept here in case manual service save is needed again later.
 
     <section class="customer-picker-modal customer-picker-modal--child" data-new-customer-modal hidden aria-hidden="true">
         <div class="customer-picker-modal__backdrop" data-new-customer-close onclick="return window.workspaceCloseStandaloneEditCustomerModal && window.workspaceCloseStandaloneEditCustomerModal(event)"></div>
-        <div class="customer-picker-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="new-customer-title">
-            <header class="customer-picker-modal__header">
+        <div class="customer-picker-modal__dialog new-customer-modal" role="dialog" aria-modal="true" aria-labelledby="new-customer-title">
+            <header class="customer-picker-modal__header new-customer-modal__header">
                 <div>
                     <strong id="new-customer-title" data-new-customer-title>New Customer</strong>
                     <span>Create the customer profile first, then continue booking with it.</span>
                 </div>
                 <button class="btn btn-sm" type="button" data-new-customer-close onclick="return window.workspaceCloseStandaloneEditCustomerModal && window.workspaceCloseStandaloneEditCustomerModal(event)">Close</button>
             </header>
-            <div class="customer-picker-modal__body">
-                <form method="post" action="<?= e(url('/workspace/travelers/save')) ?>" data-new-customer-form>
+            <div class="customer-picker-modal__body new-customer-modal__body">
+                <form method="post" action="<?= e(url('/workspace/travelers/save')) ?>" class="new-customer-form" data-new-customer-form>
                     <?= \App\Helpers\Csrf::input() ?>
                     <input type="hidden" name="booking_id" value="0">
                     <input type="hidden" name="traveler_id" value="0" data-new-customer-traveler-id>
                     <input type="hidden" name="traveler_role" value="lead">
-                    <div class="station-form-grid station-form-grid--6 station-form-grid--inline">
+                    <div class="station-form-grid station-form-grid--6 station-form-grid--inline new-customer-grid">
                         <label class="station-field span-2"><span>Branch</span><select name="traveler_branch_id"><?php foreach ($branchOptions as $branchRow): ?><option value="<?= e((string) $branchRow['id']) ?>" <?= (int) $branchRow['id'] === (int) $workspaceBooking['branchId'] ? 'selected' : '' ?>><?= e((string) $branchRow['name']) ?></option><?php endforeach; ?></select></label>
                         <label class="station-field span-2"><span>First Name</span><input type="text" name="first_name" value="" data-new-customer-focus></label>
                         <label class="station-field span-2"><span>Family Name</span><input type="text" name="last_name" value=""></label>
@@ -1445,8 +2131,9 @@ Kept here in case manual service save is needed again later.
                         <input type="hidden" name="address" value="">
                         <label class="station-field station-field--top span-6"><span>Description</span><textarea rows="4" name="notes"></textarea></label>
                     </div>
-                    <div class="station-command-buttons top-gap">
+                    <div class="station-command-buttons top-gap new-customer-actions">
                         <button class="btn btn-primary btn-sm" type="submit" data-new-customer-submit>Save Customer</button>
+                        <button class="btn btn-sm" type="button" data-offline-action="save-customer" hidden>Save Customer Offline</button>
                         <button class="btn btn-sm" type="button" data-new-customer-close onclick="return window.workspaceCloseStandaloneEditCustomerModal && window.workspaceCloseStandaloneEditCustomerModal(event)">Cancel</button>
                     </div>
                 </form>
@@ -1454,22 +2141,22 @@ Kept here in case manual service save is needed again later.
         </div>
     </section>
 
-    <section class="customer-picker-modal" data-customer-picker hidden aria-hidden="true">
+    <section class="customer-picker-modal customer-finder-modal" data-customer-picker hidden aria-hidden="true">
         <div class="customer-picker-modal__backdrop" data-customer-picker-close onclick="return window.workspaceCloseStandaloneCustomerModal && window.workspaceCloseStandaloneCustomerModal(event)"></div>
-        <div class="customer-picker-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="customer-picker-title">
-            <header class="customer-picker-modal__header">
+        <div class="customer-picker-modal__dialog customer-finder-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="customer-picker-title">
+            <header class="customer-picker-modal__header customer-finder-modal__header">
                 <div>
                     <strong id="customer-picker-title">Find Customer</strong>
-                    <span>Search live and press Enter on the selected row.</span>
+                    <span>Search customer profiles</span>
                 </div>
                 <button class="btn btn-sm" type="button" data-customer-picker-close onclick="return window.workspaceCloseStandaloneCustomerModal && window.workspaceCloseStandaloneCustomerModal(event)">Close</button>
             </header>
-            <div class="customer-picker-modal__body">
-                <label class="station-field station-field--full">
+            <div class="customer-picker-modal__body customer-finder-modal__body">
+                <label class="station-field station-field--full customer-finder-modal__search">
                     <span>Search</span>
                     <input type="text" value="" placeholder="Name / family ID / passport / phone / village / district" data-customer-picker-input oninput="window.workspaceHandleStandaloneCustomerModalInput && window.workspaceHandleStandaloneCustomerModalInput(this)" onkeydown="window.workspaceHandleStandaloneCustomerModalKeydown && window.workspaceHandleStandaloneCustomerModalKeydown(event, this)">
                 </label>
-                <div class="dense-table-wrap top-gap">
+                <div class="dense-table-wrap customer-finder-modal__table">
                     <table class="dense-table customer-picker-table">
                         <thead><tr><th>Name</th><th>Family ID</th><th>Passport</th><th>Phone</th><th>Location</th><th>Color</th><th>Action</th></tr></thead>
                         <tbody data-customer-picker-results></tbody>
@@ -1488,6 +2175,11 @@ Kept here in case manual service save is needed again later.
     <script id="workspace-payment-allocations-data" type="application/json"><?= $paymentAllocationsJson ?></script>
     <script id="workspace-payment-treasury-accounts-data" type="application/json"><?= $paymentTreasuryAccountsJson ?></script>
     <script id="workspace-service-suppliers-data" type="application/json"><?= $serviceSupplierOptionsJson ?></script>
+    <script id="workspace-branch-options-data" type="application/json"><?= json_encode(array_map(static fn (array $branch): array => [
+        'id' => (int) ($branch['id'] ?? 0),
+        'name' => (string) ($branch['name'] ?? ''),
+        'baseCurrency' => strtoupper(trim((string) ($branch['base_currency'] ?? 'PKR'))) ?: 'PKR',
+    ], $branchOptions), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?: '[]' ?></script>
     <script>
         (function () {
             var init = function () {
@@ -1882,6 +2574,12 @@ Kept here in case manual service save is needed again later.
                         return;
                     }
 
+                    if (typeof window.workspaceLoadCustomerIntoFreshInvoice === 'function') {
+                        window.workspaceLoadCustomerIntoFreshInvoice(customer);
+                        closeModal();
+                        return;
+                    }
+
                     station.dataset.hasSelectedCustomer = '1';
                     if (selectedCustomerId) {
                         selectedCustomerId.value = String(customer.id || '');
@@ -2098,6 +2796,11 @@ Kept here in case manual service save is needed again later.
                         event.stopPropagation();
                     }
 
+                    if (typeof window.workspaceStartFreshInvoiceForCustomerAction === 'function'
+                        && window.workspaceStartFreshInvoiceForCustomerAction('find-customer')) {
+                        return false;
+                    }
+
                     openModal();
                     return false;
                 };
@@ -2110,6 +2813,11 @@ Kept here in case manual service save is needed again later.
                         event.stopImmediatePropagation();
                     } else if (event && typeof event.stopPropagation === 'function') {
                         event.stopPropagation();
+                    }
+
+                    if (typeof window.workspaceStartFreshInvoiceForCustomerAction === 'function'
+                        && window.workspaceStartFreshInvoiceForCustomerAction('new-customer')) {
+                        return false;
                     }
 
                     openNewCustomerModal();
@@ -2189,12 +2897,20 @@ Kept here in case manual service save is needed again later.
                 findButton.addEventListener('click', function (event) {
                     event.preventDefault();
                     event.stopImmediatePropagation();
+                    if (typeof window.workspaceStartFreshInvoiceForCustomerAction === 'function'
+                        && window.workspaceStartFreshInvoiceForCustomerAction('find-customer')) {
+                        return;
+                    }
                     openModal();
                 }, true);
 
                 newCustomerButton.addEventListener('click', function (event) {
                     event.preventDefault();
                     event.stopImmediatePropagation();
+                    if (typeof window.workspaceStartFreshInvoiceForCustomerAction === 'function'
+                        && window.workspaceStartFreshInvoiceForCustomerAction('new-customer')) {
+                        return;
+                    }
                     openNewCustomerModal();
                 }, true);
 
@@ -2518,14 +3234,6 @@ Kept here in case manual service save is needed again later.
             };
 
             var getInvoiceDueAmount = function () {
-                if (currentBalanceInput) {
-                    var liveCurrentBalance = parseAmount(currentBalanceInput.value);
-
-                    if (liveCurrentBalance > 0.005) {
-                        return liveCurrentBalance;
-                    }
-                }
-
                 if (totalOutstandingInput) {
                     var totalOutstanding = parseAmount(
                         totalOutstandingInput.getAttribute('data-payment-total-due-now')
@@ -2535,6 +3243,14 @@ Kept here in case manual service save is needed again later.
 
                     if (totalOutstanding > 0.005) {
                         return totalOutstanding;
+                    }
+                }
+
+                if (currentBalanceInput) {
+                    var liveCurrentBalance = parseAmount(currentBalanceInput.value);
+
+                    if (liveCurrentBalance > 0.005) {
+                        return liveCurrentBalance;
                     }
                 }
 
@@ -2622,6 +3338,146 @@ Kept here in case manual service save is needed again later.
         }
 
         initPartialPaymentDueDatePicker();
+    })();
+</script>
+<script>
+    (function () {
+        var initWorkspaceDocumentsPanel = function () {
+            var station = document.querySelector('[data-workspace-station]');
+
+            if (!station || station.dataset.documentsPanelInit === '1') {
+                return;
+            }
+
+            station.dataset.documentsPanelInit = '1';
+
+            var bookingIdFields = station.querySelectorAll('input[name="booking_id"]');
+            var documentsForm = station.querySelector('[data-documents-upload-form]');
+            var pendingMessage = station.querySelector('[data-documents-pending-message]');
+            var disabledNote = station.querySelector('[data-documents-disabled-note]');
+            var documentTypeField = station.querySelector('[data-document-type-select]');
+            var linkedTargetField = station.querySelector('[data-document-target-select]');
+            var uploadButton = documentsForm ? documentsForm.querySelector('button[type="submit"]') : null;
+            var targetMapNode = station.querySelector('#workspace-document-target-map');
+            var documentTargetMap = {};
+
+            if (targetMapNode && targetMapNode.textContent) {
+                try {
+                    documentTargetMap = JSON.parse(targetMapNode.textContent) || {};
+                } catch (error) {
+                    documentTargetMap = {};
+                }
+            }
+
+            if (!documentsForm) {
+                return;
+            }
+
+            var syncDocumentTargets = function () {
+                if (!(documentTypeField instanceof HTMLSelectElement) || !(linkedTargetField instanceof HTMLSelectElement)) {
+                    return;
+                }
+
+                var documentType = String(documentTypeField.value || '').trim();
+                var allowedTargets = Array.isArray(documentTargetMap[documentType]) ? documentTargetMap[documentType] : [];
+                var previousValue = String(linkedTargetField.value || '').trim();
+                linkedTargetField.innerHTML = '';
+
+                if (allowedTargets.length === 0) {
+                    var emptyOption = document.createElement('option');
+                    emptyOption.value = '';
+                    emptyOption.textContent = 'No valid linked record is available for this document type';
+                    linkedTargetField.appendChild(emptyOption);
+                    linkedTargetField.disabled = true;
+                    if (uploadButton && documentsForm.getAttribute('aria-disabled') !== 'true') {
+                        uploadButton.disabled = true;
+                    }
+                    return;
+                }
+
+                allowedTargets.forEach(function (target, index) {
+                    var option = document.createElement('option');
+                    option.value = String(target && target.value ? target.value : '');
+                    option.textContent = String(target && target.label ? target.label : 'Booking File');
+                    if (previousValue !== '' ? option.value === previousValue : index === 0) {
+                        option.selected = true;
+                    }
+                    linkedTargetField.appendChild(option);
+                });
+
+                linkedTargetField.disabled = documentsForm.getAttribute('aria-disabled') === 'true';
+                if (uploadButton && documentsForm.getAttribute('aria-disabled') !== 'true') {
+                    uploadButton.disabled = false;
+                }
+            };
+
+            var syncDocumentsState = function (bookingId) {
+                var normalizedBookingId = parseInt(String(bookingId || '0'), 10) || 0;
+                var isReady = normalizedBookingId > 0;
+
+                bookingIdFields.forEach(function (field) {
+                    if (field instanceof HTMLInputElement && field.form === documentsForm) {
+                        field.value = String(normalizedBookingId || 0);
+                    }
+                });
+
+                documentsForm.classList.toggle('legacy-documents-form--disabled', !isReady);
+                documentsForm.setAttribute('aria-disabled', isReady ? 'false' : 'true');
+
+                if (pendingMessage) {
+                    pendingMessage.hidden = isReady;
+                    pendingMessage.style.display = isReady ? 'none' : 'block';
+                }
+
+                if (disabledNote) {
+                    disabledNote.hidden = isReady;
+                }
+
+                documentsForm.querySelectorAll('input, select, textarea, button').forEach(function (field) {
+                    if (!(field instanceof HTMLElement)) {
+                        return;
+                    }
+
+                    if (field instanceof HTMLInputElement && field.type === 'hidden') {
+                        return;
+                    }
+
+                    if ('disabled' in field) {
+                        field.disabled = !isReady;
+                    }
+                });
+
+                syncDocumentTargets();
+            };
+
+            var currentBookingId = 0;
+            bookingIdFields.forEach(function (field) {
+                if (!(field instanceof HTMLInputElement)) {
+                    return;
+                }
+
+                var value = parseInt(String(field.value || '0'), 10) || 0;
+                if (value > currentBookingId) {
+                    currentBookingId = value;
+                }
+            });
+
+            syncDocumentsState(currentBookingId);
+            if (documentTypeField instanceof HTMLSelectElement) {
+                documentTypeField.addEventListener('change', syncDocumentTargets);
+            }
+
+            station.addEventListener('workspace:booking-synced', function (event) {
+                syncDocumentsState(event && event.detail ? event.detail.booking_id : 0);
+            });
+        };
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initWorkspaceDocumentsPanel, { once: true });
+            return;
+        }
+
+        initWorkspaceDocumentsPanel();
     })();
 </script>
 </section>

@@ -16,6 +16,7 @@ use App\Core\Router;
 use App\Middleware\AuthMiddleware;
 use App\Middleware\FinancialAdminMiddleware;
 use App\Middleware\GuestMiddleware;
+use App\Middleware\LauncherGateMiddleware;
 use App\Middleware\PasswordChangeRequiredMiddleware;
 use App\Middleware\SuperAdminMiddleware;
 use App\Middleware\TwoFactorSetupRequiredMiddleware;
@@ -29,6 +30,10 @@ require BASE_PATH . '/app/Core/bootstrap.php';
 $app = App::bootstrap(BASE_PATH);
 app_send_security_headers();
 $router = new Router($app);
+$requestPath = app_path(parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/');
+if ($requestPath !== '/health') {
+    (new LauncherGateMiddleware($app))->handle();
+}
 
 $router->get('/health', [HealthController::class, 'show']);
 $router->get('/', [DashboardController::class, 'index'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class]);
@@ -59,10 +64,16 @@ $router->get('/expenses/attachment/download', [ControlController::class, 'downlo
 $router->get('/reports', [ReportsController::class, 'index'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class]);
 $router->get('/reports/export.csv', [ReportsController::class, 'exportCsv'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class]);
 $router->get('/reports/supplier-prepaid-receipt', [ReportsController::class, 'supplierPrepaidReceipt'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class]);
+$router->get('/suppliers/settlements/global', [ReportsController::class, 'globalSupplierSettlement'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class]);
+$router->post('/suppliers/settlements/global', [ReportsController::class, 'saveGlobalSupplierSettlement'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class]);
+$router->get('/customers/settlements/global', [ReportsController::class, 'globalCustomerSettlement'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class]);
+$router->post('/customers/settlements/global', [ReportsController::class, 'saveGlobalCustomerSettlement'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class]);
 $router->post('/master-data/save', [ControlController::class, 'saveMasterData'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class, SuperAdminMiddleware::class]);
 $router->post('/master-data/delete', [ControlController::class, 'deleteMasterData'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class, SuperAdminMiddleware::class]);
 $router->post('/accounting-engine/save', [ControlController::class, 'saveAccountingEngine'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class, SuperAdminMiddleware::class]);
 $router->post('/treasury/accounts/save', [TreasuryController::class, 'saveAccount'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class, SuperAdminMiddleware::class]);
+$router->post('/treasury/transfers/save', [TreasuryController::class, 'saveTransfer'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class, SuperAdminMiddleware::class]);
+$router->post('/treasury/transfers/void', [TreasuryController::class, 'voidTransfer'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class, SuperAdminMiddleware::class]);
 $router->post('/accounting-engine/delete', [ControlController::class, 'deleteAccountingEngine'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class, SuperAdminMiddleware::class]);
 $router->post('/expenses/save', [ControlController::class, 'saveExpenses'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class, SuperAdminMiddleware::class]);
 $router->post('/expenses/delete', [ControlController::class, 'deleteExpenses'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class, SuperAdminMiddleware::class]);
@@ -70,6 +81,9 @@ $router->post('/admin/security/force-password-reset', [SecurityController::class
 $router->post('/admin/security/reset-2fa', [SecurityController::class, 'adminResetTwoFactor'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class, SuperAdminMiddleware::class]);
 $router->post('/admin/security/revoke-trusted-devices', [SecurityController::class, 'adminRevokeTrustedDevices'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class, SuperAdminMiddleware::class]);
 $router->post('/admin/security/role-branch-access', [SecurityController::class, 'adminUpdateRoleBranchAccess'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class, SuperAdminMiddleware::class]);
+$router->post('/admin/security/users/create', [SecurityController::class, 'adminCreateUser'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class, SuperAdminMiddleware::class]);
+$router->post('/admin/security/users/update', [SecurityController::class, 'adminUpdateUserIdentity'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class, SuperAdminMiddleware::class]);
+$router->post('/admin/security/users/status', [SecurityController::class, 'adminSetUserStatus'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class, SuperAdminMiddleware::class]);
 $router->post('/logout', [AuthController::class, 'logout'], [AuthMiddleware::class]);
 $router->get('/workspace', [WorkspaceController::class, 'index'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class]);
 $router->post('/workspace/save', [WorkspaceController::class, 'save'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class]);
@@ -89,6 +103,7 @@ $router->post('/workspace/services/reissue', [WorkspaceController::class, 'reiss
 $router->post('/workspace/services/deactivate', [WorkspaceController::class, 'deactivateService'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class, FinancialAdminMiddleware::class]);
 $router->get('/suppliers/advances/available', [WorkspaceController::class, 'supplierAvailableAdvance'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class]);
 $router->post('/workspace/payments/receipts/save', [WorkspaceController::class, 'saveReceipt'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class]);
+$router->get('/workspace/payments/treasury-accounts', [WorkspaceController::class, 'paymentTreasuryAccounts'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class]);
 $router->post('/workspace/payments/exchange-rate/save', [WorkspaceController::class, 'saveExchangeRate'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class]);
 $router->post('/workspace/payments/receipts/void', [WorkspaceController::class, 'voidReceipt'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class, FinancialAdminMiddleware::class]);
 $router->post('/workspace/payments/receipts/metadata-save', [WorkspaceController::class, 'updateReceiptMetadata'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class]);
@@ -101,6 +116,7 @@ $router->post('/workspace/suppliers/payments/void', [WorkspaceController::class,
 $router->post('/workspace/suppliers/advances/save', [WorkspaceController::class, 'saveSupplierAdvance'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class]);
 $router->post('/suppliers/advances/save', [WorkspaceController::class, 'saveGlobalSupplierAdvance'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class]);
 $router->post('/workspace/suppliers/advances/apply', [WorkspaceController::class, 'applySupplierAdvance'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class]);
+$router->post('/workspace/suppliers/advances/apply-fx', [WorkspaceController::class, 'applyCrossCurrencySupplierAdvance'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class]);
 $router->post('/workspace/documents/upload', [WorkspaceController::class, 'uploadDocument'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class]);
 $router->post('/workspace/documents/revoke', [WorkspaceController::class, 'revokeDocument'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class]);
 $router->get('/workspace/documents/download', [WorkspaceController::class, 'downloadDocument'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class]);
@@ -108,10 +124,11 @@ $router->post('/workspace/reminders/save', [WorkspaceController::class, 'saveRem
 $router->post('/workspace/reminders/complete', [WorkspaceController::class, 'completeReminder'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class]);
 $router->post('/workspace/reminders/dismiss', [WorkspaceController::class, 'dismissReminder'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class]);
 $router->get('/workspace/output', [WorkspaceController::class, 'output'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class]);
+$router->get('/offline/ping', [OfflineController::class, 'ping'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class]);
 $router->get('/offline/snapshot', [OfflineController::class, 'snapshot'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class]);
 $router->post('/offline/drafts/sync', [OfflineController::class, 'syncDrafts'], [AuthMiddleware::class, PasswordChangeRequiredMiddleware::class, TwoFactorSetupRequiredMiddleware::class, TwoFactorVerifiedMiddleware::class]);
 
 $router->dispatch(
     $_SERVER['REQUEST_METHOD'] ?? 'GET',
-    app_path(parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/')
+    $requestPath
 );

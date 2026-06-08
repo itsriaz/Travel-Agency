@@ -12,6 +12,14 @@ use RuntimeException;
 
 final class OfflineController extends BaseController
 {
+    public function ping(): never
+    {
+        $this->jsonResponse([
+            'ok' => true,
+            'server_time' => date(DATE_ATOM),
+        ]);
+    }
+
     public function snapshot(): never
     {
         $service = new OfflineWorkspaceService($this->app);

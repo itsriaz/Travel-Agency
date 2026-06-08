@@ -1,5 +1,14 @@
 {
   "serverUrl": "http://localhost/Travel-Agency",
   "windowTitle": "Travel Agency Operations",
-  "sourceDevice": "Front Desk Launcher"
+  "sourceDevice": "Front Desk Launcher",
+  "launcherToken": "",
+  "launcherTokenHeader": "X-Travel-Launcher-Token",
+  "launcherKeyId": "travel-launcher-1",
+  "launcherPrivateKeyPem": "",
+  "launcherPrivateKeyPath": "",
+  "launcherSignatureHeader": "X-Travel-Launcher-Signature",
+  "launcherTimestampHeader": "X-Travel-Launcher-Timestamp",
+  "launcherNonceHeader": "X-Travel-Launcher-Nonce",
+  "launcherKeyIdHeader": "X-Travel-Launcher-Key-Id"
 }

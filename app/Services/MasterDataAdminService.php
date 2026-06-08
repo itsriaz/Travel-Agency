@@ -158,10 +158,19 @@ final class MasterDataAdminService extends Service
     private function validateSupplierMode(array $input, ?array $existing): array
     {
         $code = $this->normalizeCode((string) ($input['code'] ?? ''), 'lower');
+        $behavior = $this->requiredText($input['behavior'] ?? null, 'Behavior', 190);
+        $allowedBehaviors = [
+            'Creates direct supplier payable',
+            'Consumes supplier advance first',
+        ];
+        if (! in_array($behavior, $allowedBehaviors, true)) {
+            throw new RuntimeException('Please select a valid supplier behavior.');
+        }
+
         $payload = [
             'code' => $this->assertPattern($code, '/^[a-z0-9_]{2,50}$/', 'Supplier mode code must use lowercase letters, numbers, or underscores.'),
             'name' => $this->requiredText($input['name'] ?? null, 'Supplier mode name', 120),
-            'behavior' => $this->requiredText($input['behavior'] ?? null, 'Behavior', 190),
+            'behavior' => $behavior,
             'sort_order' => $this->normalizeSortOrder($input['sort_order'] ?? 0),
             'is_active' => $this->normalizeBoolean($input['is_active'] ?? 1),
         ];
@@ -174,10 +183,25 @@ final class MasterDataAdminService extends Service
     private function validateDocumentType(array $input, ?array $existing): array
     {
         $code = $this->normalizeCode((string) ($input['code'] ?? ''), 'lower');
+        $linkedArea = $this->requiredText($input['linked_area'] ?? null, 'Linked area', 120);
+        $allowedLinkedAreas = [
+            'Booking',
+            'Traveler',
+            'Service Line',
+            'Service Line / Print',
+            'Booking / Accounts',
+            'Customer Receipt',
+            'Supplier Payment',
+            'Supplier Obligation',
+        ];
+        if (! in_array($linkedArea, $allowedLinkedAreas, true)) {
+            throw new RuntimeException('Please select a valid linked area.');
+        }
+
         $payload = [
             'code' => $this->assertPattern($code, '/^[a-z0-9_]{2,50}$/', 'Document type code must use lowercase letters, numbers, or underscores.'),
             'name' => $this->requiredText($input['name'] ?? null, 'Document type name', 120),
-            'linked_area' => $this->requiredText($input['linked_area'] ?? null, 'Linked area', 120),
+            'linked_area' => $linkedArea,
             'sort_order' => $this->normalizeSortOrder($input['sort_order'] ?? 0),
             'is_active' => $this->normalizeBoolean($input['is_active'] ?? 1),
         ];

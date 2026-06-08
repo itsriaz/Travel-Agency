@@ -83,6 +83,13 @@ final class App
         $dbDatabase = trim((string) $this->config('database.database', ''));
         $dbUsername = trim((string) $this->config('database.username', ''));
         $dbPassword = (string) $this->config('database.password', '');
+        $launcherGateEnabled = (bool) $this->config('security.launcher_gate.enabled', false);
+        $launcherGateToken = trim((string) $this->config('security.launcher_gate.token', ''));
+        $launcherSignatureEnabled = (bool) $this->config('security.launcher_gate.signature_enabled', false);
+        $launcherAllowLegacyToken = (bool) $this->config('security.launcher_gate.allow_legacy_token', false);
+        $launcherPublicKey = trim((string) $this->config('security.launcher_gate.public_key', ''));
+        $launcherPublicKeyPath = trim((string) $this->config('security.launcher_gate.public_key_path', ''));
+        $passwordHashDriver = strtolower(trim((string) $this->config('security.password.hash_driver', 'default')));
 
         if ($appKey === '' || $appKey === $defaultAppKey) {
             $issues[] = 'APP_KEY must be explicitly set for production.';
@@ -106,6 +113,26 @@ final class App
 
         if ((bool) $this->config('security.trusted_device.cookie_secure', false) !== true) {
             $issues[] = 'TRUSTED_DEVICE_COOKIE_SECURE must be true in production.';
+        }
+
+        if (! $launcherGateEnabled) {
+            $issues[] = 'LAUNCHER_GATE_ENABLED must be true in production.';
+        }
+
+        if ($launcherGateEnabled && $launcherAllowLegacyToken && strlen($launcherGateToken) < 32) {
+            $issues[] = 'LAUNCHER_GATE_TOKEN must be a long random token in production.';
+        }
+
+        if ($launcherSignatureEnabled && $launcherPublicKey === '' && $launcherPublicKeyPath === '') {
+            $issues[] = 'Launcher signature mode requires LAUNCHER_GATE_PUBLIC_KEY or LAUNCHER_GATE_PUBLIC_KEY_PATH.';
+        }
+
+        if ($launcherGateEnabled && ! $launcherSignatureEnabled && ! $launcherAllowLegacyToken) {
+            $issues[] = 'Launcher gate must use either signed requests or an explicitly enabled legacy token fallback.';
+        }
+
+        if ($passwordHashDriver === 'default') {
+            $issues[] = 'PASSWORD_HASH_DRIVER should be explicitly set to argon2id or bcrypt in production.';
         }
 
         if (

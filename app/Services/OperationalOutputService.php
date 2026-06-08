@@ -7,6 +7,7 @@ namespace App\Services;
 use App\Helpers\AuditLog;
 use App\Repositories\BookingRepository;
 use App\Repositories\BookingServiceEventRepository;
+use App\Repositories\BookingServiceRefundDetailRepository;
 use App\Repositories\BookingServiceRepository;
 use App\Repositories\TravelerRepository;
 use RuntimeException;
@@ -47,6 +48,18 @@ final class OperationalOutputService extends Service
         $bookingReference = (string) $booking['booking_reference'];
         $travelers = (new TravelerRepository($this->app))->travelersForBooking($bookingId);
         $services = (new BookingServiceRepository($this->app))->servicesForBooking($bookingId);
+        $eventRepository = new BookingServiceEventRepository($this->app);
+        $serviceEvents = [];
+        foreach ($services as $service) {
+            $serviceId = (int) ($service['id'] ?? 0);
+            if ($serviceId <= 0) {
+                continue;
+            }
+
+            foreach ($eventRepository->postedEventsForService($serviceId) as $event) {
+                $serviceEvents[] = $event;
+            }
+        }
         $customerPaymentFoundation = (new CustomerPaymentFoundationService($this->app))->buildWorkspacePreview(
             $bookingReference,
             (int) ($booking['lead_traveler_id'] ?? 0) > 0 ? (int) $booking['lead_traveler_id'] : null,
@@ -62,6 +75,9 @@ final class OperationalOutputService extends Service
         $selectedReceipt = $this->resolveReceipt($type, $receiptId, $customerPaymentFoundation['receipts'] ?? []);
         $selectedSupplierPayment = $this->resolveSupplierPayment($type, $supplierPaymentId, $supplierFoundation['payments'] ?? []);
         $selectedRefundEvent = $this->resolveRefundEvent($type, $refundEventId, $services, $bookingId);
+        $selectedRefundDetail = $selectedRefundEvent !== null
+            ? (new BookingServiceRefundDetailRepository($this->app))->findByServiceEventId((int) ($selectedRefundEvent['id'] ?? 0))
+            : null;
 
         AuditLog::record($this->app, 'output.viewed', [
             'user_id' => $actorUserId,
@@ -80,12 +96,18 @@ final class OperationalOutputService extends Service
             'booking' => $booking,
             'travelers' => $travelers,
             'services' => $services,
+            'serviceEvents' => $serviceEvents,
             'customerPaymentFoundation' => $customerPaymentFoundation,
             'supplierFoundation' => $supplierFoundation,
             'selectedReceipt' => $selectedReceipt,
             'selectedSupplierPayment' => $selectedSupplierPayment,
             'selectedRefundEvent' => $selectedRefundEvent,
+            'selectedRefundDetail' => $selectedRefundDetail,
             'branchBranding' => $this->branchBranding($booking),
+            'branchDirectory' => array_map(
+                fn (array $branch): array => $this->withBranchContact($branch),
+                $bookingRepository->activeBranchDirectory()
+            ),
             'summary' => $this->summary($services, $customerPaymentFoundation, $supplierFoundation),
             'generatedAt' => date('Y-m-d H:i'),
             'backUrl' => url('/workspace?booking_id=' . $bookingId . '#dock-panel-print'),
@@ -186,13 +208,29 @@ final class OperationalOutputService extends Service
             default => $countryCode,
         };
 
-        return [
+        return $this->withBranchContact([
+            'id' => (int) ($booking['branch_id'] ?? 0),
+            'code' => (string) ($booking['branch_code'] ?? ''),
             'name' => (string) ($booking['branch_name'] ?? 'Travel Agency Branch'),
             'city' => (string) ($booking['branch_city'] ?? ''),
+            'country_code' => $countryCode,
             'country' => $countryName,
             'countryCode' => $countryCode,
             'baseCurrency' => (string) ($booking['base_currency'] ?? 'PKR'),
             'tagline' => 'Travel Agency Operations and Accounting System',
+        ]);
+    }
+
+    private function withBranchContact(array $branch): array
+    {
+        $code = mb_strtolower(trim((string) ($branch['code'] ?? '')));
+        $profiles = config('branches.receipt_contacts', []);
+        $contact = is_array($profiles[$code] ?? null) ? $profiles[$code] : [];
+
+        return [
+            ...$branch,
+            'receipt_name' => trim((string) ($contact['display_name'] ?? '')),
+            'contact' => $contact,
         ];
     }
 

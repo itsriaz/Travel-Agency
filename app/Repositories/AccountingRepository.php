@@ -74,7 +74,9 @@ final class AccountingRepository extends BaseRepository
             foreach ($lines as $line) {
                 $linePayload = [
                     'journal_entry_id' => $journalEntryId,
-                    'account_id' => $this->accountIdByCode($line['account_code']),
+                    'account_id' => isset($line['account_id']) && (int) ($line['account_id'] ?? 0) > 0
+                        ? (int) $line['account_id']
+                        : $this->accountIdByCode($line['account_code']),
                     'service_line_reference' => $line['service_line_reference'] ?? null,
                     'supplier_obligation_id' => $line['supplier_obligation_id'] ?? null,
                     'supplier_payment_id' => $line['supplier_payment_id'] ?? null,
@@ -359,11 +361,7 @@ final class AccountingRepository extends BaseRepository
     {
         $chargesAmount = (float) ($data['charges_amount'] ?? 0);
         $paidAmount = (float) $data['paid_amount'];
-        $cashAccountCode = match ($data['payment_method']) {
-            'cash' => 'CASH_ON_HAND',
-            'debit_card', 'credit_card' => 'CARD_CLEARING',
-            default => 'BANK_CLEARING',
-        };
+        $sourceAccount = $this->paymentMethodAssetAccount($data);
 
         $lines = [
             [
@@ -386,7 +384,8 @@ final class AccountingRepository extends BaseRepository
         }
 
         $lines[] = [
-            'account_code' => $cashAccountCode,
+            'account_code' => $sourceAccount['account_code'],
+            'account_id' => $sourceAccount['account_id'],
             'supplier_payment_id' => $data['supplier_payment_id'] ?? null,
             'line_description' => 'Cash or bank supplier outflow',
             'debit_amount' => 0,
@@ -549,15 +548,12 @@ final class AccountingRepository extends BaseRepository
     {
         $chargesAmount = (float) ($data['charges_amount'] ?? 0);
         $receivedAmount = (float) $data['received_amount'];
-        $cashAccountCode = match ($data['payment_method']) {
-            'cash' => 'CASH_ON_HAND',
-            'debit_card', 'credit_card' => 'CARD_CLEARING',
-            default => 'BANK_CLEARING',
-        };
+        $cashAccount = $this->customerReceiptAssetAccount($data);
 
         $lines = [
             [
-                'account_code' => $cashAccountCode,
+                'account_code' => $cashAccount['account_code'],
+                'account_id' => $cashAccount['account_id'],
                 'customer_receipt_id' => $data['customer_receipt_id'] ?? null,
                 'line_description' => 'Customer receipt captured',
                 'debit_amount' => max(0, $receivedAmount - $chargesAmount),
@@ -735,11 +731,8 @@ final class AccountingRepository extends BaseRepository
     {
         $customerRefundAmount = round((float) ($data['customer_refund_amount'] ?? 0), 2);
         $supplierRefundAmount = round((float) ($data['supplier_refund_amount'] ?? 0), 2);
-        $cashAccountCode = match ($data['payment_method'] ?? 'bank_transfer') {
-            'cash' => 'CASH_ON_HAND',
-            'debit_card', 'credit_card' => 'CARD_CLEARING',
-            default => 'BANK_CLEARING',
-        };
+        $assetAccount = $this->paymentMethodAssetAccount($data);
+        $cashAccountCode = (string) $assetAccount['account_code'];
 
         $lines = [];
         if ($customerRefundAmount > 0) {
@@ -788,6 +781,109 @@ final class AccountingRepository extends BaseRepository
             'entry_date' => $data['entry_date'],
             'currency' => $data['currency'],
             'narration' => $data['narration'] ?? 'Service refund posted',
+            'actor_user_id' => $data['actor_user_id'] ?? null,
+        ], $lines);
+    }
+
+    public function postTreasuryTransfer(array $data): int
+    {
+        $amount = round((float) ($data['amount'] ?? 0), 2);
+        if ($amount <= 0) {
+            throw new RuntimeException('Treasury transfer amount must be greater than zero.');
+        }
+
+        $fromAccount = $this->treasuryAccountLedgerReference((int) ($data['from_treasury_account_id'] ?? 0));
+        $toAccount = $this->treasuryAccountLedgerReference((int) ($data['to_treasury_account_id'] ?? 0));
+
+        if ($fromAccount === null || $toAccount === null) {
+            throw new RuntimeException('Treasury transfer requires valid source and destination treasury accounts.');
+        }
+
+        return $this->postJournalEntry([
+            'branch_id' => $data['branch_id'],
+            'booking_reference' => null,
+            'source_type' => 'treasury_transfer_posted',
+            'source_reference' => $data['source_reference'] ?? null,
+            'entry_date' => $data['entry_date'],
+            'currency' => $data['currency'],
+            'narration' => $data['narration'] ?? 'Internal treasury transfer posted',
+            'actor_user_id' => $data['actor_user_id'] ?? null,
+        ], [
+            [
+                'account_id' => $toAccount['account_id'],
+                'account_code' => $toAccount['account_code'],
+                'line_description' => $data['to_line_description'] ?? 'Treasury transfer in',
+                'debit_amount' => $amount,
+                'credit_amount' => 0,
+            ],
+            [
+                'account_id' => $fromAccount['account_id'],
+                'account_code' => $fromAccount['account_code'],
+                'line_description' => $data['from_line_description'] ?? 'Treasury transfer out',
+                'debit_amount' => 0,
+                'credit_amount' => $amount,
+            ],
+        ]);
+    }
+
+    public function postTreasuryTransferVoidReversal(array $data): ?int
+    {
+        $originalJournalEntryId = (int) ($data['journal_entry_id'] ?? 0);
+        if ($originalJournalEntryId <= 0) {
+            return null;
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT
+                je.id AS journal_entry_id,
+                je.branch_id,
+                je.currency,
+                coa.code AS account_code,
+                jel.line_description,
+                jel.debit_amount,
+                jel.credit_amount
+             FROM journal_entries je
+             INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+             INNER JOIN chart_of_accounts coa ON coa.id = jel.account_id
+             WHERE je.id = :journal_entry_id
+               AND je.source_type = "treasury_transfer_posted"
+             ORDER BY jel.id ASC'
+        );
+        $statement->execute(['journal_entry_id' => $originalJournalEntryId]);
+        $rows = $statement->fetchAll() ?: [];
+
+        if ($rows === []) {
+            return null;
+        }
+
+        $lines = [];
+        foreach ($rows as $row) {
+            $debitAmount = round((float) ($row['debit_amount'] ?? 0), 2);
+            $creditAmount = round((float) ($row['credit_amount'] ?? 0), 2);
+            if ($debitAmount <= 0 && $creditAmount <= 0) {
+                continue;
+            }
+
+            $lines[] = [
+                'account_code' => (string) ($row['account_code'] ?? ''),
+                'line_description' => 'Treasury transfer void reversal: ' . (string) ($row['line_description'] ?? ''),
+                'debit_amount' => $creditAmount,
+                'credit_amount' => $debitAmount,
+            ];
+        }
+
+        if ($lines === []) {
+            return null;
+        }
+
+        return $this->postJournalEntry([
+            'branch_id' => $data['branch_id'],
+            'booking_reference' => null,
+            'source_type' => 'treasury_transfer_void_reversed',
+            'source_reference' => $data['source_reference'] ?? null,
+            'entry_date' => $data['entry_date'],
+            'currency' => $data['currency'],
+            'narration' => $data['narration'] ?? 'Treasury transfer void reversal',
             'actor_user_id' => $data['actor_user_id'] ?? null,
         ], $lines);
     }
@@ -944,6 +1040,8 @@ final class AccountingRepository extends BaseRepository
             'supplier_settlement_released' => 'Supplier Settlement Released',
             'supplier_payment_recorded' => 'Supplier Payment Recorded',
             'supplier_payment_allocated' => 'Supplier Payment Allocated',
+            'treasury_transfer_posted' => 'Treasury Transfer Posted',
+            'treasury_transfer_void_reversed' => 'Treasury Transfer Void Reversed',
             default => ucwords(str_replace('_', ' ', $sourceType)),
         };
     }
@@ -975,5 +1073,124 @@ final class AccountingRepository extends BaseRepository
         $this->accountIdCache[$code] = $accountId;
 
         return $accountId;
+    }
+
+    private function customerReceiptAssetAccount(array $data): array
+    {
+        return $this->paymentMethodAssetAccount($data);
+    }
+
+    private function paymentMethodAssetAccount(array $data): array
+    {
+        $paymentMethod = (string) ($data['payment_method'] ?? '');
+        if (in_array($paymentMethod, ['debit_card', 'credit_card'], true)) {
+            return [
+                'account_code' => 'CARD_CLEARING',
+                'account_id' => $this->accountIdByCode('CARD_CLEARING'),
+            ];
+        }
+
+        $treasuryAccountId = (int) ($data['treasury_account_id'] ?? 0);
+        if ($treasuryAccountId > 0) {
+            $treasuryAccount = $this->treasuryAccountLedgerReference($treasuryAccountId);
+            if ($treasuryAccount !== null) {
+                return $treasuryAccount;
+            }
+        }
+
+        $fallbackCode = $paymentMethod === 'cash' ? 'CASH_ON_HAND' : 'BANK_CLEARING';
+
+        return [
+            'account_code' => $fallbackCode,
+            'account_id' => $this->accountIdByCode($fallbackCode),
+        ];
+    }
+
+    private function treasuryAccountLedgerReference(int $treasuryAccountId): ?array
+    {
+        $statement = $this->db->prepare(
+            'SELECT
+                ta.id,
+                ta.account_type,
+                ta.account_name,
+                ta.account_code,
+                ta.linked_account_id,
+                coa.code AS linked_account_code
+             FROM treasury_accounts ta
+             LEFT JOIN chart_of_accounts coa ON coa.id = ta.linked_account_id
+             WHERE ta.id = :id
+               AND ta.is_active = 1
+             LIMIT 1'
+        );
+        $statement->execute(['id' => $treasuryAccountId]);
+        $account = $statement->fetch();
+
+        if ($account === false) {
+            return null;
+        }
+
+        $accountType = (string) ($account['account_type'] ?? '');
+        if (! in_array($accountType, ['cash', 'bank', 'wallet'], true)) {
+            return null;
+        }
+
+        $desiredCode = strtoupper(trim((string) ($account['account_code'] ?? '')));
+        if ($desiredCode === '') {
+            return null;
+        }
+
+        $linkedAccountId = (int) ($account['linked_account_id'] ?? 0);
+        $linkedAccountCode = strtoupper(trim((string) ($account['linked_account_code'] ?? '')));
+
+        if ($linkedAccountId > 0 && $linkedAccountCode === $desiredCode) {
+            return [
+                'account_code' => $desiredCode,
+                'account_id' => $linkedAccountId,
+            ];
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT id
+             FROM chart_of_accounts
+             WHERE code = :code
+             LIMIT 1'
+        );
+        $statement->execute(['code' => $desiredCode]);
+        $existingId = (int) ($statement->fetchColumn() ?: 0);
+
+        if ($existingId <= 0) {
+            $insert = $this->db->prepare(
+                'INSERT INTO chart_of_accounts (
+                    code, name, purpose, account_type, normal_balance, is_system, is_active
+                 ) VALUES (
+                    :code, :name, :purpose, "asset", "debit", 0, 1
+                 )'
+            );
+            $insert->execute([
+                'code' => $desiredCode,
+                'name' => (string) ($account['account_name'] ?? $desiredCode),
+                'purpose' => 'Operational treasury account',
+            ]);
+            $existingId = (int) $this->db->lastInsertId();
+        }
+
+        if ($existingId > 0 && $linkedAccountId !== $existingId) {
+            $update = $this->db->prepare(
+                'UPDATE treasury_accounts
+                 SET linked_account_id = :linked_account_id
+                 WHERE id = :id'
+            );
+            $update->execute([
+                'linked_account_id' => $existingId,
+                'id' => $treasuryAccountId,
+            ]);
+        }
+
+        return $existingId > 0
+            ? [
+                'account_code' => $desiredCode,
+                'account_id' => $existingId,
+            ]
+            : null;
     }
 }

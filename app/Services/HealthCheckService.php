@@ -56,6 +56,37 @@ final class HealthCheckService extends Service
             if (trim((string) config('security.health.token', '')) === '') {
                 $issues[] = 'HEALTH_CHECK_TOKEN must be configured in production.';
             }
+
+            if (! (bool) config('security.launcher_gate.enabled', false)) {
+                $issues[] = 'LAUNCHER_GATE_ENABLED must be true in production.';
+            }
+
+            if (
+                (bool) config('security.launcher_gate.allow_legacy_token', false)
+                && strlen(trim((string) config('security.launcher_gate.token', ''))) < 32
+            ) {
+                $issues[] = 'LAUNCHER_GATE_TOKEN must be configured with a long random value.';
+            }
+
+            if (
+                (bool) config('security.launcher_gate.signature_enabled', false)
+                && trim((string) config('security.launcher_gate.public_key', '')) === ''
+                && trim((string) config('security.launcher_gate.public_key_path', '')) === ''
+            ) {
+                $issues[] = 'Launcher signature mode requires a configured public key.';
+            }
+
+            if (trim((string) config('security.password.hash_driver', 'default')) === 'default') {
+                $issues[] = 'PASSWORD_HASH_DRIVER should be explicitly set in production.';
+            }
+
+            if (
+                (bool) config('security.launcher_gate.enabled', false)
+                && ! (bool) config('security.launcher_gate.signature_enabled', false)
+                && ! (bool) config('security.launcher_gate.allow_legacy_token', false)
+            ) {
+                $issues[] = 'Launcher gate must use signed requests or an explicitly enabled legacy token fallback.';
+            }
         }
 
         return $issues === []

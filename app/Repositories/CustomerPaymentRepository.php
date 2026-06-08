@@ -22,6 +22,24 @@ final class CustomerPaymentRepository extends BaseRepository
         ]);
     }
 
+    private function customerReceiptTenderedAmountSelect(string $alias = ''): string
+    {
+        $prefix = $alias !== '' ? $alias . '.' : '';
+
+        return $this->columnExists('customer_receipts', 'tendered_amount')
+            ? $prefix . 'tendered_amount'
+            : $prefix . 'received_amount AS tendered_amount';
+    }
+
+    private function customerReceiptReturnedAmountSelect(string $alias = ''): string
+    {
+        $prefix = $alias !== '' ? $alias . '.' : '';
+
+        return $this->columnExists('customer_receipts', 'returned_amount')
+            ? $prefix . 'returned_amount'
+            : '0.00 AS returned_amount';
+    }
+
     private function receivableAllocationAmountExpression(string $alias = 'a'): string
     {
         $prefix = $alias !== '' ? $alias . '.' : '';
@@ -63,8 +81,9 @@ final class CustomerPaymentRepository extends BaseRepository
             : '';
 
         $statement = $this->db->prepare(
-            'SELECT customer_receipts.id, customer_receipts.branch_id, customer_receipts.booking_reference, customer_receipts.receipt_no, customer_receipts.receipt_date, customer_receipts.currency, customer_receipts.received_amount, customer_receipts.allocated_amount,
-                    customer_receipts.unallocated_amount, customer_receipts.payment_method, customer_receipts.reference_number, customer_receipts.bank_card_detail, customer_receipts.charges_amount, customer_receipts.status,
+            'SELECT customer_receipts.id, customer_receipts.branch_id, customer_receipts.booking_reference, customer_receipts.receipt_no, customer_receipts.receipt_date, customer_receipts.currency, ' . $this->customerReceiptTenderedAmountSelect('customer_receipts') . ',
+                    customer_receipts.received_amount, customer_receipts.allocated_amount,
+                    customer_receipts.unallocated_amount, ' . $this->customerReceiptReturnedAmountSelect('customer_receipts') . ', customer_receipts.payment_method, customer_receipts.reference_number, customer_receipts.bank_card_detail, customer_receipts.charges_amount, customer_receipts.status,
                     customer_receipts.exchange_rate_to_booking, customer_receipts.remarks' . $treasurySelect . ',
                     ' . $this->customerReceiptVoidMetadataSelect() . '
              FROM customer_receipts
@@ -409,6 +428,154 @@ final class CustomerPaymentRepository extends BaseRepository
 
         $statement = $this->db->prepare($sql);
         $statement->execute($params);
+
+        return $statement->fetchAll() ?: [];
+    }
+
+    public function globalSettlementCustomerOptions(int $branchId): array
+    {
+        if ($branchId <= 0) {
+            return [];
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT
+                b.lead_traveler_id AS traveler_id,
+                COALESCE(t.full_name, bp.lead_traveler_name, "Customer") AS customer_name,
+                MAX(COALESCE(t.mobile, bp.contact_mobile, "")) AS contact_mobile,
+                COUNT(cri.id) AS open_receivable_count,
+                SUM(cri.outstanding_amount) AS open_receivable_amount
+             FROM customer_receivable_items cri
+             INNER JOIN bookings b ON b.booking_reference = cri.booking_reference
+             LEFT JOIN booking_parties bp ON bp.booking_id = b.id
+             LEFT JOIN travelers t ON t.id = b.lead_traveler_id
+             WHERE b.branch_id = :branch_id
+               AND b.lead_traveler_id IS NOT NULL
+               AND b.lead_traveler_id > 0
+               AND cri.status IN ("open", "partially_paid")
+               AND cri.outstanding_amount > 0
+             GROUP BY b.lead_traveler_id, COALESCE(t.full_name, bp.lead_traveler_name, "Customer")
+             ORDER BY customer_name ASC'
+        );
+        $statement->execute(['branch_id' => $branchId]);
+
+        return $statement->fetchAll() ?: [];
+    }
+
+    public function globalSettlementCurrencies(int $branchId, int $travelerId): array
+    {
+        if ($branchId <= 0 || $travelerId <= 0) {
+            return [];
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT
+                cri.currency,
+                COUNT(cri.id) AS open_receivable_count,
+                SUM(cri.outstanding_amount) AS open_receivable_amount
+             FROM customer_receivable_items cri
+             INNER JOIN bookings b ON b.booking_reference = cri.booking_reference
+             WHERE b.branch_id = :branch_id
+               AND b.lead_traveler_id = :traveler_id
+               AND cri.status IN ("open", "partially_paid")
+               AND cri.outstanding_amount > 0
+             GROUP BY cri.currency
+             ORDER BY FIELD(cri.currency, "PKR", "AED", "USD"), cri.currency ASC'
+        );
+        $statement->execute([
+            'branch_id' => $branchId,
+            'traveler_id' => $travelerId,
+        ]);
+
+        return $statement->fetchAll() ?: [];
+    }
+
+    public function globalOpenReceivables(int $branchId, int $travelerId, string $currency): array
+    {
+        if ($branchId <= 0 || $travelerId <= 0 || trim($currency) === '') {
+            return [];
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT
+                cri.id,
+                cri.branch_id,
+                br.name AS branch_name,
+                cri.booking_reference,
+                cri.service_line_reference,
+                cri.due_group,
+                cri.currency,
+                cri.due_amount,
+                cri.allocated_amount,
+                cri.outstanding_amount,
+                cri.due_date,
+                cri.status,
+                b.id AS booking_id,
+                b.booking_date,
+                b.lead_traveler_id AS traveler_id,
+                COALESCE(t.full_name, bp.lead_traveler_name, "Customer") AS customer_name,
+                COALESCE(bs.service_type, "service") AS service_type
+             FROM customer_receivable_items cri
+             INNER JOIN bookings b ON b.booking_reference = cri.booking_reference
+             INNER JOIN branches br ON br.id = cri.branch_id
+             LEFT JOIN booking_parties bp ON bp.booking_id = b.id
+             LEFT JOIN travelers t ON t.id = b.lead_traveler_id
+             LEFT JOIN booking_services bs ON bs.booking_id = b.id AND bs.line_reference = cri.service_line_reference
+             WHERE b.branch_id = :branch_id
+               AND b.lead_traveler_id = :traveler_id
+               AND cri.currency = :currency
+               AND cri.status IN ("open", "partially_paid")
+               AND cri.outstanding_amount > 0
+             ORDER BY cri.due_date IS NULL, cri.due_date ASC, b.booking_date ASC, b.id ASC, cri.id ASC'
+        );
+        $statement->execute([
+            'branch_id' => $branchId,
+            'traveler_id' => $travelerId,
+            'currency' => strtoupper(trim($currency)),
+        ]);
+
+        return $statement->fetchAll() ?: [];
+    }
+
+    public function openGlobalReceivablesForSettlement(array $receivableIds, int $branchId, int $travelerId, string $currency): array
+    {
+        $ids = array_values(array_unique(array_map('intval', $receivableIds)));
+        if ($ids === [] || $branchId <= 0 || $travelerId <= 0 || trim($currency) === '') {
+            return [];
+        }
+
+        $placeholders = implode(', ', array_fill(0, count($ids), '?'));
+        $statement = $this->db->prepare(
+            "SELECT
+                cri.id,
+                cri.branch_id,
+                cri.booking_reference,
+                cri.service_line_reference,
+                cri.due_group,
+                cri.currency,
+                cri.due_amount,
+                cri.allocated_amount,
+                cri.outstanding_amount,
+                cri.due_date,
+                cri.status,
+                b.id AS booking_id,
+                b.booking_date,
+                b.lead_traveler_id AS traveler_id,
+                COALESCE(t.full_name, bp.lead_traveler_name, 'Customer') AS customer_name
+             FROM customer_receivable_items cri
+             INNER JOIN bookings b ON b.booking_reference = cri.booking_reference
+             LEFT JOIN booking_parties bp ON bp.booking_id = b.id
+             LEFT JOIN travelers t ON t.id = b.lead_traveler_id
+             WHERE b.branch_id = ?
+               AND b.lead_traveler_id = ?
+               AND cri.currency = ?
+               AND cri.id IN ({$placeholders})
+               AND cri.status IN ('open', 'partially_paid')
+               AND cri.outstanding_amount > 0
+             ORDER BY cri.due_date IS NULL, cri.due_date ASC, b.booking_date ASC, b.id ASC, cri.id ASC
+             FOR UPDATE"
+        );
+        $statement->execute(array_merge([$branchId, $travelerId, strtoupper(trim($currency))], $ids));
 
         return $statement->fetchAll() ?: [];
     }
@@ -863,17 +1030,21 @@ final class CustomerPaymentRepository extends BaseRepository
         return $this->transaction(function () use ($data): int {
             $receivedAmount = (float) $data['received_amount'];
             $hasTreasuryAccountLink = $this->columnExists('customer_receipts', 'treasury_account_id');
+            $hasTenderedAmount = $this->columnExists('customer_receipts', 'tendered_amount');
+            $hasReturnedAmount = $this->columnExists('customer_receipts', 'returned_amount');
+            $tenderedAmount = (float) ($data['tendered_amount'] ?? $receivedAmount);
+            $returnedAmount = (float) ($data['returned_amount'] ?? 0);
 
             $statement = $this->db->prepare(
                 'INSERT INTO customer_receipts (
                     branch_id, booking_reference, receipt_no, receipt_date, currency,
-                    received_amount, allocated_amount, unallocated_amount, payment_method,
+                    ' . ($hasTenderedAmount ? 'tendered_amount, ' : '') . 'received_amount, allocated_amount, unallocated_amount, ' . ($hasReturnedAmount ? 'returned_amount, ' : '') . 'payment_method,
                     reference_number, bank_card_detail, charges_amount, status, exchange_rate_to_booking'
                     . ($hasTreasuryAccountLink ? ', treasury_account_id' : '') . ',
                     remarks, created_by_user_id
                  ) VALUES (
                     :branch_id, :booking_reference, :receipt_no, :receipt_date, :currency,
-                    :received_amount, 0, :unallocated_amount, :payment_method,
+                    ' . ($hasTenderedAmount ? ':tendered_amount, ' : '') . ':received_amount, 0, :unallocated_amount, ' . ($hasReturnedAmount ? ':returned_amount, ' : '') . ':payment_method,
                     :reference_number, :bank_card_detail, :charges_amount, :status, :exchange_rate_to_booking'
                     . ($hasTreasuryAccountLink ? ', :treasury_account_id' : '') . ',
                     :remarks, :created_by_user_id
@@ -887,6 +1058,8 @@ final class CustomerPaymentRepository extends BaseRepository
                 'currency' => $data['currency'],
                 'received_amount' => $receivedAmount,
                 'unallocated_amount' => $receivedAmount,
+                'tendered_amount' => $tenderedAmount,
+                'returned_amount' => $returnedAmount,
                 'payment_method' => $data['payment_method'],
                 'reference_number' => $data['reference_number'] ?? null,
                 'bank_card_detail' => $data['bank_card_detail'] ?? null,
@@ -1268,14 +1441,16 @@ final class CustomerPaymentRepository extends BaseRepository
             : '';
 
         $statement = $this->db->prepare(
-            'SELECT
+                'SELECT
                 cr.id,
                 cr.receipt_no,
                 cr.receipt_date,
                 cr.currency,
+                ' . $this->customerReceiptTenderedAmountSelect('cr') . ',
                 cr.received_amount,
                 cr.allocated_amount,
                 cr.unallocated_amount,
+                ' . $this->customerReceiptReturnedAmountSelect('cr') . ',
                 cr.payment_method,
                 cr.reference_number,
                 cr.bank_card_detail,

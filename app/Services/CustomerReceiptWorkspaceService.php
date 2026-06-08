@@ -9,6 +9,7 @@ use App\Repositories\AccountingRepository;
 use App\Repositories\BookingRepository;
 use App\Repositories\CustomerPaymentRepository;
 use App\Repositories\ExchangeRateRepository;
+use App\Repositories\MasterDataRepository;
 use App\Repositories\TreasuryRepository;
 use PDO;
 use RuntimeException;
@@ -16,7 +17,6 @@ use RuntimeException;
 final class CustomerReceiptWorkspaceService extends Service
 {
     private const ALLOWED_CURRENCIES = ['PKR', 'AED', 'USD'];
-    private const ALLOWED_METHODS = ['cash', 'bank_transfer', 'debit_card', 'credit_card'];
     private const ALLOWED_STATUSES = ['received', 'void'];
 
     public function saveSettlementExchangeRate(array $input, int $actorUserId, array $accessibleBranchIds): array
@@ -77,6 +77,17 @@ final class CustomerReceiptWorkspaceService extends Service
         }
 
         try {
+            $originalReceivedAmount = (float) ($payload['received_amount'] ?? 0);
+            $payload['received_amount'] = $this->maxRetainableBookingReceiptAmount(
+                $repository,
+                $booking,
+                $accessibleBranchIds,
+                (string) $payload['currency']
+            );
+            $payload['received_amount'] = round(min($originalReceivedAmount, $payload['received_amount']), 2);
+            $payload['tendered_amount'] = $originalReceivedAmount;
+            $payload['returned_amount'] = round(max($originalReceivedAmount - (float) $payload['received_amount'], 0), 2);
+
             $receiptNo = $repository->nextReceiptNumber();
 
             $receiptId = $repository->createReceipt(array_merge($payload, [
@@ -95,6 +106,7 @@ final class CustomerReceiptWorkspaceService extends Service
                     'received_amount' => $payload['received_amount'],
                     'charges_amount' => $payload['charges_amount'],
                     'payment_method' => $payload['payment_method'],
+                    'treasury_account_id' => $payload['treasury_account_id'],
                     'entry_date' => $payload['receipt_date'],
                     'currency' => $payload['currency'],
                     'actor_user_id' => $actorUserId,
@@ -133,6 +145,7 @@ final class CustomerReceiptWorkspaceService extends Service
             return [
                 'receipt' => $repository->findReceiptById($receiptId),
                 'booking_id' => $bookingId,
+                'returned_amount' => round(max($originalReceivedAmount - (float) $payload['received_amount'], 0), 2),
             ];
         } catch (\Throwable $exception) {
             if ($startedTransaction && $db->inTransaction()) {
@@ -144,6 +157,166 @@ final class CustomerReceiptWorkspaceService extends Service
             }
 
             throw new RuntimeException('Customer receipt could not be saved.', 0, $exception);
+        }
+    }
+
+    public function recordGlobalCustomerPayment(array $input, int $actorUserId, array $accessibleBranchIds): array
+    {
+        $branchId = $this->resolveAccessibleBranchId((int) ($input['branch_id'] ?? 0), $accessibleBranchIds);
+        $travelerId = (int) ($input['traveler_id'] ?? 0);
+        if ($travelerId <= 0) {
+            throw new RuntimeException('Please select a valid customer.');
+        }
+
+        $selectedReceivableIds = $this->normalizedSelectedReceivableIds($input['global_customer_receivable_id'] ?? []);
+        if ($selectedReceivableIds === []) {
+            throw new RuntimeException('Please select at least one customer receivable.');
+        }
+
+        $payload = $this->validatedReceiptPayload($input);
+        $currency = (string) ($payload['currency'] ?? 'PKR');
+        $payload['treasury_account_id'] = $this->resolveReceiptTreasuryAccountId($input, $payload, $branchId);
+
+        /** @var PDO $db */
+        $db = $this->app->get('db');
+        $repository = new CustomerPaymentRepository($this->app);
+        $accountingRepository = new AccountingRepository($this->app);
+        $startedTransaction = ! $db->inTransaction();
+        if ($startedTransaction) {
+            $db->beginTransaction();
+        }
+
+        try {
+            $receivables = $repository->openGlobalReceivablesForSettlement(
+                $selectedReceivableIds,
+                $branchId,
+                $travelerId,
+                $currency
+            );
+            if (count($receivables) !== count($selectedReceivableIds)) {
+                throw new RuntimeException('One or more selected customer receivable rows are no longer available.');
+            }
+
+            $originalReceivedAmount = (float) ($payload['received_amount'] ?? 0);
+            $maxRetainableAmount = round(array_sum(array_map(
+                static fn (array $receivable): float => max(0, round((float) ($receivable['outstanding_amount'] ?? 0), 2)),
+                $receivables
+            )), 2);
+            $payload['received_amount'] = round(min($originalReceivedAmount, $maxRetainableAmount), 2);
+            $payload['tendered_amount'] = $originalReceivedAmount;
+            $payload['returned_amount'] = round(max($originalReceivedAmount - (float) $payload['received_amount'], 0), 2);
+
+            $receiptNo = $repository->nextReceiptNumber();
+            $receiptId = $repository->createReceipt(array_merge($payload, [
+                'branch_id' => $branchId,
+                'booking_reference' => 'GLOBAL',
+                'receipt_no' => $receiptNo,
+                'actor_user_id' => $actorUserId,
+            ]));
+
+            $accountingRepository->postCustomerReceiptRecorded([
+                'branch_id' => $branchId,
+                'booking_reference' => null,
+                'customer_receipt_id' => $receiptId,
+                'receipt_no' => $receiptNo,
+                'received_amount' => $payload['received_amount'],
+                'charges_amount' => $payload['charges_amount'],
+                'payment_method' => $payload['payment_method'],
+                'treasury_account_id' => $payload['treasury_account_id'],
+                'entry_date' => $payload['receipt_date'],
+                'currency' => $currency,
+                'actor_user_id' => $actorUserId,
+                'narration' => 'Global customer payment recorded',
+            ]);
+
+            $remainingAmount = round((float) ($payload['received_amount'] ?? 0), 2);
+            $allocationCount = 0;
+            $allocatedAmount = 0.0;
+            $affectedBookingReferences = [];
+            $customerName = 'Customer';
+
+            foreach ($receivables as $receivable) {
+                if ($remainingAmount <= 0.005) {
+                    break;
+                }
+
+                $customerName = (string) ($receivable['customer_name'] ?? $customerName);
+                $receivableBalance = round((float) ($receivable['outstanding_amount'] ?? 0), 2);
+                if ($receivableBalance <= 0.005) {
+                    continue;
+                }
+
+                $allocationAmount = round(min($remainingAmount, $receivableBalance), 2);
+                if ($allocationAmount <= 0.005) {
+                    continue;
+                }
+
+                $allocationResult = $repository->allocateReceiptExplicit([
+                    'receipt_id' => $receiptId,
+                    'receivable_item_id' => (int) $receivable['id'],
+                    'receivable_amount_to_settle' => $allocationAmount,
+                    'payment_currency' => $currency,
+                    'rate_from_currency' => $currency,
+                    'rate_to_currency' => $currency,
+                    'exchange_rate' => 1.0,
+                    'exchange_rate_effective_date' => $payload['receipt_date'],
+                    'allocation_note' => 'Global customer payment auto-allocation',
+                    'actor_user_id' => $actorUserId,
+                ]);
+                $allocationId = (int) ($allocationResult['allocation_id'] ?? 0);
+                $allocatedReceiptAmount = round((float) ($allocationResult['allocated_amount'] ?? 0), 2);
+                if ($allocationId <= 0 || $allocatedReceiptAmount <= 0) {
+                    throw new RuntimeException('Receipt auto allocation could not be completed.');
+                }
+
+                $bookingReference = (string) ($receivable['booking_reference'] ?? '');
+                $accountingRepository->postCustomerReceiptAllocation([
+                    'branch_id' => (int) ($receivable['branch_id'] ?? $branchId),
+                    'booking_reference' => $bookingReference,
+                    'source_reference' => $receiptNo . '-ALLOC-' . $allocationId,
+                    'service_line_reference' => (string) ($receivable['service_line_reference'] ?? '') !== '' ? (string) $receivable['service_line_reference'] : null,
+                    'customer_receivable_item_id' => (int) $receivable['id'],
+                    'customer_receipt_id' => $receiptId,
+                    'allocated_amount' => $allocatedReceiptAmount,
+                    'entry_date' => $payload['receipt_date'],
+                    'currency' => $currency,
+                    'actor_user_id' => $actorUserId,
+                    'narration' => 'Global customer payment allocated to receivable',
+                ]);
+
+                $affectedBookingReferences[$bookingReference] = true;
+                $remainingAmount = round($remainingAmount - $allocatedReceiptAmount, 2);
+                $allocatedAmount = round($allocatedAmount + $allocatedReceiptAmount, 2);
+                $allocationCount++;
+            }
+
+            if ($startedTransaction && $db->inTransaction()) {
+                $db->commit();
+            }
+
+            return [
+                'receipt' => $repository->findReceiptById($receiptId),
+                'receipt_no' => $receiptNo,
+                'branch_id' => $branchId,
+                'customer_name' => $customerName,
+                'currency' => $currency,
+                'received_amount' => (float) $payload['received_amount'],
+                'allocated_amount' => $allocatedAmount,
+                'unallocated_amount' => round($remainingAmount, 2),
+                'returned_amount' => round(max($originalReceivedAmount - (float) $payload['received_amount'], 0), 2),
+                'allocation_count' => $allocationCount,
+                'booking_count' => count(array_filter(array_keys($affectedBookingReferences))),
+            ];
+        } catch (\Throwable $exception) {
+            if ($startedTransaction && $db->inTransaction()) {
+                $db->rollBack();
+            }
+
+            if ($exception instanceof RuntimeException) {
+                throw $exception;
+            }
+
+            throw new RuntimeException('Global customer payment could not be saved.', 0, $exception);
         }
     }
 
@@ -485,6 +658,27 @@ final class CustomerReceiptWorkspaceService extends Service
         throw new RuntimeException('Please configure/select a cash or bank account for this payment.');
     }
 
+    private function resolveAccessibleBranchId(int $branchId, array $accessibleBranchIds): int
+    {
+        if ($branchId <= 0 || ! in_array($branchId, array_map('intval', $accessibleBranchIds), true)) {
+            throw new RuntimeException('Please select a valid accessible branch.');
+        }
+
+        return $branchId;
+    }
+
+    private function normalizedSelectedReceivableIds(mixed $value): array
+    {
+        $rawIds = is_array($value) ? $value : [$value];
+        $ids = array_values(array_unique(array_filter(
+            array_map('intval', $rawIds),
+            static fn (int $id): bool => $id > 0
+        )));
+        sort($ids);
+
+        return $ids;
+    }
+
     private function paymentMethodRequiresTreasuryAccount(string $paymentMethod): bool
     {
         return in_array($paymentMethod, ['cash', 'bank_transfer'], true);
@@ -601,6 +795,22 @@ final class CustomerReceiptWorkspaceService extends Service
                 $settlement['exchange_rate'] = 1.0;
             }
 
+            $originalReceivedAmount = (float) ($payload['received_amount'] ?? 0);
+            $additionalRetainableAmount = $this->maxRetainableBookingReceiptAmount(
+                $repository,
+                $booking,
+                $accessibleBranchIds,
+                (string) $payload['currency'],
+                [(int) $targetReceivable['id']]
+            );
+            $maxRetainableAmount = round(
+                (float) ($settlement['target_payment_amount_to_consume'] ?? 0) + $additionalRetainableAmount,
+                2
+            );
+            $payload['received_amount'] = round(min($originalReceivedAmount, $maxRetainableAmount), 2);
+            $payload['tendered_amount'] = $originalReceivedAmount;
+            $payload['returned_amount'] = round(max($originalReceivedAmount - (float) $payload['received_amount'], 0), 2);
+
             $receiptNo = $repository->nextReceiptNumber();
             $receiptId = $repository->createReceipt(array_merge($payload, [
                 'branch_id' => (int) $booking['branch_id'],
@@ -618,6 +828,7 @@ final class CustomerReceiptWorkspaceService extends Service
                     'received_amount' => $payload['received_amount'],
                     'charges_amount' => $payload['charges_amount'],
                     'payment_method' => $payload['payment_method'],
+                    'treasury_account_id' => $payload['treasury_account_id'],
                     'entry_date' => $payload['receipt_date'],
                     'currency' => $payload['currency'],
                     'actor_user_id' => $actorUserId,
@@ -685,6 +896,7 @@ final class CustomerReceiptWorkspaceService extends Service
             return [
                 'receipt' => $repository->findReceiptById($receiptId),
                 'booking_id' => $bookingId,
+                'returned_amount' => round(max($originalReceivedAmount - (float) $payload['received_amount'], 0), 2),
             ];
         } catch (\Throwable $exception) {
             if ($startedTransaction && $db->inTransaction()) {
@@ -819,6 +1031,124 @@ final class CustomerReceiptWorkspaceService extends Service
         throw new RuntimeException('The selected settlement target is not available for this customer.');
     }
 
+    private function maxRetainableBookingReceiptAmount(
+        CustomerPaymentRepository $paymentRepository,
+        array $booking,
+        array $accessibleBranchIds,
+        string $receiptCurrency,
+        array $skipReceivableIds = []
+    ): float {
+        $openReceivables = $this->sameCurrencyAutoAllocatableReceivables(
+            $paymentRepository,
+            $booking,
+            $accessibleBranchIds,
+            $receiptCurrency,
+            $skipReceivableIds
+        );
+
+        return round(array_sum(array_map(
+            static fn (array $receivable): float => max(0, round((float) ($receivable['outstanding_amount'] ?? 0), 2)),
+            $openReceivables
+        )), 2);
+    }
+
+    private function sameCurrencyAutoAllocatableReceivables(
+        CustomerPaymentRepository $paymentRepository,
+        array $booking,
+        array $accessibleBranchIds,
+        string $receiptCurrency,
+        array $skipReceivableIds = []
+    ): array {
+        $leadTravelerId = (int) ($booking['lead_traveler_id'] ?? 0);
+        $currentBookingContext = [
+            'booking_id' => (int) ($booking['id'] ?? 0),
+            'booking_reference' => (string) ($booking['booking_reference'] ?? ''),
+            'booking_date' => (string) ($booking['booking_date'] ?? ''),
+        ];
+
+        $currentBookingOpenReceivables = $leadTravelerId > 0
+            ? $paymentRepository->openReceivablesForLeadTraveler(
+                $leadTravelerId,
+                $accessibleBranchIds,
+                $currentBookingContext,
+                $receiptCurrency
+            )
+            : $paymentRepository->openReceivablesForBooking((string) $booking['booking_reference']);
+
+        $allCustomerOpenReceivables = $leadTravelerId > 0
+            ? $paymentRepository->openReceivablesForLeadTraveler(
+                $leadTravelerId,
+                $accessibleBranchIds,
+                [],
+                $receiptCurrency
+            )
+            : $currentBookingOpenReceivables;
+
+        $currentBookingId = (int) ($booking['id'] ?? 0);
+        $currentBookingReference = (string) ($booking['booking_reference'] ?? '');
+        $currentBookingReceivablesById = [];
+        $otherReceivablesById = [];
+
+        foreach (array_merge($currentBookingOpenReceivables, $allCustomerOpenReceivables) as $receivable) {
+            $receivableId = (int) ($receivable['id'] ?? 0);
+            if ($receivableId <= 0 || in_array($receivableId, $skipReceivableIds, true)) {
+                continue;
+            }
+
+            if ((string) ($receivable['currency'] ?? '') !== $receiptCurrency) {
+                continue;
+            }
+
+            $isCurrentBookingReceivable = ((int) ($receivable['booking_id'] ?? 0) === $currentBookingId)
+                || ((string) ($receivable['booking_reference'] ?? '') === $currentBookingReference);
+
+            if ($isCurrentBookingReceivable) {
+                $currentBookingReceivablesById[$receivableId] = $receivable;
+                continue;
+            }
+
+            $otherReceivablesById[$receivableId] = $receivable;
+        }
+
+        $currentBookingReceivables = array_values($currentBookingReceivablesById);
+        $otherReceivables = array_values($otherReceivablesById);
+
+        usort($otherReceivables, static function (array $left, array $right): int {
+            $leftDueDate = (string) ($left['due_date'] ?? '');
+            $rightDueDate = (string) ($right['due_date'] ?? '');
+
+            if ($leftDueDate !== $rightDueDate) {
+                if ($leftDueDate === '') {
+                    return 1;
+                }
+
+                if ($rightDueDate === '') {
+                    return -1;
+                }
+
+                return strcmp($leftDueDate, $rightDueDate);
+            }
+
+            $leftBookingDate = (string) ($left['booking_date'] ?? '');
+            $rightBookingDate = (string) ($right['booking_date'] ?? '');
+
+            if ($leftBookingDate !== $rightBookingDate) {
+                return strcmp($leftBookingDate, $rightBookingDate);
+            }
+
+            $leftBookingId = (int) ($left['booking_id'] ?? 0);
+            $rightBookingId = (int) ($right['booking_id'] ?? 0);
+
+            if ($leftBookingId !== $rightBookingId) {
+                return $leftBookingId <=> $rightBookingId;
+            }
+
+            return (int) ($left['id'] ?? 0) <=> (int) ($right['id'] ?? 0);
+        });
+
+        return array_values(array_merge($currentBookingReceivables, $otherReceivables));
+    }
+
     private function autoAllocateCurrentCurrencyReceipt(
         int $receiptId,
         string $receiptNo,
@@ -831,103 +1161,16 @@ final class CustomerReceiptWorkspaceService extends Service
         AccountingRepository $accountingRepository,
         array $skipReceivableIds = []
     ): void {
-        $leadTravelerId = (int) ($booking['lead_traveler_id'] ?? 0);
-        $currentBookingContext = [
-            'booking_id' => (int) ($booking['id'] ?? 0),
-            'booking_reference' => (string) ($booking['booking_reference'] ?? ''),
-            'booking_date' => (string) ($booking['booking_date'] ?? ''),
-        ];
-
-       $currentBookingOpenReceivables = $leadTravelerId > 0
-    ? $paymentRepository->openReceivablesForLeadTraveler(
-        $leadTravelerId,
-        $accessibleBranchIds,
-        $currentBookingContext,
-        $receiptCurrency
-    )
-    : $paymentRepository->openReceivablesForBooking((string) $booking['booking_reference']);
-
-$allCustomerOpenReceivables = $leadTravelerId > 0
-    ? $paymentRepository->openReceivablesForLeadTraveler(
-        $leadTravelerId,
-        $accessibleBranchIds,
-        [],
-        $receiptCurrency
-    )
-    : $currentBookingOpenReceivables;
-
-$currentBookingId = (int) ($booking['id'] ?? 0);
-$currentBookingReference = (string) ($booking['booking_reference'] ?? '');
-$currentBookingReceivablesById = [];
-$otherReceivablesById = [];
-
-foreach (array_merge($currentBookingOpenReceivables, $allCustomerOpenReceivables) as $receivable) {
-    $receivableId = (int) ($receivable['id'] ?? 0);
-    if ($receivableId <= 0) {
-        continue;
-    }
-
-    if ((string) ($receivable['currency'] ?? '') !== $receiptCurrency) {
-        continue;
-    }
-
-    $isCurrentBookingReceivable = ((int) ($receivable['booking_id'] ?? 0) === $currentBookingId)
-        || ((string) ($receivable['booking_reference'] ?? '') === $currentBookingReference);
-
-    if ($isCurrentBookingReceivable) {
-        $currentBookingReceivablesById[$receivableId] = $receivable;
-        continue;
-    }
-
-    $otherReceivablesById[$receivableId] = $receivable;
-}
-
-$currentBookingReceivables = array_values($currentBookingReceivablesById);
-$otherReceivables = array_values($otherReceivablesById);
-
-usort($otherReceivables, static function (array $left, array $right): int {
-    $leftDueDate = (string) ($left['due_date'] ?? '');
-    $rightDueDate = (string) ($right['due_date'] ?? '');
-
-    if ($leftDueDate !== $rightDueDate) {
-        if ($leftDueDate === '') {
-            return 1;
-        }
-
-        if ($rightDueDate === '') {
-            return -1;
-        }
-
-        return strcmp($leftDueDate, $rightDueDate);
-    }
-
-    $leftBookingDate = (string) ($left['booking_date'] ?? '');
-    $rightBookingDate = (string) ($right['booking_date'] ?? '');
-
-    if ($leftBookingDate !== $rightBookingDate) {
-        return strcmp($leftBookingDate, $rightBookingDate);
-    }
-
-    $leftBookingId = (int) ($left['booking_id'] ?? 0);
-    $rightBookingId = (int) ($right['booking_id'] ?? 0);
-
-    if ($leftBookingId !== $rightBookingId) {
-        return $leftBookingId <=> $rightBookingId;
-    }
-
-    return (int) ($left['id'] ?? 0) <=> (int) ($right['id'] ?? 0);
-});
-
-$openReceivables = array_values(array_merge($currentBookingReceivables, $otherReceivables));
+        $openReceivables = $this->sameCurrencyAutoAllocatableReceivables(
+            $paymentRepository,
+            $booking,
+            $accessibleBranchIds,
+            $receiptCurrency,
+            $skipReceivableIds
+        );
 
         foreach ($openReceivables as $receivable) {
-            if (in_array((int) ($receivable['id'] ?? 0), $skipReceivableIds, true)) {
-                continue;
-            }
-
-            if ((string) ($receivable['currency'] ?? '') !== $receiptCurrency) {
-                continue;
-            }
+            $isCurrentBookingReceivable = ((string) ($receivable['booking_reference'] ?? '') === (string) ($booking['booking_reference'] ?? ''));
 
             $receipt = $paymentRepository->findReceiptById($receiptId);
             if ($receipt === null) {
@@ -1040,11 +1283,21 @@ $openReceivables = array_values(array_merge($currentBookingReceivables, $otherRe
     private function normalizeMethod(string $value): string
     {
         $method = str_replace(' ', '_', mb_strtolower(trim($value)));
-        if (! in_array($method, self::ALLOWED_METHODS, true)) {
+        if (! in_array($method, $this->activePaymentMethodCodes(), true)) {
             throw new RuntimeException('Please select a valid payment method.');
         }
 
         return $method;
+    }
+
+    private function activePaymentMethodCodes(): array
+    {
+        $codes = array_map(
+            static fn (string $code): string => str_replace(' ', '_', mb_strtolower(trim($code))),
+            array_keys((new MasterDataRepository($this->app))->activeCodeLabelMap('payment_methods'))
+        );
+
+        return $codes !== [] ? array_values(array_unique($codes)) : ['cash', 'bank_transfer', 'debit_card', 'credit_card'];
     }
 
     private function normalizeStatus(string $value): string

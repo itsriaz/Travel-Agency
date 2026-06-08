@@ -51,9 +51,11 @@ final class CustomerPaymentFoundationService extends Service
                     'receiptNo' => (string) $row['receipt_no'],
                     'receiptDate' => (string) $row['receipt_date'],
                     'currency' => (string) $row['currency'],
+                    'tenderedAmount' => (float) ($row['tendered_amount'] ?? $row['received_amount'] ?? 0),
                     'receivedAmount' => (float) $row['received_amount'],
                     'allocatedAmount' => (float) $row['allocated_amount'],
                     'unallocatedAmount' => (float) $row['unallocated_amount'],
+                    'returnedAmount' => (float) ($row['returned_amount'] ?? 0),
                     'paymentMethod' => (string) $row['payment_method'],
                     'treasuryAccountId' => (int) ($row['treasury_account_id'] ?? 0),
                     'treasuryAccountName' => (string) ($row['treasury_account_name'] ?? ''),
@@ -258,14 +260,23 @@ final class CustomerPaymentFoundationService extends Service
         $customerOpenReceivables = [];
         if ($customerTravelerId !== null && $customerTravelerId > 0) {
             $customerOpenReceivables = array_map(
-                static function (array $row) use ($serviceDirectory, $bookingReference): array {
+                static function (array $row) use ($bookingReference): array {
+                    $serviceType = trim((string) ($row['service_type'] ?? ''));
+                    if ($serviceType === '') {
+                        $serviceType = 'Service';
+                    } else {
+                        $serviceType = ucwords(str_replace('_', ' ', $serviceType));
+                    }
+
                     return [
                         'id' => (int) ($row['id'] ?? 0),
                         'bookingId' => (int) ($row['booking_id'] ?? 0),
                         'bookingReference' => (string) ($row['booking_reference'] ?? ''),
                         'bookingDate' => (string) ($row['booking_date'] ?? ''),
+                        'branchName' => (string) ($row['branch_name'] ?? ''),
                         'serviceLineReference' => (string) ($row['service_line_reference'] ?? ''),
-                        'serviceType' => $serviceDirectory[(string) ($row['service_line_reference'] ?? '')] ?? 'Service',
+                        'serviceType' => $serviceType,
+                        'passengerName' => (string) ($row['passenger_name'] ?? ''),
                         'currency' => (string) ($row['currency'] ?? ''),
                         'dueAmount' => (float) ($row['due_amount'] ?? 0),
                         'allocatedAmount' => (float) ($row['allocated_amount'] ?? 0),
@@ -276,10 +287,10 @@ final class CustomerPaymentFoundationService extends Service
                         'isCurrentBooking' => (string) ($row['booking_reference'] ?? '') === $bookingReference,
                     ];
                 },
-                $repository->openReceivablesForLeadTraveler(
+                $repository->openReceivablesDetailedForLeadTraveler(
                     $customerTravelerId,
                     $accessibleBranchIds,
-                    $currentBookingContext
+                    null
                 )
             );
         }
@@ -360,11 +371,16 @@ final class CustomerPaymentFoundationService extends Service
         ));
 
         $paymentTreasuryAccounts = [];
+        $treasuryBranchIds = array_values(array_unique(array_filter(
+            array_map('intval', $accessibleBranchIds),
+            static fn (int $branchId): bool => $branchId > 0
+        )));
         $currentBranchId = (int) ($currentBookingContext['branch_id'] ?? 0);
-        if ($currentBranchId <= 0 && $accessibleBranchIds !== []) {
-            $currentBranchId = (int) $accessibleBranchIds[0];
+        if ($currentBranchId > 0 && ! in_array($currentBranchId, $treasuryBranchIds, true)) {
+            $treasuryBranchIds[] = $currentBranchId;
         }
-        if ($currentBranchId > 0) {
+
+        if ($treasuryBranchIds !== []) {
             $paymentTreasuryAccounts = array_map(
                 static function (array $row): array {
                     $bankName = trim((string) ($row['bank_name'] ?? ''));
@@ -384,7 +400,7 @@ final class CustomerPaymentFoundationService extends Service
                     ];
                 },
                 array_values(array_filter(
-                    (new TreasuryRepository($this->app))->accounts([$currentBranchId]),
+                    (new TreasuryRepository($this->app))->accounts($treasuryBranchIds),
                     static fn (array $row): bool => (int) ($row['is_active'] ?? 0) === 1
                 ))
             );

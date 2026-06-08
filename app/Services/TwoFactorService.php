@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace App\Services;
 
-use App\DTOs\UserSessionData;
 use App\Helpers\Auth;
 use App\Helpers\AuditLog;
 use App\Helpers\Crypto;
@@ -20,6 +19,15 @@ use PragmaRX\Google2FA\Google2FA;
 
 final class TwoFactorService extends Service
 {
+    public function currentVerifyLockState(int $userId, string $ipAddress): ?array
+    {
+        $throttle = new SecurityThrottleRepository($this->app);
+        $maxAttempts = (int) config('security.otp.max_attempts', 3);
+        $windowMinutes = (int) config('security.otp.window_minutes', 15);
+
+        return $throttle->currentLockState('otp_verify', 'user:' . $userId, $ipAddress, $windowMinutes, $maxAttempts);
+    }
+
     public function beginSetup(int $userId): array
     {
         $users = new UserRepository($this->app);
@@ -42,7 +50,9 @@ final class TwoFactorService extends Service
         }
 
         $issuer = (string) config('app.name', 'Travel Agency Operations');
-        $label = $user['email'] ?: $user['username'];
+        $username = trim((string) ($user['username'] ?? ''));
+        $email = trim((string) ($user['email'] ?? ''));
+        $label = $username !== '' && $email !== '' ? $username . ' / ' . $email : ($username !== '' ? $username : $email);
         $otpAuthUrl = (new Google2FA())->getQRCodeUrl($issuer, $label, $secret);
         $qrSvg = (new Writer(new ImageRenderer(
             new RendererStyle(220),
@@ -88,19 +98,7 @@ final class TwoFactorService extends Service
 
         Session::put('_two_factor_backup_codes', $backupCodes);
         $freshUser = $users->findForSession($userId);
-        $sessionData = new UserSessionData(
-            (int) $freshUser['id'],
-            $freshUser['name'],
-            $freshUser['username'],
-            $freshUser['email'],
-            $freshUser['role_code'],
-            (int) $freshUser['default_branch_id'],
-            array_map('intval', $users->branchIdsForUser((int) $freshUser['id'], $freshUser['role_code'])),
-            (bool) $freshUser['must_change_password'],
-            (int) $freshUser['session_version'],
-            true,
-            true
-        );
+        $sessionData = SecuritySettingsService::buildSessionData($this->app, $freshUser, true);
         Auth::refresh($sessionData->toArray(), true);
 
         return ['success' => true];
@@ -150,19 +148,7 @@ final class TwoFactorService extends Service
         }
 
         $freshUser = $users->findForSession($userId);
-        $sessionData = new UserSessionData(
-            (int) $freshUser['id'],
-            $freshUser['name'],
-            $freshUser['username'],
-            $freshUser['email'],
-            $freshUser['role_code'],
-            (int) $freshUser['default_branch_id'],
-            array_map('intval', $users->branchIdsForUser((int) $freshUser['id'], $freshUser['role_code'])),
-            (bool) $freshUser['must_change_password'],
-            (int) $freshUser['session_version'],
-            (bool) $freshUser['two_factor_enabled'],
-            true
-        );
+        $sessionData = SecuritySettingsService::buildSessionData($this->app, $freshUser, true);
         Auth::refresh($sessionData->toArray(), true);
 
         return ['success' => true];
@@ -224,7 +210,11 @@ final class TwoFactorService extends Service
         $windowMinutes = (int) config('security.otp.window_minutes', 15);
 
         if ($throttle->countRecentFailures('otp_verify', $subjectKey, $ipAddress, $windowMinutes) >= $maxAttempts) {
-            return ['success' => false, 'message' => 'Too many OTP failures. Please wait and try again.'];
+            return [
+                'success' => false,
+                'message' => 'Too many OTP failures. Please wait and try again.',
+                'lock_state' => $throttle->currentLockState('otp_verify', $subjectKey, $ipAddress, $windowMinutes, $maxAttempts),
+            ];
         }
 
         return ['success' => true];
@@ -256,7 +246,11 @@ final class TwoFactorService extends Service
         );
 
         if ($failures >= (int) config('security.otp.max_attempts', 3)) {
-            return ['success' => false, 'message' => 'Too many OTP failures. Please wait and try again.'];
+            return [
+                'success' => false,
+                'message' => 'Too many OTP failures. Please wait and try again.',
+                'lock_state' => $this->currentVerifyLockState($userId, $ipAddress),
+            ];
         }
 
         return ['success' => false, 'message' => 'Invalid verification code.'];

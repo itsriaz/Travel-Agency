@@ -4,15 +4,29 @@ declare(strict_types=1);
 
 namespace App\Services;
 
-use App\DTOs\UserSessionData;
 use App\Helpers\Auth;
 use App\Helpers\AuditLog;
+use App\Helpers\PasswordHasher;
 use App\Repositories\LoginAttemptRepository;
 use App\Repositories\UserRepository;
 use App\Services\TrustedDeviceService;
 
 final class AuthService extends Service
 {
+    public function currentLockState(string $login, string $ipAddress): ?array
+    {
+        $loginKey = mb_strtolower(trim($login));
+        if ($loginKey === '') {
+            return null;
+        }
+
+        $attempts = new LoginAttemptRepository($this->app);
+        $maxAttempts = (int) config('security.login.max_attempts', 5);
+        $windowMinutes = (int) config('security.login.window_minutes', 15);
+
+        return $attempts->currentLockState($loginKey, $ipAddress, $windowMinutes, $maxAttempts);
+    }
+
     public function attempt(string $login, string $password, string $ipAddress): array
     {
         $loginKey = mb_strtolower(trim($login));
@@ -21,6 +35,7 @@ final class AuthService extends Service
         $windowMinutes = (int) config('security.login.window_minutes', 15);
 
         if ($attempts->countRecentFailures($loginKey, $ipAddress, $windowMinutes) >= $maxAttempts) {
+            $lockState = $attempts->currentLockState($loginKey, $ipAddress, $windowMinutes, $maxAttempts);
             AuditLog::record($this->app, 'auth.login.locked', [
                 'login' => $loginKey,
                 'ip_address' => $ipAddress,
@@ -29,6 +44,7 @@ final class AuthService extends Service
             return [
                 'success' => false,
                 'message' => 'Too many login attempts. Please wait and try again.',
+                'lock_state' => $lockState,
             ];
         }
 
@@ -46,6 +62,7 @@ final class AuthService extends Service
             ]);
 
             if ($failureCount >= $maxAttempts) {
+                $lockState = $attempts->currentLockState($loginKey, $ipAddress, $windowMinutes, $maxAttempts);
                 AuditLog::record($this->app, 'auth.login.locked', [
                     'login' => $loginKey,
                     'user_id' => $user['id'] ?? null,
@@ -55,6 +72,7 @@ final class AuthService extends Service
                 return [
                     'success' => false,
                     'message' => 'Too many login attempts. Please wait and try again.',
+                    'lock_state' => $lockState,
                 ];
             }
 
@@ -64,7 +82,7 @@ final class AuthService extends Service
             ];
         }
 
-        if (password_needs_rehash($user['password_hash'], PASSWORD_DEFAULT)) {
+        if (PasswordHasher::needsRehash((string) $user['password_hash'])) {
             $userRepository->rehashPassword((int) $user['id'], $password);
         }
 
@@ -72,19 +90,7 @@ final class AuthService extends Service
         $attempts->clearFailures($loginKey, $ipAddress);
         $userRepository->touchLastLogin((int) $user['id']);
 
-        $sessionData = new UserSessionData(
-            (int) $user['id'],
-            $user['name'],
-            $user['username'],
-            $user['email'],
-            $user['role_code'],
-            (int) $user['default_branch_id'],
-            array_map('intval', $userRepository->branchIdsForUser((int) $user['id'], $user['role_code'])),
-            (bool) $user['must_change_password'],
-            (int) $user['session_version'],
-            (bool) $user['two_factor_enabled'],
-            false
-        );
+        $sessionData = SecuritySettingsService::buildSessionData($this->app, $user, false);
 
         Auth::login($sessionData->toArray());
 
@@ -93,19 +99,7 @@ final class AuthService extends Service
             $twoFactorVerified = (new TrustedDeviceService($this->app))->canBypassOtp((int) $user['id']);
 
             if ($twoFactorVerified) {
-                $sessionData = new UserSessionData(
-                    (int) $user['id'],
-                    $user['name'],
-                    $user['username'],
-                    $user['email'],
-                    $user['role_code'],
-                    (int) $user['default_branch_id'],
-                    array_map('intval', $userRepository->branchIdsForUser((int) $user['id'], $user['role_code'])),
-                    (bool) $user['must_change_password'],
-                    (int) $user['session_version'],
-                    (bool) $user['two_factor_enabled'],
-                    true
-                );
+                $sessionData = SecuritySettingsService::buildSessionData($this->app, $user, true);
                 Auth::refresh($sessionData->toArray(), true);
             }
         }

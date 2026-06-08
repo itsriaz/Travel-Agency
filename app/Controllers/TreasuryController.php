@@ -27,6 +27,8 @@ final class TreasuryController extends BaseController
         return $this->view('treasury/accounts', [
             'title' => 'Treasury Accounts',
             'accounts' => $repository->accounts($accessibleBranchIds),
+            'transferAccounts' => $repository->transferAccounts($accessibleBranchIds),
+            'recentTransfers' => $repository->recentTransfers($accessibleBranchIds),
             'branches' => $repository->branches($accessibleBranchIds),
             'currencies' => $repository->currencies(),
             'ledgerAccounts' => $repository->assetLedgerAccounts(),
@@ -67,6 +69,54 @@ final class TreasuryController extends BaseController
         }
 
         $this->redirect($returnTo !== '' ? $returnTo : '/treasury/accounts');
+    }
+
+    public function saveTransfer(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+
+        try {
+            $repository = new TreasuryRepository($this->app);
+            $repository->saveTransfer(
+                array_merge($_POST, [
+                    'created_by_user_id' => Auth::id(),
+                ]),
+                Authorization::accessibleBranchIds()
+            );
+
+            Flash::success('Treasury transfer posted successfully.');
+        } catch (RuntimeException $exception) {
+            Flash::error($exception->getMessage());
+            $this->redirect('/treasury/accounts');
+        }
+
+        $this->redirect('/treasury/accounts');
+    }
+
+    public function voidTransfer(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+
+        try {
+            $voidReason = trim((string) ($_POST['void_reason'] ?? ''));
+            if ($voidReason === '') {
+                throw new RuntimeException('Please enter a void reason for this treasury transfer.');
+            }
+
+            $repository = new TreasuryRepository($this->app);
+            $repository->voidTransfer(
+                (int) ($_POST['treasury_transaction_id'] ?? 0),
+                $voidReason,
+                Auth::id() ?? 0,
+                Authorization::accessibleBranchIds()
+            );
+
+            Flash::success('Treasury transfer voided successfully.');
+        } catch (RuntimeException $exception) {
+            Flash::error($exception->getMessage());
+        }
+
+        $this->redirect('/treasury/accounts');
     }
 
     private function sanitizeReturnTo(string $value): string

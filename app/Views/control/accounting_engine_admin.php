@@ -7,6 +7,14 @@ $systemRows = array_sum(array_map(
     $panels ?? []
 ));
 $journalRows = $accountingFoundation['journalPreview'] ?? [];
+$previewBookingOptions = is_array($previewBookingOptions ?? null) ? $previewBookingOptions : [];
+$selectedPreviewBooking = is_array($selectedPreviewBooking ?? null) ? $selectedPreviewBooking : null;
+$previewSearchTerm = trim((string) ($previewSearchTerm ?? ''));
+$previewBookingId = (int) ($previewBookingId ?? 0);
+$previewBookingReference = trim((string) ($selectedPreviewBooking['booking_reference'] ?? ''));
+$previewBookingLabel = $previewBookingReference !== ''
+    ? trim($previewBookingReference . ' / ' . (string) ($selectedPreviewBooking['lead_traveler_name'] ?? 'Booking') . ' / ' . (string) ($selectedPreviewBooking['branch_name'] ?? ''))
+    : 'No booking selected';
 ?>
 <section class="page-head">
     <div>
@@ -22,30 +30,76 @@ $journalRows = $accountingFoundation['journalPreview'] ?? [];
     <span>Accessible Branches:</span>
     <strong><?= e($branchLabel !== '' ? $branchLabel : 'Restricted') ?></strong>
     <span class="workspace-context-divider">|</span>
-    <span>Engine Scope:</span>
-    <strong>Active</strong>
+    <span>Selected Booking:</span>
+    <strong><?= e($previewBookingLabel) ?></strong>
 </div>
 
 <section class="stat-grid">
     <article class="stat-card">
-        <div class="stat-label">Setup Areas</div>
+        <div class="stat-label">Accounting Setup Sections</div>
         <div class="stat-value"><?= e((string) count($panels)) ?></div>
+        <div class="stat-note">Groups of accounting settings shown below.</div>
     </article>
     <article class="stat-card">
-        <div class="stat-label">Protected Setup</div>
+        <div class="stat-label">Locked System Setup</div>
         <div class="stat-value"><?= e((string) $systemRows) ?></div>
+        <div class="stat-note">Core accounts/rules protected from accidental changes.</div>
     </article>
     <article class="stat-card">
-        <div class="stat-label">Current Journal Rows</div>
+        <div class="stat-label">Posted Journal Lines</div>
         <div class="stat-value"><?= e((string) count($journalRows)) ?></div>
+        <div class="stat-note">Accounting entries posted for the selected booking.</div>
     </article>
 </section>
 
 <section class="control-grid">
     <article class="panel compact-panel">
         <div class="panel-header">
+            <h2>Booking Accounting Preview</h2>
+        </div>
+        <form method="get" action="<?= e(url('/accounting-engine')) ?>" class="station-form-grid station-form-grid--12">
+            <input type="hidden" name="register" value="<?= e((string) ($_GET['register'] ?? '')) ?>">
+            <?php if ((int) ($_GET['id'] ?? 0) > 0): ?>
+                <input type="hidden" name="id" value="<?= e((string) ((int) ($_GET['id'] ?? 0))) ?>">
+            <?php endif; ?>
+            <label class="station-field span-4">
+                <span>Find Booking</span>
+                <input type="text" name="preview_q" value="<?= e($previewSearchTerm) ?>" placeholder="Booking ref / traveler / passport / receipt">
+            </label>
+            <label class="station-field span-6">
+                <span>Booking to Preview</span>
+                <select name="preview_booking_id">
+                    <option value="0">Choose a booking to preview</option>
+                    <?php foreach ($previewBookingOptions as $bookingOption): ?>
+                        <?php $optionId = (int) ($bookingOption['id'] ?? 0); ?>
+                        <?php $optionLabel = trim(
+                            (string) ($bookingOption['booking_reference'] ?? '')
+                            . ' / '
+                            . (string) ($bookingOption['lead_traveler_name'] ?? 'Traveler')
+                            . ' / '
+                            . (string) ($bookingOption['branch_name'] ?? 'Branch')
+                            . ' / '
+                            . (string) ($bookingOption['booking_date'] ?? '')
+                        ); ?>
+                        <option value="<?= e((string) $optionId) ?>" <?= $optionId === $previewBookingId ? 'selected' : '' ?>><?= e($optionLabel) ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </label>
+            <div class="station-field span-2" style="align-self:end;">
+                <button class="btn btn-primary" type="submit" style="width:100%;">Show Accounting</button>
+            </div>
+        </form>
+    </article>
+
+    <article class="panel compact-panel">
+        <div class="panel-header">
             <h2>Financial Snapshot</h2>
         </div>
+        <?php if ($previewBookingReference === ''): ?>
+            <div class="workspace-feedback workspace-feedback--inline" style="display:block;margin-bottom:12px;">
+                Select a live booking to preview its posted accounting, customer receivable, and supplier payable position.
+            </div>
+        <?php endif; ?>
         <div class="dense-table-wrap">
             <table class="dense-table">
                 <thead>

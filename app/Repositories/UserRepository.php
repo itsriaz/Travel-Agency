@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Repositories;
 
+use App\Helpers\PasswordHasher;
+
 final class UserRepository extends BaseRepository
 {
     public function findForLogin(string $login): ?array
@@ -38,7 +40,7 @@ final class UserRepository extends BaseRepository
         $statement = $this->db->prepare('UPDATE users SET password_hash = :password_hash WHERE id = :id');
         $statement->execute([
             'id' => $userId,
-            'password_hash' => password_hash($password, PASSWORD_DEFAULT),
+            'password_hash' => PasswordHasher::make($password),
         ]);
     }
 
@@ -121,7 +123,7 @@ final class UserRepository extends BaseRepository
         );
         $statement->execute([
             'id' => $userId,
-            'password_hash' => password_hash($password, PASSWORD_DEFAULT),
+            'password_hash' => PasswordHasher::make($password),
             'must_change_password_value' => $mustChangePassword ? 1 : 0,
             'must_change_password_case' => $mustChangePassword ? 1 : 0,
             'reason' => $reason,
@@ -194,6 +196,25 @@ final class UserRepository extends BaseRepository
              WHERE u.is_active = 1
              ORDER BY u.name'
         );
+
+        return $statement->fetchAll() ?: [];
+    }
+
+    public function listUsers(bool $includeInactive = false): array
+    {
+        $sql = 'SELECT u.id, u.name, u.username, u.email, u.is_active, u.default_branch_id,
+                       r.code AS role_code, r.name AS role_name, b.name AS default_branch_name
+                FROM users u
+                INNER JOIN roles r ON r.id = u.role_id
+                INNER JOIN branches b ON b.id = u.default_branch_id';
+
+        if (! $includeInactive) {
+            $sql .= ' WHERE u.is_active = 1';
+        }
+
+        $sql .= ' ORDER BY u.is_active DESC, u.name ASC, u.id ASC';
+
+        $statement = $this->db->query($sql);
 
         return $statement->fetchAll() ?: [];
     }
@@ -299,5 +320,182 @@ final class UserRepository extends BaseRepository
                 ]);
             }
         });
+    }
+
+    public function createUser(
+        string $name,
+        string $username,
+        string $email,
+        string $password,
+        string $roleCode,
+        int $defaultBranchId,
+        array $branchIds
+    ): int {
+        return $this->transaction(function () use ($name, $username, $email, $password, $roleCode, $defaultBranchId, $branchIds): int {
+            $roleId = $this->roleIdByCode($roleCode);
+            if ($roleId <= 0) {
+                throw new \RuntimeException('Please select a valid role.');
+            }
+
+            $branchIds = $this->validatedActiveBranchIds($defaultBranchId, $branchIds);
+
+            $statement = $this->db->prepare(
+                'INSERT INTO users (
+                    role_id, default_branch_id, name, username, email, password_hash, is_active,
+                    must_change_password, force_password_change_reason, password_changed_at
+                 ) VALUES (
+                    :role_id, :default_branch_id, :name, :username, :email, :password_hash, 1,
+                    1, :force_password_change_reason, NULL
+                 )'
+            );
+            $statement->execute([
+                'role_id' => $roleId,
+                'default_branch_id' => $defaultBranchId,
+                'name' => $name,
+                'username' => $username,
+                'email' => $email,
+                'password_hash' => PasswordHasher::make($password),
+                'force_password_change_reason' => 'first_login',
+            ]);
+
+            $userId = (int) $this->db->lastInsertId();
+            $insertStatement = $this->db->prepare(
+                'INSERT INTO user_branch_access (user_id, branch_id)
+                 VALUES (:user_id, :branch_id)'
+            );
+            foreach ($branchIds as $branchId) {
+                $insertStatement->execute([
+                    'user_id' => $userId,
+                    'branch_id' => $branchId,
+                ]);
+            }
+
+            return $userId;
+        });
+    }
+
+    public function setUserActiveStatus(int $userId, bool $isActive): void
+    {
+        $statement = $this->db->prepare(
+            'UPDATE users
+             SET is_active = :is_active,
+                 session_version = session_version + 1
+             WHERE id = :id'
+        );
+        $statement->execute([
+            'id' => $userId,
+            'is_active' => $isActive ? 1 : 0,
+        ]);
+    }
+
+    public function countActiveUsersByRoleCode(string $roleCode): int
+    {
+        $statement = $this->db->prepare(
+            'SELECT COUNT(*)
+             FROM users u
+             INNER JOIN roles r ON r.id = u.role_id
+             WHERE r.code = :role_code
+               AND u.is_active = 1'
+        );
+        $statement->execute(['role_code' => $roleCode]);
+
+        return (int) $statement->fetchColumn();
+    }
+
+    public function usernameOrEmailExists(string $username, string $email): bool
+    {
+        $statement = $this->db->prepare(
+            'SELECT 1
+             FROM users
+             WHERE LOWER(username) = :username
+                OR LOWER(email) = :email
+             LIMIT 1'
+        );
+        $statement->execute([
+            'username' => mb_strtolower($username),
+            'email' => mb_strtolower($email),
+        ]);
+
+        return $statement->fetchColumn() !== false;
+    }
+
+    public function usernameOrEmailExistsForOtherUser(int $userId, string $username, string $email): bool
+    {
+        $statement = $this->db->prepare(
+            'SELECT 1
+             FROM users
+             WHERE id <> :user_id
+               AND (
+                   LOWER(username) = :username
+                   OR LOWER(email) = :email
+               )
+             LIMIT 1'
+        );
+        $statement->execute([
+            'user_id' => $userId,
+            'username' => mb_strtolower($username),
+            'email' => mb_strtolower($email),
+        ]);
+
+        return $statement->fetchColumn() !== false;
+    }
+
+    public function updateIdentityFields(int $userId, string $name, string $username, string $email): void
+    {
+        $statement = $this->db->prepare(
+            'UPDATE users
+             SET name = :name,
+                 username = :username,
+                 email = :email,
+                 session_version = session_version + 1
+             WHERE id = :id'
+        );
+        $statement->execute([
+            'id' => $userId,
+            'name' => $name,
+            'username' => $username,
+            'email' => $email,
+        ]);
+    }
+
+    private function roleIdByCode(string $roleCode): int
+    {
+        $statement = $this->db->prepare(
+            "SELECT id
+             FROM roles
+             WHERE code = :code
+               AND code IN ('super_admin', 'branch_admin', 'employee')
+             LIMIT 1"
+        );
+        $statement->execute(['code' => $roleCode]);
+
+        return (int) ($statement->fetchColumn() ?: 0);
+    }
+
+    private function validatedActiveBranchIds(int $defaultBranchId, array $branchIds): array
+    {
+        $branchIds = array_values(array_unique(array_map('intval', $branchIds)));
+        if ($defaultBranchId <= 0 || ! in_array($defaultBranchId, $branchIds, true)) {
+            throw new \RuntimeException('Default branch must be included in branch access.');
+        }
+
+        $placeholders = implode(',', array_fill(0, count($branchIds), '?'));
+        $branchStatement = $this->db->prepare(
+            'SELECT id
+             FROM branches
+             WHERE is_active = 1
+               AND id IN (' . $placeholders . ')'
+        );
+        $branchStatement->execute($branchIds);
+        $validBranchIds = array_map('intval', $branchStatement->fetchAll(\PDO::FETCH_COLUMN) ?: []);
+        sort($validBranchIds);
+        $expectedBranchIds = $branchIds;
+        sort($expectedBranchIds);
+
+        if ($validBranchIds !== $expectedBranchIds) {
+            throw new \RuntimeException('Branch access contains an inactive or invalid branch.');
+        }
+
+        return $branchIds;
     }
 }

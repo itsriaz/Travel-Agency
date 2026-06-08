@@ -4,16 +4,22 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!station) {
         return;
     }
+    const workspaceOpenedExistingBookingAtLoad = station.dataset.workspaceOpenedExistingBooking === '1';
 
     const pendingFreshCustomerKey = 'travel_ops_pending_fresh_customer';
+    const pendingFreshWorkspaceActionKey = 'travel_ops_pending_fresh_workspace_action';
     const pendingTreasuryWorkspaceStateKey = 'travel_ops_pending_treasury_workspace_state';
 
     const feedback = station.querySelector('[data-workspace-feedback]');
-    const quickSearch = station.querySelector('#workspace-search');
     const quickSearchForm = station.querySelector('#workspace-search-form');
-    const quickSearchSubmit = station.querySelector('[data-workspace-search-submit]');
+    const quickSearch = quickSearchForm?.querySelector('input[name="q"]') || null;
+    const quickSearchSubmit = quickSearchForm?.querySelector('[data-workspace-search-submit]') || null;
     const actionButtons = Array.from(station.querySelectorAll('[data-workspace-action]'));
+    const reminderToggleButtons = Array.from(station.querySelectorAll('[data-workspace-action="add-reminder"]'));
     const invoiceForm = station.querySelector('.legacy-invoice-header');
+    const bookingBranchField = invoiceForm?.elements?.namedItem('branch_id') instanceof HTMLSelectElement
+        ? invoiceForm.elements.namedItem('branch_id')
+        : null;
     const serviceForm = station.querySelector('#legacy-service-form');
     const dockTabs = Array.from(station.querySelectorAll('[data-dock-tab]'));
     const dockPanels = Array.from(station.querySelectorAll('[data-dock-panel]'));
@@ -53,6 +59,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const supplierSettlementCloseButtons = Array.from(station.querySelectorAll('[data-supplier-settlement-close]'));
     const simplePostpaidForm = station.querySelector('[data-simple-postpaid-form]');
     const simplePostpaidSelectors = Array.from(station.querySelectorAll('[data-simple-postpaid-select]'));
+    const simplePostpaidSelectAll = station.querySelector('[data-simple-postpaid-select-all]');
     const simplePostpaidSupplierDisplay = station.querySelector('[data-simple-postpaid-supplier-display]');
     const simplePostpaidCurrencyDisplay = station.querySelector('[data-simple-postpaid-currency-display]');
     const simplePostpaidCurrencyInput = station.querySelector('[data-simple-postpaid-currency-input]');
@@ -60,6 +67,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const simplePostpaidTotal = station.querySelector('[data-simple-postpaid-total]');
     const simplePostpaidFeedback = station.querySelector('[data-simple-postpaid-feedback]');
     const simplePostpaidSubmit = station.querySelector('[data-simple-postpaid-submit]');
+    const supplierTreasuryRows = Array.from(station.querySelectorAll('[data-supplier-treasury-row]'));
+    const supplierTreasurySelects = Array.from(station.querySelectorAll('[data-supplier-treasury-select]'));
     const globalPrepaidSupplierModal = station.querySelector('[data-global-prepaid-supplier-modal]');
     const globalPrepaidSupplierOpenButtons = Array.from(station.querySelectorAll('[data-global-prepaid-supplier-open]'));
     const globalPrepaidSupplierCloseButtons = Array.from(station.querySelectorAll('[data-global-prepaid-supplier-close]'));
@@ -75,9 +84,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const supplierAdvanceNote = station.querySelector('[data-supplier-advance-note]');
     const supplierAdvanceSummary = station.querySelector('[data-supplier-advance-summary]');
     const supplierAdvanceMessage = station.querySelector('[data-supplier-advance-message]');
+    const supplierAdvanceFxUse = station.querySelector('[data-supplier-advance-fx-use]');
+    const supplierAdvanceFxAdvanceId = station.querySelector('[data-supplier-advance-fx-advance-id]');
+    const supplierAdvanceFxRate = station.querySelector('[data-supplier-advance-fx-rate]');
+    const supplierAdvanceFxRateDate = station.querySelector('[data-supplier-advance-fx-rate-date]');
     const supplierInput = station.querySelector('[data-service-supplier-input]');
     const supplierOptionsNode = document.getElementById('workspace-service-suppliers-data');
     const paymentTreasuryAccountsNode = document.getElementById('workspace-payment-treasury-accounts-data');
+    const branchOptionsNode = document.getElementById('workspace-branch-options-data');
     const supplierOptionsList = document.getElementById('service-supplier-options');
     const addSupplierOptionValue = '__add_supplier__';
     const supplierAddModal = station.querySelector('[data-service-supplier-add-modal]');
@@ -93,6 +107,45 @@ document.addEventListener('DOMContentLoaded', () => {
         ? supplierAddForm.elements.namedItem('notes')
         : null;
     const paymentForm = station.querySelector('.legacy-payment-strip');
+    const documentUploadForm = station.querySelector('[data-documents-upload-form]');
+    const documentFileInput = station.querySelector('[data-document-file-input]');
+    const documentUploadFeedback = station.querySelector('[data-document-upload-feedback]');
+    const paymentTreasuryAccountsUrl = station.dataset.paymentTreasuryAccountsUrl || '';
+    const offlinePingUrl = station.dataset.offlinePingUrl || '';
+    const offlineSnapshotUrl = station.dataset.offlineSnapshotUrl || '';
+    const offlineSyncUrl = station.dataset.offlineSyncUrl || '';
+    const offlineStatus = station.querySelector('[data-offline-status]');
+    const offlineSnapshotButton = station.querySelector('[data-offline-action="snapshot"]');
+    const offlineSaveCustomerButtons = Array.from(station.querySelectorAll('[data-offline-action="save-customer"]'));
+    const offlineSyncButton = station.querySelector('[data-offline-action="sync"]');
+    const offlineSearchPanel = station.querySelector('[data-offline-search-results]');
+    const offlineSearchTitle = station.querySelector('[data-offline-search-title]');
+    const offlineSearchCount = station.querySelector('[data-offline-search-count]');
+    const offlineSearchEmpty = station.querySelector('[data-offline-search-empty]');
+    const offlineSearchTableWrap = station.querySelector('[data-offline-search-table-wrap]');
+    const offlineSearchResultsBody = station.querySelector('[data-offline-search-results-body]');
+    const offlineQueuePreview = station.querySelector('[data-offline-queue-preview]');
+    const offlineQueueCount = station.querySelector('[data-offline-queue-count]');
+    const offlineQueueList = station.querySelector('[data-offline-queue-list]');
+    const offlineEditLockNotice = station.querySelector('[data-offline-edit-lock]');
+    const offlineQueueStorageKey = 'travel_ops_offline_workspace_queue_v1';
+    const offlineSnapshotStorageKey = 'travel_ops_offline_workspace_snapshot_v1';
+    const offlineMetaStorageKey = 'travel_ops_offline_workspace_meta_v1';
+    const requestedCustomerEditId = (() => {
+        try {
+            const params = new URLSearchParams(window.location.search);
+            if (params.get('customer_edit') !== '1') {
+                return 0;
+            }
+
+            return Number.parseInt(
+                params.get('traveler_id') || params.get('customer_id') || '0',
+                10
+            );
+        } catch (error) {
+            return 0;
+        }
+    })();
     const debugToolsEnabled = station.dataset.debugToolsEnabled === '1';
     const canVoidFinancials = station.dataset.canVoidFinancials === '1';
     const commercialEditor = station.querySelector('[data-commercial-editor="active"]');
@@ -285,6 +338,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const paymentExchangeTargetBalanceInput = station.querySelector('[data-payment-exchange-target-balance]');
     const paymentExchangePaymentCurrencyInput = station.querySelector('[data-payment-exchange-payment-currency]');
     const paymentExchangePaymentAmountInput = station.querySelector('[data-payment-exchange-payment-amount]');
+    const paymentExchangePaymentAmountRow = station.querySelector('[data-payment-exchange-payment-amount-row]');
+    const paymentExchangePaymentAmountLabel = station.querySelector('[data-payment-exchange-payment-amount-label]');
     const paymentExchangeRateDateDisplay = station.querySelector('[data-payment-exchange-rate-date-display]');
     const paymentExchangeRateRow = station.querySelector('[data-payment-exchange-rate-row]');
     const paymentExchangeRateLabel = station.querySelector('[data-payment-exchange-rate-label]');
@@ -392,6 +447,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let paymentExchangeConfirmInFlight = false;
     let paymentExchangeAutoOpenInFlight = false;
     let paymentExchangeConfirmFocusDone = false;
+    let paymentExchangeManualTarget = null;
     const emptySavedPaymentState = () => ({
         saved: false,
         bookingId: 0,
@@ -448,6 +504,652 @@ document.addEventListener('DOMContentLoaded', () => {
         }, 4800);
     };
 
+    const allowedDocumentExtensions = ['pdf', 'jpg', 'jpeg', 'png', 'webp'];
+    const showDocumentUploadFeedback = (message) => {
+        if (!(documentUploadFeedback instanceof HTMLElement)) {
+            showFeedback(message);
+            return;
+        }
+
+        documentUploadFeedback.textContent = message;
+        documentUploadFeedback.hidden = false;
+        documentUploadFeedback.style.display = 'block';
+    };
+    const clearDocumentUploadFeedback = () => {
+        if (!(documentUploadFeedback instanceof HTMLElement)) {
+            return;
+        }
+
+        documentUploadFeedback.textContent = '';
+        documentUploadFeedback.hidden = true;
+        documentUploadFeedback.style.display = '';
+    };
+    const validateDocumentFileSelection = () => {
+        if (!(documentFileInput instanceof HTMLInputElement)) {
+            return true;
+        }
+
+        const file = documentFileInput.files && documentFileInput.files.length > 0
+            ? documentFileInput.files[0]
+            : null;
+        if (!file) {
+            clearDocumentUploadFeedback();
+            return true;
+        }
+
+        const fileName = String(file.name || '').trim();
+        const extension = fileName.includes('.')
+            ? fileName.split('.').pop().toLowerCase()
+            : '';
+        if (!allowedDocumentExtensions.includes(extension)) {
+            showDocumentUploadFeedback('This file type is blocked. Please upload only PDF, JPG, JPEG, PNG, or WEBP documents.');
+            documentFileInput.value = '';
+            showFeedback('Document upload blocked: only PDF, JPG, JPEG, PNG, or WEBP files are allowed.');
+            return false;
+        }
+
+        clearDocumentUploadFeedback();
+        return true;
+    };
+
+    const readStoredJson = (key, fallback) => {
+        try {
+            const raw = window.localStorage.getItem(key);
+            if (!raw) {
+                return fallback;
+            }
+
+            const parsed = JSON.parse(raw);
+            return parsed == null ? fallback : parsed;
+        } catch (error) {
+            return fallback;
+        }
+    };
+
+    const writeStoredJson = (key, value) => {
+        try {
+            window.localStorage.setItem(key, JSON.stringify(value));
+            return true;
+        } catch (error) {
+            return false;
+        }
+    };
+
+    let workspaceConnectivityState = window.navigator.onLine === false ? 'offline' : 'online';
+    let workspaceConnectivityCheckPromise = null;
+    let reapplyActiveServiceActionState = () => {};
+    const browserIsOffline = () => window.navigator.onLine === false || workspaceConnectivityState === 'offline';
+    const setWorkspaceConnectivityState = (state) => {
+        workspaceConnectivityState = state === 'offline' ? 'offline' : 'online';
+        syncNewCustomerSaveMode();
+        syncOfflineEditLockMode();
+        if (workspaceConnectivityState === 'online') {
+            window.setTimeout(() => reapplyActiveServiceActionState(), 0);
+        }
+    };
+    const pingUrlWithCacheBust = () => {
+        if (offlinePingUrl === '') {
+            return '';
+        }
+
+        const separator = offlinePingUrl.includes('?') ? '&' : '?';
+        return `${offlinePingUrl}${separator}_=${Date.now()}`;
+    };
+    const refreshWorkspaceConnectivity = async () => {
+        if (window.navigator.onLine === false) {
+            setWorkspaceConnectivityState('offline');
+            return false;
+        }
+
+        if (offlinePingUrl === '') {
+            setWorkspaceConnectivityState('online');
+            return true;
+        }
+
+        if (workspaceConnectivityCheckPromise) {
+            return workspaceConnectivityCheckPromise;
+        }
+
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(() => controller.abort(), 2500);
+
+        workspaceConnectivityCheckPromise = fetch(pingUrlWithCacheBust(), {
+            method: 'GET',
+            cache: 'no-store',
+            credentials: 'same-origin',
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest',
+                Accept: 'application/json',
+            },
+            signal: controller.signal,
+        }).then((response) => {
+            const isOnline = response.ok;
+            setWorkspaceConnectivityState(isOnline ? 'online' : 'offline');
+            return isOnline;
+        }).catch(() => {
+            setWorkspaceConnectivityState('offline');
+            return false;
+        }).finally(() => {
+            window.clearTimeout(timeoutId);
+            workspaceConnectivityCheckPromise = null;
+        });
+
+        return workspaceConnectivityCheckPromise;
+    };
+
+    let offlineQueue = Array.isArray(readStoredJson(offlineQueueStorageKey, []))
+        ? readStoredJson(offlineQueueStorageKey, [])
+        : [];
+    let offlineSnapshotCache = readStoredJson(offlineSnapshotStorageKey, null);
+    let offlineMeta = readStoredJson(offlineMetaStorageKey, {
+        last_snapshot_at: '',
+        last_sync_at: '',
+    });
+    let offlineQueuePreviewVisible = false;
+
+    const getCsrfToken = () => {
+        const tokenField = station.querySelector('input[name="_token"]');
+        if (tokenField instanceof HTMLInputElement && tokenField.value.trim() !== '') {
+            return tokenField.value.trim();
+        }
+
+        return String(station.dataset.csrfToken || '').trim();
+    };
+
+    const setOfflineToken = (token) => {
+        const normalized = String(token || '').trim();
+        if (normalized === '') {
+            return;
+        }
+
+        station.dataset.csrfToken = normalized;
+        station.querySelectorAll('input[name="_token"]').forEach((field) => {
+            if (field instanceof HTMLInputElement) {
+                field.value = normalized;
+            }
+        });
+    };
+
+    const offlineSourceDevice = () => {
+        const agent = String(window.navigator.userAgent || 'Browser').trim();
+        return `Workspace Browser / ${agent}`.slice(0, 120);
+    };
+
+    const formatOfflineTimestamp = (value) => {
+        const raw = String(value || '').trim();
+        if (raw === '') {
+            return '';
+        }
+
+        const parsed = new Date(raw);
+        if (Number.isNaN(parsed.getTime())) {
+            return raw;
+        }
+
+        return parsed.toLocaleString();
+    };
+
+    const formatOfflineAge = (value) => {
+        const raw = String(value || '').trim();
+        if (raw === '') {
+            return '';
+        }
+
+        const parsed = new Date(raw);
+        if (Number.isNaN(parsed.getTime())) {
+            return '';
+        }
+
+        const diffMs = Date.now() - parsed.getTime();
+        if (diffMs < 60000) {
+            return 'just now';
+        }
+
+        const minutes = Math.floor(diffMs / 60000);
+        if (minutes < 60) {
+            return `${minutes}m ago`;
+        }
+
+        const hours = Math.floor(minutes / 60);
+        if (hours < 24) {
+            return `${hours}h ago`;
+        }
+
+        const days = Math.floor(hours / 24);
+        if (days < 30) {
+            return `${days}d ago`;
+        }
+
+        const months = Math.floor(days / 30);
+        if (months < 12) {
+            return `${months}mo ago`;
+        }
+
+        const years = Math.floor(days / 365);
+        return `${years}y ago`;
+    };
+
+    const persistOfflineState = () => {
+        writeStoredJson(offlineQueueStorageKey, offlineQueue);
+        writeStoredJson(offlineSnapshotStorageKey, offlineSnapshotCache);
+        writeStoredJson(offlineMetaStorageKey, offlineMeta);
+    };
+
+    const offlineDraftDisplay = (draft) => {
+        const payload = draft && typeof draft === 'object' && draft.payload && typeof draft.payload === 'object'
+            ? draft.payload
+            : {};
+        const name = [payload.first_name, payload.last_name].map((value) => String(value || '').trim()).filter(Boolean).join(' ');
+        const label = String(draft?.label || name || 'Customer draft').trim();
+        const details = [
+            payload.mobile ? `Mobile: ${payload.mobile}` : '',
+            payload.passport_number ? `Passport: ${payload.passport_number}` : '',
+            payload.family_id ? `Family ID: ${payload.family_id}` : '',
+            draft?.queued_at ? `Queued: ${formatOfflineTimestamp(draft.queued_at)}` : '',
+        ].filter(Boolean);
+
+        return {
+            label,
+            type: String(draft?.type || 'traveler.create') === 'traveler.create' ? 'Customer' : String(draft?.type || 'Draft'),
+            details: details.join(' - '),
+        };
+    };
+
+    const hideOfflineQueuePreview = () => {
+        offlineQueuePreviewVisible = false;
+        if (offlineQueuePreview instanceof HTMLElement) {
+            offlineQueuePreview.hidden = true;
+        }
+        if (offlineStatus instanceof HTMLElement) {
+            offlineStatus.setAttribute('aria-expanded', 'false');
+        }
+    };
+
+    const renderOfflineQueuePreview = () => {
+        const rows = Array.isArray(offlineQueue) ? offlineQueue : [];
+        if (!(offlineQueuePreview instanceof HTMLElement) || !(offlineQueueList instanceof HTMLElement)) {
+            return;
+        }
+
+        if (rows.length === 0) {
+            offlineQueueList.innerHTML = '';
+            if (offlineQueueCount instanceof HTMLElement) {
+                offlineQueueCount.textContent = '0 draft(s)';
+            }
+            hideOfflineQueuePreview();
+            return;
+        }
+
+        if (offlineQueueCount instanceof HTMLElement) {
+            offlineQueueCount.textContent = `${rows.length} draft${rows.length === 1 ? '' : 's'}`;
+        }
+
+        offlineQueueList.innerHTML = rows.map((draft) => {
+            const display = offlineDraftDisplay(draft);
+            return `<div class="legacy-offline-queue-preview__item">
+                <strong>${escapeHtml(display.label)}</strong>
+                <span>${escapeHtml(display.type)}</span>
+                ${display.details !== '' ? `<small>${escapeHtml(display.details)}</small>` : ''}
+            </div>`;
+        }).join('');
+
+        offlineQueuePreview.hidden = !offlineQueuePreviewVisible;
+        if (offlineStatus instanceof HTMLElement) {
+            offlineStatus.setAttribute('aria-expanded', offlineQueuePreviewVisible ? 'true' : 'false');
+        }
+    };
+
+    const toggleOfflineQueuePreview = () => {
+        const queueCount = Array.isArray(offlineQueue) ? offlineQueue.length : 0;
+        if (queueCount === 0) {
+            hideOfflineQueuePreview();
+            return;
+        }
+
+        offlineQueuePreviewVisible = !offlineQueuePreviewVisible;
+        renderOfflineQueuePreview();
+    };
+
+    const offlineLockedActionSelectors = [
+        '[data-workspace-action="new-booking"]',
+        '[data-workspace-action="customer-dues-finder"]',
+        '[data-workspace-action="supplier-history-finder"]',
+        '[data-workspace-action="add-service"]',
+        '[data-global-prepaid-supplier-open]',
+    ];
+
+    const offlineLockedControlSelector = 'input, select, textarea, button';
+    const lockableControl = (control) => control instanceof HTMLInputElement
+        || control instanceof HTMLSelectElement
+        || control instanceof HTMLTextAreaElement
+        || control instanceof HTMLButtonElement;
+    const setOfflineLockedControl = (control, locked) => {
+        if (!lockableControl(control)) {
+            return;
+        }
+
+        if (locked) {
+            if (!Object.prototype.hasOwnProperty.call(control.dataset, 'offlinePreviousDisabled')) {
+                control.dataset.offlinePreviousDisabled = control.disabled ? '1' : '0';
+            }
+            control.disabled = true;
+            return;
+        }
+
+        if (Object.prototype.hasOwnProperty.call(control.dataset, 'offlinePreviousDisabled')) {
+            control.disabled = control.dataset.offlinePreviousDisabled === '1';
+            delete control.dataset.offlinePreviousDisabled;
+        }
+    };
+
+    const offlineLockedZones = () => [
+        invoiceForm,
+        serviceForm,
+        paymentForm,
+        simplePostpaidForm,
+        globalPrepaidSupplierForm,
+        supplierSettlementModal,
+        ...Array.from(station.querySelectorAll('[data-payment-detail-modal], [data-payment-exchange-modal]')),
+    ].filter((zone) => zone instanceof HTMLElement || zone instanceof HTMLFormElement);
+
+    const syncOfflineEditLockMode = () => {
+        const locked = browserIsOffline();
+
+        offlineLockedZones().forEach((zone) => {
+            zone.querySelectorAll(offlineLockedControlSelector).forEach((control) => setOfflineLockedControl(control, locked));
+            zone.classList.toggle('is-offline-locked', locked);
+        });
+
+        offlineLockedActionSelectors.forEach((selector) => {
+            station.querySelectorAll(selector).forEach((control) => setOfflineLockedControl(control, locked));
+        });
+
+        if (offlineEditLockNotice instanceof HTMLElement) {
+            offlineEditLockNotice.hidden = !locked;
+            offlineEditLockNotice.style.display = locked ? 'block' : '';
+        }
+
+        if (customerPicker instanceof HTMLElement && !customerPicker.hidden) {
+            renderCustomerPicker();
+        }
+    };
+
+    const preventOfflineLockedSubmit = (event) => {
+        if (!browserIsOffline()) {
+            return;
+        }
+
+        event.preventDefault();
+        showFeedback('Offline mode is lookup-only. Reconnect before changing bookings, services, or payments.');
+        syncOfflineEditLockMode();
+    };
+
+    [invoiceForm, serviceForm, paymentForm, simplePostpaidForm, globalPrepaidSupplierForm]
+        .filter((form) => form instanceof HTMLFormElement)
+        .forEach((form) => form.addEventListener('submit', preventOfflineLockedSubmit));
+
+    station.querySelectorAll('[data-service-event-bar]').forEach((form) => {
+        if (form instanceof HTMLFormElement) {
+            form.addEventListener('submit', preventOfflineLockedSubmit);
+        }
+    });
+
+    const syncNewCustomerSaveMode = () => {
+        const isOffline = browserIsOffline();
+        const editingCustomer = Number.parseInt(String(newCustomerTravelerId?.value || '0'), 10) > 0;
+
+        if (newCustomerSubmit instanceof HTMLButtonElement) {
+            newCustomerSubmit.hidden = isOffline;
+        }
+
+        offlineSaveCustomerButtons.forEach((button) => {
+            if (!(button instanceof HTMLButtonElement)) {
+                return;
+            }
+
+            button.hidden = !isOffline;
+            button.disabled = !isOffline || editingCustomer;
+            button.title = editingCustomer
+                ? 'Offline customer updates are not supported. Reconnect to update this customer.'
+                : 'Save this new customer into the offline queue.';
+        });
+    };
+
+    const renderOfflineStatus = () => {
+        if (!(offlineStatus instanceof HTMLElement)) {
+            return;
+        }
+
+        const queueCount = Array.isArray(offlineQueue) ? offlineQueue.length : 0;
+        const snapshotLabel = formatOfflineTimestamp(offlineMeta?.last_snapshot_at || '');
+        const snapshotAge = formatOfflineAge(offlineMeta?.last_snapshot_at || '');
+        const syncLabel = formatOfflineTimestamp(offlineMeta?.last_sync_at || '');
+        const parts = [];
+
+        if (queueCount > 0) {
+            parts.push(`${queueCount} offline draft${queueCount === 1 ? '' : 's'} queued`);
+        } else {
+            parts.push('Offline queue empty');
+        }
+
+        if (snapshotLabel !== '') {
+            parts.push(`snapshot ${snapshotAge !== '' ? snapshotAge : snapshotLabel}`);
+        }
+
+        if (syncLabel !== '') {
+            parts.push(`last sync ${syncLabel}`);
+        }
+
+        offlineStatus.textContent = parts.join(' • ');
+        offlineStatus.classList.toggle('is-pending', queueCount > 0);
+        offlineStatus.classList.toggle('is-ready', queueCount === 0 && (snapshotLabel !== '' || syncLabel !== ''));
+        offlineStatus.title = offlineStatus.textContent;
+
+        if (queueCount === 0) {
+            hideOfflineQueuePreview();
+        }
+        renderOfflineQueuePreview();
+    };
+
+    const normalizeOfflineSearchText = (value) => String(value || '').trim().toLowerCase();
+    const snapshotSourceLabel = 'Snapshot';
+    const isSnapshotRecord = (record) => String(record?.__source || '') === 'offline_snapshot';
+    const snapshotFreshnessText = () => formatOfflineAge(offlineMeta?.last_snapshot_at || offlineSnapshotCache?.generated_at || '');
+    const renderSnapshotBadge = (record) => {
+        if (!isSnapshotRecord(record)) {
+            return '';
+        }
+
+        const freshness = snapshotFreshnessText();
+        const badgeText = freshness !== '' ? `${snapshotSourceLabel} • ${freshness}` : snapshotSourceLabel;
+        const titleText = freshness !== '' ? `Loaded from cached offline snapshot • cached ${freshness}` : 'Loaded from cached offline snapshot';
+        return `<span class="offline-source-badge" title="${escapeHtml(titleText)}">${escapeHtml(badgeText)}</span>`;
+    };
+
+    const ticketOrPnrLabel = (booking) => {
+        const ticket = String(booking?.ticket_number || '').trim();
+        const pnr = String(booking?.pnr || '').trim();
+        if (ticket !== '' && pnr !== '') {
+            return `${ticket} / ${pnr}`;
+        }
+
+        return ticket || pnr || '-';
+    };
+
+    const offlineBookingLabel = (booking) => [
+        booking?.booking_reference,
+        booking?.lead_traveler_name,
+        booking?.contact_mobile,
+        booking?.passport_number,
+        booking?.service_line_reference,
+        booking?.ticket_number,
+        booking?.pnr,
+        booking?.supplier_name,
+        booking?.receipt_no,
+        booking?.branch_name,
+    ].map(normalizeOfflineSearchText).join(' ');
+
+    const hideOfflineSearchResults = () => {
+        if (!(offlineSearchPanel instanceof HTMLElement)) {
+            return;
+        }
+
+        offlineSearchPanel.hidden = true;
+    };
+
+    const renderOfflineSearchResults = (query, rows) => {
+        if (!(offlineSearchPanel instanceof HTMLElement) || !(offlineSearchResultsBody instanceof HTMLElement)) {
+            return;
+        }
+
+        const normalizedRows = Array.isArray(rows) ? rows : [];
+        if (normalizedRows.length === 0) {
+            offlineSearchPanel.hidden = true;
+            offlineSearchResultsBody.innerHTML = '';
+            return;
+        }
+
+        offlineSearchPanel.hidden = false;
+        if (offlineSearchTitle instanceof HTMLElement) {
+            offlineSearchTitle.textContent = query
+                ? `Offline Snapshot Results for "${query}"`
+                : 'Offline Snapshot Results';
+        }
+        if (offlineSearchCount instanceof HTMLElement) {
+            const freshness = snapshotFreshnessText();
+            offlineSearchCount.textContent = `${normalizedRows.length} match${normalizedRows.length === 1 ? '' : 'es'}${freshness !== '' ? ` • cached ${freshness}` : ''}`;
+        }
+        if (offlineSearchEmpty instanceof HTMLElement) {
+            offlineSearchEmpty.hidden = normalizedRows.length !== 0;
+        }
+        if (offlineSearchTableWrap instanceof HTMLElement) {
+            offlineSearchTableWrap.hidden = false;
+        }
+
+        offlineSearchResultsBody.innerHTML = normalizedRows.map((row) => {
+            const currency = String(row?.booking_currency || row?.base_currency || 'PKR').trim() || 'PKR';
+            const outstanding = formatMoney(toNumber(row?.total_outstanding || 0));
+            const reference = String(row?.booking_reference || '').trim();
+            return `<tr>
+                <td>${escapeHtml(reference)} ${renderSnapshotBadge(row)}</td>
+                <td>${escapeHtml(String(row?.lead_traveler_name || ''))}</td>
+                <td>${escapeHtml(String(row?.branch_name || ''))}</td>
+                <td>${escapeHtml(String(row?.booking_date || ''))}</td>
+                <td>${escapeHtml(currency)}</td>
+                <td>${escapeHtml(`${currency} ${outstanding}`)}</td>
+                <td>${escapeHtml(String(row?.service_line_reference || '-'))}</td>
+                <td>${escapeHtml(ticketOrPnrLabel(row))}</td>
+                <td><span class="table-note">Reconnect to open ${escapeHtml(reference || 'this booking')}.</span></td>
+            </tr>`;
+        }).join('');
+    };
+
+    const integrateOfflineSnapshot = (snapshot) => {
+        if (!snapshot || typeof snapshot !== 'object') {
+            return;
+        }
+
+        const snapshotTravelers = Array.isArray(snapshot.travelers) ? snapshot.travelers : [];
+        snapshotTravelers.forEach((traveler) => {
+            const enrichedTraveler = {
+                ...traveler,
+                __source: 'offline_snapshot',
+            };
+            const travelerId = Number.parseInt(String(traveler?.id || 0), 10);
+            if (travelerId > 0) {
+                const existingIndex = customerDirectory.findIndex((entry) => Number(entry?.id || 0) === travelerId);
+                if (existingIndex >= 0) {
+                    customerDirectory[existingIndex] = { ...customerDirectory[existingIndex], ...enrichedTraveler };
+                } else {
+                    customerDirectory.push(enrichedTraveler);
+                }
+            }
+        });
+
+        const snapshotBookings = Array.isArray(snapshot.bookings) ? snapshot.bookings : [];
+        offlineSnapshotCache = {
+            ...snapshot,
+            bookings: snapshotBookings.map((booking) => ({
+                ...booking,
+                __source: 'offline_snapshot',
+            })),
+            travelers: snapshotTravelers.map((traveler) => ({
+                ...traveler,
+                __source: 'offline_snapshot',
+            })),
+        };
+
+        filteredCustomers = customerDirectory.slice();
+        filteredAutocompleteCustomers = customerDirectory.slice(0, 12);
+    };
+
+    const searchOfflineSnapshotBookings = (query) => {
+        const bookings = Array.isArray(offlineSnapshotCache?.bookings) ? offlineSnapshotCache.bookings : [];
+        const normalizedQuery = normalizeOfflineSearchText(query);
+        if (normalizedQuery === '') {
+            return bookings.slice(0, 20);
+        }
+
+        return bookings
+            .filter((booking) => offlineBookingLabel(booking).includes(normalizedQuery))
+            .slice(0, 20);
+    };
+
+    const tryOfflineQuickSearch = () => {
+        const query = String(quickSearch?.value || '').trim();
+        const offlineRows = searchOfflineSnapshotBookings(query);
+        renderOfflineSearchResults(query, offlineRows);
+        if (offlineRows.length === 0) {
+            showFeedback('No cached offline booking matched this search. Refresh the offline snapshot when you are back online.');
+            return;
+        }
+
+        showFeedback(`Showing ${offlineRows.length} offline snapshot match${offlineRows.length === 1 ? '' : 'es'}. Reconnect to open the full booking.`);
+    };
+
+    const createOfflineDraftId = (type) => `${String(type || 'draft')}-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+
+    const formValue = (form, name) => {
+        if (!(form instanceof HTMLFormElement)) {
+            return '';
+        }
+
+        const field = form.elements.namedItem(name);
+        if (field instanceof RadioNodeList) {
+            return String(field.value || '').trim();
+        }
+
+        if (field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement || field instanceof HTMLSelectElement) {
+            return String(field.value || '').trim();
+        }
+
+        return '';
+    };
+
+    const queueOfflineDraft = (type, payload, label, options = {}) => {
+        offlineQueue.push({
+            client_draft_id: options.clientDraftId || createOfflineDraftId(type),
+            type,
+            payload,
+            label: String(label || '').trim(),
+            queued_at: new Date().toISOString(),
+        });
+        persistOfflineState();
+        renderOfflineStatus();
+    };
+
+    const downloadJsonFile = (fileName, payload) => {
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+        const url = window.URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = fileName;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        window.setTimeout(() => window.URL.revokeObjectURL(url), 0);
+    };
+
     const showExchangeFeedback = (message) => {
         if (!paymentExchangeFeedback) {
             showFeedback(message);
@@ -494,6 +1196,17 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
+        if (browserIsOffline()) {
+            if (offlineSnapshotCache) {
+                tryOfflineQuickSearch();
+            } else {
+                showFeedback('You are offline and no snapshot is cached yet. Download an offline snapshot while connected first.');
+            }
+            return;
+        }
+
+        hideOfflineSearchResults();
+
         if (quickSearchSubmit instanceof HTMLButtonElement) {
             quickSearchSubmit.click();
         } else {
@@ -524,6 +1237,79 @@ document.addEventListener('DOMContentLoaded', () => {
         if (focusSelector) {
             window.setTimeout(() => focusTarget(focusSelector), 80);
         }
+    };
+
+    const revealWorkspaceSection = (sectionId, options = {}) => {
+        const { message = null, focusSelector = null } = options;
+        const section = station.querySelector(`#${sectionId}`);
+        if (!(section instanceof HTMLElement)) {
+            return false;
+        }
+
+        section.hidden = false;
+        if (sectionId === 'dock-panel-reminders') {
+            reminderToggleButtons.forEach((button) => {
+                if (button instanceof HTMLButtonElement) {
+                    button.setAttribute('aria-expanded', 'true');
+                }
+            });
+        }
+        section.scrollIntoView({ behavior: 'smooth', block: 'start', inline: 'nearest' });
+
+        if (message) {
+            showFeedback(message);
+        }
+
+        if (focusSelector) {
+            window.setTimeout(() => focusTarget(focusSelector), 80);
+        }
+
+        return true;
+    };
+
+    const toggleWorkspaceSection = (sectionId, options = {}) => {
+        const { message = null, hideMessage = null, focusSelector = null } = options;
+        const section = station.querySelector(`#${sectionId}`);
+        if (!(section instanceof HTMLElement)) {
+            return false;
+        }
+
+        if (section.hidden) {
+            return revealWorkspaceSection(sectionId, { message, focusSelector });
+        }
+
+        const activeElement = document.activeElement;
+        if (activeElement instanceof HTMLElement && section.contains(activeElement)) {
+            const fallbackButton = reminderToggleButtons[0];
+            if (fallbackButton instanceof HTMLButtonElement) {
+                fallbackButton.focus({ preventScroll: true });
+            }
+        }
+
+        section.hidden = true;
+        if (sectionId === 'dock-panel-reminders') {
+            reminderToggleButtons.forEach((button) => {
+                if (button instanceof HTMLButtonElement) {
+                    button.setAttribute('aria-expanded', 'false');
+                }
+            });
+        }
+
+        if (window.location.hash === `#${sectionId}`) {
+            try {
+                const cleanedUrl = new URL(window.location.href);
+                cleanedUrl.hash = '';
+                window.history.replaceState({}, '', `${cleanedUrl.pathname}${cleanedUrl.search}`);
+            } catch (error) {
+                // Ignore URL cleanup errors.
+            }
+        }
+
+        if (hideMessage) {
+            showFeedback(hideMessage);
+        }
+
+        return true;
     };
 
     dockTabs.forEach((button, index) => {
@@ -587,6 +1373,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     window.location.href = station.dataset.newBookingUrl || '/workspace?new=1';
                     break;
                 case 'new-customer':
+                    if (startFreshWorkspaceForCustomerAction('new-customer')) {
+                        break;
+                    }
                     openNewCustomerModal();
                     break;
                 case 'search-booking':
@@ -609,6 +1398,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     showFeedback('Delete is locked for production safety. Use void/cancel workflows so ledger history is preserved.');
                     break;
                 case 'add-traveler':
+                    if (startFreshWorkspaceForCustomerAction('find-customer')) {
+                        break;
+                    }
                     openCustomerPicker();
                     break;
                 case 'customer-dues-finder':
@@ -638,10 +1430,16 @@ document.addEventListener('DOMContentLoaded', () => {
                     });
                     break;
                 case 'add-reminder':
-                    activateDock('reminders', {
+                    if (!toggleWorkspaceSection('dock-panel-reminders', {
                         message: 'Reminders opened. All follow-up stays linked to this invoice.',
+                        hideMessage: 'Reminders hidden.',
                         focusSelector: '[data-reminder-focus="task"]',
-                    });
+                    })) {
+                        activateDock('reminders', {
+                            message: 'Reminders opened. All follow-up stays linked to this invoice.',
+                            focusSelector: '[data-reminder-focus="task"]',
+                        });
+                    }
                     break;
                 case 'print':
                     activateDock('print', {
@@ -686,6 +1484,20 @@ document.addEventListener('DOMContentLoaded', () => {
         quickSearch.addEventListener('keydown', handleQuickSearchEnter);
         quickSearch.addEventListener('keypress', handleQuickSearchEnter);
     }
+
+    quickSearchForm?.addEventListener('submit', (event) => {
+        if (browserIsOffline()) {
+            event.preventDefault();
+            if (offlineSnapshotCache) {
+                tryOfflineQuickSearch();
+            } else {
+                showFeedback('You are offline and no snapshot is cached yet. Download an offline snapshot while connected first.');
+            }
+            return;
+        }
+
+        hideOfflineSearchResults();
+    });
 
     document.addEventListener('keydown', (event) => {
         if (event.key === 'Escape') {
@@ -752,6 +1564,13 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (control.type === 'hidden') {
+            return;
+        }
+
+        const settlementBar = control.closest('[data-service-event-bar="settlement"]');
+        if (settlementBar instanceof HTMLElement && !settlementBar.hidden) {
+            control.dataset.workflowOriginalDisabled = '0';
+            control.disabled = false;
             return;
         }
 
@@ -830,6 +1649,7 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch (error) {
         paymentTreasuryAccounts = [];
     }
+    let paymentTreasuryRefreshInFlight = null;
 
     const addPaymentTreasuryAccountValue = '__add_treasury_account__';
     const captureFormState = (form) => {
@@ -956,13 +1776,17 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
+            const restoredPaymentCurrency = String(payload?.payment?.receipt_currency?.value || '').trim().toUpperCase();
             window.localStorage.removeItem(pendingTreasuryWorkspaceStateKey);
             station.dataset.suppressDueDateAutoOpen = '1';
+            station.dataset.suppressExchangeAutoOpen = '1';
             restoreFormState(invoiceForm, payload.invoice, {
                 suppressedEventNames: ['lead_traveler_name'],
             });
             restoreFormState(serviceForm, payload.service);
-            restoreFormState(paymentForm, payload.payment);
+            restoreFormState(paymentForm, payload.payment, {
+                suppressedEventNames: ['receipt_currency'],
+            });
 
             window.setTimeout(() => {
                 if (typeof refreshSubtypeVisibility === 'function') {
@@ -973,6 +1797,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 if (typeof syncServiceCurrencyMirror === 'function') {
                     syncServiceCurrencyMirror();
+                }
+                if (restoredPaymentCurrency !== '' && typeof markManualPaymentCurrencySelection === 'function') {
+                    markManualPaymentCurrencySelection(
+                        restoredPaymentCurrency,
+                        currentInvoiceSnapshot().invoiceCurrency || 'PKR'
+                    );
                 }
                 if (typeof syncPaymentTreasurySelector === 'function') {
                     syncPaymentTreasurySelector();
@@ -997,9 +1827,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     receivedNowInput.select();
                 }
                 delete station.dataset.suppressDueDateAutoOpen;
+                delete station.dataset.suppressExchangeAutoOpen;
             }, 80);
         } catch (error) {
             delete station.dataset.suppressDueDateAutoOpen;
+            delete station.dataset.suppressExchangeAutoOpen;
             try {
                 window.localStorage.removeItem(pendingTreasuryWorkspaceStateKey);
             } catch (cleanupError) {
@@ -1082,6 +1914,87 @@ document.addEventListener('DOMContentLoaded', () => {
 
         return eligible.length > 0 ? eligible[0] : null;
     };
+    const replacePaymentTreasuryAccounts = (accounts) => {
+        paymentTreasuryAccounts = Array.isArray(accounts) ? accounts : [];
+        if (paymentTreasuryAccountsNode) {
+            paymentTreasuryAccountsNode.textContent = JSON.stringify(paymentTreasuryAccounts);
+        }
+    };
+    const refreshTreasurySelectors = () => {
+        if (typeof syncPaymentTreasurySelector === 'function') {
+            syncPaymentTreasurySelector();
+        }
+        if (typeof syncRefundTreasurySelector === 'function') {
+            syncRefundTreasurySelector();
+        }
+        if (typeof syncSupplierTreasurySelectors === 'function') {
+            syncSupplierTreasurySelectors();
+        }
+    };
+    const refreshPaymentTreasuryAccountsFromServer = async (options = {}) => {
+        if (paymentTreasuryAccountsUrl === '') {
+            return paymentTreasuryAccounts;
+        }
+
+        if (paymentTreasuryRefreshInFlight) {
+            return paymentTreasuryRefreshInFlight;
+        }
+
+        const clearPendingState = options.clearPendingState === true;
+        const announceRefresh = options.announceRefresh === true;
+        const previousSnapshot = JSON.stringify(paymentTreasuryAccounts);
+        paymentTreasuryRefreshInFlight = fetch(paymentTreasuryAccountsUrl, {
+            method: 'GET',
+            credentials: 'same-origin',
+            headers: {
+                'Accept': 'application/json',
+            },
+        })
+            .then(async (response) => {
+                if (!response.ok) {
+                    throw new Error(`Treasury account refresh failed with status ${response.status}`);
+                }
+
+                const payload = await response.json();
+                const accounts = Array.isArray(payload?.accounts) ? payload.accounts : [];
+                replacePaymentTreasuryAccounts(accounts);
+                refreshTreasurySelectors();
+
+                if (announceRefresh) {
+                    const refreshedSnapshot = JSON.stringify(paymentTreasuryAccounts);
+                    const eligibleCount = eligiblePaymentTreasuryAccounts().length;
+                    if (refreshedSnapshot !== previousSnapshot) {
+                        showFeedback(eligibleCount > 0
+                            ? 'Treasury accounts refreshed. The latest eligible account is now available.'
+                            : 'Treasury accounts refreshed.');
+                    } else {
+                        showFeedback('Treasury accounts checked. No new eligible account matched this branch and currency yet.');
+                    }
+                }
+
+                if (clearPendingState) {
+                    try {
+                        window.localStorage.removeItem(pendingTreasuryWorkspaceStateKey);
+                    } catch (error) {
+                        // ignore local storage cleanup errors
+                    }
+                }
+
+                return paymentTreasuryAccounts;
+            })
+            .catch((error) => {
+                if (typeof console !== 'undefined' && typeof console.warn === 'function') {
+                    console.warn('Unable to refresh treasury accounts after setup return.', error);
+                }
+
+                return paymentTreasuryAccounts;
+            })
+            .finally(() => {
+                paymentTreasuryRefreshInFlight = null;
+            });
+
+        return paymentTreasuryRefreshInFlight;
+    };
     const syncPaymentTreasurySelector = () => {
         if (!paymentTreasuryAccountSelect || !paymentTreasuryAccountRow || !paymentMethodSelect) {
             return;
@@ -1153,6 +2066,110 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         return true;
+    };
+    const supplierTreasuryContext = (form) => {
+        const methodField = form?.elements?.namedItem('supplier_payment_method');
+        const currencyField = form?.elements?.namedItem('supplier_payment_currency');
+        const branchField = form?.elements?.namedItem('branch_id');
+
+        return {
+            method: methodField instanceof HTMLSelectElement || methodField instanceof HTMLInputElement
+                ? String(methodField.value || '').trim()
+                : '',
+            currency: currencyField instanceof HTMLSelectElement || currencyField instanceof HTMLInputElement
+                ? String(currencyField.value || '').trim().toUpperCase()
+                : '',
+            branchId: branchField instanceof HTMLSelectElement || branchField instanceof HTMLInputElement
+                ? Number.parseInt(String(branchField.value || '0'), 10) || 0
+                : 0,
+        };
+    };
+    const eligibleSupplierTreasuryAccounts = (form) => {
+        const context = supplierTreasuryContext(form);
+        const compatibleTypes = paymentTreasuryTypesForMethod(context.method);
+
+        return paymentTreasuryAccounts.filter((account) => {
+            return (context.branchId <= 0 || Number.parseInt(String(account?.branchId || 0), 10) === context.branchId)
+                && compatibleTypes.includes(String(account?.accountType || '').trim())
+                && String(account?.currency || '').trim().toUpperCase() === context.currency;
+        });
+    };
+    const syncSupplierTreasurySelector = (select) => {
+        if (!(select instanceof HTMLSelectElement)) {
+            return;
+        }
+
+        const form = select.form;
+        const row = select.closest('[data-supplier-treasury-row]');
+        const context = supplierTreasuryContext(form);
+        const requiresTreasury = paymentMethodRequiresTreasurySelection(context.method);
+        const eligibleAccounts = requiresTreasury ? eligibleSupplierTreasuryAccounts(form) : [];
+        const selectedBefore = String(select.value || '').trim();
+        const preferredAccount = defaultPaymentTreasuryAccount(eligibleAccounts);
+
+        select.innerHTML = '';
+
+        const promptOption = document.createElement('option');
+        promptOption.value = '';
+        promptOption.textContent = eligibleAccounts.length > 0
+            ? (context.method === 'cash' ? 'Select cash account' : 'Select bank account')
+            : 'No eligible source account configured';
+        select.appendChild(promptOption);
+
+        eligibleAccounts.forEach((account) => {
+            const option = document.createElement('option');
+            option.value = String(account.id || '');
+            option.textContent = buildPaymentTreasuryLabel(account);
+            select.appendChild(option);
+        });
+
+        let nextValue = '';
+        if (selectedBefore !== '' && eligibleAccounts.some((account) => String(account.id || '') === selectedBefore)) {
+            nextValue = selectedBefore;
+        } else if (preferredAccount) {
+            nextValue = String(preferredAccount.id || '');
+        }
+        select.value = nextValue;
+        select.disabled = !requiresTreasury;
+        if (row instanceof HTMLElement) {
+            row.hidden = !requiresTreasury;
+        }
+    };
+    const syncSupplierTreasurySelectors = () => {
+        supplierTreasurySelects.forEach(syncSupplierTreasurySelector);
+    };
+    const ensureSupplierTreasuryReady = (form) => {
+        const context = supplierTreasuryContext(form);
+        if (!paymentMethodRequiresTreasurySelection(context.method)) {
+            return true;
+        }
+
+        const select = form?.elements?.namedItem('supplier_treasury_account_id');
+        if (select instanceof HTMLSelectElement && String(select.value || '').trim() !== '') {
+            return true;
+        }
+
+        const accountLabel = context.method === 'cash' ? 'cash account' : 'bank account';
+        showFeedback(`Select a supplier payment source ${accountLabel} before saving.`);
+        if (select instanceof HTMLSelectElement) {
+            select.focus();
+        }
+
+        return false;
+    };
+    const handleTreasurySetupReturn = () => {
+        if (!hasPendingTreasuryWorkspaceStateForCurrentRoute()) {
+            return;
+        }
+
+        refreshPaymentTreasuryAccountsFromServer({
+            clearPendingState: true,
+            announceRefresh: true,
+        }).then(() => {
+            refreshPaymentPreview();
+        }).catch(() => {
+            // Best-effort only.
+        });
     };
     if (paymentTreasuryAccountSelect) {
         paymentTreasuryAccountSelect.addEventListener('change', () => {
@@ -1302,11 +2319,58 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch (error) {
         serviceSupplierOptions = [];
     }
+    let workspaceBranchOptions = [];
+    try {
+        workspaceBranchOptions = JSON.parse(branchOptionsNode?.textContent || '[]');
+    } catch (error) {
+        workspaceBranchOptions = [];
+    }
+    const workspaceBranchById = (branchId) => {
+        const normalizedBranchId = Number.parseInt(String(branchId || '0'), 10) || 0;
+        return workspaceBranchOptions.find((branch) => Number.parseInt(String(branch?.id || '0'), 10) === normalizedBranchId) || null;
+    };
+    const workspaceBranchBaseCurrency = (branchId) => String(workspaceBranchById(branchId)?.baseCurrency || 'PKR').trim().toUpperCase() || 'PKR';
 
     const normalizeSupplierName = (value) => String(value ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
     const supplierExists = (name) => {
         const normalized = normalizeSupplierName(name);
         return normalized !== '' && serviceSupplierOptions.some((supplier) => normalizeSupplierName(supplier?.name) === normalized);
+    };
+    let supplierAddReturnContext = 'service';
+    const addSupplierToSelect = (select, savedName) => {
+        if (!(select instanceof HTMLSelectElement) || savedName === '') {
+            return;
+        }
+
+        const alreadyExists = Array.from(select.options).some((option) => normalizeSupplierName(option.value) === normalizeSupplierName(savedName));
+        if (alreadyExists) {
+            return;
+        }
+
+        const selectOption = document.createElement('option');
+        selectOption.value = savedName;
+        selectOption.textContent = savedName;
+        const addOption = Array.from(select.options).find((option) => option.value === addSupplierOptionValue);
+        select.insertBefore(selectOption, addOption || null);
+    };
+    const focusSupplierAddReturnTarget = () => {
+        if (supplierAddReturnContext === 'global-prepaid') {
+            const focusTarget = globalPrepaidSupplierField instanceof HTMLSelectElement && globalPrepaidSupplierField.value !== ''
+                ? globalPrepaidAmountField
+                : globalPrepaidSupplierField;
+            if (focusTarget instanceof HTMLElement) {
+                focusTarget.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+                window.setTimeout(() => {
+                    focusTarget.focus();
+                    if (focusTarget instanceof HTMLInputElement) {
+                        focusTarget.select();
+                    }
+                }, 80);
+            }
+            return;
+        }
+
+        supplierInput?.focus();
     };
     const closeSupplierAddModal = () => {
         if (!supplierAddModal) {
@@ -1340,23 +2404,30 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
     };
-    const openSupplierAddModal = (name = '') => {
+    const openSupplierAddModal = (name = '', context = 'service') => {
         if (!supplierAddModal || !supplierAddForm || !supplierRegisterUrl) {
             return false;
         }
 
+        supplierAddReturnContext = context === 'global-prepaid' ? 'global-prepaid' : 'service';
+        const sourceField = supplierAddReturnContext === 'global-prepaid' ? globalPrepaidSupplierField : supplierInput;
         if (supplierAddName) {
-            supplierAddName.value = String(name || supplierInput?.value || '').trim();
+            supplierAddName.value = String(name || sourceField?.value || '').trim();
         }
 
-        const bookingBranch = serviceForm?.elements?.namedItem('auto_branch_id')?.value || invoiceForm?.elements?.namedItem('branch_id')?.value || '';
+        const bookingBranch = supplierAddReturnContext === 'global-prepaid'
+            ? String(globalPrepaidBranchField?.value || '')
+            : serviceForm?.elements?.namedItem('auto_branch_id')?.value || invoiceForm?.elements?.namedItem('branch_id')?.value || '';
         if (supplierAddBranch && bookingBranch !== '') {
             supplierAddBranch.value = bookingBranch;
         }
 
         const currencyField = station.querySelector('[data-service-field="currency-mirror"]');
-        if (supplierAddCurrency && currencyField && currencyField.value) {
-            supplierAddCurrency.value = currencyField.value;
+        const supplierCurrency = supplierAddReturnContext === 'global-prepaid'
+            ? String(globalPrepaidCurrencyField?.value || '')
+            : String(currencyField?.value || '');
+        if (supplierAddCurrency && supplierCurrency !== '') {
+            supplierAddCurrency.value = supplierCurrency;
         }
 
         supplierAddModal.hidden = false;
@@ -1394,7 +2465,7 @@ document.addEventListener('DOMContentLoaded', () => {
     supplierAddCloseButtons.forEach((button) => {
         button.addEventListener('click', () => {
             closeSupplierAddModal();
-            supplierInput?.focus();
+            focusSupplierAddReturnTarget();
         });
     });
 
@@ -1513,13 +2584,8 @@ document.addEventListener('DOMContentLoaded', () => {
             const supplierMode = String(supplier.supplier_mode || supplierAddMode?.value || '').trim();
             if (savedName !== '' && !supplierExists(savedName)) {
                 serviceSupplierOptions.push(supplier);
-                if (supplierInput instanceof HTMLSelectElement) {
-                    const selectOption = document.createElement('option');
-                    selectOption.value = savedName;
-                    selectOption.textContent = savedName;
-                    const addOption = supplierInput.querySelector(`option[value="${addSupplierOptionValue}"]`);
-                    supplierInput.insertBefore(selectOption, addOption || null);
-                }
+                addSupplierToSelect(supplierInput, savedName);
+                addSupplierToSelect(globalPrepaidSupplierField, savedName);
                 if (supplierOptionsList) {
                     const option = document.createElement('option');
                     option.value = savedName;
@@ -1527,15 +2593,17 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             }
 
-            if (supplierInput) {
-                supplierInput.value = savedName;
-                supplierInput.dispatchEvent(new Event('input', { bubbles: true }));
-                supplierInput.dispatchEvent(new Event('change', { bubbles: true }));
+            const targetSupplierField = supplierAddReturnContext === 'global-prepaid' ? globalPrepaidSupplierField : supplierInput;
+            if (targetSupplierField) {
+                targetSupplierField.value = savedName;
+                targetSupplierField.dispatchEvent(new Event('input', { bubbles: true }));
+                targetSupplierField.dispatchEvent(new Event('change', { bubbles: true }));
             }
 
+            const returnContext = supplierAddReturnContext;
             closeSupplierAddModal();
             showFeedback(payload.message || 'Supplier added.');
-            if (supplierMode === 'running_balance') {
+            if (returnContext === 'service' && supplierMode === 'running_balance') {
                 openGlobalPrepaidSupplierModal({
                     supplierName: savedName,
                     branchId: supplier.branch_id || supplierAddBranch?.value || '',
@@ -1543,7 +2611,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     returnToTicketType: true,
                 });
             } else {
-                focusTicketTypeAfterSupplier();
+                if (returnContext === 'global-prepaid') {
+                    focusSupplierAddReturnTarget();
+                } else {
+                    focusTicketTypeAfterSupplier();
+                }
             }
         } catch (error) {
             if (supplierAddFeedback) {
@@ -1581,6 +2653,36 @@ document.addEventListener('DOMContentLoaded', () => {
             window.workspaceMaybeOpenSupplierAddModal(supplierInput);
         }, 80);
     });
+
+    if (globalPrepaidSupplierField instanceof HTMLSelectElement) {
+        globalPrepaidSupplierField.addEventListener('focus', () => {
+            globalPrepaidSupplierField.dataset.previousSupplierValue = globalPrepaidSupplierField.value === addSupplierOptionValue
+                ? ''
+                : globalPrepaidSupplierField.value;
+            window.setTimeout(() => openNativeSelect(globalPrepaidSupplierField), 0);
+        });
+
+        const handleGlobalPrepaidSupplierSelection = () => {
+            if (supplierAddModal?.hidden === false) {
+                return;
+            }
+
+            if (globalPrepaidSupplierField.value === addSupplierOptionValue) {
+                const previousValue = globalPrepaidSupplierField.dataset.previousSupplierValue || '';
+                globalPrepaidSupplierField.value = previousValue;
+                openSupplierAddModal('', 'global-prepaid');
+                return;
+            }
+
+            globalPrepaidSupplierField.dataset.previousSupplierValue = globalPrepaidSupplierField.value;
+        };
+
+        ['change', 'input', 'click', 'keyup'].forEach((eventName) => {
+            globalPrepaidSupplierField.addEventListener(eventName, () => {
+                window.setTimeout(handleGlobalPrepaidSupplierSelection, 0);
+            });
+        });
+    }
 
     const parseBalanceMap = (rawValue) => {
         if (rawValue && typeof rawValue === 'object' && !Array.isArray(rawValue)) {
@@ -1826,6 +2928,12 @@ document.addEventListener('DOMContentLoaded', () => {
             paymentExchangeConfirmButton.disabled = true;
             paymentExchangeConfirmButton.textContent = 'Confirm Settlement';
         }
+        if (paymentExchangePaymentAmountInput) {
+            paymentExchangePaymentAmountInput.value = '';
+        }
+        if (paymentExchangePaymentAmountRow) {
+            paymentExchangePaymentAmountRow.hidden = true;
+        }
         paymentExchangeConfirmInFlight = false;
     };
 
@@ -1930,6 +3038,46 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const currentInvoiceExchangeTarget = () => currentInvoiceExchangeTargets()[0] || null;
 
+    const buildManualExchangeSettlementTarget = (options = {}) => {
+        const { allowZeroBalance = false } = options;
+        const snapshot = currentInvoiceSnapshot();
+        const visibleInvoiceAmount = Math.max(
+            toNumber(paymentCurrentInvoiceInput?.dataset.paymentCurrentInvoice || 0),
+            toNumber(paymentCurrentInvoiceInput?.value || 0),
+            0
+        );
+        const outstandingAmount = Math.max(
+            toNumber(snapshot.invoiceBalance || 0),
+            visibleInvoiceAmount,
+            0
+        );
+        if (!allowZeroBalance && outstandingAmount <= 0.005) {
+            return null;
+        }
+
+        return {
+            id: 0,
+            bookingId: currentBookingId(),
+            bookingReference: String(invoiceNumberDisplay?.value || paymentExchangeInvoiceNoInput?.value || '').trim() || 'Current Invoice',
+            bookingDate: '',
+            serviceLineReference: allowZeroBalance ? 'Rate preview' : 'Unsaved invoice',
+            nextDueDate: String(paymentDueDateInput?.value || '').trim(),
+            currency: String(snapshot.invoiceCurrency || 'PKR').toUpperCase(),
+            outstandingAmount,
+            isCurrentBooking: true,
+            isManualPreviewOnly: true,
+        };
+    };
+
+    const selectedExchangeSettlementTarget = () => {
+        const selectedId = Number.parseInt(String(paymentExchangeTargetSelect?.value || 0), 10) || 0;
+        if (selectedId > 0) {
+            return currentSettlementTargets().find((row) => (Number.parseInt(String(row?.id || 0), 10) || 0) === selectedId) || null;
+        }
+
+        return paymentExchangeManualTarget || currentInvoiceExchangeTarget();
+    };
+
     const replaceSettlementData = (nextReceivables = [], nextRates = {}) => {
         customerOpenReceivables = Array.isArray(nextReceivables) ? nextReceivables : [];
         dailySettlementRates = nextRates && typeof nextRates === 'object' ? nextRates : {};
@@ -1953,6 +3101,8 @@ document.addEventListener('DOMContentLoaded', () => {
             paymentAllocationsDataNode.textContent = JSON.stringify(paymentAllocations);
         }
     };
+
+    let renderReceivableAlerts = () => {};
 
     const customerOutstandingByCurrency = () => {
         const datasetTotals = paymentPreviousBalanceInput
@@ -2120,6 +3270,7 @@ document.addEventListener('DOMContentLoaded', () => {
             : dailySettlementRates;
 
         replaceSettlementData(nextReceivables, nextRates);
+        renderReceivableAlerts();
     };
 
     const refreshPaymentHistoryFromPayload = (payload = {}) => {
@@ -2259,7 +3410,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (paymentExchangeSettlementButton) {
-            paymentExchangeSettlementButton.disabled = locked;
+            paymentExchangeSettlementButton.disabled = false;
         }
 
         if (paymentExchangeConfirmButton && !paymentExchangeConfirmInFlight) {
@@ -2324,7 +3475,10 @@ document.addEventListener('DOMContentLoaded', () => {
         savedPaymentEditNoticeShown = false;
 
         if (receivedNowInput) {
-            receivedNowInput.value = receipt.amount > 0.005 ? receipt.amount.toFixed(2) : receivedNowInput.value;
+            receivedNowInput.value = '0.00';
+        }
+        if (quickReceiveInput) {
+            quickReceiveInput.value = '0.00';
         }
 
         if (paymentCurrencySelect && receipt.currency !== '') {
@@ -2386,7 +3540,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         const invoiceSnapshot = currentInvoiceSnapshot();
-        const target = currentInvoiceExchangeTarget();
+        const target = selectedExchangeSettlementTarget();
         if (!target) {
             return null;
         }
@@ -2432,6 +3586,9 @@ document.addEventListener('DOMContentLoaded', () => {
             if (paymentExchangeRateRow) {
                 paymentExchangeRateRow.hidden = true;
             }
+            if (paymentExchangePaymentAmountRow) {
+                paymentExchangePaymentAmountRow.hidden = true;
+            }
             if (paymentExchangeRateHelp) {
                 paymentExchangeRateHelp.hidden = true;
                 paymentExchangeRateHelp.textContent = '';
@@ -2443,8 +3600,14 @@ document.addEventListener('DOMContentLoaded', () => {
             if (paymentExchangeRateRow) {
                 paymentExchangeRateRow.hidden = false;
             }
+            if (paymentExchangePaymentAmountRow) {
+                paymentExchangePaymentAmountRow.hidden = false;
+            }
             if (paymentExchangeRateLabel) {
                 paymentExchangeRateLabel.textContent = `Exchange Rate (1 ${quote.rateFromCurrency} = ? ${quote.rateToCurrency})`;
+            }
+            if (paymentExchangePaymentAmountLabel) {
+                paymentExchangePaymentAmountLabel.textContent = `${paymentCurrency} to Pay`;
             }
             if (paymentExchangeRateInput && document.activeElement !== paymentExchangeRateInput) {
                 const candidateRate = toNumber(paymentExchangeRateInput.value || quote.exchangeRate || 0);
@@ -2472,6 +3635,11 @@ document.addEventListener('DOMContentLoaded', () => {
             : 0;
         const targetSettled = roundToTwo(Math.min(targetBalance, targetCapacity));
         const paymentRequiredToFullyClearTarget = roundToTwo(convertTargetAmountToPaymentAmount(targetBalance, workingQuote));
+        if (paymentExchangePaymentAmountInput) {
+            paymentExchangePaymentAmountInput.value = paymentRequiredToFullyClearTarget > 0.005
+                ? formatCurrencyAmount(paymentCurrency, paymentRequiredToFullyClearTarget)
+                : formatCurrencyAmount(paymentCurrency, 0);
+        }
         const paymentConsumed = roundToTwo(
             targetSettled >= targetBalance - 0.005
                 ? Math.min(paymentAmount, paymentRequiredToFullyClearTarget)
@@ -2494,8 +3662,10 @@ document.addEventListener('DOMContentLoaded', () => {
             paymentAmount,
             targetBalance,
             targetSettled,
+            paymentRequiredToFullyClearTarget,
             paymentConsumed,
             remainingTargetBalance,
+            remainingTargetPaymentAmount: roundToTwo(convertTargetAmountToPaymentAmount(remainingTargetBalance, workingQuote)),
             remainingPaymentAmount,
             autoAppliedToSameCurrency,
             returnOrCredit,
@@ -2650,9 +3820,31 @@ document.addEventListener('DOMContentLoaded', () => {
             : Math.max(currentInvoiceAmount, 0);
         const currentBalance = Math.max(currentInvoiceDueBeforeReceipt, 0);
         const openBalanceDetails = syncOpenBalanceDisplay(invoiceCurrency, currentBalance);
-        const balanceInPaymentCurrency = Math.max(toNumber(openBalanceDetails.openBalanceMap[paymentCurrency] || 0), 0);
-        const returnAmount = Math.max(receivedNow - balanceInPaymentCurrency, 0);
-        const hasRemainingOutstanding = balanceInPaymentCurrency > 0.005;
+        let balanceInPaymentCurrency = Math.max(toNumber(openBalanceDetails.openBalanceMap[paymentCurrency] || 0), 0);
+        let returnAmount = Math.max(receivedNow - balanceInPaymentCurrency, 0);
+        let currentInvoiceDueInPaymentCurrency = paymentCurrency === invoiceCurrency
+            ? currentBalance
+            : 0;
+        let remainingCurrentInvoiceDueInPaymentCurrency = Math.max(currentInvoiceDueInPaymentCurrency - receivedNow, 0);
+        let hasRemainingOutstanding = remainingCurrentInvoiceDueInPaymentCurrency > 0.005;
+        const crossCurrencyCurrentInvoice = paymentCurrency !== invoiceCurrency && currentBalance > 0.005;
+        const crossCurrencyPreview = crossCurrencyCurrentInvoice ? exchangeSettlementPreview() : null;
+
+        if (
+            crossCurrencyPreview
+            && (
+                crossCurrencyPreview.target.currency === crossCurrencyPreview.quote.paymentCurrency
+                || toNumber(crossCurrencyPreview.quote.exchangeRate || 0) > 0.005
+            )
+        ) {
+            balanceInPaymentCurrency = Math.max(toNumber(crossCurrencyPreview.paymentRequiredToFullyClearTarget || 0), 0);
+            returnAmount = Math.max(toNumber(crossCurrencyPreview.returnOrCredit || 0), 0);
+            currentInvoiceDueInPaymentCurrency = Math.max(toNumber(crossCurrencyPreview.paymentRequiredToFullyClearTarget || 0), 0);
+            remainingCurrentInvoiceDueInPaymentCurrency = Math.max(toNumber(crossCurrencyPreview.remainingPaymentAmount || 0), 0);
+            hasRemainingOutstanding = receivedNow > 0.005
+                ? Math.max(toNumber(crossCurrencyPreview.remainingTargetBalance || 0), 0) > 0.005
+                : remainingCurrentInvoiceDueInPaymentCurrency > 0.005;
+        }
         const hasCurrentInvoiceAmount = currentInvoiceAmount > 0.005
             || currentBalance > 0.005
             || persistedAlreadyReceived > 0.005
@@ -2666,7 +3858,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         paymentCurrentBalanceInput.value = formatCurrencyAmount(invoiceCurrency, currentBalance);
         paymentTotalOutstandingInput.value = formatCurrencyAmount(paymentCurrency, balanceInPaymentCurrency);
-        paymentTotalOutstandingInput.dataset.paymentTotalDueNow = String(balanceInPaymentCurrency);
+        paymentTotalOutstandingInput.dataset.paymentTotalDueNow = String(currentInvoiceDueInPaymentCurrency);
         syncCurrentBalancePkrEquivalent(currentBalance, invoiceCurrency);
 
         if (paymentNoCurrentInvoice) {
@@ -2710,24 +3902,37 @@ document.addEventListener('DOMContentLoaded', () => {
         let computedState = 'Draft';
         let computedHelper = '';
 
-        if (!realInvoiceExists && balanceInPaymentCurrency <= 0.005) {
+        if (!realInvoiceExists && currentInvoiceDueInPaymentCurrency <= 0.005) {
             computedState = 'Draft';
-        } else if (balanceInPaymentCurrency > 0.005 && receivedNow <= 0.005) {
+        } else if (hasRemainingOutstanding && receivedNow <= 0.005) {
             if (persistedState.label === 'Overdue') {
                 computedState = 'Overdue';
                 computedHelper = persistedState.helper || '';
             } else {
                 computedState = 'Unpaid';
             }
-        } else if (balanceInPaymentCurrency > 0.005 && receivedNow > 0.005) {
+        } else if (hasRemainingOutstanding && receivedNow > 0.005) {
             computedState = 'Partially Paid';
-        } else if (balanceInPaymentCurrency <= 0.005 && (realInvoiceExists || Object.values(openBalanceDetails.openBalanceMap).some((amount) => Math.abs(toNumber(amount)) > 0.005))) {
+        } else if (remainingCurrentInvoiceDueInPaymentCurrency <= 0.005 && realInvoiceExists) {
             computedState = 'Paid';
         }
 
         setPaymentState(computedState, computedHelper);
 
         updateWorkflowState();
+    };
+
+    const markManualPaymentCurrencySelection = (paymentCurrency, invoiceCurrency = null) => {
+        if (!paymentCurrencySelect) {
+            return;
+        }
+
+        const normalizedInvoiceCurrency = String(invoiceCurrency || currentInvoiceSnapshot().invoiceCurrency || 'PKR').toUpperCase();
+        const bookingKey = `${currentBookingId()}|${normalizedInvoiceCurrency}`;
+        paymentCurrencySelect.dataset.paymentManualSelection = '1';
+        paymentCurrencySelect.dataset.paymentManualContext = bookingKey;
+        paymentCurrencySelect.dataset.paymentDefaultContext = bookingKey;
+        paymentCurrencySelect.value = String(paymentCurrency || normalizedInvoiceCurrency).toUpperCase();
     };
 
     const syncDefaultPaymentCurrency = (invoiceCurrency) => {
@@ -2737,7 +3942,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const bookingKey = `${currentBookingId()}|${String(invoiceCurrency || 'PKR').toUpperCase()}`;
         const previousKey = String(paymentCurrencySelect.dataset.paymentDefaultContext || '');
-        const shouldReset = paymentCurrencySelect.value.trim() === '' || previousKey !== bookingKey;
+        const hasManualSelection = paymentCurrencySelect.dataset.paymentManualSelection === '1'
+            && String(paymentCurrencySelect.dataset.paymentManualContext || '') === bookingKey;
+        const shouldReset = paymentCurrencySelect.value.trim() === '' || (!hasManualSelection && previousKey !== bookingKey);
 
         if (shouldReset) {
             paymentCurrencySelect.value = invoiceCurrency;
@@ -2753,6 +3960,10 @@ document.addEventListener('DOMContentLoaded', () => {
         } = options;
 
         if (currentSavedPaymentApplies()) {
+            return false;
+        }
+
+        if (station.dataset.suppressExchangeAutoOpen === '1') {
             return false;
         }
 
@@ -2951,6 +4162,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (paymentCurrencySelect) {
         paymentCurrencySelect.addEventListener('change', async () => {
+            markManualPaymentCurrencySelection(paymentCurrencySelect.value, currentInvoiceSnapshot().invoiceCurrency || 'PKR');
             if (noteSavedPaymentEditAttempt()) {
                 syncPaymentTreasurySelector();
                 syncPaymentCurrencyLabels(paymentCurrencySelect.value);
@@ -2978,12 +4190,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (paymentExchangeSettlementButton) {
         paymentExchangeSettlementButton.addEventListener('click', async () => {
-            if (currentSavedPaymentApplies()) {
-                showFeedback(savedPaymentLockedMessage());
-                return;
-            }
-
-            await openExchangeSettlementModal();
+            await openExchangeSettlementModal({ allowManualRatePreview: true });
         });
     }
 
@@ -3007,7 +4214,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const enteredPaymentAmount = Math.max(toNumber(receivedNowInput?.value || 0), 0);
             if (enteredPaymentAmount <= 0.005) {
-                showFeedback('No receipt has been saved yet. Please save payment first.');
+                const bookingId = currentBookingId();
+                if (bookingId > 0) {
+                    window.open(
+                        buildWorkspacePathUrl(`workspace/output?booking_id=${bookingId}&doc=booking_summary_receipt`),
+                        '_blank',
+                        'noopener'
+                    );
+                    showFeedback('No payment amount entered. Opened the current booking summary for printing.');
+                    return;
+                }
+
+                showFeedback('Select or save the booking first, then print the current booking summary.');
                 return;
             }
 
@@ -3037,6 +4255,23 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (paymentExchangeTargetSelect) {
         paymentExchangeTargetSelect.addEventListener('change', () => {
+            exchangeSettlementPreview();
+        });
+    }
+
+    if (paymentExchangePaymentCurrencyInput instanceof HTMLSelectElement) {
+        paymentExchangePaymentCurrencyInput.addEventListener('change', () => {
+            const nextCurrency = String(paymentExchangePaymentCurrencyInput.value || '').trim().toUpperCase();
+            if (nextCurrency === '') {
+                return;
+            }
+
+            markManualPaymentCurrencySelection(nextCurrency, currentInvoiceSnapshot().invoiceCurrency || 'PKR');
+            paymentExchangePaymentCurrencyInput.value = nextCurrency;
+
+            syncPaymentTreasurySelector();
+            syncPaymentCurrencyLabels(nextCurrency);
+            refreshPaymentPreview();
             exchangeSettlementPreview();
         });
     }
@@ -3192,16 +4427,18 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        if (currentSavedPaymentApplies()) {
-            showExchangeFeedback(savedPaymentLockedMessage());
-            syncSavedPaymentUiState();
-            return;
-        }
-
         clearExchangeFeedback();
         const preview = exchangeSettlementPreview();
         if (!preview) {
             showExchangeFeedback('Choose a settlement target first.');
+            return;
+        }
+
+        const isRateOnlySave = preview.paymentAmount <= 0.005;
+
+        if (currentSavedPaymentApplies() && !isRateOnlySave) {
+            showExchangeFeedback(savedPaymentLockedMessage());
+            syncSavedPaymentUiState();
             return;
         }
 
@@ -3233,7 +4470,10 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
 
-        const isRateOnlySave = preview.paymentAmount <= 0.005;
+        if (!isRateOnlySave && (Number.parseInt(String(preview.target?.id || 0), 10) || 0) <= 0) {
+            showExchangeFeedback('Save the current invoice first before applying exchange settlement to the payment.');
+            return;
+        }
         if (!isRateOnlySave && (preview.targetSettled <= 0.005 || preview.paymentConsumed <= 0.005)) {
             showExchangeFeedback('The entered payment does not settle any amount on the selected target.');
             return;
@@ -3537,6 +4777,74 @@ document.addEventListener('DOMContentLoaded', () => {
             const invoiceSnapshot = currentInvoiceSnapshot();
             syncPaymentCurrencyLabels(selectedPaymentCurrency);
 
+            if (receivedAmount <= 0.005) {
+                if (receivedNowInput) {
+                    receivedNowInput.value = '0.00';
+                }
+                if (quickReceiveInput) {
+                    quickReceiveInput.value = '0.00';
+                }
+
+                paymentSubmitDebug.currentBookingId = currentBookingId();
+                paymentSubmitDebug.parsedAmountReceiving = 0;
+                paymentSubmitDebug.paymentCurrency = selectedPaymentCurrency;
+                paymentSubmitDebug.invoiceCurrency = invoiceSnapshot.invoiceCurrency;
+                paymentSubmitDebug.dueDate = paymentDueDateInput?.value || '';
+                paymentSubmitDebug.lastAttemptedPayload = {
+                    booking_id: currentBookingId(),
+                    received_amount: '0.00',
+                    receipt_action: 'no_receipt',
+                };
+
+                if (paymentPrimarySaveButton) {
+                    paymentPrimarySaveButton.disabled = true;
+                    paymentPrimarySaveButton.textContent = 'Saving...';
+                }
+
+                try {
+                    if (typeof serviceAutosaveReady === 'function' && serviceAutosaveReady()) {
+                        const servicePayload = await persistServiceAutosave();
+                        if (servicePayload) {
+                            refreshSettlementDataFromPayload(servicePayload);
+                            refreshPaymentHistoryFromPayload(servicePayload);
+                            applyAutosavePaymentFoundation(servicePayload, { syncCommercialEditor: false });
+                        }
+                    }
+
+                    if (typeof autosaveBookingReady === 'function' && autosaveBookingReady()) {
+                        const invoicePayload = await persistInvoiceAutosave({ force: true });
+                        if (invoicePayload) {
+                            refreshSettlementDataFromPayload(invoicePayload);
+                            refreshPaymentHistoryFromPayload(invoicePayload);
+                            applyAutosavePaymentFoundation(invoicePayload, { syncCommercialEditor: false });
+                        }
+                    }
+                } catch (zeroPaymentSaveError) {
+                    throw new Error(zeroPaymentSaveError instanceof Error ? zeroPaymentSaveError.message : 'Booking could not be updated without payment.');
+                }
+
+                clearPaymentDetailHiddenFields();
+                closePaymentDetailModal();
+                clearSavedPaymentState({
+                    clearAmount: false,
+                    resetPaymentCurrency: false,
+                    closeExchange: true,
+                    showReadyMessage: false,
+                });
+                refreshPaymentPreview();
+                syncSavedPaymentUiState();
+
+                showFeedback('No payment recorded. Booking remains outstanding and can be paid later.');
+                station.dispatchEvent(new CustomEvent('workspace:payment-zero-saved', {
+                    bubbles: true,
+                    detail: {
+                        booking_id: currentBookingId(),
+                        received_amount: 0,
+                    },
+                }));
+                return null;
+            }
+
             if (selectedPaymentCurrency !== invoiceSnapshot.invoiceCurrency) {
                 if (invoiceSnapshot.invoiceBalance > 0.005) {
                     if (receivedAmount <= 0.005) {
@@ -3618,73 +4926,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             }
 
-            if (receivedAmount <= 0.005) {
-                if (receivedNowInput) {
-                    receivedNowInput.value = '0.00';
-                }
-                if (quickReceiveInput) {
-                    quickReceiveInput.value = '0.00';
-                }
-
-                paymentSubmitDebug.currentBookingId = currentBookingId();
-                paymentSubmitDebug.parsedAmountReceiving = 0;
-                paymentSubmitDebug.paymentCurrency = selectedPaymentCurrency;
-                paymentSubmitDebug.invoiceCurrency = invoiceSnapshot.invoiceCurrency;
-                paymentSubmitDebug.dueDate = paymentDueDateInput?.value || '';
-                paymentSubmitDebug.lastAttemptedPayload = {
-                    booking_id: currentBookingId(),
-                    received_amount: '0.00',
-                    receipt_action: 'no_receipt',
-                };
-
-                if (paymentPrimarySaveButton) {
-                    paymentPrimarySaveButton.disabled = true;
-                    paymentPrimarySaveButton.textContent = 'Saving...';
-                }
-
-                try {
-                    if (typeof serviceAutosaveReady === 'function' && serviceAutosaveReady()) {
-                        const servicePayload = await persistServiceAutosave();
-                        if (servicePayload) {
-                            refreshSettlementDataFromPayload(servicePayload);
-                            refreshPaymentHistoryFromPayload(servicePayload);
-                            applyAutosavePaymentFoundation(servicePayload, { syncCommercialEditor: false });
-                        }
-                    }
-
-                    if (typeof autosaveBookingReady === 'function' && autosaveBookingReady()) {
-                        const invoicePayload = await persistInvoiceAutosave({ force: true });
-                        if (invoicePayload) {
-                            refreshSettlementDataFromPayload(invoicePayload);
-                            refreshPaymentHistoryFromPayload(invoicePayload);
-                            applyAutosavePaymentFoundation(invoicePayload, { syncCommercialEditor: false });
-                        }
-                    }
-                } catch (zeroPaymentSaveError) {
-                    throw new Error(zeroPaymentSaveError instanceof Error ? zeroPaymentSaveError.message : 'Booking could not be updated without payment.');
-                }
-
-                clearPaymentDetailHiddenFields();
-                closePaymentDetailModal();
-                clearSavedPaymentState({
-                    clearAmount: false,
-                    resetPaymentCurrency: false,
-                    closeExchange: true,
-                    showReadyMessage: false,
-                });
-                refreshPaymentPreview();
-                syncSavedPaymentUiState();
-
-                showFeedback('No payment recorded. Booking remains outstanding and can be paid later.');
-                station.dispatchEvent(new CustomEvent('workspace:payment-zero-saved', {
-                    bubbles: true,
-                    detail: {
-                        booking_id: currentBookingId(),
-                        received_amount: 0,
-                    },
-                }));
-                return null;
-            }
             if (!ensurePaymentDetailReadyForSave()) {
                 return null;
             }
@@ -3858,6 +5099,19 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    if (documentFileInput instanceof HTMLInputElement) {
+        documentFileInput.addEventListener('change', validateDocumentFileSelection);
+    }
+
+    if (documentUploadForm instanceof HTMLFormElement) {
+        documentUploadForm.addEventListener('submit', (event) => {
+            if (!validateDocumentFileSelection()) {
+                event.preventDefault();
+                documentFileInput?.focus();
+            }
+        });
+    }
+
     const fillValue = (field, value) => {
         if (field) {
             field.value = value ?? '';
@@ -3908,6 +5162,13 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         updateCustomerLedgerTarget(normalizedBookingId);
+        renderOfflineStatus();
+        station.dispatchEvent(new CustomEvent('workspace:booking-synced', {
+            bubbles: true,
+            detail: {
+                booking_id: normalizedBookingId,
+            },
+        }));
     };
 
     const currentPersistedServiceId = () => {
@@ -4107,6 +5368,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const serviceCancelButton = station.querySelector('[data-service-cancel-button]');
     const serviceRefundId = station.querySelector('[data-service-refund-id]');
     const serviceRefundButton = station.querySelector('[data-service-refund-button]');
+    const serviceRefundForm = station.querySelector('form[data-service-event-bar="refund"]');
+    const serviceRefundMethodSelect = serviceRefundForm?.elements?.namedItem('refund_payment_method') instanceof HTMLSelectElement
+        ? serviceRefundForm.elements.namedItem('refund_payment_method')
+        : null;
+    const serviceRefundTreasuryRow = station.querySelector('[data-service-refund-treasury-row]');
+    const serviceRefundTreasurySelect = serviceRefundForm?.elements?.namedItem('refund_treasury_account_id') instanceof HTMLSelectElement
+        ? serviceRefundForm.elements.namedItem('refund_treasury_account_id')
+        : null;
+    const serviceRefundBranchIdField = station.querySelector('[data-service-refund-branch-id]');
+    const serviceRefundCurrencyField = station.querySelector('[data-service-refund-currency]');
+    const serviceRefundDestinationRows = Array.from(station.querySelectorAll('[data-service-refund-destination-row]'));
     const serviceSettlementId = station.querySelector('[data-service-settlement-id]');
     const serviceSettlementButton = station.querySelector('[data-service-settlement-button]');
     const serviceReissueId = station.querySelector('[data-service-reissue-id]');
@@ -4117,6 +5389,101 @@ document.addEventListener('DOMContentLoaded', () => {
         settlement: station.querySelector('[data-service-event-bar="settlement"]'),
         reissue: station.querySelector('[data-service-event-bar="reissue"]'),
     };
+    const settlementInitiallyVisible = serviceEventBars.settlement instanceof HTMLElement && !serviceEventBars.settlement.hidden;
+    const setServiceEventBarControlsEnabled = (bar, enabled) => {
+        if (!(bar instanceof HTMLElement)) {
+            return;
+        }
+
+        const forceEnabled = bar.dataset.serviceEventBar === 'settlement' && !bar.hidden;
+        bar.querySelectorAll('input, select, textarea, button').forEach((control) => {
+            if (
+                control instanceof HTMLInputElement
+                || control instanceof HTMLSelectElement
+                || control instanceof HTMLTextAreaElement
+                || control instanceof HTMLButtonElement
+            ) {
+                if (enabled || forceEnabled) {
+                    control.dataset.workflowOriginalDisabled = '0';
+                }
+                control.disabled = !(enabled || forceEnabled);
+            }
+        });
+    };
+    const unlockVisibleSettlementBar = () => {
+        const bar = serviceEventBars.settlement;
+        if (!(bar instanceof HTMLElement) || bar.hidden) {
+            return;
+        }
+
+        bar.style.pointerEvents = 'auto';
+        bar.style.position = 'relative';
+        bar.style.zIndex = '8';
+        bar.style.transform = 'translateZ(0)';
+        bar.querySelectorAll('input, select, textarea, button').forEach((control) => {
+            if (
+                control instanceof HTMLInputElement
+                || control instanceof HTMLSelectElement
+                || control instanceof HTMLTextAreaElement
+                || control instanceof HTMLButtonElement
+            ) {
+                control.dataset.workflowOriginalDisabled = '0';
+                control.disabled = false;
+            }
+        });
+        void bar.offsetHeight;
+        bar.style.transform = 'translateZ(0) scale(1)';
+    };
+    if (serviceEventBars.settlement instanceof HTMLElement) {
+        ['pointerenter', 'mousedown', 'click', 'focusin'].forEach((eventName) => {
+            serviceEventBars.settlement.addEventListener(eventName, unlockVisibleSettlementBar, true);
+        });
+    }
+    window.workspaceHandleSettlementSubmit = (form) => {
+        if (!(form instanceof HTMLFormElement)) {
+            return true;
+        }
+
+        unlockVisibleSettlementBar();
+        const reasonField = form.elements.namedItem('settlement_reason');
+        if (reasonField instanceof HTMLInputElement) {
+            const existingReason = String(reasonField.value || '').trim();
+            if (existingReason === '') {
+                const promptedReason = window.prompt('Enter cancellation settlement reason:');
+                if (promptedReason === null) {
+                    return false;
+                }
+
+                const normalizedReason = promptedReason.trim();
+                if (normalizedReason.length < 5) {
+                    alert('Cancellation settlement reason must be at least 5 characters.');
+                    return false;
+                }
+
+                reasonField.value = normalizedReason;
+            }
+        }
+
+        return true;
+    };
+    if (serviceEventBars.settlement instanceof HTMLFormElement) {
+        serviceEventBars.settlement.addEventListener('submit', (event) => {
+            if (!window.workspaceHandleSettlementSubmit(serviceEventBars.settlement)) {
+                event.preventDefault();
+            }
+        });
+    }
+    const settlementReasonField = serviceEventBars.settlement instanceof HTMLFormElement
+        ? serviceEventBars.settlement.elements.namedItem('settlement_reason')
+        : null;
+    if (settlementReasonField instanceof HTMLInputElement) {
+        settlementReasonField.addEventListener('dblclick', () => {
+            const promptedReason = window.prompt('Enter cancellation settlement reason:', settlementReasonField.value || '');
+            if (promptedReason !== null) {
+                settlementReasonField.value = promptedReason.trim();
+            }
+        });
+    }
     const lossAmountPanel = station.querySelector('[data-loss-amount-panel]');
     const lossReasonPanel = station.querySelector('[data-loss-reason-panel]');
     const chips = Array.from(station.querySelectorAll('.service-type-chip'));
@@ -4646,7 +6013,20 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
+    let supplierAdvanceFxCandidate = null;
+
+    const clearSupplierAdvanceFxFields = () => {
+        if (supplierAdvanceFxUse instanceof HTMLInputElement) supplierAdvanceFxUse.value = '';
+        if (supplierAdvanceFxAdvanceId instanceof HTMLInputElement) supplierAdvanceFxAdvanceId.value = '';
+        if (supplierAdvanceFxRate instanceof HTMLInputElement) supplierAdvanceFxRate.value = '';
+        if (supplierAdvanceFxRateDate instanceof HTMLInputElement && supplierAdvanceFxRateDate.value === '') {
+            supplierAdvanceFxRateDate.value = new Date().toISOString().slice(0, 10);
+        }
+    };
+
     const hideSupplierAdvanceNote = () => {
+        supplierAdvanceFxCandidate = null;
+        clearSupplierAdvanceFxFields();
         if (supplierAdvanceNote instanceof HTMLElement) {
             supplierAdvanceNote.hidden = true;
         }
@@ -4668,6 +6048,48 @@ document.addEventListener('DOMContentLoaded', () => {
         if (supplierAdvanceNote instanceof HTMLElement) {
             supplierAdvanceNote.hidden = String(summaryText || '').trim() === '';
         }
+    };
+
+    const prepareSupplierAdvanceFxUse = () => {
+        if (!supplierAdvanceFxCandidate) {
+            clearSupplierAdvanceFxFields();
+            return true;
+        }
+
+        if (supplierAdvanceFxUse instanceof HTMLInputElement && supplierAdvanceFxUse.value === '1') {
+            return true;
+        }
+
+        const advanceCurrency = String(supplierAdvanceFxCandidate.currency || '').toUpperCase();
+        const payableCurrency = String(serviceFields.currency?.value || '').trim().toUpperCase();
+        const amount = Math.max(toNumber(serviceMetricInputs.cost?.value || serviceFields.purchaseCost?.value || 0), 0);
+        if (advanceCurrency === '' || payableCurrency === '' || amount <= 0) {
+            clearSupplierAdvanceFxFields();
+            return true;
+        }
+
+        const useAdvance = window.confirm(`A ${advanceCurrency} prepaid supplier balance is available, but this payable is ${payableCurrency}. Use it with an exchange rate now?`);
+        if (!useAdvance) {
+            clearSupplierAdvanceFxFields();
+            return true;
+        }
+
+        const rateText = window.prompt(`Enter exchange rate: 1 ${advanceCurrency} = how many ${payableCurrency}?`, '');
+        const rateValue = Number.parseFloat(String(rateText || '').trim());
+        if (!Number.isFinite(rateValue) || rateValue <= 0) {
+            showFeedback('Different-currency supplier advance was not applied because exchange rate was not confirmed.');
+            clearSupplierAdvanceFxFields();
+            return true;
+        }
+
+        if (supplierAdvanceFxUse instanceof HTMLInputElement) supplierAdvanceFxUse.value = '1';
+        if (supplierAdvanceFxAdvanceId instanceof HTMLInputElement) supplierAdvanceFxAdvanceId.value = String(supplierAdvanceFxCandidate.id || '');
+        if (supplierAdvanceFxRate instanceof HTMLInputElement) supplierAdvanceFxRate.value = String(rateValue);
+        if (supplierAdvanceFxRateDate instanceof HTMLInputElement && supplierAdvanceFxRateDate.value === '') {
+            supplierAdvanceFxRateDate.value = new Date().toISOString().slice(0, 10);
+        }
+        showFeedback(`Different-currency supplier advance confirmed at 1 ${advanceCurrency} = ${rateValue} ${payableCurrency}.`);
+        return true;
     };
 
     const isDraftServiceLineActive = () => {
@@ -4748,8 +6170,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
             showSupplierAdvanceNote(
                 `Available prepaid supplier balance: ${formattedAmount}`,
-                'This advance will be used automatically against Mkt. Fare.'
+                Number(payload.available_amount || 0) > 0
+                    ? 'Same-currency advance will be used automatically against Mkt. Fare.'
+                    : 'Different-currency advance requires exchange-rate confirmation before it is used.'
             );
+            supplierAdvanceFxCandidate = null;
+            if (Number(payload.available_amount || 0) <= 0) {
+                const candidates = Array.isArray(payload.advance_candidates) ? payload.advance_candidates : [];
+                supplierAdvanceFxCandidate = candidates.find((row) => String(row.currency || '').toUpperCase() !== currency) || null;
+                if (!supplierAdvanceFxCandidate) {
+                    clearSupplierAdvanceFxFields();
+                }
+            } else {
+                clearSupplierAdvanceFxFields();
+            }
         } catch (error) {
             if (requestToken !== supplierAdvanceLookupToken) {
                 return;
@@ -5167,27 +6601,38 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const updateServiceActionState = (serviceLine) => {
         const isPersisted = Number.parseInt(String(serviceLine.serviceId || 0), 10) > 0;
-        const status = String(serviceLine.status || serviceLine.displayStatus || '').trim().toLowerCase();
+        const canShowServiceEventActions = workspaceOpenedExistingBookingAtLoad && isPersisted;
+        const status = String(serviceLine.status || serviceLine.displayStatus || '').trim().toLowerCase().replace(/\s+/g, '_');
         const type = String(serviceLine.type || '').trim().toLowerCase();
+        const hasCancellationEvent = Number.parseInt(String(serviceLine.latestCancelEventId || 0), 10) > 0
+            || serviceLine.hasCancellationEvent === true
+            || String(serviceLine.hasCancellationEvent || '') === '1';
+        const canSettleCancellation = canShowServiceEventActions
+            && (status === 'cancelled' || hasCancellationEvent || settlementInitiallyVisible);
 
         if (isPersisted) {
             hideSupplierAdvanceNote();
         }
 
         if (serviceEventBars.cancel) {
-            serviceEventBars.cancel.hidden = !isPersisted;
+            serviceEventBars.cancel.hidden = !canShowServiceEventActions;
+            setServiceEventBarControlsEnabled(serviceEventBars.cancel, canShowServiceEventActions && status !== 'cancelled');
         }
 
         if (serviceEventBars.refund) {
-            serviceEventBars.refund.hidden = !isPersisted;
+            serviceEventBars.refund.hidden = !canShowServiceEventActions;
+            setServiceEventBarControlsEnabled(serviceEventBars.refund, canShowServiceEventActions);
         }
 
         if (serviceEventBars.settlement) {
-            serviceEventBars.settlement.hidden = !isPersisted || status !== 'cancelled';
+            serviceEventBars.settlement.hidden = !canSettleCancellation;
+            setServiceEventBarControlsEnabled(serviceEventBars.settlement, canSettleCancellation);
+            unlockVisibleSettlementBar();
         }
 
         if (serviceEventBars.reissue) {
-            serviceEventBars.reissue.hidden = !isPersisted || type !== 'air ticket';
+            serviceEventBars.reissue.hidden = !canShowServiceEventActions || type !== 'air ticket';
+            setServiceEventBarControlsEnabled(serviceEventBars.reissue, canShowServiceEventActions && type === 'air ticket');
         }
 
         if (serviceSubmitButton) {
@@ -5207,37 +6652,128 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (serviceCancelId) {
-            serviceCancelId.value = isPersisted ? String(serviceLine.serviceId || '') : '';
+            serviceCancelId.value = canShowServiceEventActions ? String(serviceLine.serviceId || '') : '';
         }
 
         if (serviceCancelButton) {
-            serviceCancelButton.disabled = !isPersisted || status === 'cancelled';
+            serviceCancelButton.disabled = !canShowServiceEventActions || status === 'cancelled';
         }
 
         if (serviceRefundId) {
-            serviceRefundId.value = isPersisted ? String(serviceLine.serviceId || '') : '';
+            serviceRefundId.value = canShowServiceEventActions ? String(serviceLine.serviceId || '') : '';
+        }
+
+        if (serviceRefundCurrencyField instanceof HTMLInputElement) {
+            serviceRefundCurrencyField.value = String(serviceLine.currency || serviceRefundCurrencyField.value || 'PKR').trim().toUpperCase() || 'PKR';
         }
 
         if (serviceRefundButton) {
-            serviceRefundButton.disabled = !isPersisted;
+            serviceRefundButton.disabled = !canShowServiceEventActions;
         }
 
         if (serviceSettlementId) {
-            serviceSettlementId.value = isPersisted ? String(serviceLine.serviceId || '') : '';
+            serviceSettlementId.value = canSettleCancellation ? String(serviceLine.serviceId || '') : '';
         }
 
         if (serviceSettlementButton) {
-            serviceSettlementButton.disabled = !isPersisted || status !== 'cancelled';
+            serviceSettlementButton.disabled = !canSettleCancellation && serviceEventBars.settlement?.hidden !== false;
         }
 
         if (serviceReissueId) {
-            serviceReissueId.value = isPersisted ? String(serviceLine.serviceId || '') : '';
+            serviceReissueId.value = canShowServiceEventActions && type === 'air ticket' ? String(serviceLine.serviceId || '') : '';
         }
 
         if (serviceReissueButton) {
-            serviceReissueButton.disabled = !isPersisted || type !== 'air ticket';
+            serviceReissueButton.disabled = !canShowServiceEventActions || type !== 'air ticket';
+        }
+
+        syncRefundTreasurySelector();
+    };
+    reapplyActiveServiceActionState = () => {
+        const activeServiceRow = serviceRows.find((row) => row.classList.contains('is-active'));
+        const activeServiceIndex = activeServiceRow instanceof HTMLElement
+            ? Number.parseInt(activeServiceRow.dataset.serviceIndex || '-1', 10)
+            : -1;
+        if (activeServiceIndex >= 0 && serviceLines[activeServiceIndex]) {
+            updateServiceActionState(serviceLines[activeServiceIndex]);
         }
     };
+
+    const eligibleRefundTreasuryAccounts = () => {
+        if (!serviceRefundMethodSelect) {
+            return [];
+        }
+
+        const method = String(serviceRefundMethodSelect.value || '').trim();
+        const currency = serviceRefundCurrencyField instanceof HTMLInputElement
+            ? String(serviceRefundCurrencyField.value || '').trim().toUpperCase()
+            : '';
+        const branchId = serviceRefundBranchIdField instanceof HTMLInputElement
+            ? Number.parseInt(String(serviceRefundBranchIdField.value || '0'), 10) || 0
+            : 0;
+        const compatibleTypes = paymentTreasuryTypesForMethod(method);
+
+        return paymentTreasuryAccounts.filter((account) => {
+            return (branchId <= 0 || Number.parseInt(String(account?.branchId || 0), 10) === branchId)
+                && compatibleTypes.includes(String(account?.accountType || '').trim())
+                && String(account?.currency || '').trim().toUpperCase() === currency;
+        });
+    };
+
+    const syncRefundTreasurySelector = () => {
+        if (!serviceRefundMethodSelect || !serviceRefundTreasurySelect || !serviceRefundTreasuryRow) {
+            return;
+        }
+
+        const method = String(serviceRefundMethodSelect.value || '').trim();
+        const requiresTreasury = paymentMethodRequiresTreasurySelection(method);
+        const eligibleAccounts = requiresTreasury ? eligibleRefundTreasuryAccounts() : [];
+        const selectedBefore = String(serviceRefundTreasurySelect.value || '').trim();
+        const preferredAccount = defaultPaymentTreasuryAccount(eligibleAccounts);
+
+        serviceRefundTreasurySelect.innerHTML = '';
+
+        const promptOption = document.createElement('option');
+        promptOption.value = '';
+        promptOption.textContent = eligibleAccounts.length > 0
+            ? (method === 'cash' ? 'Select refund cash account' : 'Select refund bank account')
+            : 'No eligible refund account configured';
+        serviceRefundTreasurySelect.appendChild(promptOption);
+
+        eligibleAccounts.forEach((account) => {
+            const option = document.createElement('option');
+            option.value = String(account.id || '');
+            option.textContent = buildPaymentTreasuryLabel(account);
+            serviceRefundTreasurySelect.appendChild(option);
+        });
+
+        let nextValue = '';
+        if (selectedBefore !== '' && eligibleAccounts.some((account) => String(account.id || '') === selectedBefore)) {
+            nextValue = selectedBefore;
+        } else if (preferredAccount) {
+            nextValue = String(preferredAccount.id || '');
+        }
+        serviceRefundTreasurySelect.value = nextValue;
+
+        serviceRefundTreasuryRow.hidden = !requiresTreasury;
+        serviceRefundTreasurySelect.disabled = !requiresTreasury;
+
+        const showBankDestination = method === 'bank_transfer';
+        if (serviceRefundForm) {
+            serviceRefundForm.classList.toggle('legacy-service-event-bar--refund-bank', showBankDestination);
+            serviceRefundForm.classList.toggle('legacy-service-event-bar--refund-cash', !showBankDestination);
+        }
+        serviceRefundDestinationRows.forEach((row) => {
+            row.hidden = !showBankDestination;
+            const field = row.querySelector('input, select, textarea');
+            if (field instanceof HTMLInputElement || field instanceof HTMLSelectElement || field instanceof HTMLTextAreaElement) {
+                field.disabled = !showBankDestination;
+            }
+        });
+    };
+    if (serviceRefundMethodSelect) {
+        serviceRefundMethodSelect.addEventListener('change', syncRefundTreasurySelector);
+    }
 
     const loadServiceLine = (index) => {
         const serviceLine = serviceLines[index];
@@ -5572,10 +7108,12 @@ document.addEventListener('DOMContentLoaded', () => {
         return mergedLine;
     };
 
-    const applySavedServiceUiState = (payload) => {
+    const applySavedServiceUiState = (payload, options = {}) => {
         if (!payload || typeof payload !== 'object') {
             return;
         }
+
+        const preserveLiveEditorState = options.preserveLiveEditorState === true;
 
         const bookingId = Number.parseInt(String(payload.booking_id || 0), 10) || 0;
         const serviceId = Number.parseInt(String(payload.service_id || payload.service_line?.serviceId || 0), 10) || 0;
@@ -5602,14 +7140,17 @@ document.addEventListener('DOMContentLoaded', () => {
         if (normalizedServiceLine) {
             fillValue(serviceFields.lineNumber, normalizedServiceLine.lineNumber || 'SV-DRAFT');
             upsertAutosavedServiceLine(normalizedServiceLine, {
-                reloadEditor: !isActivelyEditingServiceForm(),
+                reloadEditor: preserveLiveEditorState ? false : !isActivelyEditingServiceForm(),
             });
             updateServiceActionState(normalizedServiceLine);
         }
 
         station.dataset.hasSavedService = autosavedHasSavedService ? '1' : '0';
         setInvoiceNumber(payload.invoice_no || 'Draft');
-        applyAutosavePaymentFoundation(payload);
+        applyAutosavePaymentFoundation(payload, {
+            syncCommercialEditor: !preserveLiveEditorState,
+            preserveLiveInvoicePreview: preserveLiveEditorState,
+        });
 
         if (autosavedHasSavedService) {
             setGateState(workflowGates.postService, true);
@@ -5723,6 +7264,82 @@ document.addEventListener('DOMContentLoaded', () => {
 
     };
 
+    const syncWorkspaceBranchContext = (options = {}) => {
+        if (!(bookingBranchField instanceof HTMLSelectElement)) {
+            return;
+        }
+
+        const branchId = String(bookingBranchField.value || '').trim();
+        const branchCurrency = workspaceBranchBaseCurrency(branchId);
+        const forceCurrency = options.forceCurrency === true;
+
+        syncAutoBookingFields();
+
+        const paymentBranchField = paymentForm?.elements?.namedItem('branch_id');
+        if (paymentBranchField instanceof HTMLInputElement || paymentBranchField instanceof HTMLSelectElement) {
+            paymentBranchField.value = branchId;
+        }
+
+        if (serviceRefundBranchIdField instanceof HTMLInputElement) {
+            serviceRefundBranchIdField.value = branchId;
+        }
+
+        if (supplierAddBranch instanceof HTMLSelectElement && branchId !== '') {
+            supplierAddBranch.value = branchId;
+        }
+
+        if (globalPrepaidBranchField instanceof HTMLSelectElement && branchId !== '') {
+            globalPrepaidBranchField.value = branchId;
+        }
+
+        if (globalPrepaidCurrencyField instanceof HTMLSelectElement && branchCurrency !== '') {
+            globalPrepaidCurrencyField.value = branchCurrency;
+        }
+
+        if (supplierAddCurrency instanceof HTMLSelectElement && branchCurrency !== '') {
+            supplierAddCurrency.value = branchCurrency;
+        }
+
+        const canResetServiceCurrency = forceCurrency || currentPersistedServiceId() <= 0;
+        if (canResetServiceCurrency && serviceFields.currency instanceof HTMLSelectElement && branchCurrency !== '') {
+            serviceFields.currency.value = branchCurrency;
+        }
+
+        if (paymentCurrencySelect instanceof HTMLSelectElement && branchCurrency !== '') {
+            delete paymentCurrencySelect.dataset.paymentManualSelection;
+            delete paymentCurrencySelect.dataset.paymentManualContext;
+            delete paymentCurrencySelect.dataset.paymentDefaultContext;
+            paymentCurrencySelect.value = branchCurrency;
+        }
+
+        if (typeof syncServiceCurrencyMirror === 'function') {
+            syncServiceCurrencyMirror();
+        }
+        if (typeof syncDefaultPaymentCurrency === 'function') {
+            syncDefaultPaymentCurrency(branchCurrency);
+        }
+        if (typeof syncPaymentCurrencyLabels === 'function') {
+            syncPaymentCurrencyLabels(branchCurrency);
+        }
+        if (typeof syncPaymentInvoiceTotals === 'function') {
+            syncPaymentInvoiceTotals(toNumber(clientReceivableField?.value || 0));
+        }
+        if (typeof clearExchangeSettlementFields === 'function') {
+            clearExchangeSettlementFields();
+        }
+        if (typeof closeExchangeSettlementModal === 'function') {
+            closeExchangeSettlementModal();
+        }
+        refreshTreasurySelectors();
+        refreshPaymentPreview();
+        updateWorkflowState();
+    };
+
+    bookingBranchField?.addEventListener('change', () => {
+        syncWorkspaceBranchContext({ forceCurrency: true });
+        showFeedback('Branch context updated. Currency, receipt branch, and treasury account defaults were refreshed.');
+    });
+
     if (invoiceForm) {
         invoiceForm.addEventListener('submit', (event) => {
             if (autosaveInvoiceUrl === '') {
@@ -5740,6 +7357,10 @@ document.addEventListener('DOMContentLoaded', () => {
             syncServiceTravelerIdFromName();
 
             if (!hasRequiredLossReason({ focus: true, announce: true })) {
+                event.preventDefault();
+                return;
+            }
+            if (!prepareSupplierAdvanceFxUse()) {
                 event.preventDefault();
                 return;
             }
@@ -5889,7 +7510,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (invoiceForm) {
-        const invoiceAutosaveFields = new Set(['booking_date', 'booking_status', 'party_label', 'remarks']);
+        const invoiceAutosaveFields = new Set(['branch_id', 'booking_date', 'booking_status', 'party_label', 'remarks']);
         invoiceForm.addEventListener('change', (event) => {
             if (suppressAutosave || !(event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement || event.target instanceof HTMLTextAreaElement)) {
                 return;
@@ -5930,7 +7551,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const bookingLeadField = station.querySelector('input[name="lead_traveler_name"]');
     const bookingMobileField = station.querySelector('[data-booking-mobile-field]');
     const bookingPassportField = station.querySelector('[data-booking-passport-field]');
-    const bookingBranchField = station.querySelector('select[name="branch_id"]');
     const bookingSelectedTravelerIdField = station.querySelector('[data-booking-selected-customer-id]');
     const customerSummaryClient = station.querySelector('[data-customer-summary-client]');
     const customerSummaryMobile = station.querySelector('[data-customer-summary-mobile]');
@@ -5942,12 +7562,17 @@ document.addEventListener('DOMContentLoaded', () => {
             : '-';
     };
     const updateCustomerSummary = (customer = null) => {
+        const previousBalanceTotals = customer?.previous_balance_totals && typeof customer.previous_balance_totals === 'object'
+            ? customer.previous_balance_totals
+            : {};
         fillValue(customerSummaryClient, customer?.id ? String(customer.id) : '-');
         fillValue(customerSummaryMobile, customer?.mobile || '-');
         fillValue(customerSummaryFamily, customer?.family_id || '-');
         fillValue(customerSummaryColor, formatCustomerColorTag(customer?.color_tag || ''));
         if (paymentPreviousBalanceInput) {
-            paymentPreviousBalanceInput.dataset.paymentPreviousBalanceMap = JSON.stringify(customer?.previous_balance_totals || {});
+            paymentPreviousBalanceInput.dataset.paymentPreviousBalanceMap = JSON.stringify(previousBalanceTotals);
+            paymentPreviousBalanceInput.dataset.paymentOpenBalanceMap = JSON.stringify(previousBalanceTotals);
+            paymentPreviousBalanceInput.dataset.paymentPreviousBalance = '0';
         }
     };
     const hasSelectedCustomer = () => {
@@ -6077,6 +7702,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const updateTotalsFromAutosave = (totals = {}, options = {}) => {
         const {
             syncCommercialEditor = true,
+            preserveLiveInvoicePreview = false,
         } = options;
         const receivable = toNumber(totals.total_receivable || 0);
         const payable = toNumber(totals.total_payable || 0);
@@ -6158,7 +7784,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 bottomTotalFields.profit.value = formatMoney(profit);
             }
         }
-        if (paymentCurrentInvoiceInput) {
+        if (paymentCurrentInvoiceInput && !preserveLiveInvoicePreview) {
             paymentCurrentInvoiceInput.dataset.paymentCurrency = currentInvoiceCurrency;
             paymentCurrentInvoiceInput.dataset.paymentCurrentInvoice = String(receivable);
             paymentCurrentInvoiceInput.value = formatCurrencyAmount(
@@ -6166,21 +7792,21 @@ document.addEventListener('DOMContentLoaded', () => {
                 receivable
             );
         }
-        if (paymentAlreadyReceivedInput) {
+        if (paymentAlreadyReceivedInput && !preserveLiveInvoicePreview) {
             paymentAlreadyReceivedInput.dataset.paymentPersistedReceived = String(totalReceived);
             paymentAlreadyReceivedInput.value = formatCurrencyAmount(
                 currentInvoiceCurrency,
                 totalReceived
             );
         }
-        if (paymentCurrentBalanceInput) {
+        if (paymentCurrentBalanceInput && !preserveLiveInvoicePreview) {
             paymentCurrentBalanceInput.dataset.paymentPersistedInvoiceBalance = String(currentBalance);
         }
-        if (paymentTotalOutstandingInput) {
+        if (paymentTotalOutstandingInput && !preserveLiveInvoicePreview) {
             paymentTotalOutstandingInput.dataset.paymentTotalOutstanding = String(totalOutstanding);
             paymentTotalOutstandingInput.dataset.paymentTotalDueNow = String(totalOutstanding);
         }
-        if (paymentCurrentBalancePkrInput) {
+        if (paymentCurrentBalancePkrInput && !preserveLiveInvoicePreview) {
             paymentCurrentBalancePkrInput.dataset.paymentPkrRate = String(currentBalancePkrRate);
             if (currentInvoiceCurrency !== 'PKR' && currentBalancePkrRate > 0.005) {
                 paymentCurrentBalancePkrInput.value = formatCurrencyAmount('PKR', currentBalancePkrEquivalent);
@@ -6188,9 +7814,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 paymentCurrentBalancePkrInput.value = 'PKR 0.00';
             }
         }
-        if (paymentPreviousBalanceInput && previousBalanceMap) {
-            paymentPreviousBalanceInput.dataset.paymentPreviousBalanceMap = JSON.stringify(previousBalanceMap);
-            paymentPreviousBalanceInput.dataset.paymentOpenBalanceMap = JSON.stringify(fullCustomerOutstandingMap || previousBalanceMap);
+        if (paymentPreviousBalanceInput) {
+            paymentPreviousBalanceInput.dataset.paymentPreviousBalanceMap = JSON.stringify(previousBalanceMap || {});
+            paymentPreviousBalanceInput.dataset.paymentOpenBalanceMap = JSON.stringify(fullCustomerOutstandingMap || previousBalanceMap || {});
         }
 
         if (serviceFields.currency && currentBookingId() <= 0 && Number.parseInt(String(serviceFields.serviceId?.value || '0'), 10) <= 0) {
@@ -6200,7 +7826,14 @@ document.addEventListener('DOMContentLoaded', () => {
         syncDefaultPaymentCurrency(currentInvoiceCurrency);
 
         syncPaymentCurrencyLabels(paymentCurrencySelect?.value || currentInvoiceCurrency);
-        syncCurrentBalancePkrEquivalent(currentBalance, currentInvoiceCurrency);
+        if (!preserveLiveInvoicePreview) {
+            syncCurrentBalancePkrEquivalent(currentBalance, currentInvoiceCurrency);
+        }
+
+        if (preserveLiveInvoicePreview) {
+            refreshPaymentPreview();
+            return;
+        }
 
         if (receivable <= 0.005 && currentBalance <= 0.005) {
             setPaymentState('Draft', '');
@@ -6223,6 +7856,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const persistInvoiceAutosave = (options = {}) => {
         if (!(invoiceForm instanceof HTMLFormElement) || autosaveInvoiceUrl === '') {
+            return Promise.resolve(null);
+        }
+
+        if (browserIsOffline()) {
+            setAutosaveStatus('dirty', 'Offline draft pending');
             return Promise.resolve(null);
         }
 
@@ -6287,6 +7925,11 @@ document.addEventListener('DOMContentLoaded', () => {
             return Promise.resolve(null);
         }
 
+        if (browserIsOffline()) {
+            setAutosaveStatus('dirty', 'Offline draft pending');
+            return Promise.resolve(null);
+        }
+
         if (!serviceAutosaveReady()) {
             return Promise.resolve(null);
         }
@@ -6304,6 +7947,7 @@ document.addEventListener('DOMContentLoaded', () => {
         serviceAutosavePromise = (async () => {
             syncAutoBookingFields();
             syncServiceTravelerIdFromName();
+            prepareSupplierAdvanceFxUse();
 
             if (currentBookingId() <= 0) {
                 const invoicePayload = await persistInvoiceAutosave({ force: true });
@@ -6319,9 +7963,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
             setAutosaveStatus('saving', 'Saving...');
             const payload = await postAutosave(autosaveServiceUrl, serviceForm);
+            const currentPayloadKey = serializeForm(serviceForm);
+            const responseIsStale = currentPayloadKey !== payloadKey;
             lastInvoiceAutosaveKey = serializeForm(invoiceForm);
             lastServiceAutosaveKey = serializeForm(serviceForm);
-            applySavedServiceUiState(payload);
+            applySavedServiceUiState(payload, {
+                preserveLiveEditorState: responseIsStale,
+            });
+            if (responseIsStale) {
+                refreshProfit('autosave-stale-response');
+            }
             setAutosaveStatus('saved', 'Saved');
             return payload;
         })().catch((error) => {
@@ -6345,6 +7996,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const scheduleInvoiceAutosave = () => {
         window.clearTimeout(invoiceAutosaveTimerId);
         setAutosaveStatus('dirty', 'Unsaved changes');
+        if (browserIsOffline()) {
+            setAutosaveStatus('dirty', 'Offline draft pending');
+            return;
+        }
         invoiceAutosaveTimerId = window.setTimeout(() => {
             void persistInvoiceAutosave();
         }, 700);
@@ -6353,6 +8008,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const scheduleServiceAutosave = () => {
         window.clearTimeout(serviceAutosaveTimerId);
         setAutosaveStatus('dirty', 'Unsaved changes');
+        if (browserIsOffline()) {
+            setAutosaveStatus('dirty', 'Offline draft pending');
+            return;
+        }
         serviceAutosaveTimerId = window.setTimeout(() => {
             void persistServiceAutosave();
         }, 1000);
@@ -6470,6 +8129,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (newCustomerSubmit) {
             newCustomerSubmit.textContent = 'Save Customer';
         }
+        syncNewCustomerSaveMode();
     };
 
     const customerLabel = (customer) => {
@@ -6491,18 +8151,68 @@ document.addEventListener('DOMContentLoaded', () => {
         ].join(' ').toLowerCase();
     };
 
+    const searchableCustomerDirectory = () => {
+        if (browserIsOffline()) {
+            return customerDirectory.slice();
+        }
+
+        return customerDirectory.filter((customer) => !isSnapshotRecord(customer));
+    };
+
+    const resetCustomerFinancialState = () => {
+        replaceSettlementData([], {});
+        replacePaymentHistoryData([], []);
+        renderPaymentHistoryModal();
+
+        if (paymentPreviousBalanceInput) {
+            paymentPreviousBalanceInput.dataset.paymentPreviousBalanceMap = '{}';
+            paymentPreviousBalanceInput.dataset.paymentOpenBalanceMap = '{}';
+            paymentPreviousBalanceInput.dataset.paymentPreviousBalance = '0';
+        }
+        if (paymentCurrentInvoiceInput) {
+            const currency = String(paymentCurrentInvoiceInput.dataset.paymentCurrency || 'PKR');
+            paymentCurrentInvoiceInput.dataset.paymentCurrentInvoice = '0';
+            paymentCurrentInvoiceInput.value = formatCurrencyAmount(currency, 0);
+        }
+        if (paymentAlreadyReceivedInput) {
+            const currency = String(paymentCurrentInvoiceInput?.dataset.paymentCurrency || 'PKR');
+            paymentAlreadyReceivedInput.dataset.paymentPersistedReceived = '0';
+            paymentAlreadyReceivedInput.value = formatCurrencyAmount(currency, 0);
+        }
+        if (paymentCurrentBalanceInput) {
+            paymentCurrentBalanceInput.dataset.paymentPersistedInvoiceBalance = '0';
+            paymentCurrentBalanceInput.value = formatCurrencyAmount(
+                String(paymentCurrentInvoiceInput?.dataset.paymentCurrency || 'PKR'),
+                0
+            );
+        }
+        if (paymentTotalOutstandingInput) {
+            paymentTotalOutstandingInput.dataset.paymentTotalOutstanding = '0';
+            paymentTotalOutstandingInput.dataset.paymentTotalDueNow = '0';
+            paymentTotalOutstandingInput.value = formatCurrencyAmount(
+                String(paymentCurrencySelect?.value || paymentCurrentInvoiceInput?.dataset.paymentCurrency || 'PKR'),
+                0
+            );
+        }
+    };
+
     const applyCustomerToForms = (customer) => {
         if (!customer) {
             return;
         }
 
         suppressCustomerAutocompleteInput = true;
+        resetCustomerFinancialState();
         station.dataset.hasSelectedCustomer = '1';
         fillValue(bookingSelectedTravelerIdField, customer.id || '');
         fillValue(resolveBookingLeadField(), customer.full_name || '');
         fillValue(bookingMobileField, customer.mobile || '');
         fillValue(bookingPassportField, customer.passport_number || '');
         updateCustomerSummary(customer);
+        if (bookingBranchField && customer.branch_id) {
+            bookingBranchField.value = String(customer.branch_id);
+            syncWorkspaceBranchContext({ forceCurrency: true });
+        }
         fillValue(travelerFields.travelerId, customer.id || '');
         fillValue(travelerFields.travelerNo, customer.id ? `TRV-${String(customer.id).padStart(3, '0')}` : 'TRV-DRAFT');
         fillValue(travelerFields.type, 'Lead');
@@ -6521,6 +8231,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (bookingBranchField && customer.branch_id) {
             bookingBranchField.value = String(customer.branch_id);
+            syncWorkspaceBranchContext({ forceCurrency: true });
         }
 
         if (activeTravelerReference) {
@@ -6599,6 +8310,43 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
+    window.workspaceLoadCustomerIntoFreshInvoice = startFreshWorkspaceForCustomer;
+
+    const workspaceNeedsFreshInvoiceBeforeCustomerAction = () => {
+        const bookingId = currentBookingId();
+        const selectedCustomerId = Number.parseInt(String(bookingSelectedTravelerIdField?.value || '0'), 10) || 0;
+        const leadName = String(resolveBookingLeadField()?.value || '').trim();
+        const mobile = String(bookingMobileField?.value || '').trim();
+        const passport = String(bookingPassportField?.value || '').trim();
+
+        return bookingId > 0
+            || selectedCustomerId > 0
+            || leadName !== ''
+            || mobile !== ''
+            || passport !== ''
+            || station.dataset.hasSelectedCustomer === '1';
+    };
+
+    const startFreshWorkspaceForCustomerAction = (actionName) => {
+        const action = actionName === 'new-customer' ? 'new-customer' : 'find-customer';
+        if (!workspaceNeedsFreshInvoiceBeforeCustomerAction()) {
+            return false;
+        }
+
+        const newBookingUrl = station.dataset.newBookingUrl || '/workspace?new=1';
+        try {
+            const normalizedUrl = new URL(newBookingUrl, window.location.origin);
+            normalizedUrl.searchParams.delete('focus');
+            window.sessionStorage.setItem(pendingFreshWorkspaceActionKey, action);
+            window.location.href = `${normalizedUrl.pathname}${normalizedUrl.search}`;
+            return true;
+        } catch (error) {
+            return false;
+        }
+    };
+
+    window.workspaceStartFreshInvoiceForCustomerAction = startFreshWorkspaceForCustomerAction;
+
     const restorePendingFreshWorkspaceCustomer = () => {
         let raw = '';
         try {
@@ -6626,6 +8374,25 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
+    const restorePendingFreshWorkspaceAction = () => {
+        let action = '';
+        try {
+            action = window.sessionStorage.getItem(pendingFreshWorkspaceActionKey) || '';
+            window.sessionStorage.removeItem(pendingFreshWorkspaceActionKey);
+        } catch (error) {
+            return;
+        }
+
+        if (action === 'new-customer') {
+            openNewCustomerModal();
+            return;
+        }
+
+        if (action === 'find-customer') {
+            openCustomerPicker();
+        }
+    };
+
     const renderInlineCustomerLabel = (customer) => {
         const idLabel = customer.id ? `#${customer.id}` : '-';
         const phoneLabel = customer.mobile || '-';
@@ -6635,7 +8402,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const colorLabel = customer.color_tag ? String(customer.color_tag).replace(/_/g, ' ').replace(/\b\w/g, (m) => m.toUpperCase()) : '-';
 
         return `
-            <span class="customer-inline-picker__cell customer-inline-picker__cell--name">${customer.full_name || ''}</span>
+            <span class="customer-inline-picker__cell customer-inline-picker__cell--name">${customer.full_name || ''} ${renderSnapshotBadge(customer)}</span>
             <span class="customer-inline-picker__cell customer-inline-picker__cell--id">${familyLabel}</span>
             <span class="customer-inline-picker__cell customer-inline-picker__cell--passport">${passportLabel}</span>
             <span class="customer-inline-picker__cell customer-inline-picker__cell--phone">${phoneLabel}</span>
@@ -6719,9 +8486,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const filterAutocompleteCustomers = () => {
         const query = (customerAutocompleteInput?.value || '').trim().toLowerCase();
+        const availableCustomers = searchableCustomerDirectory();
         filteredAutocompleteCustomers = query === ''
-            ? customerDirectory.slice(0, 12)
-            : customerDirectory.filter((customer) => customerLabel(customer).includes(query)).slice(0, 12);
+            ? availableCustomers.slice(0, 12)
+            : availableCustomers.filter((customer) => customerLabel(customer).includes(query)).slice(0, 12);
         customerAutocompleteSelectionIndex = 0;
         renderCustomerAutocomplete();
     };
@@ -6753,23 +8521,40 @@ document.addEventListener('DOMContentLoaded', () => {
             row.tabIndex = 0;
             row.dataset.customerPickerRow = 'true';
             row.classList.toggle('is-active', index === customerPickerSelectionIndex);
+            const customerEditDisabled = browserIsOffline() ? ' disabled title="Reconnect to edit this customer."' : '';
             row.innerHTML = `
-                <td>${customer.full_name || ''}</td>
+                <td>${customer.full_name || ''} ${renderSnapshotBadge(customer)}</td>
                 <td>${customer.family_id || ''}</td>
                 <td>${customer.passport_number || ''}</td>
                 <td>${customer.mobile || ''}</td>
                 <td>${customer.village || customer.district || customer.current_residence || customer.address || ''}</td>
                 <td>${customer.color_tag ? String(customer.color_tag).replace(/_/g, ' ').replace(/\b\w/g, (m) => m.toUpperCase()) : ''}</td>
-                <td><button class="btn btn-sm" type="button" data-customer-edit="${customer.id || ''}">Edit</button></td>
+                <td><button class="btn btn-sm" type="button" data-customer-edit="${customer.id || ''}"${customerEditDisabled}>Edit</button></td>
             `;
-            row.addEventListener('click', () => startFreshWorkspaceForCustomer(customer));
-            row.addEventListener('dblclick', () => startFreshWorkspaceForCustomer(customer));
+            row.addEventListener('click', () => {
+                if (browserIsOffline()) {
+                    showFeedback('Offline mode allows customer search only. Reconnect before loading a customer into a booking.');
+                    return;
+                }
+                startFreshWorkspaceForCustomer(customer);
+            });
+            row.addEventListener('dblclick', () => {
+                if (browserIsOffline()) {
+                    showFeedback('Offline mode allows customer search only. Reconnect before loading a customer into a booking.');
+                    return;
+                }
+                startFreshWorkspaceForCustomer(customer);
+            });
             customerPickerResults.appendChild(row);
 
             const editButton = row.querySelector('[data-customer-edit]');
             if (editButton) {
                 editButton.addEventListener('click', (event) => {
                     event.stopPropagation();
+                    if (browserIsOffline()) {
+                        showFeedback('Reconnect before editing an existing customer.');
+                        return;
+                    }
                     openNewCustomerModal(customer);
                 });
             }
@@ -6778,9 +8563,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const filterCustomers = () => {
         const query = (customerPickerInput?.value || '').trim().toLowerCase();
+        const availableCustomers = searchableCustomerDirectory();
         filteredCustomers = query === ''
-            ? customerDirectory.slice()
-            : customerDirectory.filter((customer) => customerLabel(customer).includes(query));
+            ? availableCustomers.slice()
+            : availableCustomers.filter((customer) => customerLabel(customer).includes(query));
         customerPickerSelectionIndex = 0;
         renderCustomerPicker();
     };
@@ -6868,6 +8654,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         newCustomerModal.hidden = false;
         newCustomerModal.setAttribute('aria-hidden', 'false');
+        void refreshWorkspaceConnectivity();
+        syncNewCustomerSaveMode();
         window.setTimeout(() => focusTarget('[data-new-customer-focus]'), 60);
     }
 
@@ -6881,12 +8669,41 @@ document.addEventListener('DOMContentLoaded', () => {
         resetNewCustomerForm();
     }
 
+    const consumeRequestedCustomerEdit = () => {
+        if (requestedCustomerEditId <= 0) {
+            return;
+        }
+
+        const customer = customerDirectory.find((entry) => Number.parseInt(String(entry?.id || '0'), 10) === requestedCustomerEditId);
+        if (!customer) {
+            return;
+        }
+
+        openNewCustomerModal(customer);
+
+        try {
+            const cleanedUrl = new URL(window.location.href);
+            cleanedUrl.searchParams.delete('customer_edit');
+            cleanedUrl.searchParams.delete('customer_id');
+            cleanedUrl.searchParams.delete('traveler_id');
+            window.history.replaceState({}, '', `${cleanedUrl.pathname}${cleanedUrl.search}${cleanedUrl.hash}`);
+        } catch (error) {
+            // Ignore URL cleanup errors.
+        }
+    };
+
     newCustomerForm?.addEventListener('submit', async (event) => {
         if (!(newCustomerForm instanceof HTMLFormElement)) {
             return;
         }
 
         event.preventDefault();
+        if (browserIsOffline()) {
+            syncNewCustomerSaveMode();
+            showFeedback('You are offline. Use Save Customer Offline to queue this customer.');
+            return;
+        }
+
         if (newCustomerSubmit) {
             newCustomerSubmit.disabled = true;
         }
@@ -6913,14 +8730,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 } else {
                     customerDirectory.push(customer);
                 }
-                filteredCustomers = customerDirectory.slice();
-                filteredAutocompleteCustomers = customerDirectory.slice(0, 12);
+                filteredCustomers = searchableCustomerDirectory();
+                filteredAutocompleteCustomers = searchableCustomerDirectory().slice(0, 12);
                 startFreshWorkspaceForCustomer(customer);
             }
 
             closeNewCustomerModal();
             showFeedback(payload.message || 'Customer saved.');
         } catch (error) {
+            setWorkspaceConnectivityState('offline');
             showFeedback(error.message || 'Customer could not be saved.');
         } finally {
             if (newCustomerSubmit) {
@@ -6928,6 +8746,218 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
     });
+
+    const collectOfflineTravelerDraftPayload = () => {
+        if (!(newCustomerForm instanceof HTMLFormElement)) {
+            throw new Error('Customer form is unavailable.');
+        }
+
+        if (Number.parseInt(formValue(newCustomerForm, 'traveler_id') || '0', 10) > 0) {
+            throw new Error('Offline v1 supports new customer drafts only. Open a fresh customer form to save offline.');
+        }
+
+        const payload = {
+            traveler_branch_id: formValue(newCustomerForm, 'traveler_branch_id'),
+            first_name: formValue(newCustomerForm, 'first_name'),
+            last_name: formValue(newCustomerForm, 'last_name'),
+            family_id: formValue(newCustomerForm, 'family_id'),
+            gender: formValue(newCustomerForm, 'gender') || 'unspecified',
+            date_of_birth: formValue(newCustomerForm, 'date_of_birth'),
+            passport_number: formValue(newCustomerForm, 'passport_number'),
+            passport_expiry: formValue(newCustomerForm, 'passport_expiry'),
+            mobile: formValue(newCustomerForm, 'mobile'),
+            occupation: formValue(newCustomerForm, 'occupation'),
+            current_residence: formValue(newCustomerForm, 'current_residence'),
+            permanent_residence: formValue(newCustomerForm, 'permanent_residence'),
+            village: formValue(newCustomerForm, 'village'),
+            district: formValue(newCustomerForm, 'district'),
+            color_tag: formValue(newCustomerForm, 'color_tag') || 'none',
+            nationality: formValue(newCustomerForm, 'nationality'),
+            address: formValue(newCustomerForm, 'address'),
+            notes: formValue(newCustomerForm, 'notes'),
+        };
+
+        if (payload.traveler_branch_id === '' || payload.first_name === '') {
+            throw new Error('Branch and first name are required before saving an offline customer draft.');
+        }
+
+        return payload;
+    };
+
+    const saveTravelerDraftOffline = () => {
+        const payload = collectOfflineTravelerDraftPayload();
+        const label = [payload.first_name, payload.last_name].filter(Boolean).join(' ');
+        queueOfflineDraft('traveler.create', payload, label || 'Customer draft');
+        showFeedback('Customer draft saved into the offline queue.');
+    };
+
+    const fetchOfflineSnapshot = async () => {
+        if (offlineSnapshotUrl === '') {
+            throw new Error('Offline snapshot route is unavailable.');
+        }
+
+        const response = await fetch(offlineSnapshotUrl, {
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest',
+                Accept: 'application/json',
+            },
+        });
+        const payload = await response.json().catch(() => ({}));
+
+        if (!response.ok || payload.ok === false) {
+            throw new Error(payload.message || 'Offline snapshot could not be downloaded.');
+        }
+
+        if (payload.csrf_token) {
+            setOfflineToken(payload.csrf_token);
+        }
+
+        offlineSnapshotCache = payload.snapshot || null;
+        offlineMeta.last_snapshot_at = payload.snapshot?.generated_at || new Date().toISOString();
+        integrateOfflineSnapshot(offlineSnapshotCache);
+        persistOfflineState();
+        renderOfflineStatus();
+
+        const fileStamp = String((payload.snapshot?.generated_at || new Date().toISOString())).replace(/[:.]/g, '-');
+        downloadJsonFile(`travel-ops-offline-snapshot-${fileStamp}.json`, payload);
+        showFeedback('Offline snapshot downloaded and cached on this device.');
+    };
+
+    const syncOfflineQueue = async () => {
+        if (offlineSyncUrl === '') {
+            throw new Error('Offline sync route is unavailable.');
+        }
+
+        if (!Array.isArray(offlineQueue) || offlineQueue.length === 0) {
+            showFeedback('Offline queue is already empty.');
+            return;
+        }
+
+        const token = getCsrfToken();
+        if (token === '') {
+            throw new Error('CSRF token is missing for offline sync.');
+        }
+
+        const response = await fetch(offlineSyncUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+                Accept: 'application/json',
+            },
+            body: JSON.stringify({
+                _token: token,
+                source_device: offlineSourceDevice(),
+                drafts: offlineQueue.map((draft) => ({
+                    client_draft_id: draft.client_draft_id,
+                    type: draft.type,
+                    payload: draft.payload,
+                })),
+            }),
+        });
+        const payload = await response.json().catch(() => ({}));
+
+        if (!response.ok || payload.ok === false) {
+            throw new Error(payload.message || 'Offline drafts could not be synced.');
+        }
+
+        const results = Array.isArray(payload.results) ? payload.results : [];
+        const processedDraftIds = new Set(results.map((row) => String(row?.client_draft_id || '')).filter(Boolean));
+        const syncedCount = results.filter((row) => String(row?.status || '') === 'synced').length;
+        const rejectedCount = results.filter((row) => String(row?.status || '') === 'rejected').length;
+
+        offlineQueue = offlineQueue.filter((draft) => !processedDraftIds.has(String(draft.client_draft_id || '')));
+        offlineMeta.last_sync_at = new Date().toISOString();
+        persistOfflineState();
+        renderOfflineStatus();
+
+        const messageParts = [];
+        if (syncedCount > 0) {
+            messageParts.push(`${syncedCount} draft${syncedCount === 1 ? '' : 's'} synced`);
+        }
+        if (rejectedCount > 0) {
+            messageParts.push(`${rejectedCount} draft${rejectedCount === 1 ? '' : 's'} rejected`);
+        }
+        if (messageParts.length === 0) {
+            messageParts.push('Offline sync completed');
+        }
+
+        showFeedback(messageParts.join(' • ') + '.');
+    };
+
+    offlineSnapshotButton?.addEventListener('click', async () => {
+        offlineSnapshotButton.disabled = true;
+        try {
+            await fetchOfflineSnapshot();
+        } catch (error) {
+            showFeedback(error.message || 'Offline snapshot could not be downloaded.');
+        } finally {
+            offlineSnapshotButton.disabled = false;
+        }
+    });
+
+    offlineSaveCustomerButtons.forEach((button) => button.addEventListener('click', () => {
+        try {
+            saveTravelerDraftOffline();
+        } catch (error) {
+            showFeedback(error.message || 'Offline customer draft could not be saved.');
+        }
+    }));
+
+    offlineStatus?.addEventListener('click', () => {
+        toggleOfflineQueuePreview();
+    });
+
+    offlineSyncButton?.addEventListener('click', async () => {
+        offlineSyncButton.disabled = true;
+        try {
+            await syncOfflineQueue();
+        } catch (error) {
+            showFeedback(error.message || 'Offline drafts could not be synced.');
+        } finally {
+            offlineSyncButton.disabled = false;
+        }
+    });
+
+    window.addEventListener('online', () => {
+        showFeedback('Connection restored. Sync the offline queue when you are ready.');
+        void refreshWorkspaceConnectivity();
+        syncNewCustomerSaveMode();
+        syncOfflineEditLockMode();
+        renderOfflineStatus();
+    });
+
+    window.addEventListener('offline', () => {
+        showFeedback('Connection lost. New customers can be saved offline.');
+        setWorkspaceConnectivityState('offline');
+        syncNewCustomerSaveMode();
+        syncOfflineEditLockMode();
+    });
+
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+            void refreshWorkspaceConnectivity();
+        }
+    });
+
+    window.addEventListener('focus', () => {
+        void refreshWorkspaceConnectivity();
+    });
+
+    window.setInterval(() => {
+        if (document.visibilityState === 'visible') {
+            void refreshWorkspaceConnectivity();
+        }
+    }, 8000);
+
+    if (offlineSnapshotCache) {
+        integrateOfflineSnapshot(offlineSnapshotCache);
+    }
+
+    void refreshWorkspaceConnectivity();
+    syncNewCustomerSaveMode();
+    syncOfflineEditLockMode();
+    renderOfflineStatus();
 
     function openPaymentHistoryModal() {
         if (!paymentHistoryModal) {
@@ -6972,13 +9002,10 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        if (normalizeCustomerDuesQuery(supplierHistoryFinderState.query) === '') {
-            supplierHistoryResultsBody.innerHTML = '<tr><td colspan="11" class="empty-cell">Search a supplier or booking to load supplier payment history.</td></tr>';
-            return;
-        }
-
         if (!Array.isArray(supplierHistoryFinderState.results) || supplierHistoryFinderState.results.length === 0) {
-            supplierHistoryResultsBody.innerHTML = '<tr><td colspan="11" class="empty-cell">No supplier payment history matched this search.</td></tr>';
+            supplierHistoryResultsBody.innerHTML = normalizeCustomerDuesQuery(supplierHistoryFinderState.query) === ''
+                ? '<tr><td colspan="11" class="empty-cell">No recent supplier payment history is available.</td></tr>'
+                : '<tr><td colspan="11" class="empty-cell">No supplier payment history matched this search.</td></tr>';
             return;
         }
 
@@ -7007,22 +9034,13 @@ document.addEventListener('DOMContentLoaded', () => {
         supplierHistoryFinderState.requestToken = requestToken;
         supplierHistoryFinderState.query = String(query || '');
 
-        if (normalizeCustomerDuesQuery(supplierHistoryFinderState.query) === '') {
-            supplierHistoryFinderState = {
-                ...supplierHistoryFinderState,
-                results: [],
-                requestToken,
-            };
-            renderSupplierHistoryFinder();
-            setSupplierHistoryFeedback('Search a supplier name, supplier code, or booking reference to reopen supplier payment history.');
-            return;
-        }
-
         setSupplierHistoryFeedback('Loading supplier payment history…');
 
         try {
             const url = new URL(supplierHistoryFinderUrl, window.location.origin);
-            url.searchParams.set('q', supplierHistoryFinderState.query.trim());
+            if (normalizeCustomerDuesQuery(supplierHistoryFinderState.query) !== '') {
+                url.searchParams.set('q', supplierHistoryFinderState.query.trim());
+            }
 
             const response = await fetch(url.toString(), {
                 headers: {
@@ -7282,6 +9300,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (simplePostpaidCurrencyInput) {
             simplePostpaidCurrencyInput.value = selectedCurrencies.length === 1 ? selectedCurrencies[0] : '';
         }
+        syncSupplierTreasurySelectors();
 
         if (simplePostpaidTotal) {
             simplePostpaidTotal.textContent = selectedCurrencies.length === 1
@@ -7303,6 +9322,11 @@ document.addEventListener('DOMContentLoaded', () => {
         if (simplePostpaidFeedback) {
             simplePostpaidFeedback.textContent = feedbackMessage;
         }
+
+        if (simplePostpaidSelectAll instanceof HTMLInputElement) {
+            simplePostpaidSelectAll.checked = availableRows > 0 && selectedRows.length === availableRows;
+            simplePostpaidSelectAll.indeterminate = selectedRows.length > 0 && selectedRows.length < availableRows;
+        }
     }
 
     function openGlobalPrepaidSupplierModal(options = {}) {
@@ -7311,7 +9335,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (globalPrepaidSupplierField && options.supplierName) {
-            globalPrepaidSupplierField.value = String(options.supplierName);
+            const supplierName = String(options.supplierName);
+            addSupplierToSelect(globalPrepaidSupplierField, supplierName);
+            globalPrepaidSupplierField.value = supplierName;
         }
         if (globalPrepaidBranchField && options.branchId) {
             globalPrepaidBranchField.value = String(options.branchId);
@@ -7325,7 +9351,7 @@ document.addEventListener('DOMContentLoaded', () => {
         globalPrepaidSupplierModal.dataset.returnToTicketType = options.returnToTicketType ? '1' : '0';
         globalPrepaidSupplierModal.hidden = false;
         globalPrepaidSupplierModal.setAttribute('aria-hidden', 'false');
-        showFeedback('Global prepaid supplier payment opened. Record supplier advance before purchase.');
+        showFeedback('Prepaid supplier payment opened.');
         window.setTimeout(() => {
             if (globalPrepaidAmountField) {
                 globalPrepaidAmountField.focus();
@@ -7350,13 +9376,18 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    async function openExchangeSettlementModal() {
+    async function openExchangeSettlementModal(options = {}) {
         if (!paymentExchangeModal || !paymentExchangeTargetSelect) {
             return;
         }
 
-        await ensureExchangeSettlementTargetsReady();
-        const target = currentInvoiceExchangeTarget();
+        const { allowManualRatePreview = false } = options;
+        if (!allowManualRatePreview) {
+            await ensureExchangeSettlementTargetsReady();
+        }
+        const target = currentInvoiceExchangeTarget() || buildManualExchangeSettlementTarget({
+            allowZeroBalance: allowManualRatePreview,
+        });
         if (!target) {
             const message = currentInvoiceNeedsSettlementTarget()
                 ? 'Save the current invoice first so it becomes available for exchange settlement.'
@@ -7365,6 +9396,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
+        paymentExchangeManualTarget = target.isManualPreviewOnly ? target : null;
         paymentExchangeTargetSelect.innerHTML = '';
         const option = document.createElement('option');
         option.value = String(target.id || 0);
@@ -7400,6 +9432,7 @@ document.addEventListener('DOMContentLoaded', () => {
         paymentExchangeModal.style.display = 'none';
         paymentExchangeModal.hidden = true;
         paymentExchangeModal.setAttribute('aria-hidden', 'true');
+        paymentExchangeManualTarget = null;
         paymentExchangeConfirmFocusDone = false;
         if (clear) {
             clearExchangeSettlementFields();
@@ -7460,6 +9493,15 @@ document.addEventListener('DOMContentLoaded', () => {
         button.addEventListener('click', closeSupplierSettlementModal);
     });
 
+    if (simplePostpaidSelectAll instanceof HTMLInputElement) {
+        simplePostpaidSelectAll.addEventListener('change', () => {
+            simplePostpaidSelectors.forEach((input) => {
+                input.checked = simplePostpaidSelectAll.checked;
+            });
+            updateSimplePostpaidSupplierForm();
+        });
+    }
+
     simplePostpaidSelectors.forEach((input) => {
         input.addEventListener('change', updateSimplePostpaidSupplierForm);
     });
@@ -7492,10 +9534,34 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (simplePostpaidFeedback) {
                     simplePostpaidFeedback.textContent = feedbackMessage;
                 }
+                return;
+            }
+
+            if (!ensureSupplierTreasuryReady(simplePostpaidForm)) {
+                event.preventDefault();
             }
         });
         updateSimplePostpaidSupplierForm();
     }
+
+    supplierTreasurySelects.forEach((select) => {
+        const form = select.form;
+        const methodField = form?.elements?.namedItem('supplier_payment_method');
+        const currencyField = form?.elements?.namedItem('supplier_payment_currency');
+        if (methodField instanceof HTMLSelectElement || methodField instanceof HTMLInputElement) {
+            methodField.addEventListener('change', syncSupplierTreasurySelectors);
+        }
+        if (currencyField instanceof HTMLSelectElement || currencyField instanceof HTMLInputElement) {
+            currencyField.addEventListener('change', syncSupplierTreasurySelectors);
+            currencyField.addEventListener('input', syncSupplierTreasurySelectors);
+        }
+        form?.addEventListener('submit', (event) => {
+            if (!ensureSupplierTreasuryReady(form)) {
+                event.preventDefault();
+            }
+        });
+    });
+    syncSupplierTreasurySelectors();
 
     globalPrepaidSupplierOpenButtons.forEach((button) => {
         button.addEventListener('click', openGlobalPrepaidSupplierModal);
@@ -7528,6 +9594,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const supplierName = String(globalPrepaidSupplierField?.value || '').trim();
         const advanceAmount = Math.max(toNumber(globalPrepaidAmountField?.value || 0), 0);
+
+        if (supplierName === addSupplierOptionValue) {
+            openSupplierAddModal('', 'global-prepaid');
+            return;
+        }
 
         if (supplierName === '') {
             showGlobalPrepaidSupplierFeedback('Enter supplier name.');
@@ -7717,6 +9788,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (bookingSelectedTravelerIdField) {
             bookingSelectedTravelerIdField.value = '';
         }
+        replaceSettlementData([], {});
+        replacePaymentHistoryData([], []);
+        renderPaymentHistoryModal();
         updateCustomerSummary(null);
         if (paymentPreviousBalanceInput) {
             paymentPreviousBalanceInput.dataset.paymentPreviousBalanceMap = '{}';
@@ -7980,8 +10054,23 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    const requestedServiceId = (() => {
+        try {
+            return Number.parseInt(new URLSearchParams(window.location.search).get('service_id') || '0', 10) || 0;
+        } catch (error) {
+            return 0;
+        }
+    })();
+
     if (serviceLines.length > 0) {
-        loadServiceLine(0);
+        const requestedServiceIndex = requestedServiceId > 0
+            ? serviceLines.findIndex((serviceLine) => Number.parseInt(String(serviceLine.serviceId || 0), 10) === requestedServiceId)
+            : -1;
+        const initialServiceIndex = requestedServiceIndex >= 0 ? requestedServiceIndex : 0;
+        serviceRows.forEach((item, rowIndex) => {
+            item.classList.toggle('is-active', rowIndex === initialServiceIndex);
+        });
+        loadServiceLine(initialServiceIndex);
     } else {
         updateCommercialTrace({
             lastEventFired: 'boot-no-service-lines',
@@ -7998,6 +10087,17 @@ document.addEventListener('DOMContentLoaded', () => {
     setAutosaveStatus('idle', currentBookingId() > 0 ? 'Saved' : 'Draft');
 
     updateWorkflowState();
+    reapplyActiveServiceActionState();
+    window.requestAnimationFrame(() => reapplyActiveServiceActionState());
+    window.setTimeout(() => reapplyActiveServiceActionState(), 150);
+    window.setTimeout(() => reapplyActiveServiceActionState(), 700);
+    window.addEventListener('focus', reapplyActiveServiceActionState);
+    window.addEventListener('resize', reapplyActiveServiceActionState);
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+            reapplyActiveServiceActionState();
+        }
+    });
 
     const requestedPanelId = window.location.hash.replace('#', '');
     const requestedPanel = requestedPanelId !== '' ? station.querySelector(`#${requestedPanelId}`) : null;
@@ -8005,6 +10105,262 @@ document.addEventListener('DOMContentLoaded', () => {
         activateDock(requestedPanel.dataset.dockPanel);
     } else {
         activateDock('overview');
+    }
+
+    if (requestedPanelId === 'dock-panel-reminders') {
+        revealWorkspaceSection('dock-panel-reminders', {
+            focusSelector: '[data-reminder-focus="task"]',
+        });
+        const pageToast = document.querySelector('.alert-toast');
+        const toastMessage = pageToast instanceof HTMLElement ? String(pageToast.textContent || '').trim() : '';
+        if (toastMessage !== '') {
+            showFeedback(toastMessage);
+        }
+    }
+
+    if (requestedPanelId === 'dock-panel-documents') {
+        const pageToast = document.querySelector('.alert-toast');
+        const toastMessage = pageToast instanceof HTMLElement ? String(pageToast.textContent || '').trim() : '';
+        if (toastMessage !== '') {
+            showDocumentUploadFeedback(toastMessage);
+            showFeedback(toastMessage);
+        }
+    }
+
+    if (reminderToggleButtons.length > 0) {
+        const reminderSection = station.querySelector('#dock-panel-reminders');
+        const expandedState = reminderSection instanceof HTMLElement && !reminderSection.hidden ? 'true' : 'false';
+        reminderToggleButtons.forEach((button) => {
+            if (button instanceof HTMLButtonElement) {
+                button.setAttribute('aria-expanded', expandedState);
+            }
+        });
+    }
+
+    const receivableAlertsPanel = station.querySelector('[data-receivable-alerts]');
+    if (receivableAlertsPanel instanceof HTMLElement) {
+        const scopeButtons = Array.from(receivableAlertsPanel.querySelectorAll('[data-receivable-alert-scope-toggle]'));
+        const totalCountNode = station.querySelector('[data-receivable-alert-count-total]');
+        const tableBody = receivableAlertsPanel.querySelector('[data-receivable-alert-table] tbody');
+        let activeReceivableAlertScope = ['customer', 'booking'].includes(String(receivableAlertsPanel.dataset.defaultScope || ''))
+            ? String(receivableAlertsPanel.dataset.defaultScope)
+            : 'customer';
+
+        const todayIso = () => {
+            const now = new Date();
+            const month = String(now.getMonth() + 1).padStart(2, '0');
+            const day = String(now.getDate()).padStart(2, '0');
+            return `${now.getFullYear()}-${month}-${day}`;
+        };
+
+        const diffDays = (fromIso, toIso) => {
+            if (!fromIso || !toIso) {
+                return 0;
+            }
+
+            const fromDate = new Date(`${fromIso}T00:00:00`);
+            const toDate = new Date(`${toIso}T00:00:00`);
+            if (Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime())) {
+                return 0;
+            }
+
+            return Math.round((toDate.getTime() - fromDate.getTime()) / 86400000);
+        };
+
+        const currentReceivableBookingReference = () => {
+            const bookingId = currentBookingId();
+            if (bookingId <= 0) {
+                return '';
+            }
+
+            return Array.from(customerOpenReceivables).find((row) => Number.parseInt(String(row?.bookingId || 0), 10) === bookingId)?.bookingReference || '';
+        };
+
+        const normalizeReceivableAlertRows = () => {
+            const bookingId = currentBookingId();
+            const bookingReference = currentReceivableBookingReference();
+
+            return Array.from(customerOpenReceivables)
+                .filter((row) => toNumber(row?.outstandingAmount || 0) > 0.005)
+                .map((row) => {
+                    const rowBookingId = Number.parseInt(String(row?.bookingId || 0), 10) || 0;
+                    const rowBookingReference = String(row?.bookingReference || '').trim();
+                    const isCurrentBooking = Boolean(row?.isCurrentBooking)
+                        || (bookingId > 0 && rowBookingId === bookingId)
+                        || (bookingReference !== '' && rowBookingReference === bookingReference);
+
+                    return {
+                        ...row,
+                        bookingId: rowBookingId,
+                        bookingReference: rowBookingReference,
+                        isCurrentBooking,
+                    };
+                })
+                .sort((left, right) => {
+                    if (left.isCurrentBooking && !right.isCurrentBooking) {
+                        return -1;
+                    }
+                    if (!left.isCurrentBooking && right.isCurrentBooking) {
+                        return 1;
+                    }
+
+                    const leftDue = String(left.nextDueDate || '');
+                    const rightDue = String(right.nextDueDate || '');
+                    if (leftDue !== rightDue) {
+                        return leftDue.localeCompare(rightDue);
+                    }
+
+                    return Number.parseInt(String(left.id || 0), 10) - Number.parseInt(String(right.id || 0), 10);
+                });
+        };
+
+        const categorizeReceivableAlertRow = (row) => {
+            const dueDate = String(row?.nextDueDate || '').trim();
+            if (dueDate === '') {
+                return {
+                    category: 'Missing Due Date',
+                    daysLabel: '',
+                };
+            }
+
+            const today = todayIso();
+            const days = diffDays(today, dueDate);
+            if (days < 0) {
+                return {
+                    category: 'Overdue',
+                    daysLabel: `Overdue ${Math.abs(days)} day${Math.abs(days) === 1 ? '' : 's'}`,
+                };
+            }
+
+            if (days === 0) {
+                return {
+                    category: 'Due Today',
+                    daysLabel: 'Due in 0 days',
+                };
+            }
+
+            return {
+                category: 'Upcoming',
+                daysLabel: `Due in ${days} day${days === 1 ? '' : 's'}`,
+            };
+        };
+
+        const buildReceivableAlertScopes = () => {
+            const rows = normalizeReceivableAlertRows();
+            const customerRows = rows;
+            const bookingRows = rows.filter((row) => row.isCurrentBooking);
+
+            return {
+                customer: customerRows,
+                booking: bookingRows,
+            };
+        };
+
+        const countReceivableAlertRows = (rows = []) => {
+            const counts = {
+                overdue: 0,
+                dueToday: 0,
+                pending: 0,
+                missingDueDate: 0,
+                total: rows.length,
+            };
+
+            rows.forEach((row) => {
+                const category = categorizeReceivableAlertRow(row).category;
+                if (category === 'Overdue') {
+                    counts.overdue += 1;
+                } else if (category === 'Due Today') {
+                    counts.dueToday += 1;
+                } else if (category === 'Missing Due Date') {
+                    counts.missingDueDate += 1;
+                } else {
+                    counts.pending += 1;
+                }
+            });
+
+            return counts;
+        };
+
+        const receivableAlertRowHtml = (row) => {
+            const dueMeta = categorizeReceivableAlertRow(row);
+            const bookingId = Number.parseInt(String(row?.bookingId || 0), 10) || 0;
+            const openUrl = bookingId > 0 ? buildWorkspacePathUrl(`workspace?booking_id=${bookingId}`) : '#';
+            const customerName = String(row?.passengerName || bookingLeadField?.value || '').trim();
+            const branchName = String(row?.branchName || '').trim();
+            const serviceType = String(row?.serviceType || 'Service').trim() || 'Service';
+            const serviceLineReference = String(row?.serviceLineReference || '').trim();
+            const serviceSummary = serviceLineReference !== ''
+                ? `${serviceType} / ${serviceLineReference}`
+                : serviceType;
+            const rowClass = row.isCurrentBooking ? ' class="legacy-reminders-table__row--current-booking"' : '';
+            const currentBookingFlag = row.isCurrentBooking
+                ? '<br><small class="legacy-reminders-table__row-flag">Current Booking</small>'
+                : '';
+            const openAction = bookingId > 0
+                ? `<a class="btn btn-sm" href="${escapeHtml(openUrl)}">Open</a>`
+                : '<span class="muted-text">Draft</span>';
+
+            return `<tr data-receivable-alert-row${rowClass}>
+                <td>${escapeHtml(dueMeta.category)}<br><small>${escapeHtml(dueMeta.daysLabel)}</small></td>
+                <td>${escapeHtml(String(row?.bookingReference || ''))}${currentBookingFlag}</td>
+                <td>${escapeHtml(customerName !== '' ? customerName : '-')}</td>
+                <td>${escapeHtml(branchName !== '' ? branchName : '-')}</td>
+                <td>${escapeHtml(formatCurrencyAmount(String(row?.currency || 'PKR'), toNumber(row?.outstandingAmount || 0)))}</td>
+                <td>${escapeHtml(String(row?.nextDueDate || '-'))}</td>
+                <td>${escapeHtml(serviceSummary)}</td>
+                <td>${openAction}</td>
+            </tr>`;
+        };
+
+        const applyReceivableAlertScope = (scopeKey, options = {}) => {
+            const normalizedScope = scopeKey === 'booking' ? 'booking' : 'customer';
+            activeReceivableAlertScope = normalizedScope;
+            const scopes = buildReceivableAlertScopes();
+            const visibleRows = scopes[normalizedScope] || [];
+            const counts = countReceivableAlertRows(visibleRows);
+
+            if (tableBody instanceof HTMLElement) {
+                tableBody.innerHTML = visibleRows.length > 0
+                    ? visibleRows.map((row) => receivableAlertRowHtml(row)).join('')
+                    : '<tr data-receivable-alert-empty-row><td colspan="8" class="empty-cell">No receivable alerts right now.</td></tr>';
+            }
+
+            scopeButtons.forEach((button) => {
+                if (!(button instanceof HTMLButtonElement)) {
+                    return;
+                }
+
+                const isActive = button.dataset.scope === normalizedScope;
+                button.classList.toggle('is-active', isActive);
+                button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+            });
+
+            if (totalCountNode instanceof HTMLElement) {
+                totalCountNode.textContent = String(counts.total);
+            }
+
+            if (options.updateDefault !== false) {
+                receivableAlertsPanel.dataset.defaultScope = normalizedScope;
+            }
+        };
+
+        renderReceivableAlerts = () => {
+            applyReceivableAlertScope(activeReceivableAlertScope, {
+                updateDefault: false,
+            });
+        };
+
+        scopeButtons.forEach((button) => {
+            if (!(button instanceof HTMLButtonElement)) {
+                return;
+            }
+
+            button.addEventListener('click', () => {
+                applyReceivableAlertScope(String(button.dataset.scope || 'customer'));
+            });
+        });
+
+        renderReceivableAlerts();
     }
 
     if (requestedPanelId === 'dock-panel-suppliers') {
@@ -8051,5 +10407,13 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     restorePendingFreshWorkspaceCustomer();
+    restorePendingFreshWorkspaceAction();
+    consumeRequestedCustomerEdit();
     restoreWorkspaceStateAfterTreasuryReturn();
+    window.addEventListener('focus', handleTreasurySetupReturn);
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+            handleTreasurySetupReturn();
+        }
+    });
 });

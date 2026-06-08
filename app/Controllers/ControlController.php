@@ -9,6 +9,8 @@ use App\Helpers\Authorization;
 use App\Helpers\Csrf;
 use App\Helpers\Flash;
 use App\Repositories\AccountingSetupRepository;
+use App\Repositories\BookingRepository;
+use App\Repositories\BookingServiceRepository;
 use App\Repositories\ExpenseRepository;
 use App\Repositories\MasterDataRepository;
 use App\Services\AccountingFoundationService;
@@ -159,7 +161,10 @@ final class ControlController extends BaseController
                     [
                         ['name' => 'code', 'label' => 'Code', 'type' => 'text', 'maxlength' => 50, 'required' => true],
                         ['name' => 'name', 'label' => 'Name', 'type' => 'text', 'maxlength' => 120, 'required' => true],
-                        ['name' => 'behavior', 'label' => 'Behavior', 'type' => 'text', 'maxlength' => 190, 'required' => true],
+                        ['name' => 'behavior', 'label' => 'Behavior', 'type' => 'select', 'required' => true, 'options' => $this->choiceOptions([
+                            'Creates direct supplier payable' => 'Creates direct supplier payable',
+                            'Consumes supplier advance first' => 'Consumes supplier advance first',
+                        ])],
                         ['name' => 'sort_order', 'label' => 'Sort', 'type' => 'number', 'min' => 0],
                         ['name' => 'is_active', 'label' => 'Status', 'type' => 'select', 'options' => $this->statusOptions()],
                     ]
@@ -179,7 +184,16 @@ final class ControlController extends BaseController
                     [
                         ['name' => 'code', 'label' => 'Code', 'type' => 'text', 'maxlength' => 50, 'required' => true],
                         ['name' => 'name', 'label' => 'Name', 'type' => 'text', 'maxlength' => 120, 'required' => true],
-                        ['name' => 'linked_area', 'label' => 'Linked Area', 'type' => 'text', 'maxlength' => 120, 'required' => true],
+                        ['name' => 'linked_area', 'label' => 'Linked Area', 'type' => 'select', 'required' => true, 'options' => $this->choiceOptions([
+                            'Booking' => 'Booking File',
+                            'Traveler' => 'Traveler',
+                            'Service Line' => 'Service Line',
+                            'Service Line / Print' => 'Service Line / Print',
+                            'Booking / Accounts' => 'Booking / Accounts',
+                            'Customer Receipt' => 'Customer Receipt',
+                            'Supplier Payment' => 'Supplier Payment',
+                            'Supplier Obligation' => 'Supplier Obligation',
+                        ])],
                         ['name' => 'sort_order', 'label' => 'Sort', 'type' => 'number', 'min' => 0],
                         ['name' => 'is_active', 'label' => 'Status', 'type' => 'select', 'options' => $this->statusOptions()],
                     ]
@@ -224,9 +238,12 @@ final class ControlController extends BaseController
 
     public function accountingEngine(): string
     {
+        $accessibleBranchIds = Authorization::accessibleBranchIds();
         $repository = new AccountingSetupRepository($this->app);
         $editRegister = $this->requestedRegister(['control_accounts', 'posting_rules']);
         $editId = (int) ($_GET['id'] ?? 0);
+        $previewSearchTerm = trim((string) ($_GET['preview_q'] ?? ''));
+        $previewBookingId = (int) ($_GET['preview_booking_id'] ?? 0);
 
         $controlAccounts = $this->decorateMasterRows($repository->listControlAccounts());
         $postingRules = array_map(function (array $row): array {
@@ -246,12 +263,28 @@ final class ControlController extends BaseController
             $repository->accountOptions()
         );
 
-        $bookingReference = 'BK-000001';
-        $serviceLines = $this->serviceLinePreview();
+        $bookingRepository = new BookingRepository($this->app);
+        $previewBookingOptions = $bookingRepository->searchBookings($previewSearchTerm, $accessibleBranchIds, 20);
+        $selectedPreviewBooking = null;
+        if ($previewBookingId > 0 && $bookingRepository->bookingExistsInBranches($previewBookingId, $accessibleBranchIds)) {
+            $selectedPreviewBooking = $bookingRepository->findBookingById($previewBookingId);
+        }
+        if ($selectedPreviewBooking === null && $previewBookingOptions !== []) {
+            $fallbackBookingId = (int) ($previewBookingOptions[0]['id'] ?? 0);
+            if ($fallbackBookingId > 0) {
+                $selectedPreviewBooking = $bookingRepository->findBookingById($fallbackBookingId);
+                $previewBookingId = $fallbackBookingId;
+            }
+        }
+
+        $bookingReference = trim((string) ($selectedPreviewBooking['booking_reference'] ?? ''));
+        $serviceLines = $bookingReference !== ''
+            ? (new BookingServiceRepository($this->app))->servicesByBookingReference($bookingReference)
+            : [];
         $supplierFoundation = (new SupplierFoundationService($this->app))->buildWorkspacePreview($bookingReference);
         $customerPaymentFoundation = (new CustomerPaymentFoundationService($this->app))->buildWorkspacePreview($bookingReference);
         $accountingFoundation = (new AccountingFoundationService($this->app))->buildWorkspacePreview(
-            $bookingReference,
+            $bookingReference !== '' ? $bookingReference : null,
             $serviceLines,
             $supplierFoundation,
             $customerPaymentFoundation
@@ -259,7 +292,7 @@ final class ControlController extends BaseController
 
         return $this->view('control/accounting_engine_admin', [
             'title' => 'Accounting Engine',
-            'accessibleBranchIds' => Authorization::accessibleBranchIds(),
+            'accessibleBranchIds' => $accessibleBranchIds,
             'panels' => [
                 $this->masterPanel(
                     'control_accounts',
@@ -323,6 +356,10 @@ final class ControlController extends BaseController
             'accountingFoundation' => $accountingFoundation,
             'supplierFoundation' => $supplierFoundation,
             'customerPaymentFoundation' => $customerPaymentFoundation,
+            'previewSearchTerm' => $previewSearchTerm,
+            'previewBookingId' => $previewBookingId,
+            'previewBookingOptions' => $previewBookingOptions,
+            'selectedPreviewBooking' => $selectedPreviewBooking,
         ]);
     }
 
@@ -635,39 +672,4 @@ final class ControlController extends BaseController
         return $options;
     }
 
-    private function serviceLinePreview(): array
-    {
-        return [
-            [
-                'lineNumber' => 'SV-001',
-                'currency' => 'PKR',
-                'salePrice' => 185000.00,
-                'purchaseCost' => 171500.00,
-                'taxes' => 9200.00,
-                'vat' => 0.00,
-                'commission' => 2500.00,
-                'serviceCharge' => 3000.00,
-            ],
-            [
-                'lineNumber' => 'SV-002',
-                'currency' => 'AED',
-                'salePrice' => 450.00,
-                'purchaseCost' => 360.00,
-                'taxes' => 25.00,
-                'vat' => 18.00,
-                'commission' => 0.00,
-                'serviceCharge' => 47.00,
-            ],
-            [
-                'lineNumber' => 'SV-003',
-                'currency' => 'USD',
-                'salePrice' => 780.00,
-                'purchaseCost' => 690.00,
-                'taxes' => 30.00,
-                'vat' => 0.00,
-                'commission' => 0.00,
-                'serviceCharge' => 60.00,
-            ],
-        ];
-    }
 }

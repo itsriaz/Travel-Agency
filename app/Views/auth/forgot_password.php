@@ -1,7 +1,7 @@
 <section class="panel compact-panel">
     <div class="panel-header">
         <h1>Forgot Password</h1>
-        <div class="panel-meta">Use username or email. Response stays generic for security.</div>
+        <div class="panel-meta">Enter your registered email address</div>
     </div>
 
     <form method="post" action="<?= e(url('/forgot-password')) ?>" class="form-grid compact-form">

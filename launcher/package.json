@@ -7,7 +7,8 @@
   "private": true,
   "scripts": {
     "start": "electron .",
-    "package:win": "electron-builder --win portable"
+    "package:win": "electron-builder --win portable",
+    "package:win:installer": "electron-builder --win nsis"
   },
   "devDependencies": {
     "electron": "^30.0.0",
@@ -17,12 +18,28 @@
     "appId": "com.imdadnobleroute.travelops",
     "productName": "Travel Agency Operations",
     "files": [
-      "**/*"
+      "main.js",
+      "preload.js",
+      "offline.html",
+      "loading.html",
+      "renderer.js",
+      "styles.css",
+      "launcher-config.json",
+      "launcher-config.example.json",
+      "launcher-config.production.example.json",
+      "launcher_gate_private.pem",
+      "package.json"
     ],
     "win": {
       "target": "portable",
       "signAndEditExecutable": false,
       "forceCodeSigning": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "runAfterFinish": true
     }
   }
 }

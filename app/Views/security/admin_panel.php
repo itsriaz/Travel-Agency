@@ -12,6 +12,63 @@ $branchAccessIds = array_map('intval', $targetSummary['branch_access_ids'] ?? []
 </section>
 
 <section class="panel compact-panel">
+    <div class="panel-header">
+        <h2>Create User</h2>
+    </div>
+    <form method="post" action="<?= e(url('/admin/security/users/create')) ?>" class="form-grid compact-form">
+        <?= \App\Helpers\Csrf::input() ?>
+        <label class="field">
+            <span>Name</span>
+            <input type="text" name="name" required>
+        </label>
+        <label class="field">
+            <span>Username</span>
+            <input type="text" name="username" required>
+        </label>
+        <label class="field">
+            <span>Email</span>
+            <input type="email" name="email" required>
+        </label>
+        <label class="field">
+            <span>Temporary Password</span>
+            <input type="text" name="temporary_password" required>
+        </label>
+        <label class="field">
+            <span>Role</span>
+            <select name="role_code" required>
+                <?php foreach ($roles as $role): ?>
+                    <option value="<?= e((string) $role['code']) ?>" <?= (string) $role['code'] === 'super_admin' ? 'selected' : '' ?>>
+                        <?= e((string) $role['name']) ?>
+                    </option>
+                <?php endforeach; ?>
+            </select>
+        </label>
+        <label class="field">
+            <span>Default Branch</span>
+            <select name="default_branch_id" required>
+                <?php foreach ($branches as $branch): ?>
+                    <option value="<?= e((string) $branch['id']) ?>"><?= e((string) $branch['name'] . ' / ' . (string) $branch['code']) ?></option>
+                <?php endforeach; ?>
+            </select>
+        </label>
+        <fieldset class="field span-2">
+            <span>Accessible Branches</span>
+            <div class="checkbox-grid">
+                <?php foreach ($branches as $branch): ?>
+                    <label class="checkbox-row">
+                        <input type="checkbox" name="branch_ids[]" value="<?= e((string) $branch['id']) ?>" checked>
+                        <span><?= e((string) $branch['name'] . ' / ' . (string) $branch['code']) ?></span>
+                    </label>
+                <?php endforeach; ?>
+            </div>
+        </fieldset>
+        <div class="form-actions">
+            <button class="btn btn-primary" type="submit">Create User</button>
+        </div>
+    </form>
+</section>
+
+<section class="panel compact-panel">
     <form method="get" action="<?= e(url('/admin/security')) ?>" class="form-grid admin-select-form">
         <label class="field">
             <span>Select User</span>
@@ -19,7 +76,7 @@ $branchAccessIds = array_map('intval', $targetSummary['branch_access_ids'] ?? []
                 <option value="">Choose user</option>
                 <?php foreach ($users as $user): ?>
                     <option value="<?= e((string) $user['id']) ?>" <?= $selectedUserId === (int) $user['id'] ? 'selected' : '' ?>>
-                        <?= e($user['name'] . ' / ' . $user['username'] . ' / ' . $user['role_code'] . ' / ' . $user['default_branch_name']) ?>
+                        <?= e($user['username'] . ' / ' . $user['role_code'] . ' / ' . $user['default_branch_name'] . ' / ' . (((int) ($user['is_active'] ?? 0) === 1) ? 'Active' : 'Inactive')) ?>
                     </option>
                 <?php endforeach; ?>
             </select>
@@ -31,6 +88,35 @@ $branchAccessIds = array_map('intval', $targetSummary['branch_access_ids'] ?? []
 </section>
 
 <?php if ($targetUser !== null): ?>
+    <section class="panel compact-panel">
+        <div class="panel-header">
+            <h2>Edit User Details</h2>
+        </div>
+        <form method="post" action="<?= e(url('/admin/security/users/update')) ?>" class="form-grid compact-form">
+            <?= \App\Helpers\Csrf::input() ?>
+            <input type="hidden" name="target_user_id" value="<?= e((string) $targetUser['id']) ?>">
+
+            <label class="field">
+                <span>Name</span>
+                <input type="text" name="name" value="<?= e((string) ($targetUser['name'] ?? '')) ?>" required>
+            </label>
+
+            <label class="field">
+                <span>Username</span>
+                <input type="text" name="username" value="<?= e((string) ($targetUser['username'] ?? '')) ?>" required>
+            </label>
+
+            <label class="field">
+                <span>Email</span>
+                <input type="email" name="email" value="<?= e((string) ($targetUser['email'] ?? '')) ?>" required>
+            </label>
+
+            <div class="form-actions">
+                <button class="btn btn-primary" type="submit">Save User Details</button>
+            </div>
+        </form>
+    </section>
+
     <section class="panel compact-panel">
         <div class="panel-header">
             <h2>Role And Branch Access</h2>
@@ -92,7 +178,7 @@ $branchAccessIds = array_map('intval', $targetSummary['branch_access_ids'] ?? []
                     <input type="text" name="temporary_password" required>
                 </label>
                 <div class="form-actions">
-                    <button class="btn btn-primary" type="submit">Force Password Reset</button>
+                    <button class="btn btn-primary" type="submit">Reset Password</button>
                 </div>
             </form>
 
@@ -106,6 +192,15 @@ $branchAccessIds = array_map('intval', $targetSummary['branch_access_ids'] ?? []
                 <?= \App\Helpers\Csrf::input() ?>
                 <input type="hidden" name="target_user_id" value="<?= e((string) $targetUser['id']) ?>">
                 <button class="btn btn-danger" type="submit">Revoke Trusted Devices</button>
+            </form>
+
+            <form method="post" action="<?= e(url('/admin/security/users/status')) ?>" class="compact-inline-form">
+                <?= \App\Helpers\Csrf::input() ?>
+                <input type="hidden" name="target_user_id" value="<?= e((string) $targetUser['id']) ?>">
+                <input type="hidden" name="is_active" value="<?= (int) ($targetUser['is_active'] ?? 0) === 1 ? '0' : '1' ?>">
+                <button class="btn <?= (int) ($targetUser['is_active'] ?? 0) === 1 ? 'btn-danger' : 'btn-primary' ?>" type="submit">
+                    <?= (int) ($targetUser['is_active'] ?? 0) === 1 ? 'Deactivate User' : 'Reactivate User' ?>
+                </button>
             </form>
         </div>
 

@@ -27,6 +27,7 @@ final class ReminderWorkspaceService extends Service
     public function reminderState(
         ?int $bookingId,
         array $accessibleBranchIds,
+        ?int $customerId,
         ?array $bookingRecord,
         array $travelers,
         array $services,
@@ -36,7 +37,7 @@ final class ReminderWorkspaceService extends Service
         ?int $editingReminderId,
         int $actorUserId
     ): array {
-        $receivableAlerts = $this->receivableAlertState($accessibleBranchIds);
+        $receivableAlerts = $this->receivableAlertState($accessibleBranchIds, $bookingId, $customerId, $bookingRecord);
 
         if ($bookingId === null || $bookingId <= 0 || $bookingRecord === null) {
             return [
@@ -220,12 +221,17 @@ final class ReminderWorkspaceService extends Service
             $travelerId = (int) ($traveler['id'] ?? 0);
             $passportExpiry = trim((string) ($traveler['passport_expiry'] ?? ''));
             if ($travelerId > 0 && $passportExpiry !== '') {
-                $dueAt = $passportExpiry . ' 09:00:00';
+                $passportExpiryDate = \DateTimeImmutable::createFromFormat('Y-m-d', $passportExpiry);
+                if (! $passportExpiryDate instanceof \DateTimeImmutable) {
+                    continue;
+                }
+
+                $dueAt = $passportExpiryDate->modify('-6 months')->format('Y-m-d') . ' 09:00:00';
                 $specs[] = $this->baseSystemSpec($branchId, $bookingId, $actorUserId, [
                     'traveler_id' => $travelerId,
                     'reminder_type' => 'passport_expiry',
                     'title' => 'Passport expiry check / ' . (string) ($traveler['full_name'] ?? 'Traveler'),
-                    'reminder_note' => 'Passport expiry reminder linked to traveler record.',
+                    'reminder_note' => 'Passport expiry reminder linked to traveler record and scheduled 6 months before expiry.',
                     'due_at' => $dueAt,
                     'channel' => 'System',
                     'owner_label' => 'Documentation Desk',
@@ -558,9 +564,80 @@ final class ReminderWorkspaceService extends Service
         return $text;
     }
 
-    private function receivableAlertState(array $accessibleBranchIds): array
+    private function receivableAlertState(array $accessibleBranchIds, ?int $bookingId, ?int $customerId, ?array $bookingRecord): array
     {
-        $rows = (new CustomerPaymentRepository($this->app))->receivableCollectionSnapshot($accessibleBranchIds);
+        $resolvedCustomerId = (int) ($customerId ?? 0);
+        if ($resolvedCustomerId <= 0) {
+            return $this->emptyReceivableAlertState();
+        }
+
+        $bookingReference = trim((string) ($bookingRecord['booking_reference'] ?? ''));
+        $customerName = trim((string) (($bookingRecord['lead_traveler_name'] ?? '') !== ''
+            ? $bookingRecord['lead_traveler_name']
+            : ($bookingRecord['party_label'] ?? '')));
+        if ($customerName === '') {
+            $customerName = 'Customer pending';
+        }
+
+        $contactMobile = trim((string) ($bookingRecord['contact_mobile'] ?? ''));
+        $rows = (new CustomerPaymentRepository($this->app))->openReceivablesDetailedForLeadTraveler($resolvedCustomerId, $accessibleBranchIds);
+        $customerRows = [];
+        $bookingRows = [];
+
+        foreach ($rows as $row) {
+            $currentRowBookingReference = trim((string) ($row['booking_reference'] ?? ''));
+            $serviceSummary = trim((string) ($row['service_type'] ?? ''));
+            if ($serviceSummary === '') {
+                $serviceSummary = 'Service summary pending';
+            } else {
+                $serviceSummary = ucwords(str_replace('_', ' ', $serviceSummary));
+            }
+
+            $alertRow = [
+                'bookingId' => (int) ($row['booking_id'] ?? 0),
+                'bookingReference' => $currentRowBookingReference,
+                'branchName' => trim((string) ($row['branch_name'] ?? '')),
+                'branchCity' => '',
+                'customerName' => $customerName !== '' ? $customerName : 'Customer pending',
+                'contactMobile' => $contactMobile,
+                'currency' => (string) ($row['currency'] ?? ''),
+                'dueAmount' => round((float) ($row['due_amount'] ?? 0), 2),
+                'allocatedAmount' => round((float) ($row['allocated_amount'] ?? 0), 2),
+                'outstandingAmount' => round((float) ($row['outstanding_amount'] ?? 0), 2),
+                'dueDate' => trim((string) ($row['due_date'] ?? '')),
+                'serviceCount' => 1,
+                'serviceSummary' => $serviceSummary,
+                'classification' => 'missing_due_date',
+                'daysDelta' => null,
+                'daysLabel' => 'Due Date Missing',
+                'isCurrentBooking' => $bookingReference !== '' && $currentRowBookingReference === $bookingReference,
+            ];
+
+            $customerRows[] = $alertRow;
+            if ($alertRow['isCurrentBooking']) {
+                $bookingRows[] = $alertRow;
+            }
+        }
+
+        $customerScope = $this->categorizeReceivableAlertRows($customerRows);
+        $bookingScope = $this->categorizeReceivableAlertRows($bookingRows);
+
+        return [
+            'defaultScope' => 'customer',
+            'scopes' => [
+                'customer' => $customerScope,
+                'booking' => $bookingScope,
+            ],
+            'overdue' => $customerScope['overdue'],
+            'dueToday' => $customerScope['dueToday'],
+            'pending' => $customerScope['pending'],
+            'missingDueDate' => $customerScope['missingDueDate'],
+            'counts' => $customerScope['counts'],
+        ];
+    }
+
+    private function categorizeReceivableAlertRows(array $rows): array
+    {
         $today = new \DateTimeImmutable('today');
         $categories = [
             'overdue' => [],
@@ -570,34 +647,35 @@ final class ReminderWorkspaceService extends Service
         ];
 
         foreach ($rows as $row) {
-            $outstandingAmount = round((float) ($row['total_outstanding_amount'] ?? 0), 2);
+            $outstandingAmount = round((float) ($row['outstandingAmount'] ?? $row['total_outstanding_amount'] ?? 0), 2);
             if ($outstandingAmount <= 0) {
                 continue;
             }
 
-            $serviceCount = (int) ($row['service_count'] ?? 0);
-            $serviceSummary = trim((string) ($row['service_summary'] ?? ''));
+            $serviceCount = (int) ($row['serviceCount'] ?? $row['service_count'] ?? 0);
+            $serviceSummary = trim((string) ($row['serviceSummary'] ?? $row['service_summary'] ?? ''));
             if ($serviceSummary === '') {
                 $serviceSummary = $serviceCount > 0 ? $serviceCount . ' service(s)' : 'Service summary pending';
             }
 
             $alert = [
-                'bookingId' => (int) ($row['booking_id'] ?? 0),
-                'bookingReference' => (string) ($row['booking_reference'] ?? ''),
-                'branchName' => trim((string) ($row['branch_name'] ?? '')),
-                'branchCity' => trim((string) ($row['branch_city'] ?? '')),
-                'customerName' => trim((string) ($row['customer_name'] ?? 'Customer pending')),
-                'contactMobile' => trim((string) ($row['contact_mobile'] ?? '')),
+                'bookingId' => (int) ($row['bookingId'] ?? $row['booking_id'] ?? 0),
+                'bookingReference' => (string) ($row['bookingReference'] ?? $row['booking_reference'] ?? ''),
+                'branchName' => trim((string) ($row['branchName'] ?? $row['branch_name'] ?? '')),
+                'branchCity' => trim((string) ($row['branchCity'] ?? $row['branch_city'] ?? '')),
+                'customerName' => trim((string) ($row['customerName'] ?? $row['customer_name'] ?? 'Customer pending')),
+                'contactMobile' => trim((string) ($row['contactMobile'] ?? $row['contact_mobile'] ?? '')),
                 'currency' => (string) ($row['currency'] ?? ''),
-                'dueAmount' => round((float) ($row['total_due_amount'] ?? 0), 2),
-                'allocatedAmount' => round((float) ($row['total_allocated_amount'] ?? 0), 2),
+                'dueAmount' => round((float) ($row['dueAmount'] ?? $row['total_due_amount'] ?? 0), 2),
+                'allocatedAmount' => round((float) ($row['allocatedAmount'] ?? $row['total_allocated_amount'] ?? 0), 2),
                 'outstandingAmount' => $outstandingAmount,
-                'dueDate' => trim((string) ($row['due_date'] ?? '')),
+                'dueDate' => trim((string) ($row['dueDate'] ?? $row['due_date'] ?? '')),
                 'serviceCount' => $serviceCount,
                 'serviceSummary' => $serviceSummary,
                 'classification' => 'missing_due_date',
                 'daysDelta' => null,
                 'daysLabel' => 'Due Date Missing',
+                'isCurrentBooking' => (bool) ($row['isCurrentBooking'] ?? false),
             ];
 
             $dueDateValue = $alert['dueDate'];
@@ -647,6 +725,52 @@ final class ReminderWorkspaceService extends Service
                 'pending' => count($categories['pending']),
                 'missingDueDate' => count($categories['missingDueDate']),
                 'total' => count($categories['overdue']) + count($categories['dueToday']) + count($categories['pending']) + count($categories['missingDueDate']),
+            ],
+        ];
+    }
+
+    private function emptyReceivableAlertState(): array
+    {
+        return [
+            'defaultScope' => 'customer',
+            'scopes' => [
+                'customer' => [
+                    'overdue' => [],
+                    'dueToday' => [],
+                    'pending' => [],
+                    'missingDueDate' => [],
+                    'counts' => [
+                        'overdue' => 0,
+                        'dueToday' => 0,
+                        'pending' => 0,
+                        'missingDueDate' => 0,
+                        'total' => 0,
+                    ],
+                ],
+                'booking' => [
+                    'overdue' => [],
+                    'dueToday' => [],
+                    'pending' => [],
+                    'missingDueDate' => [],
+                    'counts' => [
+                        'overdue' => 0,
+                        'dueToday' => 0,
+                        'pending' => 0,
+                        'missingDueDate' => 0,
+                        'total' => 0,
+                    ],
+                ],
+            ],
+            'overdue' => [],
+            'dueToday' => [],
+            'pending' => [],
+            'missingDueDate' => [],
+            'counts' => [
+                'overdue' => 0,
+                'dueToday' => 0,
+                'pending' => 0,
+                'missingDueDate' => 0,
+                'total' => 0,
             ],
         ];
     }

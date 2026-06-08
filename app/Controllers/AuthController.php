@@ -7,21 +7,67 @@ namespace App\Controllers;
 use App\Helpers\Auth;
 use App\Helpers\Csrf;
 use App\Helpers\Flash;
+use App\Helpers\Session;
 use App\Services\AuthService;
 use App\Services\PasswordSecurityService;
 use App\Services\TwoFactorService;
 
 final class AuthController extends BaseController
 {
+    private function currentIpAddress(): string
+    {
+        return (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1');
+    }
+
+    private function formatLockState(?array $lockState, string $messagePrefix): ?array
+    {
+        if ($lockState === null) {
+            return null;
+        }
+
+        $remainingSeconds = max(1, (int) ($lockState['remaining_seconds'] ?? 0));
+        $minutes = intdiv($remainingSeconds, 60);
+        $seconds = $remainingSeconds % 60;
+        $remainingLabel = $minutes > 0
+            ? sprintf('%dm %02ds', $minutes, $seconds)
+            : sprintf('%ds', $seconds);
+
+        $lockState['message'] = $messagePrefix . ' Try again in ' . $remainingLabel . '.';
+        $lockState['remaining_label'] = $remainingLabel;
+
+        return $lockState;
+    }
+
+    private function currentLoginLockState(?string $loginValue = null): ?array
+    {
+        $loginKey = trim((string) ($loginValue ?? Session::get('_auth_locked_login_key', '')));
+        if ($loginKey === '') {
+            Session::forget('_auth_locked_login_key');
+            return null;
+        }
+
+        $lockState = (new AuthService($this->app))->currentLockState($loginKey, $this->currentIpAddress());
+        if ($lockState === null) {
+            Session::forget('_auth_locked_login_key');
+            return null;
+        }
+
+        Session::put('_auth_locked_login_key', $loginKey);
+
+        return $this->formatLockState($lockState, 'Too many login attempts.');
+    }
+
     private function postLoginTarget(): string
     {
         return Auth::isSuperAdmin() ? '/' : '/workspace';
     }
 
-    public function showLogin(): string
+    public function showLogin(?string $loginValue = null, ?array $lockState = null): string
     {
         return $this->view('auth/login', [
             'title' => 'Sign In',
+            'loginValue' => $loginValue ?? (string) Session::get('_auth_login_value', ''),
+            'lockState' => $lockState ?? $this->currentLoginLockState($loginValue),
         ], 'layouts/guest');
     }
 
@@ -113,19 +159,7 @@ final class AuthController extends BaseController
 
         $user = $result['user'];
         $repository = new \App\Repositories\UserRepository($this->app);
-        $sessionData = new \App\DTOs\UserSessionData(
-            (int) $user['id'],
-            $user['name'],
-            $user['username'],
-            $user['email'],
-            $user['role_code'],
-            (int) $user['default_branch_id'],
-            array_map('intval', $repository->branchIdsForUser((int) $user['id'], $user['role_code'])),
-            (bool) $user['must_change_password'],
-            (int) $user['session_version'],
-            (bool) $user['two_factor_enabled'],
-            false
-        );
+        $sessionData = \App\Services\SecuritySettingsService::buildSessionData($this->app, $user, false);
         Auth::refresh($sessionData->toArray(), true);
 
         Flash::success('Password changed successfully.');
@@ -185,7 +219,7 @@ final class AuthController extends BaseController
         $this->redirect('/2fa/recovery-codes');
     }
 
-    public function showTwoFactorVerify(): string
+    public function showTwoFactorVerify(?array $lockState = null): string
     {
         if (Auth::mustChangePassword()) {
             $this->redirect('/force-password-change');
@@ -203,8 +237,14 @@ final class AuthController extends BaseController
             $this->redirect($this->postLoginTarget());
         }
 
+        $computedLockState = $lockState ?? $this->formatLockState(
+            (new TwoFactorService($this->app))->currentVerifyLockState((int) Auth::id(), $this->currentIpAddress()),
+            'Too many OTP failures.'
+        );
+
         return $this->view('auth/two_factor_verify', [
             'title' => '2FA Verification',
+            'lockState' => $computedLockState,
         ]);
     }
 
@@ -223,13 +263,13 @@ final class AuthController extends BaseController
         $result = (new TwoFactorService($this->app))->verifyChallenge(
             (int) Auth::id(),
             (string) ($_POST['code'] ?? ''),
-            (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'),
+            $this->currentIpAddress(),
             isset($_POST['remember_device']) && $_POST['remember_device'] === '1'
         );
 
         if (! $result['success']) {
             Flash::error($result['message']);
-            return $this->showTwoFactorVerify();
+            return $this->showTwoFactorVerify($this->formatLockState($result['lock_state'] ?? null, 'Too many OTP failures.'));
         }
 
         $this->redirect($this->postLoginTarget());
@@ -255,14 +295,20 @@ final class AuthController extends BaseController
 
         $login = trim((string) ($_POST['login'] ?? ''));
         $password = (string) ($_POST['password'] ?? '');
-        $ipAddress = (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1');
+        $ipAddress = $this->currentIpAddress();
         $result = (new AuthService($this->app))->attempt($login, $password, $ipAddress);
 
         if (! $result['success']) {
+            Session::put('_auth_login_value', $login);
+            if (($result['lock_state'] ?? null) !== null) {
+                Session::put('_auth_locked_login_key', mb_strtolower(trim($login)));
+            }
             Flash::error($result['message']);
-            return $this->showLogin();
+            return $this->showLogin($login, $this->formatLockState($result['lock_state'] ?? null, 'Too many login attempts.'));
         }
 
+        Session::forget('_auth_login_value');
+        Session::forget('_auth_locked_login_key');
         $this->redirect($result['redirect_to']);
     }
 

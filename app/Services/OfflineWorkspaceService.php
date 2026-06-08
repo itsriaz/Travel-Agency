@@ -15,7 +15,7 @@ use Throwable;
 
 final class OfflineWorkspaceService extends Service
 {
-    private const ALLOWED_DRAFT_TYPES = ['traveler.create', 'booking.create'];
+    private const ALLOWED_DRAFT_TYPES = ['traveler.create'];
 
     public function snapshot(array $accessibleBranchIds, int $actorUserId): array
     {
@@ -86,9 +86,7 @@ final class OfflineWorkspaceService extends Service
                     throw new RuntimeException('This draft type is not allowed for offline sync.');
                 }
 
-                $result = $draftType === 'traveler.create'
-                    ? $this->syncTravelerDraft($payload, $actorUserId, $accessibleBranchIds)
-                    : $this->syncBookingDraft($payload, $actorUserId, $accessibleBranchIds);
+                $result = $this->syncTravelerDraft($payload, $actorUserId, $accessibleBranchIds);
 
                 $repository->recordResult([
                     'user_id' => $actorUserId,
@@ -156,21 +154,6 @@ final class OfflineWorkspaceService extends Service
             'record_id' => (int) ($traveler['id'] ?? 0),
             'reference' => (string) ($traveler['full_name'] ?? ''),
             'branch_id' => (int) ($traveler['branch_id'] ?? 0),
-        ];
-    }
-
-    private function syncBookingDraft(array $payload, int $actorUserId, array $accessibleBranchIds): array
-    {
-        $payload['booking_id'] = 0;
-        $payload['booking_status'] = 'draft';
-        $saved = (new BookingWorkspaceService($this->app))->saveBooking($payload, $actorUserId, $accessibleBranchIds);
-        $booking = is_array($saved['booking'] ?? null) ? $saved['booking'] : [];
-
-        return [
-            'record_type' => 'booking',
-            'record_id' => (int) ($booking['id'] ?? 0),
-            'reference' => (string) ($booking['booking_reference'] ?? ''),
-            'branch_id' => (int) ($booking['branch_id'] ?? 0),
         ];
     }
 

@@ -7,11 +7,12 @@ namespace App\Services;
 use App\Helpers\AuditLog;
 use App\Repositories\BookingDocumentRepository;
 use App\Repositories\BookingRepository;
+use App\Repositories\MasterDataRepository;
 use RuntimeException;
 
 final class DocumentWorkspaceService extends Service
 {
-    private const DOCUMENT_TYPES = [
+    private const FALLBACK_DOCUMENT_TYPES = [
         'passport_copy' => 'Passport Copy',
         'visa_copy' => 'Visa Copy',
         'ticket_copy' => 'Ticket Copy',
@@ -28,11 +29,16 @@ final class DocumentWorkspaceService extends Service
         array $customerPaymentFoundation,
         array $supplierFoundation
     ): array {
+        $documentTypeDefinitions = $this->documentTypeDefinitions();
+        $documentTypeOptions = $this->documentTypeOptions($documentTypeDefinitions);
+
         if ($bookingId === null || $bookingId <= 0) {
             return [
                 'documents' => [],
-                'documentTypeOptions' => self::DOCUMENT_TYPES,
+                'documentTypeOptions' => $documentTypeOptions,
+                'documentTypeDefinitions' => $documentTypeDefinitions,
                 'documentLinkTargets' => [],
+                'documentTargetOptionsByType' => [],
                 'replaceableDocuments' => [],
             ];
         }
@@ -44,20 +50,26 @@ final class DocumentWorkspaceService extends Service
 
         $repository = new BookingDocumentRepository($this->app);
         if (! $repository->documentsTableExists()) {
+            $documentLinkTargets = $this->linkTargets($bookingId, $travelers, $services, $customerPaymentFoundation, $supplierFoundation);
             return [
                 'documents' => [],
-                'documentTypeOptions' => self::DOCUMENT_TYPES,
-                'documentLinkTargets' => $this->linkTargets($bookingId, $travelers, $services, $customerPaymentFoundation, $supplierFoundation),
+                'documentTypeOptions' => $documentTypeOptions,
+                'documentTypeDefinitions' => $documentTypeDefinitions,
+                'documentLinkTargets' => $documentLinkTargets,
+                'documentTargetOptionsByType' => $this->documentTargetOptionsByType($documentTypeDefinitions, $documentLinkTargets),
                 'replaceableDocuments' => [],
             ];
         }
 
         $documents = $repository->documentsForBooking($bookingId);
+        $documentLinkTargets = $this->linkTargets($bookingId, $travelers, $services, $customerPaymentFoundation, $supplierFoundation);
 
         return [
             'documents' => $documents,
-            'documentTypeOptions' => self::DOCUMENT_TYPES,
-            'documentLinkTargets' => $this->linkTargets($bookingId, $travelers, $services, $customerPaymentFoundation, $supplierFoundation),
+            'documentTypeOptions' => $documentTypeOptions,
+            'documentTypeDefinitions' => $documentTypeDefinitions,
+            'documentLinkTargets' => $documentLinkTargets,
+            'documentTargetOptionsByType' => $this->documentTargetOptionsByType($documentTypeDefinitions, $documentLinkTargets),
             'replaceableDocuments' => array_values(array_filter($documents, static fn (array $document): bool => (string) ($document['status'] ?? '') === 'active')),
         ];
     }
@@ -71,7 +83,7 @@ final class DocumentWorkspaceService extends Service
         $title = $this->requiredText($input['document_title'] ?? null, 'Document title', 190);
         $notes = $this->optionalText($input['document_note'] ?? null, 4000);
         $replaceDocumentId = (int) ($input['replace_document_id'] ?? 0);
-        $linkage = $this->resolveLinkage($bookingId, (string) ($input['linked_target'] ?? 'booking:' . $bookingId));
+        $linkage = $this->resolveLinkage($bookingId, $type, (string) ($input['linked_target'] ?? 'booking:' . $bookingId));
         $fileMeta = $this->validateUpload($files['document_file'] ?? null);
         $repository = new BookingDocumentRepository($this->app);
         if (! $repository->documentsTableExists()) {
@@ -249,7 +261,7 @@ final class DocumentWorkspaceService extends Service
         return $booking;
     }
 
-    private function resolveLinkage(int $bookingId, string $linkedTarget): array
+    private function resolveLinkage(int $bookingId, string $documentType, string $linkedTarget): array
     {
         $normalized = trim($linkedTarget);
         if ($normalized === '') {
@@ -259,6 +271,7 @@ final class DocumentWorkspaceService extends Service
         [$scope, $idValue] = array_pad(explode(':', $normalized, 2), 2, '');
         $scope = trim($scope);
         $linkedId = (int) $idValue;
+        $allowedScopes = $this->documentTypeDefinitions()[$documentType]['allowed_scopes'] ?? [];
 
         $repository = new BookingDocumentRepository($this->app);
         $payload = [
@@ -270,6 +283,10 @@ final class DocumentWorkspaceService extends Service
             'linked_scope' => $scope !== '' ? $scope : 'booking',
             'linked_id' => $linkedId > 0 ? $linkedId : $bookingId,
         ];
+
+        if ($allowedScopes !== [] && ! in_array(($scope !== '' ? $scope : 'booking'), $allowedScopes, true)) {
+            throw new RuntimeException('This document type cannot be linked to the selected record.');
+        }
 
         if ($scope === '' || $scope === 'booking') {
             return $payload;
@@ -461,11 +478,123 @@ final class DocumentWorkspaceService extends Service
     private function normalizeDocumentType(string $value): string
     {
         $type = trim($value);
-        if (! array_key_exists($type, self::DOCUMENT_TYPES)) {
+        if (! array_key_exists($type, $this->documentTypeDefinitions())) {
             throw new RuntimeException('Please select a valid document type.');
         }
 
         return $type;
+    }
+
+    private function documentTypeOptions(?array $definitions = null): array
+    {
+        $definitions ??= $this->documentTypeDefinitions();
+
+        $options = [];
+        foreach ($definitions as $code => $definition) {
+            $options[$code] = (string) ($definition['label'] ?? $code);
+        }
+
+        return $options;
+    }
+
+    private function documentTypeDefinitions(): array
+    {
+        $rows = (new MasterDataRepository($this->app))->activeRows('document_types');
+        if ($rows === []) {
+            $rows = array_map(
+                static fn (string $code, string $label): array => [
+                    'code' => $code,
+                    'name' => $label,
+                    'linked_area' => 'Booking File',
+                ],
+                array_keys(self::FALLBACK_DOCUMENT_TYPES),
+                array_values(self::FALLBACK_DOCUMENT_TYPES)
+            );
+        }
+
+        $definitions = [];
+        foreach ($rows as $row) {
+            $code = trim((string) ($row['code'] ?? ''));
+            if ($code === '') {
+                continue;
+            }
+
+            $linkedArea = trim((string) ($row['linked_area'] ?? ''));
+            $definitions[$code] = [
+                'label' => trim((string) ($row['name'] ?? $code)),
+                'linked_area' => $linkedArea,
+                'allowed_scopes' => $this->allowedScopesForLinkedArea($linkedArea),
+            ];
+        }
+
+        return $definitions;
+    }
+
+    private function documentTargetOptionsByType(array $definitions, array $targets): array
+    {
+        $targetMap = [];
+
+        foreach ($definitions as $code => $definition) {
+            $targetMap[$code] = $this->filterTargetsByScopes($targets, (array) ($definition['allowed_scopes'] ?? []));
+        }
+
+        return $targetMap;
+    }
+
+    private function filterTargetsByScopes(array $targets, array $allowedScopes): array
+    {
+        if ($allowedScopes === []) {
+            return $targets;
+        }
+
+        return array_values(array_filter($targets, function (array $target) use ($allowedScopes): bool {
+            $value = trim((string) ($target['value'] ?? ''));
+            $scope = trim((string) strtok($value, ':'));
+
+            return $scope !== '' && in_array($scope, $allowedScopes, true);
+        }));
+    }
+
+    private function allowedScopesForLinkedArea(string $linkedArea): array
+    {
+        $normalized = preg_replace('/[^a-z0-9]+/i', ' ', mb_strtolower(trim($linkedArea))) ?? '';
+        $normalized = trim(preg_replace('/\s+/', ' ', $normalized) ?? '');
+        if ($normalized === '') {
+            return [];
+        }
+
+        $scopeMap = [
+            'booking' => ['booking'],
+            'booking file' => ['booking'],
+            'traveler' => ['traveler'],
+            'traveller' => ['traveler'],
+            'service' => ['service'],
+            'service line' => ['service'],
+            'receipt' => ['receipt'],
+            'customer receipt' => ['receipt'],
+            'accounts' => ['receipt', 'supplier_payment', 'supplier_obligation'],
+            'payment' => ['receipt', 'supplier_payment'],
+            'supplier' => ['supplier_payment', 'supplier_obligation'],
+            'supplier payment' => ['supplier_payment'],
+            'supplier obligation' => ['supplier_obligation'],
+            'print' => ['booking', 'service'],
+        ];
+
+        $allowedScopes = [];
+        foreach (preg_split('/\s*(?:\/|,|\||\+|&)\s*/', $normalized) ?: [] as $token) {
+            $token = trim($token);
+            if ($token === '') {
+                continue;
+            }
+
+            foreach ($scopeMap as $phrase => $scopes) {
+                if ($token === $phrase || str_contains($token, $phrase)) {
+                    $allowedScopes = array_merge($allowedScopes, $scopes);
+                }
+            }
+        }
+
+        return array_values(array_unique($allowedScopes));
     }
 
     private function linkTargets(

@@ -8,19 +8,29 @@ use App\Helpers\AuditLog;
 use App\Repositories\AccountingRepository;
 use App\Repositories\BookingRepository;
 use App\Repositories\BookingServiceEventRepository;
+use App\Repositories\BookingServiceRefundDetailRepository;
 use App\Repositories\BookingServiceRepository;
 use App\Repositories\CustomerPaymentRepository;
+use App\Repositories\MasterDataRepository;
 use App\Repositories\SupplierRepository;
+use App\Repositories\TreasuryRepository;
 use App\Repositories\TravelerRepository;
 use RuntimeException;
 use Throwable;
 
 final class ServiceWorkspaceService extends Service
 {
-    private const ALLOWED_SERVICE_TYPES = ['air ticket', 'visa', 'umrah', 'hotel', 'transport', 'tourism', 'other'];
     private const ALLOWED_CURRENCIES = ['PKR', 'AED', 'USD'];
     private const ALLOWED_STATUSES = ['Booked', 'Docs Pending', 'Reserved', 'Open', 'Delivered', 'Cancelled'];
-    private const ALLOWED_PAYMENT_METHODS = ['cash', 'bank_transfer', 'debit_card', 'credit_card'];
+    private const FALLBACK_SERVICE_TYPE_MAP = [
+        'AIR' => 'air ticket',
+        'VISA' => 'visa',
+        'UMR' => 'umrah',
+        'HOT' => 'hotel',
+        'TRN' => 'transport',
+        'TOUR' => 'tourism',
+        'OTH' => 'other',
+    ];
 
     public function serviceState(?int $bookingId, array $accessibleBranchIds): array
     {
@@ -48,6 +58,8 @@ final class ServiceWorkspaceService extends Service
                 $serviceRow['latest_refund_event_date'] = (string) ($latestRefundEvent['event_date'] ?? '');
                 $serviceRow['latest_refund_customer_amount'] = (float) ($latestRefundEvent['customer_refund_amount'] ?? 0);
                 $serviceRow['latest_refund_supplier_amount'] = (float) ($latestRefundEvent['supplier_refund_amount'] ?? 0);
+                $latestCancelEvent = $eventRepository->latestPostedEvent($serviceId, 'cancel');
+                $serviceRow['latest_cancel_event_id'] = (int) ($latestCancelEvent['id'] ?? 0);
             }
             unset($serviceRow);
         }
@@ -227,7 +239,7 @@ final class ServiceWorkspaceService extends Service
             throw new RuntimeException('Inactive service lines cannot be cancelled here.');
         }
 
-        if ((string) ($existingService['service_status'] ?? '') === 'Cancelled') {
+        if ($this->isCancelledStatus((string) ($existingService['service_status'] ?? ''))) {
             throw new RuntimeException('This service line is already cancelled.');
         }
 
@@ -327,6 +339,13 @@ final class ServiceWorkspaceService extends Service
 
         $bookingReference = (string) $booking['booking_reference'];
         $currency = (string) ($existingService['currency'] ?? 'PKR');
+        $refundDetailPayload = $this->normalizedRefundDetailPayload(
+            $input,
+            $paymentMethod,
+            (int) ($existingService['branch_id'] ?? 0),
+            $currency,
+            $customerRefundAmount
+        );
 
         /** @var \PDO $db */
         $db = $this->app->get('db');
@@ -370,9 +389,15 @@ final class ServiceWorkspaceService extends Service
                     'payment_method' => $paymentMethod,
                     'customer_credit_balance_before' => $customerCreditBalance,
                     'supplier_advance_balance_before' => $supplierAdvanceBalance,
+                    'refund_detail' => $refundDetailPayload,
                 ],
                 'actor_user_id' => $actorUserId,
             ]);
+
+            (new BookingServiceRefundDetailRepository($this->app))->upsertForServiceEvent($eventId, array_merge(
+                $refundDetailPayload,
+                ['actor_user_id' => $actorUserId]
+            ));
 
             $journalEntryId = $accountingRepository->postServiceRefund([
                 'branch_id' => (int) $existingService['branch_id'],
@@ -382,6 +407,7 @@ final class ServiceWorkspaceService extends Service
                 'entry_date' => $eventDate,
                 'currency' => $currency,
                 'payment_method' => $paymentMethod,
+                'treasury_account_id' => $refundDetailPayload['treasury_account_id'] ?? null,
                 'customer_refund_amount' => $customerRefundAmount,
                 'supplier_refund_amount' => $supplierRefundAmount,
                 'narration' => 'Service refund posted for ' . (string) $existingService['line_reference'],
@@ -401,6 +427,8 @@ final class ServiceWorkspaceService extends Service
                 'customer_refund_amount' => $customerRefundAmount,
                 'supplier_refund_amount' => $supplierRefundAmount,
                 'payment_method' => $paymentMethod,
+                'treasury_account_id' => $refundDetailPayload['treasury_account_id'] ?? null,
+                'refund_detail' => $refundDetailPayload,
                 'reason' => $reason,
             ]);
 
@@ -445,7 +473,11 @@ final class ServiceWorkspaceService extends Service
             throw new RuntimeException('The selected service line does not belong to this booking.');
         }
 
-        if ((string) ($existingService['service_status'] ?? '') !== 'Cancelled') {
+        $eventRepository = new BookingServiceEventRepository($this->app);
+        if (
+            ! $this->isCancelledStatus((string) ($existingService['service_status'] ?? ''))
+            && ! $eventRepository->postedEventExists($serviceId, 'cancel')
+        ) {
             throw new RuntimeException('Cancel the service line before settling cancellation financials.');
         }
 
@@ -1202,11 +1234,13 @@ final class ServiceWorkspaceService extends Service
     private function normalizeServiceType(string $value): string
     {
         $type = mb_strtolower(trim($value));
-        if (! in_array($type, self::ALLOWED_SERVICE_TYPES, true)) {
+        $serviceTypeMap = $this->activeServiceTypeMap();
+
+        if (! array_key_exists($type, $serviceTypeMap)) {
             throw new RuntimeException('Please select a valid service type.');
         }
 
-        return $type;
+        return $serviceTypeMap[$type];
     }
 
     private function normalizeCurrency(string $value): string
@@ -1222,11 +1256,131 @@ final class ServiceWorkspaceService extends Service
     private function normalizePaymentMethod(string $value): string
     {
         $method = str_replace(' ', '_', mb_strtolower(trim($value)));
-        if (! in_array($method, self::ALLOWED_PAYMENT_METHODS, true)) {
+        if (! in_array($method, $this->activePaymentMethodCodes(), true)) {
             throw new RuntimeException('Please select a valid refund payment method.');
         }
 
         return $method;
+    }
+
+    private function activeServiceTypeMap(): array
+    {
+        $rows = (new MasterDataRepository($this->app))->activeRows('service_types');
+        $map = [];
+
+        foreach ($rows as $row) {
+            $code = strtoupper(trim((string) ($row['code'] ?? '')));
+            $name = mb_strtolower(trim((string) ($row['name'] ?? '')));
+            $runtimeKey = self::FALLBACK_SERVICE_TYPE_MAP[$code] ?? $this->normalizeServiceTypeName($name);
+            if ($runtimeKey === '') {
+                continue;
+            }
+
+            $map[$runtimeKey] = $runtimeKey;
+            if ($code !== '') {
+                $map[mb_strtolower($code)] = $runtimeKey;
+            }
+            if ($name !== '') {
+                $map[$name] = $runtimeKey;
+            }
+        }
+
+        if ($map === []) {
+            foreach (self::FALLBACK_SERVICE_TYPE_MAP as $runtimeKey) {
+                $map[$runtimeKey] = $runtimeKey;
+            }
+        }
+
+        return $map;
+    }
+
+    private function activePaymentMethodCodes(): array
+    {
+        $codes = array_map(
+            static fn (string $code): string => str_replace(' ', '_', mb_strtolower(trim($code))),
+            array_keys((new MasterDataRepository($this->app))->activeCodeLabelMap('payment_methods'))
+        );
+
+        return $codes !== [] ? array_values(array_unique($codes)) : ['cash', 'bank_transfer', 'debit_card', 'credit_card'];
+    }
+
+    private function normalizeServiceTypeName(string $name): string
+    {
+        $normalized = str_replace(['-', '_'], ' ', $name);
+        $normalized = preg_replace('/\s+/', ' ', $normalized ?? '') ?? '';
+
+        return match (trim($normalized)) {
+            'air ticket' => 'air ticket',
+            'visa' => 'visa',
+            'umrah' => 'umrah',
+            'hotel' => 'hotel',
+            'transport' => 'transport',
+            'tourism' => 'tourism',
+            'other package', 'other' => 'other',
+            default => '',
+        };
+    }
+
+    private function normalizedRefundDetailPayload(
+        array $input,
+        string $paymentMethod,
+        int $branchId,
+        string $currency,
+        float $customerRefundAmount
+    ): array {
+        $treasuryAccountId = 0;
+        $treasurySnapshot = null;
+
+        if (in_array($paymentMethod, ['cash', 'bank_transfer'], true)) {
+            $treasuryAccountId = (int) ($input['refund_treasury_account_id'] ?? 0);
+            $treasurySnapshot = (new TreasuryRepository($this->app))->validatePaymentTreasuryAccount(
+                $treasuryAccountId,
+                $branchId,
+                $currency,
+                $paymentMethod
+            );
+        }
+
+        $customerBankName = $this->optionalText($input['customer_bank_name'] ?? null, 190);
+        $customerBankAccountTitle = $this->optionalText($input['customer_bank_account_title'] ?? null, 190);
+        $customerBankAccountNo = $this->optionalText($input['customer_bank_account_no'] ?? null, 120);
+        $customerBankIban = $this->optionalText($input['customer_bank_iban'] ?? null, 120);
+        $transferReference = $this->optionalText($input['transfer_reference'] ?? null, 190);
+        $charges = $this->moneyValue($input['refund_charges'] ?? 0);
+        $remarks = $this->optionalText($input['refund_notes'] ?? null, 4000);
+
+        if ($paymentMethod === 'bank_transfer' && $customerRefundAmount > 0) {
+            if ($customerBankName === null) {
+                throw new RuntimeException('Customer bank name is required for bank refund.');
+            }
+
+            if ($customerBankAccountTitle === null && $customerBankAccountNo === null && $customerBankIban === null) {
+                throw new RuntimeException('Enter customer bank account title, account number, or IBAN for bank refund.');
+            }
+
+            if ($transferReference === null) {
+                throw new RuntimeException('Transfer reference is required for bank refund.');
+            }
+        }
+
+        return [
+            'treasury_account_id' => $treasuryAccountId > 0 ? $treasuryAccountId : null,
+            'refund_payment_method' => $paymentMethod,
+            'customer_bank_name' => $customerBankName,
+            'customer_bank_account_title' => $customerBankAccountTitle,
+            'customer_bank_account_no' => $customerBankAccountNo,
+            'customer_bank_iban' => $customerBankIban,
+            'transfer_reference' => $transferReference,
+            'charges' => $charges,
+            'remarks' => $remarks,
+            'treasury_account_snapshot' => $treasurySnapshot !== null ? [
+                'id' => (int) ($treasurySnapshot['id'] ?? 0),
+                'account_name' => (string) ($treasurySnapshot['account_name'] ?? ''),
+                'account_code' => (string) ($treasurySnapshot['account_code'] ?? ''),
+                'account_type' => (string) ($treasurySnapshot['account_type'] ?? ''),
+                'currency' => (string) ($treasurySnapshot['currency'] ?? $currency),
+            ] : null,
+        ];
     }
 
     private function assertCanPostServiceEvent(int $actorUserId): void
@@ -1245,6 +1399,11 @@ final class ServiceWorkspaceService extends Service
         }
 
         return $status;
+    }
+
+    private function isCancelledStatus(string $value): bool
+    {
+        return str_replace(' ', '_', mb_strtolower(trim($value))) === 'cancelled';
     }
 
     private function moneyValue(mixed $value): float

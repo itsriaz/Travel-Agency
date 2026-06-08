@@ -61,7 +61,15 @@ $check('mbstring extension is loaded', extension_loaded('mbstring'));
 $check('fileinfo extension is loaded', extension_loaded('fileinfo'));
 $check('OpenSSL extension is loaded', extension_loaded('openssl'));
 $check('Database backup script exists', is_file(BASE_PATH . '/scripts/backup_database.php'));
+$check('Backup cycle orchestration script exists', is_file(BASE_PATH . '/scripts/run_backup_cycle.php'));
 $check('Production preflight script exists', is_file(BASE_PATH . '/scripts/preflight_production.php'));
+$check('Release hygiene audit script exists', is_file(BASE_PATH . '/scripts/release_hygiene_audit.php'));
+$check('Workspace master-data authority readiness test exists', is_file(BASE_PATH . '/tests/workspace_master_data_authority.php'));
+$check('Workspace document/reminder readiness test exists', is_file(BASE_PATH . '/tests/workspace_document_reminder_readiness.php'));
+$check('Workspace treasury refresh readiness test exists', is_file(BASE_PATH . '/tests/workspace_treasury_refresh_readiness.php'));
+$check('Accounting engine readiness test exists', is_file(BASE_PATH . '/tests/accounting_engine_readiness.php'));
+$check('Offline sync readiness test exists', is_file(BASE_PATH . '/tests/offline_sync_readiness.php'));
+$check('Security layer readiness test exists', is_file(BASE_PATH . '/tests/security_layer_readiness.php'));
 $check('Non-production reset script exists', is_file(BASE_PATH . '/scripts/reset_non_production_data.php'));
 $check('Clean test database verification script exists', is_file(BASE_PATH . '/scripts/verify_clean_test_database.php'));
 $check('Storage document audit script exists', is_file(BASE_PATH . '/scripts/audit_storage_documents.php'));
@@ -81,6 +89,9 @@ $check('Security headers are enabled', (bool) config('security.headers.enabled',
 $check('Content Security Policy is configured', trim((string) config('security.headers.content_security_policy', '')) !== '');
 $check('Referrer Policy is configured', trim((string) config('security.headers.referrer_policy', '')) !== '');
 $check('Permissions Policy is configured', trim((string) config('security.headers.permissions_policy', '')) !== '');
+$check('Launcher gate configuration exists', array_key_exists('launcher_gate', (array) config('security', [])));
+$check('Password hash driver is explicitly configured', trim((string) config('security.password.hash_driver', '')) !== '', (string) config('security.password.hash_driver', ''));
+$check('Launcher keypair generation script exists', is_file(BASE_PATH . '/scripts/generate_launcher_keypair.php'));
 $check('Health check controller exists', is_file(BASE_PATH . '/app/Controllers/HealthController.php'));
 $check('Health check service exists', is_file(BASE_PATH . '/app/Services/HealthCheckService.php'));
 $userPolicy = is_file(BASE_PATH . '/app/Policies/UserPolicy.php')
@@ -121,6 +132,20 @@ if (app_is_production()) {
     $check('Production trusted-device cookie is secure', (bool) config('security.trusted_device.cookie_secure', false));
     $check('Production HSTS is enabled', (bool) config('security.headers.hsts_enabled', false));
     $check('Production health check token is configured', trim((string) config('security.health.token', '')) !== '');
+    $check('Production launcher gate is enabled', (bool) config('security.launcher_gate.enabled', false));
+    if ((bool) config('security.launcher_gate.allow_legacy_token', false)) {
+        $check('Production launcher gate token is configured', strlen(trim((string) config('security.launcher_gate.token', ''))) >= 32);
+    }
+    if ((bool) config('security.launcher_gate.signature_enabled', false)) {
+        $check(
+            'Production launcher signature public key is configured',
+            trim((string) config('security.launcher_gate.public_key', '')) !== '' || trim((string) config('security.launcher_gate.public_key_path', '')) !== ''
+        );
+    }
+    $check(
+        'Production launcher gate uses signed requests or an explicitly enabled legacy fallback',
+        (bool) config('security.launcher_gate.signature_enabled', false) || (bool) config('security.launcher_gate.allow_legacy_token', false)
+    );
 }
 
 $documentExtensions = array_map('strtolower', (array) config('security.documents.allowed_extensions', []));

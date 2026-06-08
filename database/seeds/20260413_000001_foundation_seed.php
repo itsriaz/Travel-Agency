@@ -2,6 +2,8 @@
 
 declare(strict_types=1);
 
+use App\Helpers\PasswordHasher;
+
 return static function (\PDO $db): void {
     $db->exec("INSERT INTO branches (id, code, name, city, country_code, base_currency, is_active) VALUES
         (1, 'swat', 'Imdad International Travel Agency', 'Swat', 'PK', 'PKR', 1),
@@ -20,16 +22,25 @@ return static function (\PDO $db): void {
         (2, 'employee', 'Employee')
     ");
 
-    $superAdminPasswordHash = password_hash('ChangeMeNow!123', PASSWORD_DEFAULT);
-    $employeePasswordHash = password_hash('EmployeePass!123', PASSWORD_DEFAULT);
+    $superAdminPasswordHash = PasswordHasher::make('ChangeMeNow!123');
+    $superAdmins = [
+        ['id' => 1, 'default_branch_id' => 1, 'name' => 'Dr. Muhammad Munir', 'username' => 'm.munir', 'email' => 'munir@travelagency.local'],
+        ['id' => 2, 'default_branch_id' => 1, 'name' => 'Imdad Ullah', 'username' => 'imdad.ullah', 'email' => 'imdad.ullah@travelagency.local'],
+        ['id' => 3, 'default_branch_id' => 1, 'name' => 'Salman Faiz', 'username' => 'salman.faiz', 'email' => 'salman.faiz@travelagency.local'],
+        ['id' => 4, 'default_branch_id' => 1, 'name' => 'Abubakar', 'username' => 'abubakar', 'email' => 'abubakar@travelagency.local'],
+        ['id' => 5, 'default_branch_id' => 1, 'name' => 'Fida Hussain Khan', 'username' => 'fida.hussain', 'email' => 'fida.hussain@travelagency.local'],
+        ['id' => 10, 'default_branch_id' => 1, 'name' => 'Development Super Admin', 'username' => 'superadmin', 'email' => 'superadmin@travelagency.local'],
+    ];
+
+    $roleId = 1;
     $statement = $db->prepare(
         'INSERT INTO users (
             id, role_id, default_branch_id, name, username, email, password_hash, is_active,
             must_change_password, force_password_change_reason, password_changed_at
          )
-         VALUES
-         (1, 1, 1, :admin_name, :admin_username, :admin_email, :admin_password_hash, 1, 1, :admin_force_reason, NULL),
-         (2, 2, 1, :employee_name, :employee_username, :employee_email, :employee_password_hash, 1, 1, :employee_force_reason, NULL)
+         VALUES (
+            :id, :role_id, :default_branch_id, :name, :username, :email, :password_hash, 1, 1, :force_reason, NULL
+         )
          ON DUPLICATE KEY UPDATE
          role_id = VALUES(role_id),
          default_branch_id = VALUES(default_branch_id),
@@ -42,20 +53,38 @@ return static function (\PDO $db): void {
          force_password_change_reason = VALUES(force_password_change_reason),
          password_changed_at = VALUES(password_changed_at)'
     );
-    $statement->execute([
-        'admin_name' => 'System Administrator',
-        'admin_username' => 'admin',
-        'admin_email' => 'admin@travelagency.local',
-        'admin_password_hash' => $superAdminPasswordHash,
-        'admin_force_reason' => 'first_login',
-        'employee_name' => 'Swat Employee',
-        'employee_username' => 'employee',
-        'employee_email' => 'employee@travelagency.local',
-        'employee_password_hash' => $employeePasswordHash,
-        'employee_force_reason' => 'first_login',
-    ]);
 
-    $db->exec("INSERT IGNORE INTO user_branch_access (user_id, branch_id) VALUES (1, 1), (1, 2), (2, 1)");
+    foreach ($superAdmins as $superAdmin) {
+        $statement->execute([
+            'id' => $superAdmin['id'],
+            'role_id' => $roleId,
+            'default_branch_id' => $superAdmin['default_branch_id'],
+            'name' => $superAdmin['name'],
+            'username' => $superAdmin['username'],
+            'email' => $superAdmin['email'],
+            'password_hash' => $superAdminPasswordHash,
+            'force_reason' => 'first_login',
+        ]);
+    }
+
+    $db->exec('DELETE FROM user_branch_access WHERE user_id IN (1,2,3,4,5,10)');
+    $accessStatement = $db->prepare('INSERT IGNORE INTO user_branch_access (user_id, branch_id) VALUES (:user_id, :branch_id)');
+    foreach ($superAdmins as $superAdmin) {
+        foreach ([1, 2] as $branchId) {
+            $accessStatement->execute([
+                'user_id' => $superAdmin['id'],
+                'branch_id' => $branchId,
+            ]);
+        }
+    }
+
+    $legacyUserStatement = $db->prepare(
+        "UPDATE users
+         SET is_active = 0,
+             updated_at = NOW()
+         WHERE id NOT IN (1,2,3,4,5,10)"
+    );
+    $legacyUserStatement->execute();
 
     $statement = $db->prepare(
         'INSERT IGNORE INTO app_settings (setting_key, setting_value) VALUES

@@ -1,5 +1,13 @@
 {
   "serverUrl": "https://your-production-domain.example",
   "windowTitle": "Travel Agency Operations",
-  "sourceDevice": "Branch Windows Launcher"
+  "sourceDevice": "Branch Windows Launcher",
+  "launcherToken": "replace_with_same_value_as_LAUNCHER_GATE_TOKEN",
+  "launcherTokenHeader": "X-Travel-Launcher-Token",
+  "launcherKeyId": "travel-launcher-1",
+  "launcherPrivateKeyPath": "launcher_gate_private.pem",
+  "launcherSignatureHeader": "X-Travel-Launcher-Signature",
+  "launcherTimestampHeader": "X-Travel-Launcher-Timestamp",
+  "launcherNonceHeader": "X-Travel-Launcher-Nonce",
+  "launcherKeyIdHeader": "X-Travel-Launcher-Key-Id"
 }

@@ -20,6 +20,8 @@ final class Session
             return;
         }
 
+        self::prepareSavePath();
+
         session_start([
             'cookie_httponly' => true,
             'cookie_secure' => (bool) config('security.session.cookie_secure', self::isSecureRequest()),
@@ -76,6 +78,28 @@ final class Session
         $forwardedProto = mb_strtolower(trim((string) ($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '')));
 
         return ($https !== '' && $https !== 'off') || $forwardedProto === 'https';
+    }
+
+    private static function prepareSavePath(): void
+    {
+        $configuredPath = trim((string) config('security.session.save_path', 'storage/runtime/sessions'));
+        if ($configuredPath === '') {
+            return;
+        }
+
+        $path = preg_match('/^[A-Za-z]:[\\\\\\/]/', $configuredPath) === 1 || str_starts_with($configuredPath, '/')
+            ? $configuredPath
+            : base_path('/' . ltrim($configuredPath, '/'));
+
+        if (! is_dir($path) && ! @mkdir($path, 0775, true) && ! is_dir($path)) {
+            throw new \RuntimeException('Unable to prepare secure session storage.');
+        }
+
+        if (! is_writable($path)) {
+            throw new \RuntimeException('Secure session storage is not writable.');
+        }
+
+        session_save_path($path);
     }
 
     private static function sameSiteValue(string $value): string

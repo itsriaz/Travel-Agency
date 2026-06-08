@@ -139,6 +139,11 @@ final class BookingReminderRepository extends BaseRepository
 
     public function markReminderStatus(int $reminderId, string $status, int $actorUserId): void
     {
+        $reminder = $this->findReminderById($reminderId);
+        if ($reminder === null) {
+            return;
+        }
+
         $statement = $this->db->prepare(
             'UPDATE booking_reminders
              SET status = :status,
@@ -154,6 +159,42 @@ final class BookingReminderRepository extends BaseRepository
             'dismissed_status' => $status,
             'updated_by_user_id' => $actorUserId,
         ]);
+
+        if ((int) ($reminder['system_generated'] ?? 0) !== 1) {
+            return;
+        }
+
+        $siblingStatement = $this->db->prepare(
+            'UPDATE booking_reminders
+             SET status = :status,
+                 completed_at = CASE WHEN :completed_status = "completed" THEN NOW() ELSE NULL END,
+                 dismissed_at = CASE WHEN :dismissed_status = "dismissed" THEN NOW() ELSE NULL END,
+                 updated_by_user_id = :updated_by_user_id
+             WHERE id <> :id
+               AND system_generated = 1
+               AND booking_id = :booking_id
+               AND reminder_type = :reminder_type
+               AND COALESCE(traveler_id, 0) = :traveler_id
+               AND COALESCE(booking_service_id, 0) = :booking_service_id
+               AND COALESCE(customer_receipt_id, 0) = :customer_receipt_id
+               AND COALESCE(supplier_payment_id, 0) = :supplier_payment_id
+               AND COALESCE(supplier_obligation_id, 0) = :supplier_obligation_id
+               AND status IN ("open", "due")'
+        );
+        $siblingStatement->execute([
+            'id' => $reminderId,
+            'status' => $status,
+            'completed_status' => $status,
+            'dismissed_status' => $status,
+            'updated_by_user_id' => $actorUserId,
+            'booking_id' => (int) ($reminder['booking_id'] ?? 0),
+            'reminder_type' => (string) ($reminder['reminder_type'] ?? ''),
+            'traveler_id' => (int) ($reminder['traveler_id'] ?? 0),
+            'booking_service_id' => (int) ($reminder['booking_service_id'] ?? 0),
+            'customer_receipt_id' => (int) ($reminder['customer_receipt_id'] ?? 0),
+            'supplier_payment_id' => (int) ($reminder['supplier_payment_id'] ?? 0),
+            'supplier_obligation_id' => (int) ($reminder['supplier_obligation_id'] ?? 0),
+        ]);
     }
 
     public function upsertSystemReminder(array $data): void
@@ -163,6 +204,10 @@ final class BookingReminderRepository extends BaseRepository
             $this->createReminder($data);
             return;
         }
+
+        $existingStatus = strtolower(trim((string) ($existing['status'] ?? 'open')));
+        $preserveClosedState = in_array($existingStatus, ['completed', 'dismissed'], true);
+        $nextStatus = $preserveClosedState ? $existingStatus : (string) $data['status'];
 
         $statement = $this->db->prepare(
             'UPDATE booking_reminders
@@ -197,9 +242,9 @@ final class BookingReminderRepository extends BaseRepository
             'due_at' => $data['due_at'],
             'channel' => $data['channel'] ?? null,
             'owner_label' => $data['owner_label'] ?? null,
-            'status' => $data['status'],
-            'completed_status' => $data['status'],
-            'dismissed_status' => $data['status'],
+            'status' => $nextStatus,
+            'completed_status' => $nextStatus,
+            'dismissed_status' => $nextStatus,
             'priority' => $data['priority'] ?? 'normal',
             'updated_by_user_id' => $data['actor_user_id'] ?? null,
         ]);

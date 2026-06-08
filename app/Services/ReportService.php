@@ -27,6 +27,7 @@ final class ReportService extends Service
         'accounting_integrity' => 'Accounting Integrity Checks',
         'receivable_aging' => 'Receivable Aging',
         'payable_aging' => 'Payable Aging',
+        'reminder_hub' => 'Reminder Hub',
         'service_profit' => 'Service Profit',
         'branch_performance' => 'Branch Performance Summary',
         'customer_outstanding' => 'Customer Outstanding',
@@ -400,6 +401,32 @@ final class ReportService extends Service
                 ];
                 break;
 
+            case 'reminder_hub':
+                $reportData = $repository->reminderHub(
+                    $filters['branchScopeIds'],
+                    $filters['dateFrom'],
+                    $filters['dateTo'],
+                    $filters['reminderStatus'],
+                    $filters['reminderType'],
+                    $filters['reminderServiceType'],
+                    $filters['reminderSearch']
+                );
+                [$rows, $summaryCards] = $this->reminderHubReport($reportData);
+                $columns = [
+                    ['key' => 'due_at', 'label' => 'Due'],
+                    ['key' => 'priority', 'label' => 'Priority'],
+                    ['key' => 'reminder_type', 'label' => 'Type'],
+                    ['key' => 'service_type', 'label' => 'Service'],
+                    ['key' => 'customer_name', 'label' => 'Customer'],
+                    ['key' => 'contact_mobile', 'label' => 'Mobile'],
+                    ['key' => 'booking_reference', 'label' => 'Booking'],
+                    ['key' => 'title', 'label' => 'Task'],
+                    ['key' => 'channel', 'label' => 'Channel'],
+                    ['key' => 'status', 'label' => 'Status'],
+                    ['key' => 'open_booking', 'label' => 'Open'],
+                ];
+                break;
+
             case 'service_profit':
                 $reportData = $repository->serviceProfit($filters['branchScopeIds'], $filters['dateFrom'], $filters['dateTo']);
                 [$rows, $summaryCards] = $this->serviceProfitReport(
@@ -578,6 +605,9 @@ final class ReportService extends Service
                     ['key' => 'currency', 'label' => 'Curr.'],
                     ['key' => 'sale_amount', 'label' => 'Sale'],
                     ['key' => 'supplier_cost', 'label' => 'Cost'],
+                    ['key' => 'refund_source_account', 'label' => 'Refund Source'],
+                    ['key' => 'refund_destination_detail', 'label' => 'Destination'],
+                    ['key' => 'transfer_reference', 'label' => 'Transaction ID / Ref.'],
                     ['key' => 'service_status', 'label' => 'Status'],
                     ['key' => 'ticket_remarks', 'label' => 'Remarks'],
                 ];
@@ -716,6 +746,9 @@ final class ReportService extends Service
             'receivableAgingSummaryRows' => $receivableAgingSummaryRows,
             'receivableAgingSummaryColumns' => $receivableAgingSummaryColumns,
             'branchOptions' => $branchOptions,
+            'reminderStatusOptions' => $this->reminderStatusOptions(),
+            'reminderTypeFilterOptions' => $this->reminderTypeFilterOptions(),
+            'reminderServiceTypeOptions' => $this->reminderServiceTypeOptions(),
             'csvFilename' => $filters['report'] . '_' . date('Ymd_His') . '.csv',
         ];
     }
@@ -735,6 +768,7 @@ final class ReportService extends Service
 
         $repository = new ReportRepository($this->app);
         $periods = [];
+        $branchLocalPeriods = [];
 
         foreach ($periodRanges as $key => [$dateFrom, $dateTo]) {
             $grossProfitRows = $repository->grossProfitSummary($accessibleBranchIds, $dateFrom, $dateTo);
@@ -765,6 +799,13 @@ final class ReportService extends Service
                 'pkr_total_expenses' => 'PKR ' . $this->money($this->convertCurrencyMapToPkr($expenseTotals, $pkrRates)),
                 'pkr_net_profit' => 'PKR ' . $this->money($this->convertCurrencyMapToPkr($netProfitTotals, $pkrRates)),
             ];
+
+            $branchLocalPeriods[$key] = [
+                'label' => (string) ($periods[$key]['label'] ?? 'Period'),
+                'branches' => $this->formatBranchLocalDashboardRows(
+                    $repository->branchLocalDashboard($accessibleBranchIds, $dateFrom, $dateTo)
+                ),
+            ];
         }
 
         $monthDateFrom = $periodRanges['this_month'][0];
@@ -788,9 +829,109 @@ final class ReportService extends Service
 
         return [
             'periods' => $periods,
+            'branchLocalPeriods' => $branchLocalPeriods,
             'expenseByBranch' => array_map(fn (array $row): array => $this->formatExpenseBreakdownRow($row, $dashboardRates), $expenseByBranch),
             'expenseByCategory' => array_map(fn (array $row): array => $this->formatExpenseBreakdownRow($row, $dashboardRates, true), $expenseByCategory),
         ];
+    }
+
+    private function formatBranchLocalDashboardRows(array $data): array
+    {
+        $rows = [];
+
+        foreach (($data['branches'] ?? []) as $branch) {
+            $branchId = (int) ($branch['branch_id'] ?? 0);
+            if ($branchId <= 0) {
+                continue;
+            }
+
+            $rows[$branchId] = [
+                'branch_id' => $branchId,
+                'branch_name' => (string) ($branch['branch_name'] ?? 'Branch'),
+                'base_currency' => strtoupper(trim((string) ($branch['base_currency'] ?? 'PKR'))),
+                'sales' => 0.0,
+                'supplier_cost' => 0.0,
+                'expenses' => 0.0,
+                'net_profit' => 0.0,
+                'pending_fx_count' => 0,
+            ];
+        }
+
+        $ensureBranch = static function (array $source) use (&$rows): int {
+            $branchId = (int) ($source['branch_id'] ?? 0);
+            if ($branchId <= 0) {
+                return 0;
+            }
+
+            if (! isset($rows[$branchId])) {
+                $rows[$branchId] = [
+                    'branch_id' => $branchId,
+                    'branch_name' => (string) ($source['branch_name'] ?? 'Branch'),
+                    'base_currency' => strtoupper(trim((string) ($source['base_currency'] ?? 'PKR'))),
+                    'sales' => 0.0,
+                    'supplier_cost' => 0.0,
+                    'expenses' => 0.0,
+                    'net_profit' => 0.0,
+                    'pending_fx_count' => 0,
+                ];
+            }
+
+            return $branchId;
+        };
+
+        foreach (($data['baseServices'] ?? []) as $row) {
+            $branchId = $ensureBranch($row);
+            if ($branchId <= 0) {
+                continue;
+            }
+
+            $rows[$branchId]['sales'] += (float) ($row['base_sales'] ?? 0);
+            $rows[$branchId]['supplier_cost'] += (float) ($row['base_supplier_cost'] ?? 0);
+        }
+
+        foreach (($data['crossCustomerAllocations'] ?? []) as $row) {
+            $branchId = $ensureBranch($row);
+            if ($branchId <= 0) {
+                continue;
+            }
+
+            $rows[$branchId]['sales'] += (float) ($row['converted_sales'] ?? 0);
+            $rows[$branchId]['pending_fx_count'] += (int) ($row['pending_fx_count'] ?? 0);
+        }
+
+        foreach (($data['crossSupplierAllocations'] ?? []) as $row) {
+            $branchId = $ensureBranch($row);
+            if ($branchId <= 0) {
+                continue;
+            }
+
+            $rows[$branchId]['supplier_cost'] += (float) ($row['converted_supplier_cost'] ?? 0);
+            $rows[$branchId]['pending_fx_count'] += (int) ($row['pending_fx_count'] ?? 0);
+        }
+
+        foreach (($data['expenses'] ?? []) as $row) {
+            $branchId = $ensureBranch($row);
+            if ($branchId <= 0) {
+                continue;
+            }
+
+            $rows[$branchId]['expenses'] += (float) ($row['base_expenses'] ?? 0);
+            $rows[$branchId]['pending_fx_count'] += (int) ($row['pending_fx_count'] ?? 0);
+        }
+
+        foreach ($rows as &$row) {
+            $row['sales'] = round((float) $row['sales'], 2);
+            $row['supplier_cost'] = round((float) $row['supplier_cost'], 2);
+            $row['expenses'] = round((float) $row['expenses'], 2);
+            $row['net_profit'] = round($row['sales'] - $row['supplier_cost'] - $row['expenses'], 2);
+            $row['sales_label'] = $row['base_currency'] . ' ' . $this->money($row['sales']);
+            $row['supplier_cost_label'] = $row['base_currency'] . ' ' . $this->money($row['supplier_cost']);
+            $row['expenses_label'] = $row['base_currency'] . ' ' . $this->money($row['expenses']);
+            $row['net_profit_label'] = $row['base_currency'] . ' ' . $this->money($row['net_profit']);
+        }
+        unset($row);
+
+        return array_values($rows);
     }
 
     private function validatedFilters(array $query, array $accessibleBranchIds): array
@@ -818,6 +959,25 @@ final class ReportService extends Service
         $dateFrom = $this->normalizeOptionalDate((string) ($query['date_from'] ?? ''));
         $dateTo = $this->normalizeOptionalDate((string) ($query['date_to'] ?? ''));
         $asOfDate = $this->normalizeRequiredDate((string) ($query['as_of_date'] ?? date('Y-m-d')), 'As of date');
+        $reminderStatus = strtolower(trim((string) ($query['reminder_status'] ?? 'active')));
+        if (! array_key_exists($reminderStatus, $this->reminderStatusOptions())) {
+            throw new RuntimeException('Please select a valid reminder status filter.');
+        }
+
+        $reminderType = trim((string) ($query['reminder_type'] ?? ''));
+        if ($reminderType !== '' && ! array_key_exists($reminderType, $this->reminderTypeFilterOptions())) {
+            throw new RuntimeException('Please select a valid reminder type filter.');
+        }
+
+        $reminderServiceType = strtolower(trim((string) ($query['reminder_service_type'] ?? '')));
+        if ($reminderServiceType !== '' && ! array_key_exists($reminderServiceType, $this->reminderServiceTypeOptions())) {
+            throw new RuntimeException('Please select a valid reminder service filter.');
+        }
+
+        $reminderSearch = trim((string) ($query['reminder_search'] ?? ''));
+        if (mb_strlen($reminderSearch) > 120) {
+            throw new RuntimeException('Reminder search is too long.');
+        }
 
         if ($dateFrom !== null && $dateTo !== null && $dateFrom > $dateTo) {
             throw new RuntimeException('Date from cannot be later than date to.');
@@ -832,6 +992,143 @@ final class ReportService extends Service
             'dateFrom' => $dateFrom,
             'dateTo' => $dateTo,
             'asOfDate' => $asOfDate,
+            'reminderStatus' => $reminderStatus,
+            'reminderType' => $reminderType,
+            'reminderServiceType' => $reminderServiceType,
+            'reminderSearch' => $reminderSearch,
+        ];
+    }
+
+    private function reminderHubReport(array $rows): array
+    {
+        $now = time();
+        $counts = [
+            'active' => 0,
+            'due' => 0,
+            'overdue' => 0,
+            'high' => 0,
+            'passport' => 0,
+        ];
+        $reportRows = [];
+
+        foreach ($rows as $row) {
+            $status = strtolower(trim((string) ($row['status'] ?? 'open')));
+            $priority = strtolower(trim((string) ($row['priority'] ?? 'normal')));
+            $type = strtolower(trim((string) ($row['reminder_type'] ?? 'custom_manual')));
+            $dueAtRaw = (string) ($row['due_at'] ?? '');
+            $dueAtTimestamp = $dueAtRaw !== '' ? strtotime($dueAtRaw) : false;
+            $bookingId = (int) ($row['booking_id'] ?? 0);
+            $travelerId = (int) ($row['traveler_id'] ?? 0);
+            $customerTravelerId = (int) ($row['customer_traveler_id'] ?? 0);
+
+            if (in_array($status, ['open', 'due'], true)) {
+                $counts['active']++;
+            }
+            if ($status === 'due') {
+                $counts['due']++;
+            }
+            if ($dueAtTimestamp !== false && in_array($status, ['open', 'due'], true) && $dueAtTimestamp < $now) {
+                $counts['overdue']++;
+            }
+            if ($priority === 'high') {
+                $counts['high']++;
+            }
+            if ($type === 'passport_expiry') {
+                $counts['passport']++;
+            }
+
+            $linkedTo = 'Booking File';
+            if (trim((string) ($row['traveler_name'] ?? '')) !== '') {
+                $linkedTo = 'Traveler / ' . (string) $row['traveler_name'];
+            } elseif (trim((string) ($row['service_line_reference'] ?? '')) !== '') {
+                $linkedTo = 'Service / ' . (string) $row['service_line_reference'];
+            } elseif (trim((string) ($row['customer_receipt_no'] ?? '')) !== '') {
+                $linkedTo = 'Receipt / ' . (string) $row['customer_receipt_no'];
+            } elseif (trim((string) ($row['supplier_payment_no'] ?? '')) !== '') {
+                $linkedTo = 'Supplier Payment / ' . (string) $row['supplier_payment_no'];
+            } elseif (trim((string) ($row['supplier_name'] ?? '')) !== '' || trim((string) ($row['supplier_obligation_service_line'] ?? '')) !== '') {
+                $linkedTo = 'Supplier Obligation / ' . trim((string) (($row['supplier_name'] ?? 'Supplier') . ' ' . ($row['supplier_obligation_service_line'] ?? '')));
+            }
+
+            $customerDetailsHref = '';
+            if ($customerTravelerId > 0) {
+                $query = ['traveler_id' => $customerTravelerId, 'customer_edit' => '1'];
+                if ($bookingId > 0) {
+                    $query = ['booking_id' => $bookingId] + $query;
+                }
+                $customerDetailsHref = url('/workspace?' . http_build_query($query));
+            } elseif ($bookingId > 0) {
+                $customerDetailsHref = url('/workspace?booking_id=' . $bookingId);
+            }
+
+            $reportRows[] = [
+                'due_at' => $dueAtTimestamp !== false ? date('Y-m-d H:i', $dueAtTimestamp) : $dueAtRaw,
+                'priority' => ucfirst($priority),
+                'reminder_type' => $this->reminderTypeFilterOptions()[$type] ?? ucwords(str_replace('_', ' ', $type)),
+                'service_type' => $this->reminderServiceTypeOptions()[(string) ($row['service_type'] ?? '')] ?? ((string) ($row['service_type'] ?? '') !== '' ? ucwords((string) $row['service_type']) : '-'),
+                'customer_name' => (string) ($row['customer_name'] ?? 'Customer'),
+                'customer_name_href' => $customerDetailsHref,
+                'contact_mobile' => trim((string) ($row['contact_mobile'] ?? '')) !== '' ? (string) $row['contact_mobile'] : '-',
+                'booking_reference' => (string) ($row['booking_reference'] ?? ''),
+                'booking_reference_href' => $bookingId > 0 ? url('/workspace?booking_id=' . $bookingId . '#dock-panel-reminders') : '',
+                'linked_to' => $linkedTo,
+                'title' => (string) ($row['title'] ?? ''),
+                'owner_label' => trim((string) ($row['owner_label'] ?? '')) !== '' ? (string) $row['owner_label'] : '-',
+                'channel' => trim((string) ($row['channel'] ?? '')) !== '' ? (string) $row['channel'] : '-',
+                'status' => ucwords($status),
+                'open_booking' => 'Open',
+                'open_booking_href' => $bookingId > 0 ? url('/workspace?booking_id=' . $bookingId . '#dock-panel-reminders') : '',
+            ];
+        }
+
+        $summaryCards = [
+            ['label' => 'Active Reminders', 'value' => (string) $counts['active'], 'tone' => 'reminder-active'],
+            ['label' => 'Due Now', 'value' => (string) $counts['due'], 'tone' => 'reminder-due'],
+            ['label' => 'Overdue', 'value' => (string) $counts['overdue'], 'tone' => 'reminder-overdue'],
+            ['label' => 'High Priority', 'value' => (string) $counts['high'], 'tone' => 'reminder-priority'],
+            ['label' => 'Passport Queue', 'value' => (string) $counts['passport'], 'tone' => 'reminder-passport'],
+        ];
+
+        return [$reportRows, $summaryCards];
+    }
+
+    private function reminderStatusOptions(): array
+    {
+        return [
+            'active' => 'Active Only',
+            'all' => 'All Statuses',
+            'overdue' => 'Overdue',
+            'upcoming' => 'Upcoming',
+            'open' => 'Open',
+            'due' => 'Due',
+            'completed' => 'Completed',
+            'dismissed' => 'Dismissed',
+        ];
+    }
+
+    private function reminderTypeFilterOptions(): array
+    {
+        return [
+            'due_date' => 'Due Date Reminder',
+            'passport_expiry' => 'Passport Expiry Reminder',
+            'visa_expiry' => 'Visa Expiry Reminder',
+            'supplier_payment' => 'Supplier Payment Reminder',
+            'document_missing' => 'Document Missing Reminder',
+            'travel_date' => 'Travel Date Reminder',
+            'custom_manual' => 'Custom Manual Reminder',
+        ];
+    }
+
+    private function reminderServiceTypeOptions(): array
+    {
+        return [
+            'air ticket' => 'Air Ticket',
+            'visa' => 'Visa',
+            'umrah' => 'Umrah',
+            'hotel' => 'Hotel',
+            'transport' => 'Transport',
+            'tourism' => 'Tourism',
+            'other' => 'Other',
         ];
     }
 

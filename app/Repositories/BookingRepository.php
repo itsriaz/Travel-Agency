@@ -25,6 +25,18 @@ final class BookingRepository extends BaseRepository
         return $statement->fetchAll() ?: [];
     }
 
+    public function activeBranchDirectory(): array
+    {
+        $statement = $this->db->query(
+            'SELECT id, code, name, city, country_code, base_currency
+             FROM branches
+             WHERE is_active = 1
+             ORDER BY id ASC'
+        );
+
+        return $statement->fetchAll() ?: [];
+    }
+
     public function createBooking(array $bookingData, array $partyData): int
     {
         return $this->transaction(function () use ($bookingData, $partyData): int {
@@ -149,13 +161,18 @@ final class BookingRepository extends BaseRepository
                 bp.contact_mobile,
                 bp.passport_number,
                 bp.notes AS party_notes,
+                br.code AS branch_code,
                 br.name AS branch_name,
                 br.city AS branch_city,
                 br.country_code,
-                br.base_currency
+                br.base_currency,
+                CASE WHEN created_user.username IS NOT NULL AND created_user.username <> "" THEN created_user.username ELSE created_user.email END AS created_by_name,
+                CASE WHEN updated_user.username IS NOT NULL AND updated_user.username <> "" THEN updated_user.username ELSE updated_user.email END AS updated_by_name
              FROM bookings b
              INNER JOIN branches br ON br.id = b.branch_id
              LEFT JOIN booking_parties bp ON bp.booking_id = b.id
+             LEFT JOIN users created_user ON created_user.id = b.created_by_user_id
+             LEFT JOIN users updated_user ON updated_user.id = b.updated_by_user_id
              WHERE b.id = :id
              LIMIT 1'
         );
@@ -192,13 +209,18 @@ final class BookingRepository extends BaseRepository
                 bp.contact_mobile,
                 bp.passport_number,
                 bp.notes AS party_notes,
+                br.code AS branch_code,
                 br.name AS branch_name,
                 br.city AS branch_city,
                 br.country_code,
-                br.base_currency
+                br.base_currency,
+                CASE WHEN created_user.username IS NOT NULL AND created_user.username <> '' THEN created_user.username ELSE created_user.email END AS created_by_name,
+                CASE WHEN updated_user.username IS NOT NULL AND updated_user.username <> '' THEN updated_user.username ELSE updated_user.email END AS updated_by_name
              FROM bookings b
              INNER JOIN branches br ON br.id = b.branch_id
              LEFT JOIN booking_parties bp ON bp.booking_id = b.id
+             LEFT JOIN users created_user ON created_user.id = b.created_by_user_id
+             LEFT JOIN users updated_user ON updated_user.id = b.updated_by_user_id
              WHERE b.booking_reference = ?
                AND b.branch_id IN ({$placeholders})
              LIMIT 1"

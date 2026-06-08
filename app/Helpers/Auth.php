@@ -47,6 +47,13 @@ final class Auth
         return $user['activeBranchId'] ?? $user['active_branch_id'] ?? null;
     }
 
+    public static function activeBranchName(): ?string
+    {
+        $user = self::user();
+
+        return $user['activeBranchName'] ?? $user['active_branch_name'] ?? null;
+    }
+
     public static function mustChangePassword(): bool
     {
         $user = self::user();
