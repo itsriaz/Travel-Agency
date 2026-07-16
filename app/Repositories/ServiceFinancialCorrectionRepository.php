@@ -1,0 +1,119 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Repositories;
+
+final class ServiceFinancialCorrectionRepository extends BaseRepository
+{
+    public function recordCorrection(array $data): int
+    {
+        return $this->transaction(function () use ($data): int {
+            $statement = $this->db->prepare(
+                'INSERT INTO service_financial_corrections (
+                    booking_service_id,
+                    booking_id,
+                    branch_id,
+                    booking_reference,
+                    service_line_reference,
+                    service_type,
+                    correction_date,
+                    correction_reason,
+                    correction_note,
+                    prior_invoice_currency,
+                    new_invoice_currency,
+                    prior_cost_currency,
+                    new_cost_currency,
+                    prior_pricing_exchange_rate,
+                    new_pricing_exchange_rate,
+                    prior_pricing_rate_effective_date,
+                    new_pricing_rate_effective_date,
+                    prior_sale_price,
+                    new_sale_price,
+                    prior_purchase_cost,
+                    new_purchase_cost,
+                    prior_service_charge,
+                    new_service_charge,
+                    prior_discount_amount,
+                    new_discount_amount,
+                    prior_vat_amount,
+                    new_vat_amount,
+                    prior_final_sale_price,
+                    new_final_sale_price,
+                    released_customer_credit_amount,
+                    released_supplier_credit_amount,
+                    created_by_user_id
+                 ) VALUES (
+                    :booking_service_id,
+                    :booking_id,
+                    :branch_id,
+                    :booking_reference,
+                    :service_line_reference,
+                    :service_type,
+                    :correction_date,
+                    :correction_reason,
+                    :correction_note,
+                    :prior_invoice_currency,
+                    :new_invoice_currency,
+                    :prior_cost_currency,
+                    :new_cost_currency,
+                    :prior_pricing_exchange_rate,
+                    :new_pricing_exchange_rate,
+                    :prior_pricing_rate_effective_date,
+                    :new_pricing_rate_effective_date,
+                    :prior_sale_price,
+                    :new_sale_price,
+                    :prior_purchase_cost,
+                    :new_purchase_cost,
+                    :prior_service_charge,
+                    :new_service_charge,
+                    :prior_discount_amount,
+                    :new_discount_amount,
+                    :prior_vat_amount,
+                    :new_vat_amount,
+                    :prior_final_sale_price,
+                    :new_final_sale_price,
+                    :released_customer_credit_amount,
+                    :released_supplier_credit_amount,
+                    :created_by_user_id
+                 )'
+            );
+            $statement->execute([
+                'booking_service_id' => $data['booking_service_id'],
+                'booking_id' => $data['booking_id'],
+                'branch_id' => $data['branch_id'],
+                'booking_reference' => $data['booking_reference'],
+                'service_line_reference' => $data['service_line_reference'],
+                'service_type' => $data['service_type'],
+                'correction_date' => $data['correction_date'],
+                'correction_reason' => $data['correction_reason'],
+                'correction_note' => $data['correction_note'] ?? null,
+                'prior_invoice_currency' => $data['prior_invoice_currency'] ?? 'PKR',
+                'new_invoice_currency' => $data['new_invoice_currency'] ?? 'PKR',
+                'prior_cost_currency' => $data['prior_cost_currency'] ?? 'PKR',
+                'new_cost_currency' => $data['new_cost_currency'] ?? 'PKR',
+                'prior_pricing_exchange_rate' => $data['prior_pricing_exchange_rate'] ?? 1,
+                'new_pricing_exchange_rate' => $data['new_pricing_exchange_rate'] ?? 1,
+                'prior_pricing_rate_effective_date' => $data['prior_pricing_rate_effective_date'] ?? null,
+                'new_pricing_rate_effective_date' => $data['new_pricing_rate_effective_date'] ?? null,
+                'prior_sale_price' => $data['prior_sale_price'] ?? 0,
+                'new_sale_price' => $data['new_sale_price'] ?? 0,
+                'prior_purchase_cost' => $data['prior_purchase_cost'] ?? 0,
+                'new_purchase_cost' => $data['new_purchase_cost'] ?? 0,
+                'prior_service_charge' => $data['prior_service_charge'] ?? 0,
+                'new_service_charge' => $data['new_service_charge'] ?? 0,
+                'prior_discount_amount' => $data['prior_discount_amount'] ?? 0,
+                'new_discount_amount' => $data['new_discount_amount'] ?? 0,
+                'prior_vat_amount' => $data['prior_vat_amount'] ?? 0,
+                'new_vat_amount' => $data['new_vat_amount'] ?? 0,
+                'prior_final_sale_price' => $data['prior_final_sale_price'] ?? 0,
+                'new_final_sale_price' => $data['new_final_sale_price'] ?? 0,
+                'released_customer_credit_amount' => $data['released_customer_credit_amount'] ?? 0,
+                'released_supplier_credit_amount' => $data['released_supplier_credit_amount'] ?? 0,
+                'created_by_user_id' => $data['created_by_user_id'] ?? null,
+            ]);
+
+            return (int) $this->db->lastInsertId();
+        });
+    }
+}

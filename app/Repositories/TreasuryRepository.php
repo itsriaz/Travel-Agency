@@ -282,6 +282,9 @@ final class TreasuryRepository extends BaseRepository
         }
 
         $placeholders = implode(',', array_fill(0, count($branchIds), '?'));
+        $counterpartySelect = $this->columnExists('treasury_transactions', 'counterparty_name')
+            ? ', tt.counterparty_name'
+            : ', NULL AS counterparty_name';
         $statement = $this->db->prepare(
             "SELECT
                 tt.id,
@@ -291,6 +294,7 @@ final class TreasuryRepository extends BaseRepository
                 tt.amount,
                 tt.reference_no,
                 tt.narration,
+                " . ltrim($counterpartySelect, ', ') . ",
                 tt.status,
                 tt.voided_at,
                 tt.void_reason,
@@ -315,6 +319,142 @@ final class TreasuryRepository extends BaseRepository
         $statement->execute($branchIds);
 
         return $statement->fetchAll(PDO::FETCH_ASSOC) ?: [];
+    }
+
+    public function saveDirectEntry(array $data, array $branchIds): int
+    {
+        $branchIds = array_values(array_map('intval', $branchIds));
+
+        return $this->transaction(function () use ($data, $branchIds): int {
+            $branchId = (int) ($data['branch_id'] ?? 0);
+            if ($branchId <= 0 || ! in_array($branchId, $branchIds, true)) {
+                throw new RuntimeException('Please select an accessible branch for the direct treasury entry.');
+            }
+
+            $transactionType = trim((string) ($data['transaction_type'] ?? ''));
+            if (! in_array($transactionType, ['adjustment_increase', 'adjustment_decrease'], true)) {
+                throw new RuntimeException('Please select a valid direct treasury entry type.');
+            }
+
+            $transactionDate = trim((string) ($data['transaction_date'] ?? ''));
+            if ($transactionDate === '') {
+                throw new RuntimeException('Please select the direct treasury entry date.');
+            }
+
+            $currency = strtoupper(trim((string) ($data['currency'] ?? 'PKR')));
+            if ($currency === '') {
+                throw new RuntimeException('Please select the direct treasury entry currency.');
+            }
+
+            $amount = round((float) ($data['amount'] ?? 0), 2);
+            if ($amount <= 0) {
+                throw new RuntimeException('Please enter a direct treasury amount greater than zero.');
+            }
+
+            $treasuryAccountId = (int) ($data['treasury_account_id'] ?? 0);
+            if ($treasuryAccountId <= 0) {
+                throw new RuntimeException('Please select the cash or bank account for this direct treasury entry.');
+            }
+
+            $account = $this->validatedTransferAccount($treasuryAccountId, $branchId, $currency);
+            $availableBalance = $this->currentBalanceForAccountId($treasuryAccountId);
+            if ($transactionType === 'adjustment_decrease' && round($availableBalance + 0.005, 2) < $amount) {
+                throw new RuntimeException(
+                    'Selected treasury account does not have enough balance. Available: '
+                    . number_format($availableBalance, 2)
+                    . ' ' . $currency . '.'
+                );
+            }
+
+            $counterpartyName = trim((string) ($data['counterparty_name'] ?? ''));
+            $counterpartyName = $counterpartyName !== '' ? mb_substr($counterpartyName, 0, 190) : null;
+            $referenceNo = trim((string) ($data['reference_no'] ?? ''));
+            $referenceNo = $referenceNo !== '' ? mb_substr($referenceNo, 0, 100) : null;
+            $remarks = trim((string) ($data['narration'] ?? ''));
+            $remarks = $remarks !== '' ? mb_substr($remarks, 0, 500) : null;
+
+            $directionLabel = $transactionType === 'adjustment_increase' ? 'Money In' : 'Money Out';
+            $defaultNarration = $directionLabel
+                . ($counterpartyName !== null ? ' - ' . $counterpartyName : '')
+                . ($remarks !== null ? ' - ' . $remarks : '');
+
+            $accounting = new AccountingRepository($this->app);
+            $journalEntryId = $accounting->postDirectTreasuryEntry([
+                'branch_id' => $branchId,
+                'entry_date' => $transactionDate,
+                'currency' => $currency,
+                'amount' => $amount,
+                'transaction_type' => $transactionType,
+                'source_reference' => $referenceNo,
+                'narration' => $defaultNarration,
+                'counterparty_name' => $counterpartyName,
+                'treasury_account_id' => $treasuryAccountId,
+                'actor_user_id' => $data['created_by_user_id'] ?? null,
+            ]);
+
+            $hasCounterpartyColumn = $this->columnExists('treasury_transactions', 'counterparty_name');
+            $columns = [
+                'branch_id',
+                'transaction_type',
+                'transaction_date',
+                'currency',
+                'from_treasury_account_id',
+                'to_treasury_account_id',
+                'amount',
+                'reference_no',
+                'narration',
+                'journal_entry_id',
+                'status',
+                'created_by_user_id',
+            ];
+            if ($hasCounterpartyColumn) {
+                array_splice($columns, 8, 0, ['counterparty_name']);
+            }
+
+            $payload = [
+                'branch_id' => $branchId,
+                'transaction_type' => $transactionType,
+                'transaction_date' => $transactionDate,
+                'currency' => $currency,
+                'from_treasury_account_id' => $transactionType === 'adjustment_decrease' ? $treasuryAccountId : null,
+                'to_treasury_account_id' => $transactionType === 'adjustment_increase' ? $treasuryAccountId : null,
+                'amount' => $amount,
+                'reference_no' => $referenceNo,
+                'counterparty_name' => $counterpartyName,
+                'narration' => $defaultNarration,
+                'journal_entry_id' => $journalEntryId,
+                'status' => 'posted',
+                'created_by_user_id' => $data['created_by_user_id'] ?? null,
+            ];
+
+            $placeholders = array_map(static fn (string $column): string => ':' . $column, $columns);
+            $statement = $this->db->prepare(sprintf(
+                'INSERT INTO treasury_transactions (%s) VALUES (%s)',
+                implode(', ', $columns),
+                implode(', ', $placeholders)
+            ));
+            $statement->execute(array_intersect_key($payload, array_flip($columns)));
+
+            $transactionId = (int) $this->db->lastInsertId();
+
+            AuditLog::record($this->app, 'treasury.direct_entry.posted', [
+                'user_id' => $data['created_by_user_id'] ?? null,
+                'treasury_transaction_id' => $transactionId,
+                'journal_entry_id' => $journalEntryId,
+                'branch_id' => $branchId,
+                'transaction_type' => $transactionType,
+                'transaction_date' => $transactionDate,
+                'currency' => $currency,
+                'amount' => $amount,
+                'treasury_account_id' => $treasuryAccountId,
+                'treasury_account_name' => (string) ($account['account_name'] ?? ''),
+                'counterparty_name' => $counterpartyName,
+                'reference_no' => $referenceNo,
+                'narration' => $defaultNarration,
+            ]);
+
+            return $transactionId;
+        });
     }
 
     public function eligiblePaymentTreasuryAccounts(int $branchId, string $currency, string $paymentMethod): array
@@ -378,6 +518,7 @@ final class TreasuryRepository extends BaseRepository
             'SELECT
                 id,
                 branch_id,
+                linked_account_id,
                 account_type,
                 account_name,
                 account_code,
@@ -426,6 +567,7 @@ final class TreasuryRepository extends BaseRepository
             'cash' => ['cash'],
             'bank_transfer' => ['bank'],
             'wallet', 'wallet_mobile', 'mobile_wallet' => ['wallet'],
+            'debit_card', 'credit_card', 'card' => ['bank', 'card_clearing'],
             default => [],
         };
     }
@@ -949,33 +1091,44 @@ final class TreasuryRepository extends BaseRepository
             $transfer = $statement->fetch(PDO::FETCH_ASSOC);
 
             if ($transfer === false) {
-                throw new RuntimeException('The selected treasury transfer could not be found.');
+                throw new RuntimeException('The selected treasury transaction could not be found.');
             }
 
             $branchId = (int) ($transfer['branch_id'] ?? 0);
             if (! in_array($branchId, $branchIds, true)) {
-                throw new RuntimeException('You do not have access to reverse this treasury transfer.');
+                throw new RuntimeException('You do not have access to reverse this treasury transaction.');
             }
 
             $status = str_replace(' ', '_', mb_strtolower(trim((string) ($transfer['status'] ?? ''))));
             if ($status === 'void') {
-                throw new RuntimeException('This treasury transfer is already void.');
+                throw new RuntimeException('This treasury transaction is already void.');
             }
 
             if ((int) ($transfer['reversal_journal_entry_id'] ?? 0) > 0) {
-                throw new RuntimeException('This treasury transfer already has a reversal journal recorded.');
+                throw new RuntimeException('This treasury transaction already has a reversal journal recorded.');
             }
 
             $accounting = new AccountingRepository($this->app);
-            $reversalJournalEntryId = $accounting->postTreasuryTransferVoidReversal([
-                'journal_entry_id' => (int) ($transfer['journal_entry_id'] ?? 0),
-                'branch_id' => $branchId,
-                'entry_date' => date('Y-m-d'),
-                'currency' => (string) ($transfer['currency'] ?? 'PKR'),
-                'source_reference' => 'VOID-TR-' . $transferId,
-                'narration' => 'Treasury transfer void reversal for transfer #' . $transferId,
-                'actor_user_id' => $actorUserId,
-            ]);
+            $transactionType = (string) ($transfer['transaction_type'] ?? '');
+            $reversalJournalEntryId = in_array($transactionType, ['adjustment_increase', 'adjustment_decrease'], true)
+                ? $accounting->postDirectTreasuryEntryVoidReversal([
+                    'journal_entry_id' => (int) ($transfer['journal_entry_id'] ?? 0),
+                    'branch_id' => $branchId,
+                    'entry_date' => date('Y-m-d'),
+                    'currency' => (string) ($transfer['currency'] ?? 'PKR'),
+                    'source_reference' => 'VOID-DTE-' . $transferId,
+                    'narration' => 'Direct treasury entry void reversal for transaction #' . $transferId,
+                    'actor_user_id' => $actorUserId,
+                ])
+                : $accounting->postTreasuryTransferVoidReversal([
+                    'journal_entry_id' => (int) ($transfer['journal_entry_id'] ?? 0),
+                    'branch_id' => $branchId,
+                    'entry_date' => date('Y-m-d'),
+                    'currency' => (string) ($transfer['currency'] ?? 'PKR'),
+                    'source_reference' => 'VOID-TR-' . $transferId,
+                    'narration' => 'Treasury transfer void reversal for transfer #' . $transferId,
+                    'actor_user_id' => $actorUserId,
+                ]);
 
             $update = $this->db->prepare(
                 'UPDATE treasury_transactions
@@ -993,11 +1146,11 @@ final class TreasuryRepository extends BaseRepository
                 'id' => $transferId,
             ]);
 
-            AuditLog::record($this->app, 'treasury.transfer.voided', [
+            AuditLog::record($this->app, in_array($transactionType, ['adjustment_increase', 'adjustment_decrease'], true) ? 'treasury.direct_entry.voided' : 'treasury.transfer.voided', [
                 'user_id' => $actorUserId,
                 'treasury_transaction_id' => $transferId,
                 'branch_id' => $branchId,
-                'transaction_type' => (string) ($transfer['transaction_type'] ?? ''),
+                'transaction_type' => $transactionType,
                 'currency' => (string) ($transfer['currency'] ?? 'PKR'),
                 'amount' => round((float) ($transfer['amount'] ?? 0), 2),
                 'reference_no' => (string) ($transfer['reference_no'] ?? ''),

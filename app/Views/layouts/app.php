@@ -48,6 +48,12 @@ $isCurrentPath = static function (string $path) use ($requestPath): bool {
             <div class="brand-subtitle"><?= e($isWorkspacePage ? $branchSubtitle : $adminSubtitle) ?></div>
         </div>
         <div class="topbar-actions">
+            <?php if ($authUser !== null): ?>
+                <div class="history-nav" data-history-nav>
+                    <button class="btn btn-sm history-nav__btn" type="button" data-history-back title="Go back to the previous screen">Back</button>
+                    <button class="btn btn-sm history-nav__btn" type="button" data-history-forward title="Go forward to the next screen">Forward</button>
+                </div>
+            <?php endif; ?>
             <a class="btn btn-sm<?= $isCurrentPath('/') ? ' is-current' : '' ?>" href="<?= e(url('/')) ?>">Dashboard</a>
             <a class="btn btn-sm<?= $isCurrentPath('/workspace') ? ' is-current' : '' ?>" href="<?= e(url('/workspace')) ?>">Booking Workspace</a>
             <?php if ($authUser !== null): ?>
@@ -75,7 +81,17 @@ $isCurrentPath = static function (string $path) use ($requestPath): bool {
                     <a class="nav-link<?= $isCurrentPath('/admin/security') ? ' is-current' : '' ?>" href="<?= e(url('/admin/security')) ?>">Admin Security</a>
                     <a class="nav-link<?= $isCurrentPath('/master-data') ? ' is-current' : '' ?>" href="<?= e(url('/master-data')) ?>">Master Data</a>
                     <a class="nav-link<?= $isCurrentPath('/accounting-engine') ? ' is-current' : '' ?>" href="<?= e(url('/accounting-engine')) ?>">Accounting Engine</a>
-                    <a class="nav-link<?= $isCurrentPath('/treasury/accounts') ? ' is-current' : '' ?>" href="<?= e(url('/treasury/accounts')) ?>">Treasury Accounts</a>
+                    <div class="nav-link-group">
+                        <a class="nav-link<?= $isCurrentPath('/treasury/accounts') ? ' is-current' : '' ?>" href="<?= e(url('/treasury/accounts')) ?>">Treasury Accounts</a>
+                        <div class="nav-submenu" aria-label="Treasury quick links">
+                            <a href="<?= e(url('/treasury/accounts#treasury-account-setup')) ?>">Add Treasury Account</a>
+                            <a href="<?= e(url('/treasury/accounts#treasury-direct-entry')) ?>">Money In / Money Out</a>
+                            <a href="<?= e(url('/treasury/accounts#treasury-transfer')) ?>">Internal Treasury Transfer</a>
+                            <a href="<?= e(url('/treasury/accounts#treasury-account-register')) ?>">Treasury Accounts</a>
+                            <a href="<?= e(url('/treasury/accounts#treasury-recent-activity')) ?>">Recent Treasury Activity</a>
+                        </div>
+                    </div>
+                    <a class="nav-link<?= $isCurrentPath('/expenses') ? ' is-current' : '' ?>" href="<?= e(url('/expenses')) ?>">Business Expenses</a>
                 <?php endif; ?>
             </div>
         </aside>
@@ -93,6 +109,41 @@ $isCurrentPath = static function (string $path) use ($requestPath): bool {
         $pageScriptVersion = is_file($pageScriptPath) ? (string) filemtime($pageScriptPath) : (string) time();
         ?>
         <script src="<?= e(asset((string) $pageScript) . '?v=' . rawurlencode($pageScriptVersion)) ?>" defer></script>
+    <?php endif; ?>
+    <?php if ($authUser !== null): ?>
+        <script>
+            (function () {
+                var backButton = document.querySelector('[data-history-back]');
+                var forwardButton = document.querySelector('[data-history-forward]');
+
+                if (!backButton || !forwardButton) {
+                    return;
+                }
+
+                if ('scrollRestoration' in window.history) {
+                    window.history.scrollRestoration = 'auto';
+                }
+
+                var updateButtons = function () {
+                    var canGoBack = window.history.length > 1 || document.referrer !== '';
+                    backButton.disabled = !canGoBack;
+                };
+
+                backButton.addEventListener('click', function () {
+                    if (window.history.length > 1 || document.referrer !== '') {
+                        window.history.back();
+                    }
+                });
+
+                forwardButton.addEventListener('click', function () {
+                    window.history.forward();
+                });
+
+                window.addEventListener('pageshow', updateButtons);
+                window.addEventListener('popstate', updateButtons);
+                updateButtons();
+            }());
+        </script>
     <?php endif; ?>
 </body>
 </html>

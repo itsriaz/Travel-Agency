@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-define('BASE_PATH', dirname(__DIR__));
+defined('BASE_PATH') || define('BASE_PATH', dirname(__DIR__));
 
 $failures = [];
 
@@ -51,7 +51,8 @@ if ($failures !== []) {
         echo ' - ' . $failure . PHP_EOL;
     }
 
-    exit(1);
+    return 1;
 }
 
 echo PHP_EOL . 'Workspace salesperson receipt readiness passed.' . PHP_EOL;
+return 0;

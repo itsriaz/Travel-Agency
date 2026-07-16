@@ -1,2 +1,0 @@
-payment_no,supplier,branch,payment_date,currency,amount_paid,allocated_to_invoice,expected_supplier_balance_after_payment
-SPAY-000001,"Hotel Partner","Imdad International Travel Agency",2026-03-18,PKR,3000,BK-000014,2000

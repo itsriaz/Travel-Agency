@@ -13,12 +13,13 @@ $options = getopt('', [
     'confirm-non-production-reset',
     'include-suppliers',
     'include-exchange-rates',
+    'include-audit-logs',
     'apply',
     'help',
 ]);
 
 if (isset($options['help'])) {
-    echo 'Usage: php scripts/reset_non_production_data.php --confirm-non-production-reset [--apply] [--include-suppliers] [--include-exchange-rates]' . PHP_EOL;
+    echo 'Usage: php scripts/reset_non_production_data.php --confirm-non-production-reset [--apply] [--include-suppliers] [--include-exchange-rates] [--include-audit-logs]' . PHP_EOL;
     echo 'Without --apply, this command prints row counts only.' . PHP_EOL;
     exit(0);
 }
@@ -42,8 +43,13 @@ $deleteTables = [
     'offline_draft_syncs',
     'booking_reminders',
     'booking_documents',
+    'booking_service_refund_details',
+    'service_financial_corrections',
+    'business_expense_corrections',
     'expense_attachments',
     'business_expenses',
+    'customer_advance_corrections',
+    'customer_advance_refunds',
     'customer_receipt_allocations',
     'customer_receipts',
     'customer_receivable_items',
@@ -67,7 +73,6 @@ $deleteTables = [
     'booking_parties',
     'bookings',
     'travelers',
-    'audit_logs',
 ];
 
 if (isset($options['include-suppliers'])) {
@@ -78,11 +83,19 @@ if (isset($options['include-exchange-rates'])) {
     $deleteTables[] = 'exchange_rates';
 }
 
+if (isset($options['include-audit-logs'])) {
+    $deleteTables[] = 'audit_logs';
+}
+
 $sequenceKeys = [
     'booking.reference.sequence',
     'customer.receipt.sequence',
     'supplier.payment.sequence',
 ];
+
+if (isset($options['include-suppliers'])) {
+    $sequenceKeys[] = 'supplier.code.sequence';
+}
 
 $tableExists = static function (PDO $db, string $table): bool {
     $statement = $db->prepare(
@@ -117,6 +130,7 @@ if (! $apply) {
     exit(0);
 }
 
+$db->exec('SET FOREIGN_KEY_CHECKS = 0');
 $db->beginTransaction();
 try {
     foreach ($deleteTables as $table) {
@@ -138,9 +152,31 @@ try {
         $db->rollBack();
     }
 
+    $db->exec('SET FOREIGN_KEY_CHECKS = 1');
     fwrite(STDERR, 'Reset failed: ' . $exception->getMessage() . PHP_EOL);
     exit(1);
 }
 
+try {
+    foreach ($deleteTables as $table) {
+        if (! $tableExists($db, $table)) {
+            continue;
+        }
+
+        $db->exec('ALTER TABLE `' . str_replace('`', '``', $table) . '` AUTO_INCREMENT = 1');
+    }
+} finally {
+    $db->exec('SET FOREIGN_KEY_CHECKS = 1');
+}
+
 echo PHP_EOL . 'Non-production data reset completed.' . PHP_EOL;
+foreach ($deleteTables as $table) {
+    $remaining = $countRows($db, $table);
+    if ($remaining > 0) {
+        fwrite(STDERR, 'Verification failed: ' . $table . ' still contains ' . $remaining . ' row(s).' . PHP_EOL);
+        exit(1);
+    }
+}
+
+echo 'Verification passed: all selected tables are empty and their AUTO_INCREMENT counters were reset.' . PHP_EOL;
 echo 'Run database/seed.php if you want to restore foundation seed users and registers.' . PHP_EOL;

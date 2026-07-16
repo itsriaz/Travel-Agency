@@ -24,6 +24,12 @@ $transferDraft = [
     'currency' => (string) ($_GET['transfer_currency'] ?? 'PKR'),
     'transaction_date' => (string) ($_GET['transaction_date'] ?? date('Y-m-d')),
 ];
+$directEntryDraft = [
+    'branch_id' => (int) ($_GET['direct_branch_id'] ?? ($branches[0]['id'] ?? 0)),
+    'transaction_type' => (string) ($_GET['direct_transaction_type'] ?? 'adjustment_increase'),
+    'currency' => (string) ($_GET['direct_currency'] ?? 'PKR'),
+    'transaction_date' => (string) ($_GET['direct_transaction_date'] ?? date('Y-m-d')),
+];
 $activeAccountsCount = count(array_filter($accounts, static fn (array $row): bool => (int) ($row['is_active'] ?? 0) === 1));
 $defaultAccountsCount = count(array_filter($accounts, static fn (array $row): bool => (int) ($row['is_default'] ?? 0) === 1));
 $cashAccountsCount = count(array_filter($accounts, static fn (array $row): bool => (string) ($row['account_type'] ?? '') === 'cash'));
@@ -280,8 +286,13 @@ $bankAccountsCount = count(array_filter($accounts, static fn (array $row): bool 
 .treasury-transfer-grid {
     gap: 12px;
 }
+.treasury-direct-grid {
+    gap: 12px;
+}
 .treasury-transfer-grid .station-field,
-.treasury-transfer-grid .station-check {
+.treasury-transfer-grid .station-check,
+.treasury-direct-grid .station-field,
+.treasury-direct-grid .station-check {
     gap: 5px;
 }
 .treasury-transfer-helper {
@@ -289,6 +300,9 @@ $bankAccountsCount = count(array_filter($accounts, static fn (array $row): bool 
     color: #6a8093;
 }
 .treasury-transfer-grid .station-command-buttons {
+    margin-top: 2px;
+}
+.treasury-direct-grid .station-command-buttons {
     margin-top: 2px;
 }
 .treasury-transfer-table .data-table th,
@@ -319,6 +333,19 @@ $bankAccountsCount = count(array_filter($accounts, static fn (array $row): bool 
 .treasury-transfer-amount {
     font-weight: 700;
     color: #14324a;
+}
+.treasury-transfer-party {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.treasury-transfer-party strong {
+    color: #102c44;
+    font-weight: 700;
+}
+.treasury-transfer-party small {
+    color: #6a8093;
+    font-size: 11px;
 }
 .treasury-status-inline {
     display: inline-flex;
@@ -413,7 +440,7 @@ $bankAccountsCount = count(array_filter($accounts, static fn (array $row): bool 
     </article>
 </section>
 
-<section class="panel compact-panel treasury-panel">
+<section class="panel compact-panel treasury-panel" id="treasury-account-setup">
     <div class="panel-header">
         <div>
             <div class="treasury-section-kicker">Account Setup</div>
@@ -511,13 +538,91 @@ $bankAccountsCount = count(array_filter($accounts, static fn (array $row): bool 
     </form>
 </section>
 
-<section class="panel compact-panel treasury-panel">
+<section class="panel compact-panel treasury-panel" id="treasury-direct-entry">
+    <div class="panel-header">
+        <div>
+            <div class="treasury-section-kicker">Direct Cash / Bank Posting</div>
+            <h2>Money In / Money Out</h2>
+        </div>
+    </div>
+
+    <form method="post" action="<?= e(url('/treasury/direct/save')) ?>" class="station-form-grid station-form-grid--6 treasury-direct-grid" data-treasury-direct-form>
+        <?= \App\Helpers\Csrf::input() ?>
+
+        <label class="station-field span-2">
+            <span>Branch</span>
+            <select name="branch_id" required data-direct-branch>
+                <?php foreach ($branches as $branch): ?>
+                    <option value="<?= e((string) $branch['id']) ?>" <?= (int) $directEntryDraft['branch_id'] === (int) $branch['id'] ? 'selected' : '' ?>>
+                        <?= e((string) $branch['name']) ?>
+                    </option>
+                <?php endforeach; ?>
+            </select>
+        </label>
+
+        <label class="station-field span-2">
+            <span>Entry Type</span>
+            <select name="transaction_type" required data-direct-type>
+                <option value="adjustment_increase" <?= $directEntryDraft['transaction_type'] === 'adjustment_increase' ? 'selected' : '' ?>>Money In</option>
+                <option value="adjustment_decrease" <?= $directEntryDraft['transaction_type'] === 'adjustment_decrease' ? 'selected' : '' ?>>Money Out</option>
+            </select>
+        </label>
+
+        <label class="station-field span-2">
+            <span>Currency</span>
+            <select name="currency" required data-direct-currency>
+                <?php foreach ($currencies as $currency): ?>
+                    <option value="<?= e((string) $currency['code']) ?>" <?= (string) $directEntryDraft['currency'] === (string) $currency['code'] ? 'selected' : '' ?>>
+                        <?= e((string) $currency['code']) ?> - <?= e((string) $currency['name']) ?>
+                    </option>
+                <?php endforeach; ?>
+            </select>
+        </label>
+
+        <label class="station-field span-2">
+            <span>Date</span>
+            <input type="date" name="transaction_date" value="<?= e((string) $directEntryDraft['transaction_date']) ?>" required>
+        </label>
+
+        <label class="station-field span-2">
+            <span>Cash / Bank Account</span>
+            <select name="treasury_account_id" required data-direct-account>
+                <option value="">Select treasury account</option>
+            </select>
+        </label>
+
+        <label class="station-field span-2">
+            <span data-direct-counterparty-label>Received From</span>
+            <input type="text" name="counterparty_name" maxlength="190" value="" placeholder="Person / company / source">
+        </label>
+
+        <label class="station-field span-2">
+            <span>Amount</span>
+            <input type="number" name="amount" min="0.01" step="0.01" value="" placeholder="0.00" required>
+        </label>
+
+        <label class="station-field span-2">
+            <span>Reference No.</span>
+            <input type="text" name="reference_no" maxlength="100" value="" placeholder="Voucher / slip / transfer ref.">
+        </label>
+
+        <label class="station-field span-2">
+            <span>Remarks</span>
+            <input type="text" name="narration" maxlength="500" value="" placeholder="Short narration for this direct treasury posting">
+        </label>
+
+        <div class="station-command-buttons span-6">
+            <button class="btn btn-primary btn-sm" type="submit">Post Direct Entry</button>
+        </div>
+    </form>
+</section>
+
+<section class="panel compact-panel treasury-panel" id="treasury-transfer">
     <div class="panel-header">
         <div>
             <div class="treasury-section-kicker">Treasury Movement</div>
             <h2>Internal Treasury Transfer</h2>
         </div>
-        <div class="treasury-panel-meta">Move money between treasury accounts without turning the movement into a fake sale, expense, or customer transaction.</div>
     </div>
 
     <form method="post" action="<?= e(url('/treasury/transfers/save')) ?>" class="station-form-grid station-form-grid--6 treasury-transfer-grid" data-treasury-transfer-form>
@@ -565,7 +670,6 @@ $bankAccountsCount = count(array_filter($accounts, static fn (array $row): bool 
             <select name="from_treasury_account_id" required data-transfer-from-account>
                 <option value="">Select source account</option>
             </select>
-            <small class="treasury-transfer-helper" data-transfer-from-helper>Cash will reduce from this account.</small>
         </label>
 
         <label class="station-field span-2">
@@ -573,7 +677,6 @@ $bankAccountsCount = count(array_filter($accounts, static fn (array $row): bool 
             <select name="to_treasury_account_id" required data-transfer-to-account>
                 <option value="">Select destination account</option>
             </select>
-            <small class="treasury-transfer-helper" data-transfer-to-helper>Bank will increase in this account.</small>
         </label>
 
         <label class="station-field span-2">
@@ -597,7 +700,7 @@ $bankAccountsCount = count(array_filter($accounts, static fn (array $row): bool 
     </form>
 </section>
 
-<section class="panel compact-panel treasury-panel treasury-table">
+<section class="panel compact-panel treasury-panel treasury-table" id="treasury-account-register">
     <div class="panel-header">
         <div>
             <div class="treasury-section-kicker">Account Register</div>
@@ -646,13 +749,13 @@ $bankAccountsCount = count(array_filter($accounts, static fn (array $row): bool 
     </div>
 </section>
 
-<section class="panel compact-panel treasury-panel treasury-transfer-table">
+<section class="panel compact-panel treasury-panel treasury-transfer-table" id="treasury-recent-activity">
     <div class="panel-header">
         <div>
-            <div class="treasury-section-kicker">Transfer History</div>
-            <h2>Recent Internal Transfers</h2>
+            <div class="treasury-section-kicker">Treasury History</div>
+            <h2>Recent Treasury Activity</h2>
         </div>
-        <div class="panel-meta"><?= e((string) count($recentTransfers)) ?> recent transfer(s)</div>
+        <div class="panel-meta"><?= e((string) count($recentTransfers)) ?> recent transaction(s)</div>
     </div>
 
     <div class="table-wrap">
@@ -673,7 +776,7 @@ $bankAccountsCount = count(array_filter($accounts, static fn (array $row): bool 
             </thead>
             <tbody>
             <?php if ($recentTransfers === []): ?>
-                <tr><td colspan="10">No internal treasury transfers posted yet.</td></tr>
+                <tr><td colspan="10">No treasury activity posted yet.</td></tr>
             <?php endif; ?>
             <?php foreach ($recentTransfers as $transfer): ?>
                 <?php
@@ -682,15 +785,44 @@ $bankAccountsCount = count(array_filter($accounts, static fn (array $row): bool 
                     'bank_withdrawal_to_cash' => 'Bank -> Cash',
                     'bank_to_bank_transfer' => 'Bank -> Bank',
                     'cash_to_cash_transfer' => 'Cash -> Cash',
+                    'adjustment_increase' => 'Money In',
+                    'adjustment_decrease' => 'Money Out',
                     default => ucwords(str_replace('_', ' ', (string) ($transfer['transaction_type'] ?? ''))),
                 };
+                $counterpartyName = trim((string) ($transfer['counterparty_name'] ?? ''));
+                $fromAccountName = (string) ($transfer['from_account_name'] ?? '');
+                $fromAccountCode = (string) ($transfer['from_account_code'] ?? '');
+                $toAccountName = (string) ($transfer['to_account_name'] ?? '');
+                $toAccountCode = (string) ($transfer['to_account_code'] ?? '');
+                $fromDisplayName = $fromAccountName;
+                $fromDisplayCode = $fromAccountCode;
+                $toDisplayName = $toAccountName;
+                $toDisplayCode = $toAccountCode;
+
+                if ((string) ($transfer['transaction_type'] ?? '') === 'adjustment_increase') {
+                    $fromDisplayName = $counterpartyName !== '' ? $counterpartyName : 'Direct source';
+                    $fromDisplayCode = 'External';
+                } elseif ((string) ($transfer['transaction_type'] ?? '') === 'adjustment_decrease') {
+                    $toDisplayName = $counterpartyName !== '' ? $counterpartyName : 'Direct destination';
+                    $toDisplayCode = 'External';
+                }
                 ?>
                 <tr>
                     <td><?= e((string) ($transfer['transaction_date'] ?? '')) ?></td>
                     <td><?= e((string) ($transfer['branch_name'] ?? '')) ?></td>
                     <td><span class="treasury-transfer-type"><?= e($typeLabel) ?></span></td>
-                    <td><?= e((string) ($transfer['from_account_name'] ?? '')) ?></td>
-                    <td><?= e((string) ($transfer['to_account_name'] ?? '')) ?></td>
+                    <td>
+                        <div class="treasury-transfer-party">
+                            <strong><?= e($fromDisplayName !== '' ? $fromDisplayName : '—') ?></strong>
+                            <small><?= e($fromDisplayCode !== '' ? $fromDisplayCode : '—') ?></small>
+                        </div>
+                    </td>
+                    <td>
+                        <div class="treasury-transfer-party">
+                            <strong><?= e($toDisplayName !== '' ? $toDisplayName : '—') ?></strong>
+                            <small><?= e($toDisplayCode !== '' ? $toDisplayCode : '—') ?></small>
+                        </div>
+                    </td>
                     <td><span class="treasury-transfer-amount"><?= e(number_format((float) ($transfer['amount'] ?? 0), 2)) ?></span> <?= e((string) ($transfer['currency'] ?? 'PKR')) ?></td>
                     <td><?= e((string) ($transfer['reference_no'] ?? '')) ?></td>
                     <td>
@@ -736,8 +868,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const transferToAccount = document.querySelector('[data-transfer-to-account]');
     const transferFromLabel = document.querySelector('[data-transfer-from-label]');
     const transferToLabel = document.querySelector('[data-transfer-to-label]');
-    const transferFromHelper = document.querySelector('[data-transfer-from-helper]');
-    const transferToHelper = document.querySelector('[data-transfer-to-helper]');
     const transferSaveButton = document.querySelector('[data-treasury-transfer-save-button]');
     const transferAccounts = <?= json_encode(array_map(static function (array $account): array {
         return [
@@ -751,6 +881,13 @@ document.addEventListener('DOMContentLoaded', () => {
             'current_balance' => number_format((float) ($account['current_balance'] ?? 0), 2, '.', ''),
         ];
     }, $transferAccounts), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>;
+    const directForm = document.querySelector('[data-treasury-direct-form]');
+    const directBranch = document.querySelector('[data-direct-branch]');
+    const directType = document.querySelector('[data-direct-type]');
+    const directCurrency = document.querySelector('[data-direct-currency]');
+    const directAccount = document.querySelector('[data-direct-account]');
+    const directCounterpartyLabel = document.querySelector('[data-direct-counterparty-label]');
+    const directSaveButton = directForm?.querySelector('button[type="submit"]') || null;
 
     const syncBankDetailsVisibility = () => {
         const selectedType = String(treasuryAccountType?.value || '');
@@ -852,8 +989,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 toType: 'cash',
                 fromLabel: 'From Bank Account',
                 toLabel: 'To Cash Account',
-                fromHelper: 'Bank will reduce from this account.',
-                toHelper: 'Cash will increase in this account.',
             };
         }
 
@@ -863,8 +998,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 toType: 'bank',
                 fromLabel: 'From Bank Account',
                 toLabel: 'To Bank Account',
-                fromHelper: 'Money will move out from this bank account.',
-                toHelper: 'Money will move into this bank account.',
             };
         }
 
@@ -874,8 +1007,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 toType: 'cash',
                 fromLabel: 'From Cash Account',
                 toLabel: 'To Cash Account',
-                fromHelper: 'Cash will reduce from this counter.',
-                toHelper: 'Cash will increase in this counter.',
             };
         }
 
@@ -884,8 +1015,6 @@ document.addEventListener('DOMContentLoaded', () => {
             toType: 'bank',
             fromLabel: 'From Cash Account',
             toLabel: 'To Bank Account',
-            fromHelper: 'Cash will reduce from this account.',
-            toHelper: 'Bank will increase in this account.',
         };
     };
 
@@ -905,12 +1034,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         if (transferToLabel) {
             transferToLabel.textContent = config.toLabel;
-        }
-        if (transferFromHelper) {
-            transferFromHelper.textContent = config.fromHelper;
-        }
-        if (transferToHelper) {
-            transferToHelper.textContent = config.toHelper;
         }
 
         const buildOptions = (accountType, placeholder) => {
@@ -951,6 +1074,46 @@ document.addEventListener('DOMContentLoaded', () => {
 
     [transferBranch, transferType, transferCurrency].forEach((field) => field?.addEventListener('change', syncTransferAccounts));
     syncTransferAccounts();
+
+    const syncDirectAccounts = () => {
+        if (!(directAccount instanceof HTMLSelectElement)) {
+            return;
+        }
+
+        const branchId = Number(directBranch?.value || 0);
+        const currency = String(directCurrency?.value || 'PKR').trim().toUpperCase();
+        const previousValue = directAccount.value;
+
+        const matches = transferAccounts.filter((account) =>
+            Number(account.branch_id || 0) === branchId
+            && String(account.currency || '').toUpperCase() === currency
+        );
+
+        directAccount.innerHTML = '<option value="">Select treasury account</option>'
+            + matches.map((account) => {
+                const suffix = Number(account.is_default || 0) === 1 ? ' [Default]' : '';
+                return '<option value="' + String(account.id) + '">' +
+                    String(account.account_name) + ' - Bal ' + String(account.current_balance) + suffix +
+                    '</option>';
+            }).join('');
+
+        if (matches.some((account) => String(account.id) === previousValue)) {
+            directAccount.value = previousValue;
+        } else if (matches.length === 1) {
+            directAccount.value = String(matches[0].id);
+        }
+    };
+
+    const syncDirectLabels = () => {
+        if (directCounterpartyLabel) {
+            directCounterpartyLabel.textContent = String(directType?.value || '') === 'adjustment_decrease' ? 'Paid To' : 'Received From';
+        }
+    };
+
+    [directBranch, directCurrency].forEach((field) => field?.addEventListener('change', syncDirectAccounts));
+    directType?.addEventListener('change', syncDirectLabels);
+    syncDirectAccounts();
+    syncDirectLabels();
 
     transferForm?.addEventListener('keydown', (event) => {
         if (event.key !== 'Enter') {
@@ -998,6 +1161,55 @@ document.addEventListener('DOMContentLoaded', () => {
         if (transferSaveButton instanceof HTMLButtonElement) {
             transferSaveButton.focus();
             transferSaveButton.click();
+        }
+    }, true);
+
+    directForm?.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter') {
+            return;
+        }
+
+        const target = event.target;
+        if (!(target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement || target instanceof HTMLButtonElement)) {
+            return;
+        }
+
+        if (target instanceof HTMLTextAreaElement && !event.ctrlKey && !event.metaKey) {
+            event.preventDefault();
+        } else if (!(target instanceof HTMLButtonElement)) {
+            event.preventDefault();
+        }
+
+        const fields = Array.from(directForm.querySelectorAll('input, select, textarea, button[type="submit"]')).filter((field) => {
+            if (!(field instanceof HTMLElement)) {
+                return false;
+            }
+
+            if (field instanceof HTMLInputElement && (field.type === 'hidden' || field.disabled)) {
+                return false;
+            }
+
+            if ((field instanceof HTMLSelectElement || field instanceof HTMLTextAreaElement || field instanceof HTMLButtonElement) && field.disabled) {
+                return false;
+            }
+
+            const style = window.getComputedStyle(field);
+            return style.display !== 'none' && style.visibility !== 'hidden';
+        });
+
+        const currentIndex = fields.indexOf(target);
+        const nextField = currentIndex >= 0 ? fields[currentIndex + 1] : null;
+        if (nextField instanceof HTMLElement) {
+            nextField.focus();
+            if ((nextField instanceof HTMLInputElement || nextField instanceof HTMLTextAreaElement) && typeof nextField.select === 'function') {
+                nextField.select();
+            }
+            return;
+        }
+
+        if (directSaveButton instanceof HTMLButtonElement) {
+            directSaveButton.focus();
+            directSaveButton.click();
         }
     }, true);
 });

@@ -4,19 +4,24 @@ $branchOptions = is_array($branchOptions ?? null) ? $branchOptions : [];
 $customerOptions = is_array($customerOptions ?? null) ? $customerOptions : [];
 $currencyOptions = is_array($currencyOptions ?? null) ? $currencyOptions : [];
 $openReceivables = is_array($openReceivables ?? null) ? $openReceivables : [];
+$availableAdvances = is_array($availableAdvances ?? null) ? $availableAdvances : [];
 $treasuryAccounts = is_array($treasuryAccounts ?? null) ? $treasuryAccounts : [];
 $paymentMethods = is_array($paymentMethods ?? null) ? $paymentMethods : [];
 $selectedBranchId = (int) ($selectedBranchId ?? 0);
 $selectedTravelerId = (int) ($selectedTravelerId ?? 0);
 $selectedCurrency = (string) ($selectedCurrency ?? 'PKR');
 $formatMoney = static fn (float $amount): string => number_format($amount, 2);
+$displayBranchName = static function (string $branchName): string {
+    $name = trim($branchName);
+
+    return $name === 'Imdad International Travel Agency' ? 'Imdad Int.' : $name;
+};
 $totalOutstanding = array_sum(array_map(static fn (array $row): float => (float) ($row['outstanding_amount'] ?? 0), $openReceivables));
 ?>
 
 <section class="page-head global-settlement-head">
     <div>
         <h1>Global Customer Payment</h1>
-        <p>Receive one customer payment and allocate it across open invoices.</p>
     </div>
     <div class="toolbar">
         <a class="btn btn-sm" href="<?= e(url('/reports?report=receivable_aging')) ?>">Receivable Aging</a>
@@ -33,7 +38,7 @@ $totalOutstanding = array_sum(array_map(static fn (array $row): float => (float)
             <select name="branch_id">
                 <?php foreach ($branchOptions as $branch): ?>
                     <option value="<?= e((string) ($branch['id'] ?? 0)) ?>" <?= (int) ($branch['id'] ?? 0) === $selectedBranchId ? 'selected' : '' ?>>
-                        <?= e((string) ($branch['name'] ?? 'Branch')) ?>
+                        <?= e($displayBranchName((string) ($branch['name'] ?? 'Branch'))) ?>
                     </option>
                 <?php endforeach; ?>
             </select>
@@ -79,6 +84,7 @@ $totalOutstanding = array_sum(array_map(static fn (array $row): float => (float)
         <input type="hidden" name="traveler_id" value="<?= e((string) $selectedTravelerId) ?>">
         <input type="hidden" name="receipt_currency" value="<?= e($selectedCurrency) ?>">
         <input type="hidden" name="receipt_status" value="received">
+        <input type="hidden" name="settlement_action" value="payment" data-global-customer-settlement-action>
 
         <div class="dense-table-wrap">
             <table class="dense-table">
@@ -158,6 +164,20 @@ $totalOutstanding = array_sum(array_map(static fn (array $row): float => (float)
                 <span>Remarks</span>
                 <input type="text" name="receipt_remarks" value="" maxlength="4000">
             </label>
+            <label class="station-field span-3">
+                <span>Use Existing Advance</span>
+                <select name="advance_receipt_id" data-global-customer-advance-select>
+                    <option value="">Select advance credit</option>
+                    <?php foreach ($availableAdvances as $advance): ?>
+                        <option value="<?= e((string) ($advance['id'] ?? 0)) ?>">
+                            <?= e((string) ($advance['receipt_no'] ?? 'Advance')) ?> / <?= e($selectedCurrency) ?> <?= e($formatMoney((float) ($advance['unallocated_amount'] ?? 0))) ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+            </label>
+            <div class="station-command-buttons station-command-buttons--end span-3">
+                <button class="btn btn-sm" type="submit" name="settlement_action_button" value="apply_advance" data-apply-customer-advance <?= $availableAdvances === [] || $openReceivables === [] ? 'disabled' : '' ?>>Apply Advance</button>
+            </div>
         </div>
 
         <div class="supplier-simple-payment-summary top-gap">
@@ -210,6 +230,9 @@ $totalOutstanding = array_sum(array_map(static fn (array $row): float => (float)
         const feedback = form.querySelector('[data-global-customer-feedback]');
         const methodField = form.querySelector('[data-global-customer-payment-method]');
         const treasuryField = form.querySelector('[data-global-customer-treasury-account]');
+        const actionField = form.querySelector('[data-global-customer-settlement-action]');
+        const advanceField = form.querySelector('[data-global-customer-advance-select]');
+        const applyAdvanceButton = form.querySelector('[data-apply-customer-advance]');
 
         const money = (value) => Number(value || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
         const selectedTotal = () => checkboxes.reduce((sum, box) => box.checked ? sum + Number(box.dataset.balance || 0) : sum, 0);
@@ -271,14 +294,21 @@ $totalOutstanding = array_sum(array_map(static fn (array $row): float => (float)
         });
         methodField?.addEventListener('change', syncTreasuryAccounts);
         form.addEventListener('submit', (event) => {
+            const submitter = event.submitter;
+            const isAdvanceApply = submitter instanceof HTMLElement && submitter.matches('[data-apply-customer-advance]');
+            if (actionField instanceof HTMLInputElement) {
+                actionField.value = isAdvanceApply ? 'apply_advance' : 'payment';
+            }
             const total = selectedTotal();
             const amount = Number(amountField?.value || 0);
             let message = '';
             if (total <= 0) {
                 message = 'Please select at least one customer receivable.';
-            } else if (amount <= 0) {
+            } else if (isAdvanceApply && String(advanceField?.value || '') === '') {
+                message = 'Please select the customer advance to apply.';
+            } else if (!isAdvanceApply && amount <= 0) {
                 message = 'Enter a valid customer payment amount.';
-            } else if (['cash', 'bank_transfer'].includes(String(methodField?.value || '')) && String(treasuryField?.value || '') === '') {
+            } else if (!isAdvanceApply && ['cash', 'bank_transfer'].includes(String(methodField?.value || '')) && String(treasuryField?.value || '') === '') {
                 message = 'Please select the cash or bank account receiving this payment.';
             }
 
@@ -293,5 +323,28 @@ $totalOutstanding = array_sum(array_map(static fn (array $row): float => (float)
 
         syncTotal();
         syncTreasuryAccounts();
+
+        document.querySelectorAll('[data-global-customer-payment-method]').forEach((methodSelect) => {
+            const formNode = methodSelect.closest('form');
+            const treasurySelect = formNode?.querySelector('[data-global-customer-treasury-account]');
+            const syncFormTreasury = () => {
+                if (!(methodSelect instanceof HTMLSelectElement) || !(treasurySelect instanceof HTMLSelectElement)) {
+                    return;
+                }
+                const method = methodSelect.value;
+                Array.from(treasurySelect.options).forEach((option) => {
+                    if (option.value === '') {
+                        option.hidden = false;
+                        return;
+                    }
+                    option.hidden = !String(option.dataset.methods || '').split(',').includes(method);
+                });
+                if (treasurySelect.selectedOptions[0]?.hidden) {
+                    treasurySelect.value = '';
+                }
+            };
+            methodSelect.addEventListener('change', syncFormTreasury);
+            syncFormTreasury();
+        });
     })();
 </script>

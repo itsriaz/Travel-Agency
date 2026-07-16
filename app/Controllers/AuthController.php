@@ -184,7 +184,13 @@ final class AuthController extends BaseController
             $this->redirect(Auth::twoFactorVerified() ? $this->postLoginTarget() : '/2fa/verify');
         }
 
-        $setup = (new TwoFactorService($this->app))->beginSetup((int) Auth::id());
+        try {
+            $setup = (new TwoFactorService($this->app))->beginSetup((int) Auth::id());
+        } catch (\Throwable $exception) {
+            app_log_exception($exception, 'app.2fa.setup_unavailable');
+            Flash::error('2FA setup could not start. Please verify the server 2FA files and database migrations.');
+            return $this->showLogin();
+        }
 
         return $this->view('auth/two_factor_setup', [
             'title' => '2FA Setup',
@@ -260,12 +266,18 @@ final class AuthController extends BaseController
 
         Csrf::verifyOrFail($_POST['_token'] ?? null);
 
-        $result = (new TwoFactorService($this->app))->verifyChallenge(
-            (int) Auth::id(),
-            (string) ($_POST['code'] ?? ''),
-            $this->currentIpAddress(),
-            isset($_POST['remember_device']) && $_POST['remember_device'] === '1'
-        );
+        try {
+            $result = (new TwoFactorService($this->app))->verifyChallenge(
+                (int) Auth::id(),
+                (string) ($_POST['code'] ?? ''),
+                $this->currentIpAddress(),
+                isset($_POST['remember_device']) && $_POST['remember_device'] === '1'
+            );
+        } catch (\Throwable $exception) {
+            app_log_exception($exception, 'app.2fa.verify_unavailable');
+            Flash::error($exception->getMessage() !== '' ? $exception->getMessage() : '2FA verification could not complete. Please contact the administrator.');
+            return $this->showTwoFactorVerify();
+        }
 
         if (! $result['success']) {
             Flash::error($result['message']);

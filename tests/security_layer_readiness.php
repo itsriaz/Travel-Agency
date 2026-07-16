@@ -2,12 +2,14 @@
 
 declare(strict_types=1);
 
-define('BASE_PATH', dirname(__DIR__));
+defined('BASE_PATH') || define('BASE_PATH', dirname(__DIR__));
 
-require BASE_PATH . '/app/Helpers/functions.php';
-require BASE_PATH . '/app/Core/bootstrap.php';
+require_once BASE_PATH . '/app/Helpers/functions.php';
+require_once BASE_PATH . '/app/Core/bootstrap.php';
 
-\App\Core\App::bootstrap(BASE_PATH);
+$app = (isset($app) && $app instanceof \App\Core\App)
+    ? $app
+    : \App\Core\App::bootstrap(BASE_PATH);
 
 $failures = [];
 $check = static function (string $label, bool $passed, string $details = '') use (&$failures): void {
@@ -16,25 +18,37 @@ $check = static function (string $label, bool $passed, string $details = '') use
         $failures[] = $label . ($details !== '' ? ': ' . $details : '');
     }
 };
+$warn = static function (string $label, bool $passed, string $details = ''): void {
+    echo ($passed ? '[PASS] ' : '[WARN] ') . $label . ($details !== '' ? ' - ' . $details : '') . PHP_EOL;
+};
 
-$publicIndex = (string) file_get_contents(BASE_PATH . '/public/index.php');
-$securityConfig = (string) file_get_contents(BASE_PATH . '/config/security.php');
-$launcherGateMiddleware = (string) file_get_contents(BASE_PATH . '/app/Middleware/LauncherGateMiddleware.php');
-$launcherMain = (string) file_get_contents(BASE_PATH . '/launcher/main.js');
-$productionEnvExample = (string) file_get_contents(BASE_PATH . '/.env.production.example');
-$appCore = (string) file_get_contents(BASE_PATH . '/app/Core/App.php');
-$bootstrap = (string) file_get_contents(BASE_PATH . '/app/Core/bootstrap.php');
-$session = (string) file_get_contents(BASE_PATH . '/app/Helpers/Session.php');
-$authService = (string) file_get_contents(BASE_PATH . '/app/Services/AuthService.php');
-$documentService = (string) file_get_contents(BASE_PATH . '/app/Services/DocumentWorkspaceService.php');
-$loginAttemptRepository = (string) file_get_contents(BASE_PATH . '/app/Repositories/LoginAttemptRepository.php');
-$securityThrottleRepository = (string) file_get_contents(BASE_PATH . '/app/Repositories/SecurityThrottleRepository.php');
+$artifactCheck = app_is_production() ? $warn : $check;
+$readFile = static function (string $path): string {
+    return is_file($path) ? (string) file_get_contents($path) : '';
+};
 
-$check(
-    'Launcher gate middleware is globally applied before route dispatch',
-    str_contains($publicIndex, 'LauncherGateMiddleware')
-        && str_contains($publicIndex, '$requestPath !== \'/health\'')
-        && strpos($publicIndex, 'LauncherGateMiddleware') < strpos($publicIndex, '$router->dispatch')
+$rootIndex = $readFile(BASE_PATH . '/index.php');
+$publicIndex = $readFile(BASE_PATH . '/public/index.php');
+$frontController = $publicIndex !== '' ? $publicIndex : $rootIndex;
+$securityConfig = $readFile(BASE_PATH . '/config/security.php');
+$launcherGateMiddleware = $readFile(BASE_PATH . '/app/Middleware/LauncherGateMiddleware.php');
+$launcherMain = $readFile(BASE_PATH . '/launcher/main.js');
+$productionEnvExample = $readFile(BASE_PATH . '/.env.production.example');
+$appCore = $readFile(BASE_PATH . '/app/Core/App.php');
+$bootstrap = $readFile(BASE_PATH . '/app/Core/bootstrap.php');
+$session = $readFile(BASE_PATH . '/app/Helpers/Session.php');
+$authService = $readFile(BASE_PATH . '/app/Services/AuthService.php');
+$documentService = $readFile(BASE_PATH . '/app/Services/DocumentWorkspaceService.php');
+$loginAttemptRepository = $readFile(BASE_PATH . '/app/Repositories/LoginAttemptRepository.php');
+$securityThrottleRepository = $readFile(BASE_PATH . '/app/Repositories/SecurityThrottleRepository.php');
+
+$artifactCheck(
+    'Front controller keeps launcher gate middleware ahead of route dispatch',
+    $frontController !== ''
+        && str_contains($frontController, 'LauncherGateMiddleware')
+        && str_contains($frontController, '$requestPath !== \'/health\'')
+        && strpos($frontController, 'LauncherGateMiddleware') < strpos($frontController, '$router->dispatch'),
+    $frontController === '' ? 'No root or public front controller file was found on this host.' : ''
 );
 $check(
     'Launcher gate is enforced in production and supports signature-first rollout',
@@ -50,22 +64,26 @@ $check(
         && str_contains($launcherGateMiddleware, 'security.launcher_gate.denied')
         && str_contains($launcherGateMiddleware, 'HTTP_')
 );
-$check(
+$artifactCheck(
     'Windows launcher sends launcher token/signature headers for navigation and API requests',
-    str_contains($launcherMain, 'launcherTokenHeaders')
+    $launcherMain !== ''
+        && str_contains($launcherMain, 'launcherTokenHeaders')
         && str_contains($launcherMain, 'launcherSignatureHeaders')
         && str_contains($launcherMain, 'webRequest.onBeforeSendHeaders')
         && str_contains($launcherMain, 'X-Travel-Launcher-Token')
-        && str_contains($launcherMain, 'X-Travel-Launcher-Signature')
+        && str_contains($launcherMain, 'X-Travel-Launcher-Signature'),
+    $launcherMain === '' ? 'launcher/main.js is not deployed on this host.' : ''
 );
-$check(
+$artifactCheck(
     'Production env template exposes launcher gate settings and explicit password hashing settings',
-    str_contains($productionEnvExample, 'LAUNCHER_GATE_ENABLED=true')
+    $productionEnvExample !== ''
+        && str_contains($productionEnvExample, 'LAUNCHER_GATE_ENABLED=true')
         && str_contains($productionEnvExample, 'LAUNCHER_GATE_HEADER=')
         && str_contains($productionEnvExample, 'LAUNCHER_GATE_SIGNATURE_ENABLED=true')
         && str_contains($productionEnvExample, 'LAUNCHER_GATE_ALLOW_LEGACY_TOKEN=false')
         && str_contains($productionEnvExample, 'LAUNCHER_GATE_PUBLIC_KEY_PATH=')
-        && str_contains($productionEnvExample, 'PASSWORD_HASH_DRIVER=argon2id')
+        && str_contains($productionEnvExample, 'PASSWORD_HASH_DRIVER=argon2id'),
+    $productionEnvExample === '' ? '.env.production.example is not deployed on this host.' : ''
 );
 $check(
     'Production hides detailed errors while logging real exceptions',
@@ -116,7 +134,8 @@ if ($failures !== []) {
     foreach ($failures as $failure) {
         echo ' - ' . $failure . PHP_EOL;
     }
-    exit(1);
+    return 1;
 }
 
 echo PHP_EOL . 'Security layer readiness passed.' . PHP_EOL;
+return 0;

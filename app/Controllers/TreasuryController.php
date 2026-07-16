@@ -71,6 +71,28 @@ final class TreasuryController extends BaseController
         $this->redirect($returnTo !== '' ? $returnTo : '/treasury/accounts');
     }
 
+    public function saveDirectEntry(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+
+        try {
+            $repository = new TreasuryRepository($this->app);
+            $repository->saveDirectEntry(
+                array_merge($_POST, [
+                    'created_by_user_id' => Auth::id(),
+                ]),
+                Authorization::accessibleBranchIds()
+            );
+
+            Flash::success('Direct treasury entry posted successfully.');
+        } catch (RuntimeException $exception) {
+            Flash::error($exception->getMessage());
+            $this->redirect('/treasury/accounts');
+        }
+
+        $this->redirect('/treasury/accounts');
+    }
+
     public function saveTransfer(): never
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);

@@ -1,0 +1,125 @@
+-- NON-PRODUCTION TEST DATA RESET
+-- Run only in the local/XAMPP test database after taking a backup.
+-- Preserves users, branches, suppliers, treasury accounts, currencies,
+-- business sources, master data, exchange rates, and audit logs.
+
+SET FOREIGN_KEY_CHECKS = 0;
+
+-- Corrections, refunds, events, and operational attachments.
+DELETE FROM customer_advance_corrections;
+DELETE FROM customer_advance_refunds;
+DELETE FROM booking_service_refund_details;
+DELETE FROM service_financial_corrections;
+DELETE FROM booking_service_events;
+DELETE FROM business_expense_corrections;
+DELETE FROM expense_attachments;
+
+-- Supplier payments, allocations, advances, and obligations.
+DELETE FROM supplier_payment_allocations;
+DELETE FROM supplier_advance_applications;
+DELETE FROM supplier_payments;
+DELETE FROM supplier_advances;
+DELETE FROM supplier_obligations;
+
+-- Customer receipts, allocations, and receivables.
+DELETE FROM customer_receipt_allocations;
+DELETE FROM customer_receipts;
+DELETE FROM customer_receivable_items;
+
+-- Treasury and accounting transactions.
+DELETE FROM treasury_transactions;
+DELETE FROM journal_entry_lines;
+DELETE FROM journal_entries;
+
+-- Booking support records.
+DELETE FROM booking_reminders;
+DELETE FROM booking_documents;
+
+-- Service subtype records and common services.
+DELETE FROM service_air_ticket;
+DELETE FROM service_visa;
+DELETE FROM service_umrah;
+DELETE FROM service_hotel;
+DELETE FROM service_transport;
+DELETE FROM service_tour;
+DELETE FROM service_other;
+DELETE FROM booking_services;
+
+-- Booking parties, bookings, and customers/passengers.
+DELETE FROM booking_travelers;
+DELETE FROM booking_parties;
+DELETE FROM bookings;
+DELETE FROM travelers;
+
+-- Expenses and offline drafts.
+DELETE FROM business_expenses;
+DELETE FROM offline_draft_syncs;
+
+-- Reset visible business numbering to BK-000001, RCPT-000001,
+-- and the first supplier payment number.
+DELETE FROM app_settings
+WHERE setting_key IN (
+    'booking.reference.sequence',
+    'customer.receipt.sequence',
+    'supplier.payment.sequence'
+);
+
+-- Reset database identity counters.
+ALTER TABLE customer_advance_corrections AUTO_INCREMENT = 1;
+ALTER TABLE customer_advance_refunds AUTO_INCREMENT = 1;
+ALTER TABLE booking_service_refund_details AUTO_INCREMENT = 1;
+ALTER TABLE service_financial_corrections AUTO_INCREMENT = 1;
+ALTER TABLE booking_service_events AUTO_INCREMENT = 1;
+ALTER TABLE business_expense_corrections AUTO_INCREMENT = 1;
+ALTER TABLE expense_attachments AUTO_INCREMENT = 1;
+
+ALTER TABLE supplier_payment_allocations AUTO_INCREMENT = 1;
+ALTER TABLE supplier_advance_applications AUTO_INCREMENT = 1;
+ALTER TABLE supplier_payments AUTO_INCREMENT = 1;
+ALTER TABLE supplier_advances AUTO_INCREMENT = 1;
+ALTER TABLE supplier_obligations AUTO_INCREMENT = 1;
+
+ALTER TABLE customer_receipt_allocations AUTO_INCREMENT = 1;
+ALTER TABLE customer_receipts AUTO_INCREMENT = 1;
+ALTER TABLE customer_receivable_items AUTO_INCREMENT = 1;
+
+ALTER TABLE treasury_transactions AUTO_INCREMENT = 1;
+ALTER TABLE journal_entry_lines AUTO_INCREMENT = 1;
+ALTER TABLE journal_entries AUTO_INCREMENT = 1;
+
+ALTER TABLE booking_reminders AUTO_INCREMENT = 1;
+ALTER TABLE booking_documents AUTO_INCREMENT = 1;
+
+ALTER TABLE service_air_ticket AUTO_INCREMENT = 1;
+ALTER TABLE service_visa AUTO_INCREMENT = 1;
+ALTER TABLE service_umrah AUTO_INCREMENT = 1;
+ALTER TABLE service_hotel AUTO_INCREMENT = 1;
+ALTER TABLE service_transport AUTO_INCREMENT = 1;
+ALTER TABLE service_tour AUTO_INCREMENT = 1;
+ALTER TABLE service_other AUTO_INCREMENT = 1;
+ALTER TABLE booking_services AUTO_INCREMENT = 1;
+
+ALTER TABLE booking_travelers AUTO_INCREMENT = 1;
+ALTER TABLE booking_parties AUTO_INCREMENT = 1;
+ALTER TABLE bookings AUTO_INCREMENT = 1;
+ALTER TABLE travelers AUTO_INCREMENT = 1;
+
+ALTER TABLE business_expenses AUTO_INCREMENT = 1;
+ALTER TABLE offline_draft_syncs AUTO_INCREMENT = 1;
+
+SET FOREIGN_KEY_CHECKS = 1;
+
+-- Verification: every returned value should be zero.
+SELECT
+    (SELECT COUNT(*) FROM bookings) AS bookings,
+    (SELECT COUNT(*) FROM booking_services) AS booking_services,
+    (SELECT COUNT(*) FROM customer_receipts) AS customer_receipts,
+    (SELECT COUNT(*) FROM customer_receivable_items) AS customer_receivables,
+    (SELECT COUNT(*) FROM customer_advance_refunds) AS customer_advance_refunds,
+    (SELECT COUNT(*) FROM customer_advance_corrections) AS customer_advance_corrections,
+    (SELECT COUNT(*) FROM supplier_payments) AS supplier_payments,
+    (SELECT COUNT(*) FROM supplier_advances) AS supplier_advances,
+    (SELECT COUNT(*) FROM supplier_obligations) AS supplier_obligations,
+    (SELECT COUNT(*) FROM treasury_transactions) AS treasury_transactions,
+    (SELECT COUNT(*) FROM journal_entries) AS journal_entries,
+    (SELECT COUNT(*) FROM business_expenses) AS business_expenses;

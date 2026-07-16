@@ -19,6 +19,42 @@ use PragmaRX\Google2FA\Google2FA;
 
 final class TwoFactorService extends Service
 {
+    private function google2fa(): Google2FA
+    {
+        if (! class_exists(Google2FA::class)) {
+            throw new \RuntimeException('2FA library is missing on the server. Upload the vendor/pragmarx and vendor/paragonie folders.');
+        }
+
+        return new Google2FA();
+    }
+
+    private function renderQrSvg(string $otpAuthUrl): string
+    {
+        try {
+            if (
+                ! class_exists(Writer::class)
+                || ! class_exists(ImageRenderer::class)
+                || ! class_exists(RendererStyle::class)
+                || ! class_exists(SvgImageBackEnd::class)
+            ) {
+                app_write_log('app.2fa.qr_unavailable', 'QR renderer is unavailable; falling back to manual secret only.', [
+                    'user_id' => Auth::id(),
+                ]);
+
+                return '';
+            }
+
+            return (new Writer(new ImageRenderer(
+                new RendererStyle(220),
+                new SvgImageBackEnd()
+            )))->writeString($otpAuthUrl);
+        } catch (\Throwable $exception) {
+            app_log_exception($exception, 'app.2fa.qr_render_failed');
+
+            return '';
+        }
+    }
+
     public function currentVerifyLockState(int $userId, string $ipAddress): ?array
     {
         $throttle = new SecurityThrottleRepository($this->app);
@@ -40,7 +76,7 @@ final class TwoFactorService extends Service
         $secret = Crypto::decrypt($user['two_factor_secret_pending_encrypted'] ?? null);
 
         if ($secret === null) {
-            $google2fa = new Google2FA();
+            $google2fa = $this->google2fa();
             $secret = $google2fa->generateSecretKey();
             $users->storePendingTwoFactorSecret($userId, Crypto::encrypt($secret));
 
@@ -53,11 +89,8 @@ final class TwoFactorService extends Service
         $username = trim((string) ($user['username'] ?? ''));
         $email = trim((string) ($user['email'] ?? ''));
         $label = $username !== '' && $email !== '' ? $username . ' / ' . $email : ($username !== '' ? $username : $email);
-        $otpAuthUrl = (new Google2FA())->getQRCodeUrl($issuer, $label, $secret);
-        $qrSvg = (new Writer(new ImageRenderer(
-            new RendererStyle(220),
-            new SvgImageBackEnd()
-        )))->writeString($otpAuthUrl);
+        $otpAuthUrl = $this->google2fa()->getQRCodeUrl($issuer, $label, $secret);
+        $qrSvg = $this->renderQrSvg($otpAuthUrl);
 
         return [
             'secret' => $secret,
@@ -80,7 +113,7 @@ final class TwoFactorService extends Service
             return ['success' => false, 'message' => '2FA setup is not ready. Please start again.'];
         }
 
-        if (! (new Google2FA())->verifyKey($secret, trim($otp))) {
+        if (! $this->google2fa()->verifyKey($secret, trim($otp))) {
             return $this->handleOtpFailure($userId, $ipAddress, 'setup');
         }
 
@@ -121,7 +154,7 @@ final class TwoFactorService extends Service
         $usedBackupCode = false;
 
         if ($secret !== null && preg_match('/^\d{6}$/', $normalized) === 1) {
-            $verified = (new Google2FA())->verifyKey($secret, $normalized);
+            $verified = $this->google2fa()->verifyKey($secret, $normalized);
         }
 
         if (! $verified) {
@@ -144,7 +177,15 @@ final class TwoFactorService extends Service
         }
 
         if ($rememberDevice && ! \App\Helpers\Auth::isSuperAdmin()) {
-            (new TrustedDeviceService($this->app))->createForCurrentUser($userId);
+            try {
+                (new TrustedDeviceService($this->app))->createForCurrentUser($userId);
+            } catch (\Throwable $exception) {
+                app_log_exception($exception, 'auth.2fa.remember_device_failed');
+                app_write_log('auth.2fa.remember_device_context', 'Trusted device creation failed after successful OTP verification.', [
+                    'user_id' => $userId,
+                    'ip_address' => $ipAddress,
+                ]);
+            }
         }
 
         $freshUser = $users->findForSession($userId);

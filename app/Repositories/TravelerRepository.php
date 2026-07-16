@@ -330,7 +330,7 @@ final class TravelerRepository extends BaseRepository
                 'attached_by_user_id' => $actorUserId,
             ]);
 
-            $this->synchronizeLeadTraveler($bookingId);
+            $this->synchronizeLeadTraveler($bookingId, false);
         });
     }
 
@@ -347,7 +347,7 @@ final class TravelerRepository extends BaseRepository
                 'traveler_id' => $travelerId,
             ]);
 
-            $this->synchronizeLeadTraveler($bookingId);
+            $this->synchronizeLeadTraveler($bookingId, true);
         });
     }
 
@@ -397,10 +397,14 @@ final class TravelerRepository extends BaseRepository
         return $row !== false ? $row : null;
     }
 
-    private function synchronizeLeadTraveler(int $bookingId): void
+    private function synchronizeLeadTraveler(int $bookingId, bool $clearWhenMissing): void
     {
         $leadTraveler = $this->currentLeadTravelerForBooking($bookingId);
         $leadTravelerId = (int) ($leadTraveler['id'] ?? 0);
+
+        if ($leadTravelerId <= 0 && ! $clearWhenMissing) {
+            return;
+        }
 
         $updateBooking = $this->db->prepare(
             'UPDATE bookings

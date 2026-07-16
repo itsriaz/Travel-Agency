@@ -1,0 +1,24 @@
+{
+  "bookingReference": "BK-000169",
+  "customerSearchTerm": "FAWAD",
+  "supplierSearchTerm": "AL",
+  "visible": true,
+  "loginTimeoutMs": 300000,
+  "stepTimeoutMs": 20000,
+  "postActionPauseMs": 600,
+  "writeAudit": {
+    "enabled": false,
+    "leadTravelerName": "AUDIT CUSTOMER",
+    "passengerName": "AUDIT PASSENGER",
+    "mobile": "03001234567",
+    "supplierNameContains": "",
+    "ticketType": "local",
+    "ticketClass": "economy",
+    "departureDate": "2026-06-20",
+    "route": "ISB/DXB/ISB",
+    "marketFare": 1000,
+    "serviceCharge": 100,
+    "receivedAmount": 1100,
+    "paymentMethod": "cash"
+  }
+}

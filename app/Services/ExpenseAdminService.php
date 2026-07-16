@@ -5,8 +5,12 @@ declare(strict_types=1);
 namespace App\Services;
 
 use App\Helpers\AuditLog;
+use App\Repositories\AccountingRepository;
+use App\Repositories\BusinessExpenseCorrectionRepository;
 use App\Repositories\ExpenseRepository;
 use App\Repositories\MasterDataRepository;
+use App\Repositories\TreasuryRepository;
+use PDO;
 use RuntimeException;
 
 final class ExpenseAdminService extends Service
@@ -58,6 +62,10 @@ final class ExpenseAdminService extends Service
             $record = $repository->findExpense($id, $accessibleBranchIds);
             if ($record === null) {
                 throw new RuntimeException('The selected expense could not be found.');
+            }
+
+            if ((int) ($record['journal_entry_id'] ?? 0) > 0) {
+                throw new RuntimeException('Posted expenses linked to a source account cannot be deleted.');
             }
 
             if ($repository->attachmentsTableExists()) {
@@ -231,6 +239,24 @@ final class ExpenseAdminService extends Service
             throw new RuntimeException('Please select a valid expense status.');
         }
 
+        $treasuryAccountId = max(0, (int) ($input['treasury_account_id'] ?? 0));
+        $treasuryAccount = null;
+        if ($status === 'posted' && $this->requiresTreasurySource($paymentMethod)) {
+            if (! $repository->hasTreasuryAccountLink() || ! $repository->hasJournalEntryLink()) {
+                throw new RuntimeException('Expense source-account posting is not available until the latest migration is applied.');
+            }
+
+            $treasuryAccount = (new TreasuryRepository($this->app))->validatePaymentTreasuryAccount(
+                $treasuryAccountId,
+                $branchId,
+                $currency,
+                $paymentMethod
+            );
+            if ((int) ($treasuryAccount['linked_account_id'] ?? 0) <= 0) {
+                throw new RuntimeException('Selected source account is not linked to a ledger account.');
+            }
+        }
+
         $payload = [
             'id' => $id,
             'expense_date' => $this->normalizeDate((string) ($input['expense_date'] ?? '')),
@@ -240,25 +266,108 @@ final class ExpenseAdminService extends Service
             'amount' => $this->positiveMoney($input['amount'] ?? 0),
             'currency' => $currency,
             'payment_method' => $paymentMethod,
+            'treasury_account_id' => $treasuryAccount['id'] ?? null,
             'paid_to_name' => $this->optionalText($input['paid_to_name'] ?? null, 190),
             'reference_number' => $this->optionalText($input['reference_number'] ?? null, 120),
             'notes' => $this->optionalText($input['notes'] ?? null, 4000),
             'expense_status' => $status,
             'actor_user_id' => $actorUserId,
         ];
+        $correctionReason = $existing !== null ? $this->requiredCorrectionReason($input['correction_reason'] ?? null) : null;
+        $correctionNote = $existing !== null ? $this->optionalText($input['correction_note'] ?? null, 4000) : null;
+        if ($existing !== null && !(new BusinessExpenseCorrectionRepository($this->app))->correctionsTableExists()) {
+            throw new RuntimeException('Expense correction history is not available until the latest expense correction migration is applied.');
+        }
 
-        $savedId = $repository->saveExpense($payload);
-        $action = $existing === null ? 'created' : 'updated';
-        $attachmentAction = null;
+        /** @var PDO $db */
+        $db = $this->app->get('db');
+        $startedTransaction = ! $db->inTransaction();
+        if ($startedTransaction) {
+            $db->beginTransaction();
+        }
 
-        if ($repository->attachmentsTableExists() && $this->hasUpload($files['attachment_file'] ?? null)) {
-            $attachmentAction = $this->storeExpenseAttachment(
-                $repository,
-                $savedId,
-                $payload['branch_id'],
-                $files['attachment_file'],
-                $actorUserId
-            );
+        try {
+            $savedId = $repository->saveExpense($payload);
+            $action = $existing === null ? 'created' : 'corrected';
+            $attachmentAction = null;
+            $priorJournalEntryId = $existing !== null ? (int) ($existing['journal_entry_id'] ?? 0) : 0;
+            $reversalJournalEntryId = null;
+
+            if ($repository->attachmentsTableExists() && $this->hasUpload($files['attachment_file'] ?? null)) {
+                $attachmentAction = $this->storeExpenseAttachment(
+                    $repository,
+                    $savedId,
+                    $payload['branch_id'],
+                    $files['attachment_file'],
+                    $actorUserId
+                );
+            }
+
+            if ($existing !== null && $priorJournalEntryId > 0) {
+                $reversalJournalEntryId = (new AccountingRepository($this->app))->postBusinessExpenseEditReversal([
+                    'journal_entry_id' => $priorJournalEntryId,
+                    'branch_id' => (int) ($existing['branch_id'] ?? $payload['branch_id']),
+                    'source_reference' => 'EXP-CORR-' . $savedId,
+                    'entry_date' => $payload['expense_date'],
+                    'currency' => (string) ($existing['currency'] ?? $payload['currency']),
+                    'narration' => 'Business expense correction reversal for expense #' . $savedId,
+                    'actor_user_id' => $actorUserId,
+                ]);
+            }
+
+            $journalEntryId = null;
+            if ($status === 'posted' && $treasuryAccount !== null) {
+                $journalEntryId = (new AccountingRepository($this->app))->postBusinessExpenseRecorded([
+                    'branch_id' => $payload['branch_id'],
+                    'entry_date' => $payload['expense_date'],
+                    'currency' => $payload['currency'],
+                    'amount' => $payload['amount'],
+                    'source_reference' => 'EXP-' . $savedId,
+                    'narration' => 'Business expense: ' . $payload['title'],
+                    'actor_user_id' => $actorUserId,
+                    'source_account_id' => (int) ($treasuryAccount['linked_account_id'] ?? 0),
+                    'source_account_code' => (string) ($treasuryAccount['account_code'] ?? ''),
+                    'expense_line_description' => 'Business expense - ' . (string) ($category['name'] ?? 'Operating'),
+                    'source_line_description' => 'Source account payout - ' . (string) ($treasuryAccount['account_name'] ?? 'Treasury account'),
+                ]);
+                $repository->updatePostingLinks(
+                    $savedId,
+                    (int) ($treasuryAccount['id'] ?? 0),
+                    $journalEntryId
+                );
+            } elseif ($existing !== null) {
+                $repository->updatePostingLinks(
+                    $savedId,
+                    $payload['treasury_account_id'] !== null ? (int) $payload['treasury_account_id'] : null,
+                    null
+                );
+            }
+
+            if ($existing !== null) {
+                $this->recordExpenseCorrection(
+                    $savedId,
+                    $existing,
+                    $payload,
+                    $category,
+                    $treasuryAccount,
+                    (string) $correctionReason,
+                    $correctionNote,
+                    $actorUserId,
+                    $priorJournalEntryId > 0 ? $priorJournalEntryId : null,
+                    $reversalJournalEntryId,
+                    $journalEntryId
+                );
+            }
+
+            if ($startedTransaction && $db->inTransaction()) {
+                $db->commit();
+            }
+        } catch (\Throwable $exception) {
+            if ($startedTransaction && $db->inTransaction()) {
+                $db->rollBack();
+            }
+
+            throw $exception;
         }
 
         AuditLog::record($this->app, 'admin.business_expense.' . $action, [
@@ -270,7 +379,10 @@ final class ExpenseAdminService extends Service
             'amount' => $payload['amount'],
             'currency' => $payload['currency'],
             'payment_method' => $payload['payment_method'],
+            'treasury_account_id' => $payload['treasury_account_id'],
             'attachment_action' => $attachmentAction,
+            'correction_reason' => $correctionReason,
+            'correction_note' => $correctionNote,
         ]);
 
         return [
@@ -278,6 +390,88 @@ final class ExpenseAdminService extends Service
             'action' => $action,
             'label' => $payload['title'],
         ];
+    }
+
+    private function requiresTreasurySource(string $paymentMethod): bool
+    {
+        return in_array(
+            str_replace(' ', '_', mb_strtolower(trim($paymentMethod))),
+            ['cash', 'bank_transfer', 'wallet', 'wallet_mobile', 'mobile_wallet', 'debit_card', 'credit_card', 'card'],
+            true
+        );
+    }
+
+    private function requiredCorrectionReason(mixed $value): string
+    {
+        $reason = trim((string) $value);
+        if ($reason === '') {
+            throw new RuntimeException('Correction reason is required when editing an expense.');
+        }
+        if (mb_strlen($reason) < 5) {
+            throw new RuntimeException('Correction reason must be at least 5 characters.');
+        }
+        if (mb_strlen($reason) > 1000) {
+            throw new RuntimeException('Correction reason may not exceed 1000 characters.');
+        }
+
+        return $reason;
+    }
+
+    private function recordExpenseCorrection(
+        int $expenseId,
+        array $existing,
+        array $payload,
+        array $category,
+        ?array $treasuryAccount,
+        string $correctionReason,
+        ?string $correctionNote,
+        int $actorUserId,
+        ?int $priorJournalEntryId,
+        ?int $reversalJournalEntryId,
+        ?int $newJournalEntryId
+    ): void {
+        $repository = new BusinessExpenseCorrectionRepository($this->app);
+        if (! $repository->correctionsTableExists()) {
+            return;
+        }
+
+        $repository->recordCorrection([
+            'business_expense_id' => $expenseId,
+            'branch_id' => $payload['branch_id'],
+            'correction_date' => $payload['expense_date'],
+            'correction_reason' => $correctionReason,
+            'correction_note' => $correctionNote,
+            'prior_expense_date' => (string) ($existing['expense_date'] ?? $payload['expense_date']),
+            'new_expense_date' => $payload['expense_date'],
+            'prior_category_id' => (int) ($existing['expense_category_id'] ?? 0),
+            'new_category_id' => (int) $payload['expense_category_id'],
+            'prior_category_name' => trim((string) ($existing['category_name'] ?? 'Uncategorised')),
+            'new_category_name' => trim((string) ($category['name'] ?? 'Uncategorised')),
+            'prior_title' => (string) ($existing['title'] ?? ''),
+            'new_title' => (string) $payload['title'],
+            'prior_amount' => round((float) ($existing['amount'] ?? 0), 2),
+            'new_amount' => round((float) ($payload['amount'] ?? 0), 2),
+            'prior_currency' => (string) ($existing['currency'] ?? 'PKR'),
+            'new_currency' => (string) $payload['currency'],
+            'prior_payment_method' => (string) ($existing['payment_method'] ?? ''),
+            'new_payment_method' => (string) $payload['payment_method'],
+            'prior_treasury_account_id' => isset($existing['treasury_account_id']) && $existing['treasury_account_id'] !== null ? (int) $existing['treasury_account_id'] : null,
+            'new_treasury_account_id' => $payload['treasury_account_id'] !== null ? (int) $payload['treasury_account_id'] : null,
+            'prior_treasury_account_name' => $existing['treasury_account_name'] ?? null,
+            'new_treasury_account_name' => $treasuryAccount['account_name'] ?? null,
+            'prior_paid_to_name' => $existing['paid_to_name'] ?? null,
+            'new_paid_to_name' => $payload['paid_to_name'] ?? null,
+            'prior_reference_number' => $existing['reference_number'] ?? null,
+            'new_reference_number' => $payload['reference_number'] ?? null,
+            'prior_notes' => $existing['notes'] ?? null,
+            'new_notes' => $payload['notes'] ?? null,
+            'prior_expense_status' => (string) ($existing['expense_status'] ?? 'posted'),
+            'new_expense_status' => (string) $payload['expense_status'],
+            'prior_journal_entry_id' => $priorJournalEntryId,
+            'reversal_journal_entry_id' => $reversalJournalEntryId,
+            'new_journal_entry_id' => $newJournalEntryId,
+            'created_by_user_id' => $actorUserId,
+        ]);
     }
 
     private function storeExpenseAttachment(

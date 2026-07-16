@@ -7,7 +7,13 @@
 
 <section class="panel compact-panel compact-auth-panel">
     <div class="two-factor-setup">
-        <div class="qr-panel"><?= $qrSvg ?></div>
+        <?php if (trim((string) ($qrSvg ?? '')) !== ''): ?>
+            <div class="qr-panel"><?= $qrSvg ?></div>
+        <?php else: ?>
+            <div class="alert alert-warning">
+                QR code is unavailable on this server. Use the manual secret below, or enable the PHP XMLWriter/libxml extension on the host to restore QR scanning.
+            </div>
+        <?php endif; ?>
         <div class="form-grid">
             <div class="field-readonly">
                 <span>Manual Secret</span>

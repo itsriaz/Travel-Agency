@@ -8,6 +8,7 @@
         "bacon/bacon-qr-code": "^2.0"
     },
     "scripts": {
-        "test:production": "php tests/production_readiness.php"
+        "test:production": "php tests/production_readiness.php",
+        "test:production:smoke": "php scripts/run_production_smoke_suite.php"
     }
 }

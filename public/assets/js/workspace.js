@@ -1,14 +1,93 @@
 document.addEventListener('DOMContentLoaded', () => {
+    let sendWorkspaceClientError = null;
+    if (!Array.isArray(window.__travelWorkspaceClientErrors)) {
+        window.__travelWorkspaceClientErrors = [];
+    }
+    const pushWorkspaceClientError = (type, payload) => {
+        const entry = {
+            type,
+            timestamp: new Date().toISOString(),
+            ...payload,
+        };
+        window.__travelWorkspaceClientErrors.push(entry);
+        if (typeof console !== 'undefined' && typeof console.error === 'function') {
+            console.error('[workspace-client-error]', entry);
+        }
+        if (typeof sendWorkspaceClientError === 'function') {
+            sendWorkspaceClientError(entry);
+        }
+    };
+    window.addEventListener('error', (event) => {
+        pushWorkspaceClientError('error', {
+            message: String(event.message || 'Unknown workspace error'),
+            file: String(event.filename || ''),
+            line: Number(event.lineno || 0),
+            column: Number(event.colno || 0),
+        });
+    });
+    window.addEventListener('unhandledrejection', (event) => {
+        const reason = event.reason instanceof Error
+            ? `${event.reason.name}: ${event.reason.message}`
+            : String(event.reason || 'Unhandled promise rejection');
+        pushWorkspaceClientError('unhandledrejection', {
+            message: reason,
+        });
+    });
+
     const station = document.querySelector('[data-workspace-station]');
 
     if (!station) {
         return;
     }
+    const workspaceScriptInstanceId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    let customerOpenReceivables = [];
+    let customerDuesFinderState = {
+        query: '',
+        selectedTravelerId: 0,
+        currency: '',
+        customers: [],
+        selectedCustomer: null,
+        openInvoices: [],
+        requestToken: 0,
+    };
+    const clientErrorLogUrl = String(station.dataset.clientErrorLogUrl || '').trim();
+    const csrfToken = String(station.dataset.csrfToken || '').trim();
+    sendWorkspaceClientError = (entry) => {
+        if (clientErrorLogUrl === '') {
+            return;
+        }
+
+        const payload = JSON.stringify({
+            type: String(entry?.type || 'client_runtime'),
+            message: String(entry?.message || 'Client runtime event captured.'),
+            file: String(entry?.file || ''),
+            line: Number(entry?.line || 0),
+            column: Number(entry?.column || 0),
+            timestamp: String(entry?.timestamp || ''),
+            extra: entry,
+        });
+
+        fetch(clientErrorLogUrl, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+                'X-CSRF-Token': csrfToken,
+            },
+            body: payload,
+            keepalive: true,
+        }).catch(() => {
+            // Do not recurse on logging transport failures.
+        });
+    };
     const workspaceOpenedExistingBookingAtLoad = station.dataset.workspaceOpenedExistingBooking === '1';
 
     const pendingFreshCustomerKey = 'travel_ops_pending_fresh_customer';
     const pendingFreshWorkspaceActionKey = 'travel_ops_pending_fresh_workspace_action';
     const pendingTreasuryWorkspaceStateKey = 'travel_ops_pending_treasury_workspace_state';
+    const pendingServiceEditBookingModalKey = 'travel_ops_pending_service_edit_booking_modal';
+    const pendingPenaltyRefundModalKey = 'travel_ops_pending_penalty_refund_modal';
 
     const feedback = station.querySelector('[data-workspace-feedback]');
     const quickSearchForm = station.querySelector('#workspace-search-form');
@@ -20,6 +99,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const bookingBranchField = invoiceForm?.elements?.namedItem('branch_id') instanceof HTMLSelectElement
         ? invoiceForm.elements.namedItem('branch_id')
         : null;
+    const bookingLeadField = station.querySelector('input[name="lead_traveler_name"]');
+    const bookingMobileField = station.querySelector('[data-booking-mobile-field]');
+    const bookingPassportField = station.querySelector('[data-booking-passport-field]');
+    const bookingSelectedTravelerIdField = station.querySelector('[data-booking-selected-customer-id]');
+    const customerSummaryClient = station.querySelector('[data-customer-summary-client]');
+    const customerSummaryMobile = station.querySelector('[data-customer-summary-mobile]');
+    const customerSummaryFamily = station.querySelector('[data-customer-summary-family]');
+    const customerSummaryColor = station.querySelector('[data-customer-summary-color]');
     const serviceForm = station.querySelector('#legacy-service-form');
     const dockTabs = Array.from(station.querySelectorAll('[data-dock-tab]'));
     const dockPanels = Array.from(station.querySelectorAll('[data-dock-panel]'));
@@ -50,11 +137,46 @@ document.addEventListener('DOMContentLoaded', () => {
     const customerDuesCustomersBody = station.querySelector('[data-customer-dues-customers-body]');
     const customerDuesInvoicesBody = station.querySelector('[data-customer-dues-invoices-body]');
     const customerDuesSelectedSummary = station.querySelector('[data-customer-dues-selected-summary]');
+    const customerAdvanceOpenButton = station.querySelector('[data-customer-advance-open]');
+    const customerAdvanceModal = station.querySelector('[data-customer-advance-modal]');
+    const customerAdvanceAvailableUrl = customerAdvanceModal?.dataset.customerAdvanceAvailableUrl || '';
+    const customerAdvanceCloseButtons = Array.from(station.querySelectorAll('[data-customer-advance-close]'));
+    const customerAdvanceForm = station.querySelector('[data-customer-advance-form]');
+    const customerAdvanceTravelerId = station.querySelector('[data-customer-advance-traveler-id]');
+    const customerAdvanceCustomerName = station.querySelector('[data-customer-advance-customer-name]');
+    const customerAdvanceSearchInput = station.querySelector('[data-customer-advance-search]');
+    const customerAdvanceResults = station.querySelector('[data-customer-advance-results]');
+    const customerAdvanceNewCustomerButton = station.querySelector('[data-customer-advance-new-customer]');
+    const customerAdvanceReturnTo = station.querySelector('[data-customer-advance-return-to]');
+    const customerAdvancePrintAfterSave = station.querySelector('[data-customer-advance-print-after-save]');
+    const customerAdvanceBranch = station.querySelector('[data-customer-advance-branch]');
+    const customerAdvanceCurrency = station.querySelector('[data-customer-advance-currency]');
+    const customerAdvanceAmount = station.querySelector('[data-customer-advance-amount]');
+    const customerAdvanceMethod = station.querySelector('[data-customer-advance-method]');
+    const customerAdvanceTreasuryAccount = station.querySelector('[data-customer-advance-treasury-account]');
+    const customerAdvanceBankDetailField = station.querySelector('[data-customer-advance-bank-detail-field]');
+    const customerAdvanceFeedback = station.querySelector('[data-customer-advance-feedback]');
+    const customerAdvanceRefundForm = station.querySelector('[data-customer-advance-refund-form]');
+    const customerAdvanceRefundTravelerId = station.querySelector('[data-customer-advance-refund-traveler-id]');
+    const customerAdvanceRefundReturnTo = station.querySelector('[data-customer-advance-refund-return-to]');
+    const customerAdvanceRefundBranch = station.querySelector('[data-customer-advance-refund-branch]');
+    const customerAdvanceRefundCurrency = station.querySelector('[data-customer-advance-refund-currency]');
+    const customerAdvanceRefundReceipt = station.querySelector('[data-customer-advance-refund-receipt]');
+    const customerAdvanceRefundAmount = station.querySelector('[data-customer-advance-refund-amount]');
+    const customerAdvanceRefundMethod = station.querySelector('[data-customer-advance-refund-method]');
+    const customerAdvanceRefundTreasuryAccount = station.querySelector('[data-customer-advance-refund-treasury-account]');
+    const customerAdvanceRefundFeedback = station.querySelector('[data-customer-advance-refund-feedback]');
     const supplierHistoryModal = station.querySelector('[data-supplier-history-modal]');
     const supplierHistoryCloseButtons = Array.from(station.querySelectorAll('[data-supplier-history-close]'));
     const supplierHistorySearchInput = station.querySelector('[data-supplier-history-search]');
     const supplierHistoryFeedback = station.querySelector('[data-supplier-history-feedback]');
     const supplierHistoryResultsBody = station.querySelector('[data-supplier-history-results-body]');
+    const serviceEditBookingModal = station.querySelector('[data-service-edit-booking-modal]');
+    const serviceEditBookingCloseButtons = Array.from(station.querySelectorAll('[data-service-edit-booking-close]'));
+    const serviceEditBookingOpenButtons = Array.from(station.querySelectorAll('[data-workspace-action="service-edit-booking"]'));
+    const servicePenaltyRefundModal = station.querySelector('[data-service-penalty-refund-modal]');
+    const servicePenaltyRefundCloseButtons = Array.from(station.querySelectorAll('[data-service-penalty-refund-close]'));
+    const servicePenaltyRefundOpenButtons = Array.from(station.querySelectorAll('[data-workspace-action="service-penalty-refund"]'));
     const supplierSettlementModal = station.querySelector('[data-supplier-settlement-modal]');
     const supplierSettlementCloseButtons = Array.from(station.querySelectorAll('[data-supplier-settlement-close]'));
     const simplePostpaidForm = station.querySelector('[data-simple-postpaid-form]');
@@ -81,6 +203,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const globalPrepaidSupplierSubmit = station.querySelector('[data-global-prepaid-supplier-submit]');
     const supplierAdvanceLookupUrl = station.dataset.supplierAdvanceLookupUrl || '';
     const supplierRegisterUrl = station.dataset.supplierRegisterUrl || '';
+    const businessSourceRegisterUrl = station.dataset.businessSourceRegisterUrl || '';
     const supplierAdvanceNote = station.querySelector('[data-supplier-advance-note]');
     const supplierAdvanceSummary = station.querySelector('[data-supplier-advance-summary]');
     const supplierAdvanceMessage = station.querySelector('[data-supplier-advance-message]');
@@ -89,11 +212,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const supplierAdvanceFxRate = station.querySelector('[data-supplier-advance-fx-rate]');
     const supplierAdvanceFxRateDate = station.querySelector('[data-supplier-advance-fx-rate-date]');
     const supplierInput = station.querySelector('[data-service-supplier-input]');
+    const businessSourceInput = station.querySelector('[data-business-source-input]');
     const supplierOptionsNode = document.getElementById('workspace-service-suppliers-data');
+    const businessSourceOptionsNode = document.getElementById('workspace-business-sources-data');
     const paymentTreasuryAccountsNode = document.getElementById('workspace-payment-treasury-accounts-data');
     const branchOptionsNode = document.getElementById('workspace-branch-options-data');
     const supplierOptionsList = document.getElementById('service-supplier-options');
     const addSupplierOptionValue = '__add_supplier__';
+    const addBusinessSourceOptionValue = '__add_business_source__';
     const supplierAddModal = station.querySelector('[data-service-supplier-add-modal]');
     const supplierAddForm = station.querySelector('[data-service-supplier-add-form]');
     const supplierAddCloseButtons = Array.from(station.querySelectorAll('[data-service-supplier-add-close]'));
@@ -102,6 +228,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const supplierAddCurrency = station.querySelector('[data-service-supplier-add-currency]');
     const supplierAddFeedback = station.querySelector('[data-service-supplier-add-feedback]');
     const supplierAddSubmit = station.querySelector('[data-service-supplier-add-submit]');
+    const businessSourceAddModal = station.querySelector('[data-business-source-add-modal]');
+    const businessSourceAddForm = station.querySelector('[data-business-source-add-form]');
+    const businessSourceAddCloseButtons = Array.from(station.querySelectorAll('[data-business-source-add-close]'));
+    const businessSourceAddName = station.querySelector('[data-business-source-add-name]');
+    const businessSourceAddPhone = station.querySelector('[data-business-source-add-phone]');
+    const businessSourceAddAddress = station.querySelector('[data-business-source-add-address]');
+    const businessSourceAddDescription = station.querySelector('[data-business-source-add-description]');
+    const businessSourceAddFeedback = station.querySelector('[data-business-source-add-feedback]');
+    const businessSourceAddSubmit = station.querySelector('[data-business-source-add-submit]');
     const supplierAddMode = supplierAddForm?.elements?.namedItem('supplier_mode') || null;
     const supplierAddNotes = supplierAddForm?.elements?.namedItem('notes') instanceof HTMLInputElement
         ? supplierAddForm.elements.namedItem('notes')
@@ -148,6 +283,9 @@ document.addEventListener('DOMContentLoaded', () => {
     })();
     const debugToolsEnabled = station.dataset.debugToolsEnabled === '1';
     const canVoidFinancials = station.dataset.canVoidFinancials === '1';
+    const currentServiceIdField = serviceForm?.elements?.namedItem('service_id') instanceof HTMLInputElement
+        ? serviceForm.elements.namedItem('service_id')
+        : null;
     const commercialEditor = station.querySelector('[data-commercial-editor="active"]');
     const commercialLookup = (id, fallbackSelector = null) => {
         if (id) {
@@ -167,6 +305,45 @@ document.addEventListener('DOMContentLoaded', () => {
         return fallbackSelector ? station.querySelector(fallbackSelector) : null;
     };
     const commercialDebug = station.querySelector('[data-commercial-debug]');
+    const lockSavedServiceFinancialEditor = () => {
+        if (!(commercialEditor instanceof HTMLElement)) {
+            return;
+        }
+
+        const serviceId = Number.parseInt(String(currentServiceIdField?.value || '0'), 10) || 0;
+        const shouldLock = serviceId > 0;
+        commercialEditor.dataset.financialEditorLocked = shouldLock ? '1' : '0';
+
+        const fields = commercialEditor.querySelectorAll('input, textarea, select');
+        fields.forEach((field) => {
+            if (!(field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement || field instanceof HTMLSelectElement)) {
+                return;
+            }
+
+            if (field.type === 'hidden') {
+                return;
+            }
+
+            if (field.closest('.legacy-payment-strip')) {
+                if (field instanceof HTMLSelectElement) {
+                    field.disabled = false;
+                } else {
+                    field.readOnly = false;
+                    field.classList.remove('is-readonly');
+                }
+                return;
+            }
+
+            if (field instanceof HTMLSelectElement) {
+                field.disabled = shouldLock;
+                return;
+            }
+
+            field.readOnly = shouldLock;
+            field.classList.toggle('is-readonly', shouldLock);
+        });
+    };
+    lockSavedServiceFinancialEditor();
     const commercialTrace = {
         bootStatus: 'booting',
         editorFound: Boolean(commercialEditor),
@@ -306,21 +483,46 @@ document.addEventListener('DOMContentLoaded', () => {
     const paymentCurrentInvoiceInput = commercialLookup('commercial-payment-current-invoice', '[data-payment-current-invoice]');
     const paymentAlreadyReceivedInput = commercialLookup('commercial-payment-already-received', '[data-payment-already-received]');
     const paymentCurrentBalanceInput = commercialLookup('commercial-payment-current-balance', '[data-payment-current-balance]');
+    const paymentCustomerCreditInput = commercialLookup('commercial-payment-customer-credit', '[data-payment-customer-credit]');
     const paymentCurrentInvoiceRow = station.querySelector('[data-payment-current-invoice-row]');
     const paymentPaidCurrentInvoiceRow = station.querySelector('[data-payment-paid-current-invoice-row]');
     const paymentCurrentBalanceRow = station.querySelector('[data-payment-current-balance-row]');
+    const paymentCustomerCreditRow = station.querySelector('[data-payment-customer-credit-row]');
     const paymentNoCurrentInvoice = station.querySelector('[data-payment-no-current-invoice]');
     const paymentTotalOutstandingInput = commercialLookup('commercial-payment-total-outstanding', '[data-payment-total-outstanding]');
     const paymentPreviousBalanceInput = station.querySelector('[data-payment-previous-balance]');
     const paymentPreviousBalancesBlock = station.querySelector('[data-payment-previous-balances-block]');
     const paymentPreviousBalanceList = station.querySelector('[data-payment-previous-balance-list]');
+    const paymentPassengerBalanceHeading = station.querySelector('[data-payment-passenger-balance-heading]');
+    const paymentPassengerBalanceList = station.querySelector('[data-payment-passenger-balance-list]');
     const paymentNoPreviousBalance = station.querySelector('[data-payment-no-previous-balance]');
     const paymentTotalOutstandingLabel = station.querySelector('[data-payment-total-outstanding-label]');
     const paymentCurrencySelect = paymentForm?.elements?.namedItem('receipt_currency') instanceof HTMLSelectElement
         ? paymentForm.elements.namedItem('receipt_currency')
         : null;
+    const paymentReceiptScopeSelect = paymentForm?.elements?.namedItem('receipt_scope') instanceof HTMLSelectElement
+        ? paymentForm.elements.namedItem('receipt_scope')
+        : null;
+    const paymentTargetReceivableSelect = paymentForm?.elements?.namedItem('target_receivable_item_id') instanceof HTMLSelectElement
+        ? paymentForm.elements.namedItem('target_receivable_item_id')
+        : null;
+    const paymentReceiptScopeRow = station.querySelector('[data-payment-receipt-scope-row]');
+    const paymentTargetRow = station.querySelector('[data-payment-target-row]');
+    const paymentScopeNote = station.querySelector('[data-payment-scope-note]');
+    const paymentAdvanceRow = station.querySelector('[data-payment-advance-row]');
+    const paymentAdvanceSelect = paymentForm?.elements?.namedItem('advance_receipt_id') instanceof HTMLSelectElement
+        ? paymentForm.elements.namedItem('advance_receipt_id')
+        : null;
+    const paymentAdvanceAmountRow = station.querySelector('[data-payment-advance-amount-row]');
+    const paymentAdvanceAmountInput = paymentForm?.elements?.namedItem('advance_apply_amount') instanceof HTMLInputElement
+        ? paymentForm.elements.namedItem('advance_apply_amount')
+        : null;
+    let paymentAdvanceOptions = [];
+    let paymentAdvanceLoadController = null;
     const paymentCurrentBalancePkrRow = station.querySelector('[data-payment-current-balance-pkr-row]');
     const paymentCurrentBalancePkrInput = commercialLookup('commercial-payment-current-balance-pkr', '[data-payment-current-balance-pkr]');
+    var dailySettlementRatesDataNode = null;
+    var dailySettlementRates = {};
     const paymentState = station.querySelector('[data-payment-state]');
     const paymentStateLabel = station.querySelector('[data-payment-state-label]');
     const paymentDueHelper = station.querySelector('[data-payment-due-helper]');
@@ -358,6 +560,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const paymentNewEntryButton = station.querySelector('[data-payment-action="new-payment"]');
     const paymentPrintReceiptButton = station.querySelector('[data-payment-action="print-receipt"]');
     const paymentLedgerLink = station.querySelector('[data-payment-action="customer-ledger"]');
+    const paymentWhatsappLedgerButton = station.querySelector('[data-payment-action="whatsapp-ledger"]');
     const customerLedgerLinks = Array.from(station.querySelectorAll('[data-customer-ledger-link]'));
     const paymentReceiptDateInput = paymentForm?.elements?.namedItem('receipt_date') instanceof HTMLInputElement
         ? paymentForm.elements.namedItem('receipt_date')
@@ -369,6 +572,13 @@ document.addEventListener('DOMContentLoaded', () => {
         ? paymentForm.elements.namedItem('treasury_account_id')
         : null;
     const paymentTreasuryAccountRow = station.querySelector('[data-payment-treasury-row]');
+    const directSupplierPaymentRow = station.querySelector('[data-direct-supplier-payment-row]');
+    const directSupplierObligationSelect = paymentForm?.elements?.namedItem('direct_supplier_obligation_id') instanceof HTMLSelectElement
+        ? paymentForm.elements.namedItem('direct_supplier_obligation_id')
+        : null;
+    const directSupplierServiceLineReferenceInput = paymentForm?.elements?.namedItem('direct_supplier_service_line_reference') instanceof HTMLInputElement
+        ? paymentForm.elements.namedItem('direct_supplier_service_line_reference')
+        : null;
     const paymentReferenceInput = paymentForm?.elements?.namedItem('reference_number') instanceof HTMLInputElement
         ? paymentForm.elements.namedItem('reference_number')
         : null;
@@ -418,6 +628,7 @@ document.addEventListener('DOMContentLoaded', () => {
         : null;
     const bookingDueDateField = station.querySelector('[data-booking-due-date-field]');
     const bookingDueDateDisplay = station.querySelector('[data-booking-due-date-display]');
+    const bookingBranchLabelField = station.querySelector('[data-booking-branch-label]');
     const autoBookingDueDateField = station.querySelector('[data-auto-booking-field="due_date"]');
     const paymentReturnRow = station.querySelector('[data-payment-return-row]');
     const paymentReturnAmountInput = commercialLookup('commercial-payment-return-amount', '[data-payment-return-amount]');
@@ -427,6 +638,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const autosaveStatusLabel = station.querySelector('[data-autosave-status]');
     const serviceTableBody = station.querySelector('.legacy-service-table tbody');
     let suppressAutosave = false;
+    let suppressAutosaveTimerId = 0;
     let invoiceAutosaveTimerId = 0;
     let serviceAutosaveTimerId = 0;
     let invoiceAutosavePromise = Promise.resolve(null);
@@ -437,11 +649,16 @@ document.addEventListener('DOMContentLoaded', () => {
     let serviceAutosaveInFlight = false;
     let pendingInvoiceAutosave = false;
     let pendingInvoiceAutosaveForce = false;
+    let pendingInvoiceAutosaveAllowCreate = false;
     let pendingServiceAutosave = false;
+    let pendingServiceAutosaveAllowCreate = false;
     let autosavedPaymentEligible = false;
     let autosavedPersistedServiceId = 0;
     let autosavedHasSavedService = false;
     let autosavedReceivableAmount = 0;
+    // Production users do not want partial invoice/service edits saved while they are still typing.
+    // Keep explicit saves through Save Service/Save Payment, but disable change/focusout autosave.
+    const fieldAutosaveEnabled = false;
     let allowNativePaymentSubmit = false;
     let paymentSubmitValidationInFlight = false;
     let paymentExchangeConfirmInFlight = false;
@@ -461,6 +678,32 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     let savedPaymentState = emptySavedPaymentState();
     let savedPaymentEditNoticeShown = false;
+    window.workspaceSuppressAutosaveTemporarily = (reason = 'manual', durationMs = 450) => {
+        suppressAutosave = true;
+        window.clearTimeout(suppressAutosaveTimerId);
+        suppressAutosaveTimerId = window.setTimeout(() => {
+            suppressAutosave = false;
+            suppressAutosaveTimerId = 0;
+            if (typeof console !== 'undefined' && typeof console.debug === 'function') {
+                console.debug('[workspace-autosave]', 'suppress cleared', {
+                    reason,
+                    durationMs,
+                });
+            }
+        }, Math.max(Number(durationMs) || 0, 0));
+
+        if (typeof console !== 'undefined' && typeof console.debug === 'function') {
+            console.debug('[workspace-autosave]', 'suppress enabled', {
+                reason,
+                durationMs,
+            });
+        }
+    };
+    window.workspaceDebugEnterFlow = (stage, details = {}) => {
+        if (typeof console !== 'undefined' && typeof console.debug === 'function') {
+            console.debug('[workspace-enter]', stage, details);
+        }
+    };
     const paymentSubmitDebug = {
         saveButtonFound: false,
         handlerAttached: false,
@@ -491,9 +734,63 @@ document.addEventListener('DOMContentLoaded', () => {
     };
     const paymentExchangeRateSaveUrl = buildWorkspacePathUrl('/workspace/payments/exchange-rate/save');
 
+    const logWorkflowTrace = (stage, extra = {}) => {
+        if (typeof sendWorkspaceClientError !== 'function') {
+            return;
+        }
+
+        sendWorkspaceClientError({
+            type: 'workspace_workflow_trace',
+            message: `Workflow trace: ${stage}`,
+            extra: {
+                stage,
+                bookingId: currentBookingId(),
+                persistedServiceId: currentPersistedServiceId(),
+                activeServiceId: activeServiceId(),
+                savedPaymentApplies: currentSavedPaymentApplies(),
+                hasSavedReceipt: Number.parseInt(String(paymentPrintReceiptButton?.dataset.paymentLatestReceiptId || 0), 10) > 0,
+                receiptId: Number.parseInt(String(paymentPrintReceiptButton?.dataset.paymentLatestReceiptId || 0), 10) || 0,
+                receiptUrl: String(paymentPrintReceiptButton?.dataset.paymentPrintUrl || '').trim(),
+                scriptInstanceId: workspaceScriptInstanceId,
+                enteredPaymentAmount: Math.max(toNumber(receivedNowInput?.value || 0), 0),
+                invoiceDraftDirty: (() => {
+                    try {
+                        return invoiceForm instanceof HTMLFormElement && serializeForm(invoiceForm) !== lastInvoiceAutosaveKey;
+                    } catch (error) {
+                        return null;
+                    }
+                })(),
+                serviceDraftDirty: (() => {
+                    try {
+                        return serviceForm instanceof HTMLFormElement && serializeForm(serviceForm) !== lastServiceAutosaveKey;
+                    } catch (error) {
+                        return null;
+                    }
+                })(),
+                autosaveState: String(autosaveStatusLabel?.dataset.state || '').trim().toLowerCase(),
+                serviceAutosaveReady: typeof serviceAutosaveReady === 'function' ? serviceAutosaveReady() : null,
+                autosaveBookingReady: typeof autosaveBookingReady === 'function' ? autosaveBookingReady() : null,
+                ...extra,
+            },
+        });
+    };
+
     const showFeedback = (message) => {
         if (!feedback) {
             return;
+        }
+
+        const normalizedMessage = String(message || '').trim();
+        const now = Date.now();
+        if (normalizedMessage !== '') {
+            const lastMessage = String(showFeedback.lastMessage || '');
+            const lastShownAt = Number(showFeedback.lastShownAt || 0);
+            if (lastMessage === normalizedMessage && now - lastShownAt < 4500) {
+                return;
+            }
+
+            showFeedback.lastMessage = normalizedMessage;
+            showFeedback.lastShownAt = now;
         }
 
         feedback.textContent = message;
@@ -1366,6 +1663,38 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
+    const currentInvoiceDraftIsDirty = () => {
+        if (!(invoiceForm instanceof HTMLFormElement)) {
+            return false;
+        }
+
+        return serializeForm(invoiceForm) !== lastInvoiceAutosaveKey;
+    };
+
+    const currentServiceDraftIsDirty = () => {
+        if (!(serviceForm instanceof HTMLFormElement)) {
+            return false;
+        }
+
+        return serializeForm(serviceForm) !== lastServiceAutosaveKey;
+    };
+
+    const currentServiceDraftNeedsPersistForWorkflow = () => {
+        if (currentBookingId() <= 0) {
+            return autosaveBookingReady() || serviceAutosaveReady();
+        }
+
+        if (!serviceAutosaveReady()) {
+            return false;
+        }
+
+        if (currentPersistedServiceId() <= 0) {
+            return true;
+        }
+
+        return currentServiceDraftIsDirty() || currentInvoiceDraftIsDirty();
+    };
+
     actionButtons.forEach((button) => {
         button.addEventListener('click', async () => {
             switch (button.dataset.workspaceAction) {
@@ -1409,17 +1738,52 @@ document.addEventListener('DOMContentLoaded', () => {
                 case 'supplier-history-finder':
                     openSupplierHistoryModal();
                     break;
+                case 'service-edit-booking':
+                    openServiceEditBookingModal();
+                    break;
+                case 'service-penalty-refund':
+                    openServicePenaltyRefundModal();
+                    break;
+                case 'recent-bookings':
+                    toggleWorkspaceSection('workspace-recent-bookings', {
+                        message: 'Recent invoices opened.',
+                        hideMessage: 'Recent invoices hidden.',
+                    });
+                    break;
                 case 'add-service':
                     {
+                        logWorkflowTrace('add-service:clicked');
                         const enteredPaymentAmount = Math.max(toNumber(receivedNowInput?.value || 0), 0);
-                        if (!currentSavedPaymentApplies() && enteredPaymentAmount > 0.005) {
-                            await performSameCurrencyPaymentSave();
+                        const addServicePayload = await performSameCurrencyPaymentSave({
+                            autoOpenReceipt: false,
+                            suppressReceiptCreation: enteredPaymentAmount <= 0.005,
+                            workflowOrigin: 'add_service',
+                        });
+
+                        logWorkflowTrace('add-service:shared-save-finished', {
+                            enteredPaymentAmount,
+                            payloadOk: Boolean(addServicePayload),
+                            paymentStillUnsaved: !currentSavedPaymentApplies(),
+                            currentPersistedServiceId: currentPersistedServiceId(),
+                        });
+
+                        if (enteredPaymentAmount > 0.005) {
                             const remainingEnteredAmount = Math.max(toNumber(receivedNowInput?.value || 0), 0);
                             if (!currentSavedPaymentApplies() && remainingEnteredAmount > 0.005) {
+                                logWorkflowTrace('add-service:blocked-unsaved-payment', {
+                                    remainingEnteredAmount,
+                                });
                                 return;
                             }
+                        } else if (currentPersistedServiceId() <= 0) {
+                            logWorkflowTrace('add-service:blocked-unsaved-service', {
+                                currentPersistedServiceId: currentPersistedServiceId(),
+                            });
+                            showFeedback('The current passenger/service could not be saved yet. Complete the required fields before Add Service.');
+                            return;
                         }
 
+                        logWorkflowTrace('add-service:prepare-new-service-entry');
                         prepareNewServiceEntry();
                     }
                     break;
@@ -1464,6 +1828,20 @@ document.addEventListener('DOMContentLoaded', () => {
                 default:
                     break;
             }
+        });
+    });
+
+    Array.from(station.querySelectorAll('[data-workspace-close-section]')).forEach((button) => {
+        button.addEventListener('click', () => {
+            const sectionId = String(button.dataset.workspaceCloseSection || '').trim();
+            if (sectionId === '') {
+                return;
+            }
+
+            toggleWorkspaceSection(sectionId, {
+                message: 'Section opened.',
+                hideMessage: 'Section hidden.',
+            });
         });
     });
 
@@ -1533,6 +1911,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const parsed = Number.parseFloat(String(value ?? '').replace(/[^0-9.-]/g, ''));
         return Number.isFinite(parsed) ? parsed : 0;
     };
+
+    const roundMoneyValue = (value) => Math.round(Number(value || 0));
+    const formatNumberInputValue = (value) => String(roundMoneyValue(value));
 
     const setLinkDisabled = (link, disabled) => {
         if (!(link instanceof HTMLAnchorElement)) {
@@ -1605,8 +1986,8 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     const formatMoney = (value) => value.toLocaleString(undefined, {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 0,
     });
 
     const formatCurrencyAmount = (currency, amount) => `${currency || 'PKR'} ${formatMoney(Math.max(amount, 0))}`;
@@ -1627,6 +2008,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const nonCashPaymentMethods = new Set(Object.keys(paymentMethodLabels));
 
     const isNonCashPaymentMethod = (method) => nonCashPaymentMethods.has(String(method || '').trim());
+    const isDirectSupplierPaymentMethod = (method) => String(method || '').trim() === 'customer_paid_supplier';
 
     const currentPaymentMethodLabel = () => {
         const method = String(paymentMethodSelect?.value || '').trim();
@@ -1927,6 +2309,15 @@ document.addEventListener('DOMContentLoaded', () => {
         if (typeof syncRefundTreasurySelector === 'function') {
             syncRefundTreasurySelector();
         }
+        if (typeof syncSupplierRefundTreasurySelector === 'function') {
+            syncSupplierRefundTreasurySelector();
+        }
+        if (typeof syncCorrectionRefundTreasurySelector === 'function') {
+            syncCorrectionRefundTreasurySelector();
+        }
+        if (typeof syncCorrectionSupplierRefundTreasurySelector === 'function') {
+            syncCorrectionSupplierRefundTreasurySelector();
+        }
         if (typeof syncSupplierTreasurySelectors === 'function') {
             syncSupplierTreasurySelectors();
         }
@@ -1995,12 +2386,146 @@ document.addEventListener('DOMContentLoaded', () => {
 
         return paymentTreasuryRefreshInFlight;
     };
+    const directSupplierPendingOptionValue = '__current_service__';
+    let directSupplierOpenObligations = [];
+
+    const normalizeDirectSupplierObligation = (row = {}) => {
+        const id = Number.parseInt(String(row?.id || 0), 10) || 0;
+        const supplier = String(row?.supplier || row?.supplier_name || 'Supplier').trim() || 'Supplier';
+        const serviceLineReference = String(row?.serviceLineReference || row?.service_line_reference || '').trim();
+        const currency = String(row?.currency || '').trim().toUpperCase();
+        const balance = Math.max(
+            toNumber(row?.balanceDueAmount ?? row?.netPayableAmount ?? row?.net_payable_amount ?? row?.balance ?? 0),
+            0
+        );
+
+        return { id, supplier, serviceLineReference, currency, balance };
+    };
+
+    const directSupplierOptionsFromSelect = () => {
+        if (!directSupplierObligationSelect) {
+            return [];
+        }
+
+        return Array.from(directSupplierObligationSelect.options || [])
+            .map((option) => ({
+                id: Number.parseInt(String(option.value || '0'), 10) || 0,
+                supplier: String(option.textContent || 'Supplier').split('/')[0]?.trim() || 'Supplier',
+                serviceLineReference: '',
+                currency: String(option.dataset.currency || '').trim().toUpperCase(),
+                balance: toNumber(option.dataset.balance || 0),
+            }))
+            .filter((row) => row.id > 0);
+    };
+
+    directSupplierOpenObligations = directSupplierOptionsFromSelect();
+
+    const updateDirectSupplierServiceLineReference = (payload = {}) => {
+        if (!directSupplierServiceLineReferenceInput) {
+            return;
+        }
+
+        const payloadLine = String(
+            payload?.service_line?.serviceLineReference
+            || payload?.service_line?.lineNumber
+            || payload?.service_line_reference
+            || ''
+        ).trim();
+        if (payloadLine !== '') {
+            directSupplierServiceLineReferenceInput.value = payloadLine;
+        }
+    };
+
+    const syncDirectSupplierObligationOptions = (payload = {}) => {
+        if (!directSupplierObligationSelect) {
+            return;
+        }
+
+        updateDirectSupplierServiceLineReference(payload);
+
+        const payloadObligations = payload?.supplier_foundation?.openObligations;
+        if (Array.isArray(payloadObligations)) {
+            directSupplierOpenObligations = payloadObligations
+                .map(normalizeDirectSupplierObligation)
+                .filter((row) => row.id > 0 && row.balance > 0.005);
+        }
+
+        const selectedBefore = String(directSupplierObligationSelect.value || '').trim();
+        const paymentCurrency = String(paymentCurrencySelect?.value || paymentCurrentInvoiceInput?.dataset.paymentCurrency || 'PKR').trim().toUpperCase();
+        const eligible = directSupplierOpenObligations.filter((row) => {
+            return paymentCurrency === '' || row.currency === paymentCurrency;
+        });
+
+        directSupplierObligationSelect.innerHTML = '';
+        const promptOption = document.createElement('option');
+        promptOption.value = '';
+        promptOption.textContent = eligible.length > 0 ? 'Select supplier payable' : 'No supplier payable saved yet';
+        directSupplierObligationSelect.appendChild(promptOption);
+
+        eligible.forEach((row) => {
+            const option = document.createElement('option');
+            option.value = String(row.id);
+            option.dataset.currency = row.currency;
+            option.dataset.balance = String(row.balance);
+            option.dataset.serviceLineReference = row.serviceLineReference;
+            option.textContent = [
+                row.supplier,
+                row.serviceLineReference,
+                `${row.currency || paymentCurrency || 'PKR'} ${formatMoney(row.balance)}`,
+            ].filter(Boolean).join(' / ');
+            directSupplierObligationSelect.appendChild(option);
+        });
+
+        const currentServiceLineReference = String(directSupplierServiceLineReferenceInput?.value || '').trim();
+        let nextValue = '';
+        if (selectedBefore !== '' && eligible.some((row) => String(row.id) === selectedBefore)) {
+            nextValue = selectedBefore;
+        } else if (currentServiceLineReference !== '') {
+            const matchingServiceObligation = eligible.find((row) => row.serviceLineReference === currentServiceLineReference);
+            if (matchingServiceObligation) {
+                nextValue = String(matchingServiceObligation.id);
+            }
+        }
+        if (nextValue === '' && eligible.length === 1) {
+            nextValue = String(eligible[0].id);
+        }
+
+        if (nextValue === '' && isDirectSupplierPaymentMethod(paymentMethodSelect?.value || '')) {
+            const supplierName = String(supplierInput?.value || '').trim();
+            const draftBalance = Math.max(
+                toNumber(paymentCurrentBalanceInput?.dataset.paymentPersistedInvoiceBalance || paymentCurrentBalanceInput?.value || 0),
+                toNumber(paymentCurrentInvoiceInput?.dataset.paymentCurrentInvoice || paymentCurrentInvoiceInput?.value || 0),
+                0
+            );
+            if (supplierName !== '' && supplierName !== addSupplierOptionValue && draftBalance > 0.005) {
+                const pendingOption = document.createElement('option');
+                pendingOption.value = directSupplierPendingOptionValue;
+                pendingOption.dataset.currency = paymentCurrency;
+                pendingOption.dataset.balance = String(draftBalance);
+                pendingOption.textContent = `${supplierName} / current invoice / ${paymentCurrency || 'PKR'} ${formatMoney(draftBalance)}`;
+                directSupplierObligationSelect.appendChild(pendingOption);
+                nextValue = directSupplierPendingOptionValue;
+            }
+        }
+
+        directSupplierObligationSelect.value = nextValue;
+    };
+
     const syncPaymentTreasurySelector = () => {
         if (!paymentTreasuryAccountSelect || !paymentTreasuryAccountRow || !paymentMethodSelect) {
             return;
         }
 
         const method = String(paymentMethodSelect.value || '').trim();
+        const isDirectSupplierPayment = isDirectSupplierPaymentMethod(method);
+        if (directSupplierPaymentRow && directSupplierObligationSelect) {
+            syncDirectSupplierObligationOptions();
+            directSupplierPaymentRow.hidden = !isDirectSupplierPayment;
+            directSupplierObligationSelect.disabled = !isDirectSupplierPayment;
+            if (!isDirectSupplierPayment) {
+                directSupplierObligationSelect.value = '';
+            }
+        }
         const requiresTreasury = paymentMethodRequiresTreasurySelection(method);
         const eligibleAccounts = requiresTreasury ? eligiblePaymentTreasuryAccounts() : [];
         const selectedBefore = String(paymentTreasuryAccountSelect.value || paymentTreasuryAccountSelect.dataset.initialValue || '').trim();
@@ -2052,6 +2577,23 @@ document.addEventListener('DOMContentLoaded', () => {
             return false;
         }
 
+        if (
+            paymentTreasuryAccountSelect
+            && paymentTreasuryAccountRow
+            && !paymentTreasuryAccountRow.hidden
+            && !paymentTreasuryAccountSelect.disabled
+        ) {
+            const selectedValue = String(paymentTreasuryAccountSelect.value || '').trim();
+            if (selectedValue !== '' && selectedValue !== addPaymentTreasuryAccountValue) {
+                const selectedOptionExists = Array.from(paymentTreasuryAccountSelect.options || []).some((option) => {
+                    return String(option?.value || '').trim() === selectedValue;
+                });
+                if (selectedOptionExists) {
+                    return false;
+                }
+            }
+        }
+
         const eligibleAccounts = eligiblePaymentTreasuryAccounts();
         if (eligibleAccounts.length > 0) {
             return false;
@@ -2063,6 +2605,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (window.confirm(message)) {
             openTreasuryAccountSetup(normalizedMethod);
+        }
+
+        return true;
+    };
+    const promptDirectSupplierPayableIfMissing = () => {
+        if (!paymentMethodSelect || !isDirectSupplierPaymentMethod(paymentMethodSelect.value)) {
+            return false;
+        }
+
+        if (directSupplierObligationSelect && String(directSupplierObligationSelect.value || '').trim() !== '') {
+            return false;
+        }
+
+        showFeedback('Select the supplier payable that the customer paid directly.');
+        if (directSupplierObligationSelect) {
+            directSupplierObligationSelect.focus();
         }
 
         return true;
@@ -2211,7 +2769,7 @@ document.addEventListener('DOMContentLoaded', () => {
             paymentBankCardDetailInput.value = '';
         }
         if (paymentChargesAmountInput) {
-            paymentChargesAmountInput.value = '0.00';
+            paymentChargesAmountInput.value = '0';
         }
         if (paymentRemarksInput) {
             paymentRemarksInput.value = '';
@@ -2226,7 +2784,7 @@ document.addEventListener('DOMContentLoaded', () => {
             paymentDetailBankCardInput.value = paymentBankCardDetailInput?.value || '';
         }
         if (paymentDetailChargesInput) {
-            paymentDetailChargesInput.value = paymentChargesAmountInput?.value || '0.00';
+            paymentDetailChargesInput.value = paymentChargesAmountInput?.value || '0';
         }
         if (paymentDetailRemarksInput) {
             paymentDetailRemarksInput.value = paymentRemarksInput?.value || '';
@@ -2281,7 +2839,7 @@ document.addEventListener('DOMContentLoaded', () => {
             paymentBankCardDetailInput.value = String(paymentDetailBankCardInput?.value || '').trim();
         }
         if (paymentChargesAmountInput) {
-            paymentChargesAmountInput.value = Math.max(toNumber(paymentDetailChargesInput?.value || 0), 0).toFixed(2);
+            paymentChargesAmountInput.value = formatNumberInputValue(Math.max(toNumber(paymentDetailChargesInput?.value || 0), 0));
         }
         if (paymentRemarksInput) {
             paymentRemarksInput.value = String(paymentDetailRemarksInput?.value || '').trim();
@@ -2319,6 +2877,12 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch (error) {
         serviceSupplierOptions = [];
     }
+    let businessSourceOptions = [];
+    try {
+        businessSourceOptions = JSON.parse(businessSourceOptionsNode?.textContent || '[]');
+    } catch (error) {
+        businessSourceOptions = [];
+    }
     let workspaceBranchOptions = [];
     try {
         workspaceBranchOptions = JSON.parse(branchOptionsNode?.textContent || '[]');
@@ -2332,9 +2896,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const workspaceBranchBaseCurrency = (branchId) => String(workspaceBranchById(branchId)?.baseCurrency || 'PKR').trim().toUpperCase() || 'PKR';
 
     const normalizeSupplierName = (value) => String(value ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+    const normalizeBusinessSourceName = (value) => String(value ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
     const supplierExists = (name) => {
         const normalized = normalizeSupplierName(name);
         return normalized !== '' && serviceSupplierOptions.some((supplier) => normalizeSupplierName(supplier?.name) === normalized);
+    };
+    const businessSourceExists = (name) => {
+        const normalized = normalizeBusinessSourceName(name);
+        return normalized !== '' && businessSourceOptions.some((row) => normalizeBusinessSourceName(row?.name) === normalized);
     };
     let supplierAddReturnContext = 'service';
     const addSupplierToSelect = (select, savedName) => {
@@ -2352,6 +2921,67 @@ document.addEventListener('DOMContentLoaded', () => {
         selectOption.textContent = savedName;
         const addOption = Array.from(select.options).find((option) => option.value === addSupplierOptionValue);
         select.insertBefore(selectOption, addOption || null);
+    };
+    const addBusinessSourceToSelect = (select, savedAccount) => {
+        if (!(select instanceof HTMLSelectElement) || !savedAccount) {
+            return;
+        }
+
+        const savedId = String(savedAccount.id || '').trim();
+        const savedName = String(savedAccount.name || '').trim();
+        if (savedId === '' || savedName === '') {
+            return;
+        }
+
+        const alreadyExists = Array.from(select.options).some((option) => option.value === savedId);
+        if (alreadyExists) {
+            return;
+        }
+
+        const option = document.createElement('option');
+        option.value = savedId;
+        option.textContent = savedName;
+        const addOption = Array.from(select.options).find((row) => row.value === addBusinessSourceOptionValue);
+        select.insertBefore(option, addOption || null);
+    };
+    const closeBusinessSourceAddModal = () => {
+        if (!businessSourceAddModal) {
+            return;
+        }
+
+        businessSourceAddModal.hidden = true;
+        businessSourceAddModal.setAttribute('aria-hidden', 'true');
+        if (businessSourceAddFeedback) {
+            businessSourceAddFeedback.hidden = true;
+            businessSourceAddFeedback.textContent = '';
+        }
+    };
+    const openBusinessSourceAddModal = (name = '') => {
+        if (!businessSourceAddModal || !businessSourceAddForm || !businessSourceRegisterUrl) {
+            return false;
+        }
+
+        if (businessSourceAddName) {
+            businessSourceAddName.value = String(name || businessSourceInput?.selectedOptions?.[0]?.textContent || '').trim();
+        }
+        if (businessSourceAddPhone instanceof HTMLInputElement) {
+            businessSourceAddPhone.value = '';
+        }
+        if (businessSourceAddAddress instanceof HTMLInputElement) {
+            businessSourceAddAddress.value = '';
+        }
+        if (businessSourceAddDescription instanceof HTMLInputElement) {
+            businessSourceAddDescription.value = '';
+        }
+
+        businessSourceAddModal.hidden = false;
+        businessSourceAddModal.setAttribute('aria-hidden', 'false');
+        window.setTimeout(() => {
+            businessSourceAddName?.focus();
+            businessSourceAddName?.select();
+        }, 60);
+
+        return true;
     };
     const focusSupplierAddReturnTarget = () => {
         if (supplierAddReturnContext === 'global-prepaid') {
@@ -2391,6 +3021,129 @@ document.addEventListener('DOMContentLoaded', () => {
             window.setTimeout(() => nextField.focus(), 80);
         }
     };
+    businessSourceAddCloseButtons.forEach((button) => {
+        button.addEventListener('click', () => {
+            closeBusinessSourceAddModal();
+            if (businessSourceInput instanceof HTMLElement) {
+                businessSourceInput.focus();
+            }
+        });
+    });
+    const businessSourceAddFieldOrder = [
+        businessSourceAddName,
+        businessSourceAddPhone,
+        businessSourceAddAddress,
+        businessSourceAddDescription,
+    ].filter((field) => field instanceof HTMLElement);
+    const focusBusinessSourceAddField = (field) => {
+        if (!(field instanceof HTMLElement)) {
+            return;
+        }
+
+        field.focus();
+        if (field instanceof HTMLInputElement) {
+            field.select();
+        }
+    };
+    const submitBusinessSourceAddFormFromKeyboard = () => {
+        if (!(businessSourceAddForm instanceof HTMLFormElement) || !businessSourceAddSubmit || businessSourceAddSubmit.disabled) {
+            return;
+        }
+
+        if (typeof businessSourceAddForm.requestSubmit === 'function') {
+            businessSourceAddForm.requestSubmit(businessSourceAddSubmit);
+            return;
+        }
+
+        businessSourceAddSubmit.click();
+    };
+    if (businessSourceAddForm) {
+        businessSourceAddForm.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter' && event.code !== 'NumpadEnter') {
+                return;
+            }
+
+            const target = event.target;
+            if (!(target instanceof HTMLInputElement)) {
+                return;
+            }
+
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation();
+
+            const currentIndex = businessSourceAddFieldOrder.indexOf(target);
+            const nextField = businessSourceAddFieldOrder[currentIndex + 1] || businessSourceAddSubmit;
+            if (currentIndex === businessSourceAddFieldOrder.length - 1) {
+                submitBusinessSourceAddFormFromKeyboard();
+                return;
+            }
+
+            focusBusinessSourceAddField(nextField);
+        }, true);
+        businessSourceAddForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+
+            if (!businessSourceRegisterUrl) {
+                return;
+            }
+
+            const accountName = String(businessSourceAddName?.value || '').trim();
+            if (accountName === '') {
+                if (businessSourceAddFeedback) {
+                    businessSourceAddFeedback.hidden = false;
+                    businessSourceAddFeedback.textContent = 'Enter account name.';
+                }
+                businessSourceAddName?.focus();
+                return;
+            }
+
+            if (businessSourceAddSubmit) {
+                businessSourceAddSubmit.disabled = true;
+            }
+
+            try {
+                const response = await fetch(businessSourceRegisterUrl, {
+                    method: 'POST',
+                    body: new FormData(businessSourceAddForm),
+                    headers: {
+                        'X-Requested-With': 'XMLHttpRequest',
+                        Accept: 'application/json',
+                    },
+                });
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok || payload.ok === false) {
+                    throw new Error(payload.message || 'Account could not be saved.');
+                }
+
+                const account = payload.account || {};
+                const savedName = String(account.name || accountName).trim();
+                if (!businessSourceExists(savedName)) {
+                    businessSourceOptions.push(account);
+                }
+                addBusinessSourceToSelect(businessSourceInput, account);
+
+                if (businessSourceInput instanceof HTMLSelectElement) {
+                    businessSourceInput.value = String(account.id || '');
+                    businessSourceInput.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+
+                closeBusinessSourceAddModal();
+                showFeedback(payload.message || 'Account added.');
+            } catch (error) {
+                if (businessSourceAddFeedback) {
+                    businessSourceAddFeedback.hidden = false;
+                    businessSourceAddFeedback.textContent = error.message || 'Account could not be saved.';
+                } else {
+                    showFeedback(error.message || 'Account could not be saved.');
+                }
+            } finally {
+                if (businessSourceAddSubmit) {
+                    businessSourceAddSubmit.disabled = false;
+                }
+            }
+        });
+    }
     const openNativeSelect = (select) => {
         if (!(select instanceof HTMLSelectElement)) {
             return;
@@ -2531,19 +3284,6 @@ document.addEventListener('DOMContentLoaded', () => {
         supplierAddForm.addEventListener('keydown', handleSupplierAddFormEnter, true);
     }
 
-    const handleSupplierAddModeChange = () => {
-        if (String(supplierAddMode?.value || '').trim() !== 'running_balance') {
-            return;
-        }
-
-        window.setTimeout(() => {
-            submitSupplierAddFormFromKeyboard();
-        }, 0);
-    };
-
-    if (supplierAddMode instanceof HTMLElement) {
-        supplierAddMode.addEventListener('change', handleSupplierAddModeChange);
-    }
     supplierAddForm?.addEventListener('submit', async (event) => {
         event.preventDefault();
 
@@ -2636,6 +3376,32 @@ document.addEventListener('DOMContentLoaded', () => {
         window.setTimeout(() => openNativeSelect(supplierInput), 0);
     });
 
+    if (businessSourceInput instanceof HTMLSelectElement) {
+        businessSourceInput.addEventListener('focus', () => {
+            businessSourceInput.dataset.previousBusinessSourceValue = businessSourceInput.value === addBusinessSourceOptionValue
+                ? ''
+                : businessSourceInput.value;
+            window.setTimeout(() => openNativeSelect(businessSourceInput), 0);
+        });
+
+        businessSourceInput.addEventListener('change', () => {
+            window.setTimeout(() => {
+                if (businessSourceAddModal?.hidden === false) {
+                    return;
+                }
+
+                if (businessSourceInput.value === addBusinessSourceOptionValue) {
+                    const previousValue = businessSourceInput.dataset.previousBusinessSourceValue || '';
+                    businessSourceInput.value = previousValue;
+                    openBusinessSourceAddModal('');
+                    return;
+                }
+
+                businessSourceInput.dataset.previousBusinessSourceValue = businessSourceInput.value;
+            }, 80);
+        });
+    }
+
     supplierInput?.addEventListener('change', () => {
         window.setTimeout(() => {
             if (!supplierInput || supplierAddModal?.hidden === false) {
@@ -2701,7 +3467,28 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
-    const roundToTwo = (value) => Math.round((value + Number.EPSILON) * 100) / 100;
+    const syncCustomerCreditDisplay = (currentInvoiceCurrency, creditMap = null) => {
+        if (!paymentCustomerCreditInput) {
+            return;
+        }
+
+        const invoiceCurrency = String(currentInvoiceCurrency || paymentCurrentInvoiceInput?.dataset.paymentCurrency || 'PKR').toUpperCase();
+        const resolvedCreditMap = creditMap && typeof creditMap === 'object' && !Array.isArray(creditMap)
+            ? creditMap
+            : parseBalanceMap(paymentCustomerCreditInput.dataset.paymentCustomerCreditMap || '{}');
+        const sameCurrencyCredit = Math.max(toNumber(resolvedCreditMap[invoiceCurrency] || 0), 0);
+
+        paymentCustomerCreditInput.dataset.paymentCustomerCredit = String(sameCurrencyCredit);
+        paymentCustomerCreditInput.dataset.paymentCustomerCreditMap = JSON.stringify(resolvedCreditMap);
+        paymentCustomerCreditInput.value = formatCurrencyAmount(invoiceCurrency, sameCurrencyCredit);
+
+        if (paymentCustomerCreditRow) {
+            paymentCustomerCreditRow.hidden = sameCurrencyCredit <= 0.005;
+        }
+    };
+
+    const roundToTwo = (value) => roundMoneyValue(value);
+    const roundExchangeRate = (value) => Math.round(toNumber(value || 0) * 100000000) / 100000000;
 
     const preferredSettlementQuote = (targetCurrency, paymentCurrency, ratesMap, effectiveDate) => {
         const normalizeRateRow = (row) => ({
@@ -2805,17 +3592,31 @@ document.addEventListener('DOMContentLoaded', () => {
         const fullOpenBalanceMap = parseBalanceMap(
             paymentPreviousBalanceInput.dataset.paymentOpenBalanceMap || '{}'
         );
+        const normalizedCurrency = currentInvoiceCurrency || paymentCurrentInvoiceInput?.dataset.paymentCurrency || 'PKR';
+        const normalizedInvoiceBalance = Math.max(toNumber(currentInvoiceBalance), 0);
         const hasFullOpenBalanceMap = Object.keys(fullOpenBalanceMap).length > 0;
         const openBalanceMap = {
             ...(hasFullOpenBalanceMap ? fullOpenBalanceMap : previousBalanceMap),
         };
-        const normalizedCurrency = currentInvoiceCurrency || paymentCurrentInvoiceInput?.dataset.paymentCurrency || 'PKR';
-        const normalizedInvoiceBalance = Math.max(toNumber(currentInvoiceBalance), 0);
+
+        // A full server balance already contains the persisted current invoice. Remove that
+        // persisted portion before adding the live editor value, otherwise the total becomes stale.
+        if (hasFullOpenBalanceMap) {
+            const persistedCurrentBalance = Math.max(toNumber(
+                paymentCurrentBalanceInput?.dataset.paymentSavedInvoiceBalance
+                || paymentCurrentBalanceInput?.dataset.paymentPersistedInvoiceBalance
+                || 0
+            ), 0);
+            openBalanceMap[normalizedCurrency] = roundToTwo(Math.max(
+                toNumber(openBalanceMap[normalizedCurrency] || 0) - persistedCurrentBalance,
+                0
+            ));
+        }
 
         if (normalizedInvoiceBalance > 0.005) {
-            openBalanceMap[normalizedCurrency] = hasFullOpenBalanceMap
-                ? roundToTwo(Math.max(toNumber(openBalanceMap[normalizedCurrency] || 0), normalizedInvoiceBalance))
-                : roundToTwo(toNumber(openBalanceMap[normalizedCurrency] || 0) + normalizedInvoiceBalance);
+            openBalanceMap[normalizedCurrency] = roundToTwo(
+                toNumber(openBalanceMap[normalizedCurrency] || 0) + normalizedInvoiceBalance
+            );
         } else if (!Object.prototype.hasOwnProperty.call(openBalanceMap, normalizedCurrency)) {
             openBalanceMap[normalizedCurrency] = 0;
         }
@@ -2833,7 +3634,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (paymentPreviousBalanceInput) {
             paymentPreviousBalanceInput.dataset.paymentPreviousBalance = String(previousBalanceAmount);
-            paymentPreviousBalanceInput.dataset.paymentOpenBalanceMap = JSON.stringify(openBalanceMap);
         }
 
         if (paymentPreviousBalanceList) {
@@ -2861,6 +3661,40 @@ document.addEventListener('DOMContentLoaded', () => {
             paymentNoPreviousBalance.hidden = visibleBalances.length !== 0;
         }
 
+        if (paymentPassengerBalanceList instanceof HTMLElement) {
+            const passengerRows = currentBookingPassengerDueRows();
+            paymentPassengerBalanceList.innerHTML = '';
+
+            passengerRows.forEach((row, index) => {
+                const item = document.createElement('div');
+                item.className = `legacy-payment-passenger-item${index === 0 ? ' is-lead' : ''}`;
+
+                const top = document.createElement('div');
+                top.className = 'legacy-payment-passenger-item__top';
+                const name = document.createElement('strong');
+                name.textContent = String(row?.passengerName || '').trim() || 'Passenger';
+                const relation = document.createElement('span');
+                relation.textContent = index === 0 ? 'Self / Lead Traveler' : 'Passenger';
+                top.append(name, relation);
+
+                const meta = document.createElement('div');
+                meta.className = 'legacy-payment-passenger-item__meta';
+                const paid = document.createElement('span');
+                paid.textContent = `Paid: ${formatCurrencyAmount(String(row?.currency || 'PKR'), Math.max(toNumber(row?.allocatedAmount || 0), 0))}`;
+                const outstanding = document.createElement('span');
+                outstanding.textContent = `Outstanding: ${formatCurrencyAmount(String(row?.currency || 'PKR'), Math.max(toNumber(row?.outstandingAmount || 0), 0))}`;
+                meta.append(paid, outstanding);
+
+                item.append(top, meta);
+                paymentPassengerBalanceList.appendChild(item);
+            });
+
+            paymentPassengerBalanceList.hidden = passengerRows.length === 0;
+            if (paymentPassengerBalanceHeading instanceof HTMLElement) {
+                paymentPassengerBalanceHeading.hidden = passengerRows.length === 0;
+            }
+        }
+
         return {
             invoiceCurrency,
             previousBalanceInInvoiceCurrency: previousBalanceAmount,
@@ -2882,16 +3716,34 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         const displayCurrency = currency || paymentCurrentInvoiceInput?.dataset.paymentCurrency || 'PKR';
-        const candidateRate = toNumber(paymentCurrentBalancePkrInput.dataset.paymentPkrRate || 0);
+        const liveQuote = preferredSettlementQuote(
+            String(displayCurrency).toUpperCase(),
+            'PKR',
+            dailySettlementRates || {},
+            normalizeLooseDate(paymentReceiptDateInput?.value || '')
+        );
+        const conversionQuote = {
+            ...liveQuote,
+            targetCurrency: String(displayCurrency).toUpperCase(),
+            paymentCurrency: 'PKR',
+        };
+        let candidateRate = 0;
+        if (toNumber(liveQuote?.exchangeRate || 0) > 0.005) {
+            candidateRate = convertTargetAmountToPaymentAmount(1, conversionQuote);
+        }
+        if (candidateRate <= 0.005) {
+            candidateRate = toNumber(paymentCurrentBalancePkrInput.dataset.paymentPkrRate || 0);
+        }
         const shouldShow = displayCurrency !== 'PKR' && candidateRate > 0.005;
 
         paymentCurrentBalancePkrRow.hidden = !shouldShow;
         if (!shouldShow) {
-            paymentCurrentBalancePkrInput.value = 'PKR 0.00';
+            paymentCurrentBalancePkrInput.value = 'PKR 0';
             return;
         }
 
         const pkrEquivalent = Math.max(currentBalance, 0) * candidateRate;
+        paymentCurrentBalancePkrInput.dataset.paymentPkrRate = String(candidateRate);
         paymentCurrentBalancePkrInput.value = formatCurrencyAmount('PKR', pkrEquivalent);
     };
 
@@ -3012,8 +3864,523 @@ document.addEventListener('DOMContentLoaded', () => {
             });
     };
 
+    const currentBookingReceivableTargets = (currency = '') => {
+        const bookingId = currentBookingId();
+        if (bookingId <= 0) {
+            return [];
+        }
+
+        const normalizedCurrency = String(currency || currentInvoiceSnapshot().invoiceCurrency || 'PKR').toUpperCase();
+
+        return Array.from(customerOpenReceivables)
+            .filter((row) => Number.parseInt(String(row?.bookingId || 0), 10) === bookingId)
+            .filter((row) => String(row?.currency || 'PKR').toUpperCase() === normalizedCurrency)
+            .filter((row) => toNumber(row?.outstandingAmount || 0) > 0.005)
+            .sort((left, right) => {
+                const leftService = String(left?.serviceLineReference || '');
+                const rightService = String(right?.serviceLineReference || '');
+                if (leftService !== rightService) {
+                    return leftService.localeCompare(rightService);
+                }
+
+                const leftPassenger = String(left?.passengerName || '');
+                const rightPassenger = String(right?.passengerName || '');
+                if (leftPassenger !== rightPassenger) {
+                    return leftPassenger.localeCompare(rightPassenger);
+                }
+
+                return (Number.parseInt(String(left?.id || 0), 10) || 0) - (Number.parseInt(String(right?.id || 0), 10) || 0);
+            });
+    };
+
+    const paymentTargetLabel = (row) => {
+        const passenger = String(row?.passengerName || '').trim();
+        const servicePnr = (() => {
+            const lineReference = String(row?.serviceLineReference || '').trim();
+            const matchingService = Array.from(serviceLines).find((serviceLine) => String(serviceLine?.lineNumber || '').trim() === lineReference);
+            const pnr = String(matchingService?.pnr || '').trim();
+            return pnr !== '' ? pnr : 'No PNR';
+        })();
+        const amount = formatCurrencyAmount(String(row?.currency || 'PKR'), toNumber(row?.outstandingAmount || 0));
+
+        return [
+            passenger !== '' ? passenger : 'Passenger',
+            servicePnr,
+            amount,
+        ].join(' / ');
+    };
+
+    const preferredPaymentTargetId = (targets = []) => {
+        const activeServiceLineReference = String(
+            station.querySelector('[data-service-field="lineNumber"]')?.value
+            || station.querySelector('input[name="line_number"]')?.value
+            || ''
+        ).trim();
+        const activePnr = String(
+            station.querySelector('[data-ticket-field="pnr"]')?.value
+            || station.querySelector('input[name="ticket_pnr"]')?.value
+            || ''
+        ).trim().toUpperCase();
+        const activePassenger = String(
+            station.querySelector('[data-service-passenger-name]')?.value
+            || station.querySelector('input[name="service_passenger_name"]')?.value
+            || ''
+        ).trim().toUpperCase();
+
+        if (targets.length === 0) {
+            return '';
+        }
+
+        const directServiceMatch = targets.find((row) => String(row?.serviceLineReference || '').trim() === activeServiceLineReference);
+        if (directServiceMatch) {
+            return String(Number.parseInt(String(directServiceMatch.id || 0), 10) || 0);
+        }
+
+        const pnrMatch = targets.find((row) => {
+            const lineReference = String(row?.serviceLineReference || '').trim();
+            const matchingService = Array.from(serviceLines).find((serviceLine) => String(serviceLine?.lineNumber || '').trim() === lineReference);
+            return String(matchingService?.pnr || '').trim().toUpperCase() === activePnr && activePnr !== '';
+        });
+        if (pnrMatch) {
+            return String(Number.parseInt(String(pnrMatch.id || 0), 10) || 0);
+        }
+
+        const passengerMatch = targets.find((row) => String(row?.passengerName || '').trim().toUpperCase() === activePassenger && activePassenger !== '');
+        if (passengerMatch) {
+            return String(Number.parseInt(String(passengerMatch.id || 0), 10) || 0);
+        }
+
+        return '';
+    };
+
+    const receiptScopeHelpText = () => {
+        if (!(paymentReceiptScopeSelect instanceof HTMLSelectElement)) {
+            return '';
+        }
+
+        return paymentReceiptScopeSelect.value === 'passenger_specific'
+            ? 'Selected Passenger Due Only keeps this payment tied to one passenger/service due.'
+            : 'Whole Invoice / Auto Split applies this receipt across the current invoice dues in order.';
+    };
+
+    const activeServiceLineReference = () => String(
+        station.querySelector('[data-service-field="lineNumber"]')?.value
+        || station.querySelector('input[name="line_number"]')?.value
+        || ''
+    ).trim();
+
+    const liveCurrentServiceDuePreview = () => {
+        const snapshot = currentInvoiceSnapshot();
+
+        return {
+            currency: String(snapshot.invoiceCurrency || paymentCurrentInvoiceInput?.dataset.paymentCurrency || 'PKR').toUpperCase(),
+            dueAmount: Math.max(toNumber(snapshot.invoiceAmount || 0), 0),
+            allocatedAmount: Math.max(toNumber(snapshot.invoicePaid || 0), 0),
+            outstandingAmount: Math.max(toNumber(snapshot.invoiceBalance || 0), 0),
+        };
+    };
+
+    const currentBookingPassengerDueRows = () => {
+        const bookingId = currentBookingId();
+        if (bookingId <= 0) {
+            return [];
+        }
+
+        const liveLineReference = activeServiceLineReference();
+        const livePreview = liveCurrentServiceDuePreview();
+
+        return Array.from(customerOpenReceivables)
+            .filter((row) => Number.parseInt(String(row?.bookingId || 0), 10) === bookingId)
+            .map((row) => {
+                if (liveLineReference === '' || String(row?.serviceLineReference || '').trim() !== liveLineReference) {
+                    return row;
+                }
+
+                return {
+                    ...row,
+                    currency: livePreview.currency,
+                    dueAmount: livePreview.dueAmount,
+                    allocatedAmount: livePreview.allocatedAmount,
+                    outstandingAmount: livePreview.outstandingAmount,
+                };
+            })
+            .filter((row) => {
+                const dueAmount = toNumber(row?.dueAmount || 0);
+                const outstandingAmount = toNumber(row?.outstandingAmount || 0);
+                const allocatedAmount = toNumber(row?.allocatedAmount || 0);
+                return dueAmount > 0.005 || outstandingAmount > 0.005 || allocatedAmount > 0.005;
+            })
+            .sort((left, right) => {
+                const leftService = String(left?.serviceLineReference || '');
+                const rightService = String(right?.serviceLineReference || '');
+                if (leftService !== rightService) {
+                    return leftService.localeCompare(rightService);
+                }
+
+                const leftPassenger = String(left?.passengerName || '');
+                const rightPassenger = String(right?.passengerName || '');
+                if (leftPassenger !== rightPassenger) {
+                    return leftPassenger.localeCompare(rightPassenger);
+                }
+
+                return (Number.parseInt(String(left?.id || 0), 10) || 0) - (Number.parseInt(String(right?.id || 0), 10) || 0);
+            });
+    };
+
+    const syncActivePassengerSummaryDisplay = () => {
+        const activeRow = station.querySelector('.legacy-passenger-box [data-service-row].is-active')
+            || station.querySelector('.legacy-passenger-box [data-service-row]');
+        if (!(activeRow instanceof HTMLElement)) {
+            return;
+        }
+
+        const livePreview = liveCurrentServiceDuePreview();
+        const invoiceCell = activeRow.querySelector('[data-passenger-summary-invoice]');
+        const paidCell = activeRow.querySelector('[data-passenger-summary-paid]');
+        const outstandingCell = activeRow.querySelector('[data-passenger-summary-outstanding]');
+
+        if (invoiceCell instanceof HTMLElement) {
+            invoiceCell.textContent = formatCurrencyAmount(livePreview.currency, livePreview.dueAmount);
+        }
+        if (paidCell instanceof HTMLElement) {
+            paidCell.textContent = formatCurrencyAmount(livePreview.currency, livePreview.allocatedAmount);
+        }
+        if (outstandingCell instanceof HTMLElement) {
+            outstandingCell.textContent = formatCurrencyAmount(livePreview.currency, livePreview.outstandingAmount);
+        }
+    };
+
+    const settlementFieldShouldSync = (field, switchedServiceLine) => {
+        if (!(field instanceof HTMLInputElement)) {
+            return false;
+        }
+
+        if (switchedServiceLine) {
+            field.dataset.settlementDirty = '0';
+            return true;
+        }
+
+        return String(field.dataset.settlementDirty || '0') !== '1';
+    };
+
+    const bindSettlementFieldDraftBehavior = (field, options = {}) => {
+        const { selectZeroOnFocus = false } = options;
+        if (!(field instanceof HTMLInputElement) || field.dataset.settlementFieldBound === '1') {
+            return;
+        }
+
+        field.dataset.settlementFieldBound = '1';
+        const markDirty = () => {
+            field.dataset.settlementDirty = '1';
+        };
+
+        field.addEventListener('input', markDirty);
+        field.addEventListener('change', markDirty);
+
+        if (selectZeroOnFocus) {
+            field.addEventListener('focus', () => {
+                if (toNumber(field.value || 0) <= 0.005) {
+                    field.select();
+                }
+            });
+        }
+    };
+
+    const syncSettlementFormFromServiceLine = (serviceLine) => {
+        if (!(serviceEventBars.settlement instanceof HTMLFormElement)) {
+            return;
+        }
+
+        const customerPenaltyField = serviceEventBars.settlement.elements.namedItem('customer_penalty_amount');
+        const expectedSupplierRefundField = serviceEventBars.settlement.elements.namedItem('expected_supplier_refund_amount');
+        const supplierPenaltyField = serviceEventBars.settlement.elements.namedItem('supplier_penalty_amount');
+        const settlementReasonField = serviceEventBars.settlement.elements.namedItem('settlement_reason');
+        const settlementDateField = serviceEventBars.settlement.elements.namedItem('settlement_event_date');
+        const settlementSummaryNote = serviceEventBars.settlement.querySelector('[data-service-settlement-summary]');
+        const serviceLineKey = String(
+            serviceLine?.serviceId
+            || serviceLine?.lineReference
+            || serviceLine?.lineNumber
+            || 'draft'
+        );
+        const previousServiceLineKey = String(serviceEventBars.settlement.dataset.settlementServiceKey || '');
+        const switchedServiceLine = serviceLineKey !== previousServiceLineKey;
+        serviceEventBars.settlement.dataset.settlementServiceKey = serviceLineKey;
+
+        const customerPenaltyAmount = toNumber(serviceLine?.latestCancelCustomerPenaltyAmount || 0);
+        const supplierPenaltyAmount = toNumber(serviceLine?.latestCancelSupplierPenaltyAmount || 0);
+        const supplierCostAmount = toNumber(serviceLine?.purchaseCost || serviceLine?.supplierCost || 0);
+        const expectedSupplierRefundAmount = toNumber(
+            serviceLine?.latestCancelExpectedSupplierRefundAmount
+            || Math.max(supplierCostAmount - supplierPenaltyAmount, 0)
+        );
+        const customerRefundCredit = toNumber(serviceLine?.latestCancelReleasedCustomerCreditAmount || 0);
+        const supplierRefundCredit = toNumber(serviceLine?.latestCancelReleasedSupplierCreditAmount || 0);
+        const invoiceCurrency = String(serviceLine?.currency || currentInvoiceSnapshot().invoiceCurrency || 'PKR').toUpperCase();
+
+        if (customerPenaltyField instanceof HTMLInputElement) {
+            bindSettlementFieldDraftBehavior(customerPenaltyField, { selectZeroOnFocus: true });
+            if (settlementFieldShouldSync(customerPenaltyField, switchedServiceLine)) {
+                customerPenaltyField.value = formatNumberInputValue(customerPenaltyAmount);
+            }
+        }
+        if (expectedSupplierRefundField instanceof HTMLInputElement) {
+            bindSettlementFieldDraftBehavior(expectedSupplierRefundField, { selectZeroOnFocus: true });
+            if (settlementFieldShouldSync(expectedSupplierRefundField, switchedServiceLine)) {
+                expectedSupplierRefundField.value = formatNumberInputValue(expectedSupplierRefundAmount);
+            }
+        }
+        if (supplierPenaltyField instanceof HTMLInputElement) {
+            bindSettlementFieldDraftBehavior(supplierPenaltyField);
+            if (settlementFieldShouldSync(supplierPenaltyField, switchedServiceLine)) {
+                supplierPenaltyField.value = formatNumberInputValue(Math.max(supplierCostAmount - expectedSupplierRefundAmount, 0));
+            }
+        }
+        if (settlementReasonField instanceof HTMLInputElement) {
+            bindSettlementFieldDraftBehavior(settlementReasonField);
+            if (settlementFieldShouldSync(settlementReasonField, switchedServiceLine)) {
+                settlementReasonField.value = String(serviceLine?.latestCancelReason || '');
+            }
+        }
+        if (settlementDateField instanceof HTMLInputElement) {
+            bindSettlementFieldDraftBehavior(settlementDateField);
+            if (settlementFieldShouldSync(settlementDateField, switchedServiceLine)) {
+                settlementDateField.value = String(serviceLine?.latestCancelEventDate || '') || settlementDateField.value || todayIso();
+            }
+        }
+        const syncSettlementDerivedAmounts = () => {
+            const liveCustomerPenaltyAmount = toNumber(customerPenaltyField?.value || 0);
+            const liveExpectedSupplierRefundAmount = Math.min(
+                Math.max(toNumber(expectedSupplierRefundField?.value || 0), 0),
+                Math.max(supplierCostAmount, 0)
+            );
+            const liveSupplierPenaltyAmount = Math.max(supplierCostAmount - liveExpectedSupplierRefundAmount, 0);
+            if (supplierPenaltyField instanceof HTMLInputElement) {
+                supplierPenaltyField.value = formatNumberInputValue(liveSupplierPenaltyAmount);
+            }
+            if (!(settlementSummaryNote instanceof HTMLElement)) {
+                return;
+            }
+            const hasSummary = liveCustomerPenaltyAmount > 0.005
+                || liveExpectedSupplierRefundAmount > 0.005
+                || liveSupplierPenaltyAmount > 0.005
+                || customerRefundCredit > 0.005
+                || supplierRefundCredit > 0.005;
+            settlementSummaryNote.hidden = !hasSummary;
+            if (hasSummary) {
+                settlementSummaryNote.textContent = [
+                    `Customer penalty: ${formatCurrencyAmount(invoiceCurrency, liveCustomerPenaltyAmount)}.`,
+                    `Expected supplier refund: ${formatCurrencyAmount(invoiceCurrency, liveExpectedSupplierRefundAmount)}.`,
+                    `Supplier penalty: ${formatCurrencyAmount(invoiceCurrency, liveSupplierPenaltyAmount)}.`,
+                    `Customer refund credit released: ${formatCurrencyAmount(invoiceCurrency, customerRefundCredit)}.`,
+                    `Supplier refundable credit released: ${formatCurrencyAmount(invoiceCurrency, supplierRefundCredit)}.`,
+                ].join(' ');
+            } else {
+                settlementSummaryNote.textContent = '';
+            }
+        };
+        customerPenaltyField?.addEventListener('input', syncSettlementDerivedAmounts);
+        expectedSupplierRefundField?.addEventListener('input', syncSettlementDerivedAmounts);
+        syncSettlementDerivedAmounts();
+    };
+
+    const syncSettlementCorrectionFormFromServiceLine = (serviceLine) => {
+        if (!(serviceCorrectionSettlementForm instanceof HTMLFormElement)) {
+            return;
+        }
+
+        const customerPenaltyField = serviceCorrectionSettlementForm.elements.namedItem('customer_penalty_amount');
+        const expectedSupplierRefundField = serviceCorrectionSettlementForm.elements.namedItem('expected_supplier_refund_amount');
+        const supplierPenaltyField = serviceCorrectionSettlementForm.elements.namedItem('supplier_penalty_amount');
+        const settlementReasonField = serviceCorrectionSettlementForm.elements.namedItem('settlement_reason')
+            || serviceCorrectionSettlementForm.elements.namedItem('correction_reason');
+        const settlementDateField = serviceCorrectionSettlementForm.elements.namedItem('settlement_event_date')
+            || serviceCorrectionSettlementForm.elements.namedItem('correction_event_date');
+        const serviceLineKey = String(
+            serviceLine?.serviceId
+            || serviceLine?.lineReference
+            || serviceLine?.lineNumber
+            || 'draft'
+        );
+        const previousServiceLineKey = String(serviceCorrectionSettlementForm.dataset.settlementServiceKey || '');
+        const switchedServiceLine = serviceLineKey !== previousServiceLineKey;
+        serviceCorrectionSettlementForm.dataset.settlementServiceKey = serviceLineKey;
+
+        const customerPenaltyAmount = toNumber(serviceLine?.latestCancelCustomerPenaltyAmount || 0);
+        const supplierPenaltyAmount = toNumber(serviceLine?.latestCancelSupplierPenaltyAmount || 0);
+        const supplierCostAmount = toNumber(serviceLine?.purchaseCost || serviceLine?.supplierCost || 0);
+        const expectedSupplierRefundAmount = toNumber(
+            serviceLine?.latestCancelExpectedSupplierRefundAmount
+            || Math.max(supplierCostAmount - supplierPenaltyAmount, 0)
+        );
+        const customerRefundCredit = toNumber(serviceLine?.latestCancelReleasedCustomerCreditAmount || 0);
+        const supplierRefundCredit = toNumber(serviceLine?.latestCancelReleasedSupplierCreditAmount || 0);
+        const invoiceCurrency = String(serviceLine?.currency || currentInvoiceSnapshot().invoiceCurrency || 'PKR').toUpperCase();
+
+        if (customerPenaltyField instanceof HTMLInputElement) {
+            bindSettlementFieldDraftBehavior(customerPenaltyField, { selectZeroOnFocus: true });
+            if (settlementFieldShouldSync(customerPenaltyField, switchedServiceLine)) {
+                customerPenaltyField.value = formatNumberInputValue(customerPenaltyAmount);
+            }
+        }
+
+        if (expectedSupplierRefundField instanceof HTMLInputElement) {
+            bindSettlementFieldDraftBehavior(expectedSupplierRefundField, { selectZeroOnFocus: true });
+            if (settlementFieldShouldSync(expectedSupplierRefundField, switchedServiceLine)) {
+                expectedSupplierRefundField.value = formatNumberInputValue(expectedSupplierRefundAmount);
+            }
+        }
+
+        if (supplierPenaltyField instanceof HTMLInputElement) {
+            bindSettlementFieldDraftBehavior(supplierPenaltyField);
+            if (settlementFieldShouldSync(supplierPenaltyField, switchedServiceLine)) {
+                supplierPenaltyField.value = formatNumberInputValue(Math.max(supplierCostAmount - expectedSupplierRefundAmount, 0));
+            }
+        }
+
+        if (settlementReasonField instanceof HTMLInputElement) {
+            bindSettlementFieldDraftBehavior(settlementReasonField);
+            if (settlementFieldShouldSync(settlementReasonField, switchedServiceLine)) {
+                settlementReasonField.value = String(serviceLine?.latestCancelReason || '');
+            }
+        }
+
+        if (settlementDateField instanceof HTMLInputElement) {
+            bindSettlementFieldDraftBehavior(settlementDateField);
+            if (settlementFieldShouldSync(settlementDateField, switchedServiceLine)) {
+                settlementDateField.value = String(serviceLine?.latestCancelEventDate || '') || settlementDateField.value || todayIso();
+            }
+        }
+
+        const syncSettlementCorrectionDerivedAmounts = () => {
+            const liveCustomerPenaltyAmount = Math.max(toNumber(customerPenaltyField?.value || 0), 0);
+            const liveExpectedSupplierRefundAmount = Math.min(
+                Math.max(toNumber(expectedSupplierRefundField?.value || 0), 0),
+                Math.max(supplierCostAmount, 0)
+            );
+            const liveSupplierPenaltyAmount = Math.max(supplierCostAmount - liveExpectedSupplierRefundAmount, 0);
+
+            if (supplierPenaltyField instanceof HTMLInputElement) {
+                supplierPenaltyField.value = formatNumberInputValue(liveSupplierPenaltyAmount);
+            }
+
+            if (!(serviceCorrectionSettlementSummaryNote instanceof HTMLElement)) {
+                return;
+            }
+
+            const hasSummary = liveCustomerPenaltyAmount > 0.005
+                || liveExpectedSupplierRefundAmount > 0.005
+                || liveSupplierPenaltyAmount > 0.005
+                || customerRefundCredit > 0.005
+                || supplierRefundCredit > 0.005;
+
+            serviceCorrectionSettlementSummaryNote.hidden = !hasSummary;
+            serviceCorrectionSettlementSummaryNote.textContent = hasSummary
+                ? [
+                    `Customer penalty: ${formatCurrencyAmount(invoiceCurrency, liveCustomerPenaltyAmount)}.`,
+                    `Expected supplier refund: ${formatCurrencyAmount(invoiceCurrency, liveExpectedSupplierRefundAmount)}.`,
+                    `Supplier penalty: ${formatCurrencyAmount(invoiceCurrency, liveSupplierPenaltyAmount)}.`,
+                    `Customer refund credit released: ${formatCurrencyAmount(invoiceCurrency, customerRefundCredit)}.`,
+                    `Supplier refundable credit released: ${formatCurrencyAmount(invoiceCurrency, supplierRefundCredit)}.`,
+                ].join(' ')
+                : '';
+        };
+
+        customerPenaltyField?.addEventListener('input', syncSettlementCorrectionDerivedAmounts);
+        expectedSupplierRefundField?.addEventListener('input', syncSettlementCorrectionDerivedAmounts);
+        syncSettlementCorrectionDerivedAmounts();
+    };
+
+    const syncRefundCorrectionFormFromServiceLine = (serviceLine) => {
+        if (!(serviceCorrectionRefundForm instanceof HTMLFormElement)) {
+            return;
+        }
+
+        const serviceLineKey = String(
+            serviceLine?.serviceId
+            || serviceLine?.lineReference
+            || serviceLine?.lineNumber
+            || 'draft'
+        );
+        const previousServiceLineKey = String(serviceCorrectionRefundForm.dataset.refundServiceKey || '');
+        const switchedServiceLine = serviceLineKey !== previousServiceLineKey;
+        serviceCorrectionRefundForm.dataset.refundServiceKey = serviceLineKey;
+
+        const customerRefundAmountField = serviceCorrectionRefundForm.elements.namedItem('customer_refund_amount');
+        const supplierRefundAmountField = serviceCorrectionRefundForm.elements.namedItem('supplier_refund_amount');
+        const refundDateField = serviceCorrectionRefundForm.elements.namedItem('refund_event_date')
+            || serviceCorrectionRefundForm.elements.namedItem('correction_event_date');
+        const customerRefundAmount = toNumber(serviceLine?.latestCustomerRefundAmountOnly || 0);
+        const supplierRefundAmount = toNumber(serviceLine?.latestSupplierRefundAmountOnly || 0);
+
+        if (customerRefundAmountField instanceof HTMLInputElement) {
+            if (switchedServiceLine || String(customerRefundAmountField.dataset.refundBound || '') !== '1') {
+                customerRefundAmountField.value = formatNumberInputValue(customerRefundAmount);
+            }
+            customerRefundAmountField.dataset.refundBound = '1';
+        }
+
+        if (supplierRefundAmountField instanceof HTMLInputElement) {
+            if (switchedServiceLine || String(supplierRefundAmountField.dataset.refundBound || '') !== '1') {
+                supplierRefundAmountField.value = formatNumberInputValue(supplierRefundAmount);
+            }
+            supplierRefundAmountField.dataset.refundBound = '1';
+        }
+
+        if (refundDateField instanceof HTMLInputElement && switchedServiceLine) {
+            refundDateField.value = refundDateField.value || todayIso();
+        }
+    };
+
+    const syncReceiptScopeTargets = () => {
+        if (!(paymentReceiptScopeSelect instanceof HTMLSelectElement) || !(paymentTargetReceivableSelect instanceof HTMLSelectElement)) {
+            return;
+        }
+
+        const invoiceCurrency = String(currentInvoiceSnapshot().invoiceCurrency || paymentCurrentInvoiceInput?.dataset.paymentCurrency || 'PKR').toUpperCase();
+        const targets = currentBookingReceivableTargets(invoiceCurrency);
+        const previousValue = String(paymentTargetReceivableSelect.value || '');
+
+        paymentTargetReceivableSelect.innerHTML = '<option value="">Select passenger due</option>';
+        targets.forEach((row) => {
+            const option = document.createElement('option');
+            option.value = String(Number.parseInt(String(row.id || 0), 10) || 0);
+            option.textContent = paymentTargetLabel(row);
+            paymentTargetReceivableSelect.appendChild(option);
+        });
+
+        const preferredValue = preferredPaymentTargetId(targets);
+
+        if (targets.some((row) => String(Number.parseInt(String(row.id || 0), 10) || 0) === previousValue)) {
+            paymentTargetReceivableSelect.value = previousValue;
+        } else if (preferredValue !== '') {
+            paymentTargetReceivableSelect.value = preferredValue;
+        } else if (targets.length === 1) {
+            paymentTargetReceivableSelect.value = String(Number.parseInt(String(targets[0].id || 0), 10) || 0);
+        } else {
+            paymentTargetReceivableSelect.value = '';
+        }
+
+        const passengerSpecific = paymentReceiptScopeSelect.value === 'passenger_specific';
+        const hasTargets = targets.length > 0;
+        if (paymentTargetRow instanceof HTMLElement) {
+            paymentTargetRow.hidden = !(passengerSpecific && hasTargets);
+        }
+
+        if (passengerSpecific && !hasTargets) {
+            paymentReceiptScopeSelect.value = 'whole_invoice';
+            if (paymentTargetRow instanceof HTMLElement) {
+                paymentTargetRow.hidden = true;
+            }
+        }
+
+        if (paymentScopeNote instanceof HTMLElement) {
+            paymentScopeNote.textContent = receiptScopeHelpText();
+        }
+    };
+
     const settlementTargetLabel = (target) => {
-        const prefix = target.isCurrentBooking ? 'Current Invoice' : 'Open Balance';
+        const prefix = target.isCurrentBooking ? 'Current Invoice' : 'Outstanding Balance';
         const bookingRef = String(target.bookingReference || '').trim();
         const serviceRef = String(target.serviceLineReference || '').trim();
         const dueDate = String(target.nextDueDate || '').trim();
@@ -3088,6 +4455,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (dailySettlementRatesDataNode) {
             dailySettlementRatesDataNode.textContent = JSON.stringify(dailySettlementRates);
         }
+
+        syncReceiptScopeTargets();
     };
 
     const replacePaymentHistoryData = (nextReceipts = [], nextAllocations = []) => {
@@ -3134,7 +4503,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const formatCurrencyTotalsInline = (totals = {}) => {
         const entries = Object.entries(totals).filter(([, amount]) => Math.abs(toNumber(amount || 0)) > 0.005);
         if (entries.length === 0) {
-            return 'PKR 0.00';
+            return 'PKR 0';
         }
 
         return entries.map(([currency, amount]) => formatCurrencyAmount(currency, amount)).join(' / ');
@@ -3142,6 +4511,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const updateCustomerLedgerTarget = (bookingId = currentBookingId()) => {
         if (customerLedgerLinks.length === 0 && !(paymentLedgerLink instanceof HTMLAnchorElement)) {
+            updateWhatsappLedgerActionState();
             return;
         }
 
@@ -3168,6 +4538,176 @@ document.addEventListener('DOMContentLoaded', () => {
                 link.tabIndex = -1;
             }
         });
+
+        updateWhatsappLedgerActionState();
+    };
+
+    const normalizePhoneDigits = (value, branchName = '') => {
+        const raw = String(value || '').trim();
+        if (raw === '' || raw === '-') {
+            return '';
+        }
+
+        let digits = raw.replace(/\D+/g, '');
+        if (digits === '') {
+            return '';
+        }
+
+        if (digits.startsWith('00')) {
+            digits = digits.slice(2);
+        }
+
+        if (digits.startsWith('92') || digits.startsWith('971') || digits.startsWith('964')) {
+            return digits;
+        }
+
+        const branch = String(branchName || '').trim().toLowerCase();
+        const isUaeBranch = branch !== '' && (branch.includes('noble') || branch.includes('dubai') || branch.includes('uae'));
+        const isPakistanBranch = branch !== '' && (branch.includes('imdad') || branch.includes('swat') || branch.includes('pakistan'));
+
+        if (digits.startsWith('0')) {
+            const localDigits = digits.replace(/^0+/, '');
+            if (localDigits === '') {
+                return '';
+            }
+
+            if (isUaeBranch) {
+                return `971${localDigits}`;
+            }
+
+            if (isPakistanBranch) {
+                return `92${localDigits}`;
+            }
+
+            return localDigits;
+        }
+
+        if (isUaeBranch && digits.length === 9 && digits.startsWith('5')) {
+            return `971${digits}`;
+        }
+
+        if (isPakistanBranch && digits.length === 10 && digits.startsWith('3')) {
+            return `92${digits}`;
+        }
+
+        return digits;
+    };
+
+    const currentLedgerPrintUrl = () => {
+        const bookingId = currentBookingId();
+        if (bookingId <= 0) {
+            return '';
+        }
+
+        const params = new URLSearchParams();
+        const customerName = customerAutocompleteInput instanceof HTMLInputElement
+            ? String(customerAutocompleteInput.value || '').trim()
+            : '';
+        const branchId = bookingBranchField instanceof HTMLSelectElement
+            ? Number.parseInt(String(bookingBranchField.value || '0'), 10) || 0
+            : 0;
+        const businessSourceId = businessSourceInput instanceof HTMLSelectElement
+            ? Number.parseInt(String(businessSourceInput.value || '0'), 10) || 0
+            : 0;
+
+        if (branchId > 0) {
+            params.set('branch_id', String(branchId));
+        }
+        if (businessSourceId > 0) {
+            params.set('business_source_id', String(businessSourceId));
+        }
+        if (customerName !== '') {
+            params.set('customer_name', customerName);
+        }
+
+        return buildWorkspacePathUrl(`reports/account-ledger-print?${params.toString()}`);
+    };
+
+    const updateWhatsappLedgerActionState = () => {
+        if (!(paymentWhatsappLedgerButton instanceof HTMLButtonElement)) {
+            return;
+        }
+
+        const ledgerPrintUrl = currentLedgerPrintUrl();
+        const branchLabel = bookingBranchLabelField instanceof HTMLInputElement
+            ? String(bookingBranchLabelField.value || '').trim()
+            : '';
+        const mobile = bookingMobileField instanceof HTMLInputElement
+            ? String(bookingMobileField.value || '').trim()
+            : '';
+        const phoneDigits = normalizePhoneDigits(mobile, branchLabel);
+
+        paymentWhatsappLedgerButton.dataset.ledgerPrintUrl = ledgerPrintUrl;
+        paymentWhatsappLedgerButton.dataset.whatsappDigits = phoneDigits;
+        paymentWhatsappLedgerButton.disabled = ledgerPrintUrl === '';
+    };
+
+    const openWhatsappLedgerFlow = () => {
+        if (!(paymentWhatsappLedgerButton instanceof HTMLButtonElement)) {
+            return false;
+        }
+
+        const ledgerPrintUrl = String(paymentWhatsappLedgerButton.dataset.ledgerPrintUrl || '').trim();
+        if (ledgerPrintUrl === '') {
+            showFeedback('Save or open a booking first, then send its ledger.');
+            return false;
+        }
+
+        const customerName = customerAutocompleteInput instanceof HTMLInputElement
+            ? String(customerAutocompleteInput.value || '').trim()
+            : '';
+        const invoiceNo = invoiceNumberDisplay instanceof HTMLElement
+            ? String(invoiceNumberDisplay.textContent || '').trim()
+            : '';
+        const phoneDigits = String(paymentWhatsappLedgerButton.dataset.whatsappDigits || '').trim();
+
+        if (window.travelLauncher && typeof window.travelLauncher.saveLedgerPdfAndOpenWhatsApp === 'function') {
+            paymentWhatsappLedgerButton.disabled = true;
+            paymentWhatsappLedgerButton.textContent = 'Preparing...';
+
+            window.travelLauncher.saveLedgerPdfAndOpenWhatsApp({
+                ledgerUrl: ledgerPrintUrl,
+                phoneDigits,
+                customerName,
+                invoiceNo
+            }).then((result) => {
+                const savedPath = String(result?.filePath || '').trim();
+                if (savedPath !== '') {
+                    showFeedback(`Ledger saved: ${savedPath}`);
+                } else if (phoneDigits === '') {
+                    showFeedback('Ledger saved, but customer mobile is missing so WhatsApp was not opened.');
+                }
+            }).catch((error) => {
+                const message = error instanceof Error ? error.message : 'Could not save ledger PDF from launcher.';
+                showFeedback(message);
+            }).finally(() => {
+                paymentWhatsappLedgerButton.disabled = ledgerPrintUrl === '';
+                paymentWhatsappLedgerButton.textContent = 'WhatsApp Ledger';
+            });
+
+            return true;
+        }
+
+        const printPopup = window.open(ledgerPrintUrl, '_blank', 'noopener');
+
+        if (phoneDigits === '') {
+            showFeedback('Ledger opened. Customer mobile is missing, so WhatsApp could not be prepared.');
+            return printPopup !== null;
+        }
+
+        const messageParts = [
+            customerName !== '' ? `Account ledger for ${customerName}` : 'Account ledger',
+            invoiceNo !== '' ? `(${invoiceNo})` : '',
+            'is ready. Please attach the PDF from the ledger tab.',
+        ].filter((part) => part !== '');
+        const whatsappUrl = `https://wa.me/${encodeURIComponent(phoneDigits)}?text=${encodeURIComponent(messageParts.join(' '))}`;
+        const whatsappPopup = window.open(whatsappUrl, '_blank', 'noopener');
+
+        if (whatsappPopup === null && printPopup !== null) {
+            showFeedback('Ledger opened. Allow pop-ups if you also want WhatsApp to open automatically.');
+        }
+
+        return printPopup !== null || whatsappPopup !== null;
     };
 
     const renderPaymentHistoryModal = () => {
@@ -3177,22 +4717,83 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (paymentHistoryReceiptsBody instanceof HTMLElement) {
-            if (paymentReceipts.length === 0) {
+            const receiptKeys = new Set();
+            const displayReceipts = Array.isArray(paymentReceipts) ? [...paymentReceipts] : [];
+            displayReceipts.forEach((receipt) => {
+                const receiptId = Number.parseInt(String(receipt?.id || 0), 10) || 0;
+                const receiptNo = String(receipt?.receiptNo || '').trim();
+                if (receiptId > 0) {
+                    receiptKeys.add(`id:${receiptId}`);
+                }
+                if (receiptNo !== '') {
+                    receiptKeys.add(`no:${receiptNo}`);
+                }
+            });
+
+            const advanceReceiptRows = new Map();
+            if (Array.isArray(paymentAllocations)) {
+                paymentAllocations.forEach((allocation) => {
+                    const purpose = String(allocation?.receiptPurpose || 'booking_payment').trim().toLowerCase().replace(/\s+/g, '_');
+                    if (purpose !== 'customer_advance') {
+                        return;
+                    }
+
+                    const receiptStatusRaw = String(allocation?.receiptStatusRaw || '').trim().toLowerCase().replace(/\s+/g, '_');
+                    if (receiptStatusRaw === 'void') {
+                        return;
+                    }
+
+                    const receiptId = Number.parseInt(String(allocation?.receiptId || 0), 10) || 0;
+                    const receiptNo = String(allocation?.receiptNo || '').trim();
+                    const key = receiptId > 0 ? `id:${receiptId}` : (receiptNo !== '' ? `no:${receiptNo}` : `advance:${advanceReceiptRows.size}`);
+                    if (receiptKeys.has(key)) {
+                        return;
+                    }
+
+                    const currency = String(allocation?.receivableCurrency || allocation?.currency || 'PKR');
+                    const appliedAmount = toNumber(allocation?.receivableAmountAllocated ?? allocation?.allocatedAmount ?? 0);
+                    if (Math.abs(appliedAmount) <= 0.005) {
+                        return;
+                    }
+
+                    const existing = advanceReceiptRows.get(key) || {
+                        id: 0,
+                        receiptNo: receiptNo || 'Advance',
+                        receiptDate: String(allocation?.receiptDate || String(allocation?.allocatedAt || '').slice(0, 10)),
+                        currency,
+                        tenderedAmount: 0,
+                        receivedAmount: 0,
+                        returnedAmount: 0,
+                        allocatedAmount: 0,
+                        paymentMethod: 'Customer Advance',
+                        status: 'Advance Applied',
+                        statusRaw: 'advance_applied',
+                        isAdvanceApplication: true,
+                    };
+                    existing.allocatedAmount = toNumber(existing.allocatedAmount || 0) + appliedAmount;
+                    advanceReceiptRows.set(key, existing);
+                });
+            }
+
+            advanceReceiptRows.forEach((row) => displayReceipts.push(row));
+
+            if (displayReceipts.length === 0) {
                 paymentHistoryReceiptsBody.innerHTML = '<tr><td colspan="12" class="empty-cell">No receipts recorded yet.</td></tr>';
             } else {
                 const csrfField = paymentForm?.elements?.namedItem('_token');
                 const csrfToken = csrfField instanceof HTMLInputElement ? csrfField.value.trim() : '';
-                paymentHistoryReceiptsBody.innerHTML = paymentReceipts.map((receipt) => {
+                paymentHistoryReceiptsBody.innerHTML = displayReceipts.map((receipt) => {
                     const receiptId = Number.parseInt(String(receipt?.id || 0), 10) || 0;
                     const bookingId = currentBookingId();
+                    const isAdvanceApplication = receipt?.isAdvanceApplication === true;
                     const statusRaw = String(receipt?.statusRaw || receipt?.status || '').trim().toLowerCase().replace(/\s+/g, '_');
                     const statusLabel = statusRaw === 'void'
                         ? 'VOID'
                         : String(receipt?.status || '').trim();
-                    const printUrl = receiptId > 0 && bookingId > 0
+                    const printUrl = !isAdvanceApplication && receiptId > 0 && bookingId > 0
                         ? buildWorkspacePathUrl(`workspace/output?booking_id=${bookingId}&doc=customer_receipt&receipt_id=${receiptId}`)
                         : '';
-                    const metadataActionHtml = receiptId > 0 && bookingId > 0 && csrfToken !== ''
+                    const metadataActionHtml = !isAdvanceApplication && receiptId > 0 && bookingId > 0 && csrfToken !== '' && statusRaw !== 'void'
                         ? `<form method="post" action="${escapeHtml(buildWorkspacePathUrl('workspace/payments/receipts/metadata-save'))}" style="display:grid;gap:6px;min-width:190px;">
                             <input type="hidden" name="_token" value="${escapeHtml(csrfToken)}">
                             <input type="hidden" name="booking_id" value="${bookingId}">
@@ -3203,7 +4804,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             <button class="btn btn-sm" type="submit">Save Notes</button>
                         </form>`
                         : '-';
-                    const voidActionHtml = canVoidFinancials && statusRaw !== 'void' && receiptId > 0 && bookingId > 0 && csrfToken !== ''
+                    const voidActionHtml = !isAdvanceApplication && canVoidFinancials && statusRaw !== 'void' && receiptId > 0 && bookingId > 0 && csrfToken !== ''
                         ? `<form method="post" action="${escapeHtml(buildWorkspacePathUrl('workspace/payments/receipts/void'))}" onsubmit="return confirm('Void this receipt and reverse its allocations?');" style="display:grid;gap:6px;min-width:150px;">
                             <input type="hidden" name="_token" value="${escapeHtml(csrfToken)}">
                             <input type="hidden" name="booking_id" value="${bookingId}">
@@ -3212,16 +4813,16 @@ document.addEventListener('DOMContentLoaded', () => {
                             <button class="btn btn-sm" type="submit">Void</button>
                         </form>`
                         : '-';
-                    const recreateActionHtml = statusRaw === 'void' && receiptId > 0 && bookingId > 0
+                    const recreateActionHtml = !isAdvanceApplication && statusRaw === 'void' && receiptId > 0 && bookingId > 0
                         ? `<a class="btn btn-sm" href="${escapeHtml(buildWorkspacePathUrl(`workspace?booking_id=${bookingId}&recreate_receipt_id=${receiptId}#dock-panel-payments`))}">Recreate</a>`
                         : '-';
                     return `<tr>
                         <td>${escapeHtml(String(receipt?.receiptNo || ''))}</td>
                         <td>${escapeHtml(String(receipt?.receiptDate || ''))}</td>
                         <td>${escapeHtml(String(receipt?.currency || ''))}</td>
-                        <td>${escapeHtml(formatMoney(toNumber(receipt?.receivedAmount || 0)))}</td>
+                        <td>${escapeHtml(formatMoney(toNumber(receipt?.tenderedAmount || receipt?.receivedAmount || 0)))}</td>
+                        <td>${escapeHtml(formatMoney(toNumber(receipt?.returnedAmount || 0)))}</td>
                         <td>${escapeHtml(formatMoney(toNumber(receipt?.allocatedAmount || 0)))}</td>
-                        <td>${escapeHtml(formatMoney(toNumber(receipt?.unallocatedAmount || 0)))}</td>
                         <td>${escapeHtml(String(receipt?.paymentMethod || ''))}</td>
                         <td>${escapeHtml(statusLabel)}</td>
                         <td>${printUrl !== '' ? `<a href="${escapeHtml(printUrl)}" target="_blank" rel="noopener">Print</a>` : '-'}</td>
@@ -3283,10 +4884,21 @@ document.addEventListener('DOMContentLoaded', () => {
     const readDisplayBackedAmount = (field, datasetValue) => {
         const persistedAmount = toNumber(datasetValue || 0);
         const visibleAmount = field ? toNumber(field.value || 0) : 0;
+
         return Math.max(persistedAmount, visibleAmount);
     };
 
-    const currentInvoiceSnapshot = () => {
+    const paymentInvoiceBalanceIsLocked = () => (
+        paymentCurrentBalanceInput?.dataset.paymentBalanceLocked === '1'
+    );
+
+    const persistedInvoiceBalanceAmount = () => Math.max(toNumber(
+        paymentCurrentBalanceInput?.dataset.paymentSavedInvoiceBalance
+        || paymentCurrentBalanceInput?.dataset.paymentPersistedInvoiceBalance
+        || 0
+    ), 0);
+
+    function currentInvoiceSnapshot() {
         const invoiceCurrency = String(paymentCurrentInvoiceInput?.dataset.paymentCurrency || serviceFields.currency?.value || 'PKR');
         const invoiceAmount = Math.max(readDisplayBackedAmount(
             paymentCurrentInvoiceInput,
@@ -3300,7 +4912,9 @@ document.addEventListener('DOMContentLoaded', () => {
             paymentCurrentBalanceInput,
             paymentCurrentBalanceInput?.dataset.paymentPersistedInvoiceBalance || 0
         ), 0);
-        const invoiceBalance = Math.max(invoiceAmount - invoicePaid, 0, persistedBalance);
+        const invoiceBalance = paymentInvoiceBalanceIsLocked()
+            ? persistedInvoiceBalanceAmount()
+            : Math.max(invoiceAmount - invoicePaid, 0, persistedBalance);
 
         return {
             invoiceCurrency,
@@ -3308,6 +4922,21 @@ document.addEventListener('DOMContentLoaded', () => {
             invoicePaid,
             invoiceBalance,
         };
+    }
+
+    const applyManualInvoiceAmountOverride = (rawValue) => {
+        if (!(finalSalePriceInput instanceof HTMLInputElement) || !(paymentCurrentInvoiceInput instanceof HTMLInputElement)) {
+            return;
+        }
+
+        const invoiceAmount = Math.max(toNumber(rawValue), 0);
+        finalSalePriceInput.value = formatNumberInputValue(invoiceAmount);
+        finalSalePriceInput.dataset.manualOverride = invoiceAmount > 0.005 ? '1' : '0';
+        paymentCurrentInvoiceInput.dataset.paymentCurrentInvoice = String(invoiceAmount);
+        paymentCurrentInvoiceInput.value = formatNumberInputValue(invoiceAmount);
+
+        refreshProfit('manual:payment_current_invoice');
+        syncTicketCommercialMirrors();
     };
 
     const currentInvoiceNeedsSettlementTarget = () => {
@@ -3369,7 +4998,143 @@ document.addEventListener('DOMContentLoaded', () => {
         paymentPrintReceiptButton.dataset.paymentPrintUrl = nextUrl;
     };
 
+    const openCustomerReceiptWindow = () => {
+        const receiptId = Number.parseInt(String(paymentPrintReceiptButton?.dataset.paymentLatestReceiptId || 0), 10) || 0;
+        const printUrl = String(paymentPrintReceiptButton?.dataset.paymentPrintUrl || '').trim();
+
+        if (receiptId <= 0 || printUrl === '') {
+            return false;
+        }
+
+        const popup = window.open(printUrl, '_blank', 'noopener');
+        return popup !== null;
+    };
+
+    if (!window.__travelReceiptOpenGuard || typeof window.__travelReceiptOpenGuard !== 'object') {
+        window.__travelReceiptOpenGuard = {
+            key: '',
+            openedAt: 0,
+        };
+    }
+    if (!window.__travelReceiptClickGuard || typeof window.__travelReceiptClickGuard !== 'object') {
+        window.__travelReceiptClickGuard = {
+            clickedAt: 0,
+            clickId: '',
+        };
+    }
+    const openCustomerReceiptWindowOnce = (reason = 'manual') => {
+        const receiptId = Number.parseInt(String(paymentPrintReceiptButton?.dataset.paymentLatestReceiptId || 0), 10) || 0;
+        const printUrl = String(paymentPrintReceiptButton?.dataset.paymentPrintUrl || '').trim();
+        const existingGuard = window.__travelReceiptOpenGuard || { key: '', openedAt: 0 };
+
+        logWorkflowTrace('receipt-open:requested', {
+            reason,
+            receiptId,
+            hasPrintUrl: printUrl !== '',
+            printUrl,
+            existingGuardKey: String(existingGuard.key || ''),
+            existingGuardAgeMs: Date.now() - Number(existingGuard.openedAt || 0),
+        });
+
+        if (receiptId <= 0 || printUrl === '') {
+            logWorkflowTrace('receipt-open:blocked-missing-target', {
+                reason,
+                receiptId,
+            });
+            return false;
+        }
+
+        const openKey = `${receiptId}|${printUrl}`;
+        const now = Date.now();
+        const receiptOpenGuard = window.__travelReceiptOpenGuard || { key: '', openedAt: 0 };
+        if (now - Number(receiptOpenGuard.openedAt || 0) < 2500) {
+            logWorkflowTrace('receipt-open:blocked-duplicate', {
+                reason,
+                receiptId,
+                previousKey: String(receiptOpenGuard.key || ''),
+                nextKey: openKey,
+                ageMs: now - Number(receiptOpenGuard.openedAt || 0),
+            });
+            return true;
+        }
+
+        window.__travelReceiptOpenGuard = {
+            key: openKey,
+            openedAt: now,
+            reason,
+            scriptInstanceId: workspaceScriptInstanceId,
+        };
+
+        logWorkflowTrace('receipt-open:calling-window-open', {
+            reason,
+            receiptId,
+            printUrl,
+            openKey,
+        });
+
+        const popup = window.open(printUrl, '_blank', 'noopener');
+        if (popup === null) {
+            logWorkflowTrace('receipt-open:blocked-popup', {
+                reason,
+                receiptId,
+            });
+            return false;
+        }
+
+        logWorkflowTrace('receipt-open:opened', {
+            reason,
+            receiptId,
+            openKey,
+        });
+        return true;
+    };
+
+    const hasOpenableCustomerReceipt = () => {
+        const receiptId = Number.parseInt(String(paymentPrintReceiptButton?.dataset.paymentLatestReceiptId || 0), 10) || 0;
+        const printUrl = String(paymentPrintReceiptButton?.dataset.paymentPrintUrl || '').trim();
+        return receiptId > 0 && printUrl !== '';
+    };
+
+    const openBookingSummaryReceiptWindow = () => {
+        const bookingId = currentBookingId();
+        if (bookingId <= 0) {
+            return false;
+        }
+
+        const printUrl = buildWorkspacePathUrl(`workspace/output?booking_id=${bookingId}&doc=booking_summary_receipt`);
+        const popup = window.open(printUrl, '_blank', 'noopener');
+
+        return popup !== null;
+    };
+
+    let printReceiptInFlight = false;
+
     const currentSavedPaymentApplies = () => savedPaymentState.saved && savedPaymentState.receiptId > 0 && savedPaymentState.bookingId === currentBookingId();
+
+    const logPaymentInputRuntime = (stage, extra = {}) => {
+        if (typeof sendWorkspaceClientError !== 'function') {
+            return;
+        }
+
+        sendWorkspaceClientError({
+            type: 'payment_input_runtime',
+            message: `Amount Receiving runtime: ${stage}`,
+            extra: {
+                stage,
+                currentBookingId: currentBookingId(),
+                savedPaymentApplies: currentSavedPaymentApplies(),
+                savedPaymentState: { ...savedPaymentState },
+                receivedDisabled: receivedNowInput instanceof HTMLInputElement ? receivedNowInput.disabled : null,
+                receivedReadOnly: receivedNowInput instanceof HTMLInputElement ? receivedNowInput.readOnly : null,
+                receivedValue: receivedNowInput instanceof HTMLInputElement ? receivedNowInput.value : null,
+                paymentCurrency: paymentCurrencySelect instanceof HTMLSelectElement ? paymentCurrencySelect.value : null,
+                invoiceCurrency: paymentCurrentInvoiceInput instanceof HTMLInputElement
+                    ? String(paymentCurrentInvoiceInput.dataset.paymentCurrency || '')
+                    : null,
+                ...extra,
+            },
+        });
+    };
 
     const savedPaymentLockedMessage = () => {
         const receiptLabel = savedPaymentState.receiptNo !== ''
@@ -3438,7 +5203,7 @@ document.addEventListener('DOMContentLoaded', () => {
             receivedNowInput.value = '';
         }
         if (clearAmount && quickReceiveInput) {
-            quickReceiveInput.value = '0.00';
+            quickReceiveInput.value = '0';
         }
 
         if (resetPaymentCurrency && paymentCurrencySelect) {
@@ -3475,10 +5240,10 @@ document.addEventListener('DOMContentLoaded', () => {
         savedPaymentEditNoticeShown = false;
 
         if (receivedNowInput) {
-            receivedNowInput.value = '0.00';
+            receivedNowInput.value = '0';
         }
         if (quickReceiveInput) {
-            quickReceiveInput.value = '0.00';
+            quickReceiveInput.value = '0';
         }
 
         if (paymentCurrencySelect && receipt.currency !== '') {
@@ -3493,6 +5258,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!currentSavedPaymentApplies()) {
             return false;
         }
+
+        logPaymentInputRuntime('saved-payment-edit-attempt');
 
         if (!savedPaymentEditNoticeShown) {
             showFeedback('Saved receipts cannot be edited here. Use New Payment for another receipt or void/reversal for correction.');
@@ -3790,10 +5557,175 @@ document.addEventListener('DOMContentLoaded', () => {
         };
     };
 
+    const selectedPaymentAdvanceOption = () => {
+        if (!paymentAdvanceSelect || paymentAdvanceSelect.value === '') {
+            return null;
+        }
+
+        return paymentAdvanceOptions.find((advance) => String(advance.id || '') === String(paymentAdvanceSelect.value)) || null;
+    };
+
+    const uniqueCustomerAdvanceRows = (rows) => {
+        const seen = new Set();
+        return (Array.isArray(rows) ? rows : []).filter((advance) => {
+            const id = Number.parseInt(String(advance?.id || 0), 10) || 0;
+            const amount = Math.max(toNumber(advance?.unallocated_amount || 0), 0);
+            if (id <= 0 || amount <= 0.005) {
+                return false;
+            }
+
+            const key = id > 0
+                ? `id:${id}`
+                : [
+                    String(advance?.receipt_no || '').trim().toUpperCase(),
+                    String(advance?.currency || '').trim().toUpperCase(),
+                    formatMoney(amount),
+                ].join('|');
+            if (seen.has(key)) {
+                return false;
+            }
+            seen.add(key);
+            return true;
+        });
+    };
+
+    const currentPaymentAdvanceContext = () => ({
+        branchId: Number.parseInt(String(bookingBranchField?.value || 0), 10) || 0,
+        travelerId: Number.parseInt(String(bookingSelectedTravelerIdField?.value || 0), 10) || 0,
+        currency: String(paymentCurrencySelect?.value || currentInvoiceSnapshot().invoiceCurrency || 'PKR').toUpperCase(),
+        invoiceCurrency: String(currentInvoiceSnapshot().invoiceCurrency || 'PKR').toUpperCase(),
+    });
+
+    const setPaymentAdvanceVisible = (visible) => {
+        if (paymentAdvanceRow) {
+            paymentAdvanceRow.hidden = false;
+        }
+        if (paymentAdvanceSelect) {
+            paymentAdvanceSelect.disabled = !visible;
+        }
+        if (paymentAdvanceAmountRow) {
+            paymentAdvanceAmountRow.hidden = !visible;
+        }
+        if (!visible) {
+            if (paymentAdvanceSelect) {
+                paymentAdvanceSelect.value = '';
+            }
+            if (paymentAdvanceAmountInput) {
+                paymentAdvanceAmountInput.value = '0';
+            }
+        }
+    };
+
+    const syncPaymentAdvanceAmountCap = (currentDueOverride = null) => {
+        if (!paymentAdvanceAmountInput) {
+            return 0;
+        }
+
+        const selectedAdvance = selectedPaymentAdvanceOption();
+        if (!selectedAdvance) {
+            paymentAdvanceAmountInput.value = '0';
+            return 0;
+        }
+
+        const invoiceCurrency = paymentCurrentInvoiceInput?.dataset.paymentCurrency || currentInvoiceSnapshot().invoiceCurrency || 'PKR';
+        const paymentCurrency = paymentCurrencySelect?.value || invoiceCurrency;
+        if (String(invoiceCurrency).toUpperCase() !== String(paymentCurrency).toUpperCase()) {
+            paymentAdvanceAmountInput.value = '0';
+            setPaymentAdvanceVisible(false);
+            return 0;
+        }
+
+        const available = Math.max(toNumber(selectedAdvance.unallocated_amount || 0), 0);
+        const fallbackDue = paymentTotalOutstandingInput?.dataset.paymentTotalDueNow
+            || paymentCurrentBalanceInput?.dataset.paymentPersistedInvoiceBalance
+            || paymentCurrentBalanceInput?.value
+            || 0;
+        const currentDue = Math.max(toNumber(currentDueOverride ?? fallbackDue), 0);
+        const cashNow = Math.max(toNumber(receivedNowInput?.value || 0), 0);
+        const maxAdvanceUse = Math.max(Math.min(available, Math.max(currentDue - cashNow, 0)), 0);
+        let requested = Math.max(toNumber(paymentAdvanceAmountInput.value || 0), 0);
+
+        if (requested <= 0.005 && maxAdvanceUse > 0.005 && paymentAdvanceSelect?.value) {
+            requested = maxAdvanceUse;
+        }
+        if (requested > maxAdvanceUse) {
+            requested = maxAdvanceUse;
+        }
+
+        paymentAdvanceAmountInput.value = formatNumberInputValue(requested);
+        return requested;
+    };
+
+    const refreshPaymentAdvanceControls = async () => {
+        if (!paymentAdvanceSelect || !paymentAdvanceAmountInput || !customerAdvanceAvailableUrl) {
+            return;
+        }
+
+        const context = currentPaymentAdvanceContext();
+        if (context.branchId <= 0 || context.travelerId <= 0 || context.currency !== context.invoiceCurrency) {
+            paymentAdvanceOptions = [];
+            paymentAdvanceSelect.innerHTML = '<option value="">No advance available</option>';
+            setPaymentAdvanceVisible(false);
+            return;
+        }
+
+        if (paymentAdvanceLoadController) {
+            paymentAdvanceLoadController.abort();
+        }
+        paymentAdvanceLoadController = new AbortController();
+
+        try {
+            const url = new URL(customerAdvanceAvailableUrl, window.location.href);
+            url.searchParams.set('branch_id', String(context.branchId));
+            url.searchParams.set('traveler_id', String(context.travelerId));
+            url.searchParams.set('currency', context.currency);
+
+            const response = await fetch(url.toString(), {
+                headers: { 'X-Requested-With': 'XMLHttpRequest' },
+                credentials: 'same-origin',
+                signal: paymentAdvanceLoadController.signal,
+            });
+            const payload = await response.json().catch(() => ({ ok: false, advances: [] }));
+            paymentAdvanceOptions = uniqueCustomerAdvanceRows(payload.advances);
+            const previousValue = paymentAdvanceSelect.value;
+
+            paymentAdvanceSelect.innerHTML = '<option value="">No advance available</option>';
+            paymentAdvanceOptions.forEach((advance) => {
+                const amount = Math.max(toNumber(advance.unallocated_amount || 0), 0);
+                const option = document.createElement('option');
+                option.value = String(advance.id || '');
+                option.dataset.amount = String(amount);
+                option.textContent = `${advance.receipt_no || 'Advance'} / ${context.currency} ${formatNumberInputValue(amount)}`;
+                paymentAdvanceSelect.appendChild(option);
+            });
+
+            if (paymentAdvanceSelect.options.length > 1) {
+                paymentAdvanceSelect.options[0].textContent = 'Select customer advance';
+            }
+            if (previousValue && Array.from(paymentAdvanceSelect.options).some((option) => option.value === previousValue)) {
+                paymentAdvanceSelect.value = previousValue;
+            }
+
+            setPaymentAdvanceVisible(paymentAdvanceOptions.length > 0);
+            syncPaymentAdvanceAmountCap();
+        } catch (error) {
+            if (error instanceof DOMException && error.name === 'AbortError') {
+                return;
+            }
+            paymentAdvanceOptions = [];
+            setPaymentAdvanceVisible(false);
+            logWorkflowTrace('customer-advance:payment-load-failed', {
+                error: error instanceof Error ? error.message : String(error),
+            });
+        }
+    };
+
     const refreshPaymentPreview = () => {
         if (!receivedNowInput || !paymentCurrentInvoiceInput || !paymentCurrentBalanceInput || !paymentTotalOutstandingInput) {
             return;
         }
+
+        syncReceiptScopeTargets();
 
         const invoiceCurrency = paymentCurrentInvoiceInput.dataset.paymentCurrency || serviceFields.currency?.value || 'PKR';
         const paymentCurrency = paymentCurrencySelect?.value || invoiceCurrency;
@@ -3815,17 +5747,25 @@ document.addEventListener('DOMContentLoaded', () => {
             || autosavedHasSavedService
             || hasSavedServiceRows()
             || Math.abs(persistedCurrentInvoiceBalance) > 0.005;
-        const currentInvoiceDueBeforeReceipt = hasPersistedInvoiceState
-            ? Math.max(currentInvoiceAmount - persistedAlreadyReceived, 0)
-            : Math.max(currentInvoiceAmount, 0);
+        const currentInvoiceDueBeforeReceipt = paymentInvoiceBalanceIsLocked()
+            ? persistedInvoiceBalanceAmount()
+            : (hasPersistedInvoiceState
+                ? Math.max(currentInvoiceAmount - persistedAlreadyReceived, 0)
+                : Math.max(currentInvoiceAmount, 0));
         const currentBalance = Math.max(currentInvoiceDueBeforeReceipt, 0);
         const openBalanceDetails = syncOpenBalanceDisplay(invoiceCurrency, currentBalance);
-        let balanceInPaymentCurrency = Math.max(toNumber(openBalanceDetails.openBalanceMap[paymentCurrency] || 0), 0);
+        let balanceInPaymentCurrency = paymentCurrency === invoiceCurrency
+            ? Math.max(currentBalance, 0)
+            : 0;
         let returnAmount = Math.max(receivedNow - balanceInPaymentCurrency, 0);
         let currentInvoiceDueInPaymentCurrency = paymentCurrency === invoiceCurrency
             ? currentBalance
             : 0;
-        let remainingCurrentInvoiceDueInPaymentCurrency = Math.max(currentInvoiceDueInPaymentCurrency - receivedNow, 0);
+        let advanceUsedNow = 0;
+        if (paymentCurrency === invoiceCurrency) {
+            advanceUsedNow = syncPaymentAdvanceAmountCap(currentInvoiceDueInPaymentCurrency);
+        }
+        let remainingCurrentInvoiceDueInPaymentCurrency = Math.max(currentInvoiceDueInPaymentCurrency - receivedNow - advanceUsedNow, 0);
         let hasRemainingOutstanding = remainingCurrentInvoiceDueInPaymentCurrency > 0.005;
         const crossCurrencyCurrentInvoice = paymentCurrency !== invoiceCurrency && currentBalance > 0.005;
         const crossCurrencyPreview = crossCurrencyCurrentInvoice ? exchangeSettlementPreview() : null;
@@ -3841,6 +5781,7 @@ document.addEventListener('DOMContentLoaded', () => {
             returnAmount = Math.max(toNumber(crossCurrencyPreview.returnOrCredit || 0), 0);
             currentInvoiceDueInPaymentCurrency = Math.max(toNumber(crossCurrencyPreview.paymentRequiredToFullyClearTarget || 0), 0);
             remainingCurrentInvoiceDueInPaymentCurrency = Math.max(toNumber(crossCurrencyPreview.remainingPaymentAmount || 0), 0);
+            advanceUsedNow = 0;
             hasRemainingOutstanding = receivedNow > 0.005
                 ? Math.max(toNumber(crossCurrencyPreview.remainingTargetBalance || 0), 0) > 0.005
                 : remainingCurrentInvoiceDueInPaymentCurrency > 0.005;
@@ -3852,7 +5793,9 @@ document.addEventListener('DOMContentLoaded', () => {
             || hasSavedServiceRows();
 
         syncPaymentCurrencyLabels(paymentCurrency);
-        paymentCurrentInvoiceInput.value = formatCurrencyAmount(invoiceCurrency, currentInvoiceAmount);
+        if (paymentCurrentInvoiceInput instanceof HTMLInputElement) {
+            paymentCurrentInvoiceInput.value = formatNumberInputValue(currentInvoiceAmount);
+        }
         if (paymentAlreadyReceivedInput) {
             paymentAlreadyReceivedInput.value = formatCurrencyAmount(invoiceCurrency, persistedAlreadyReceived);
         }
@@ -3860,6 +5803,7 @@ document.addEventListener('DOMContentLoaded', () => {
         paymentTotalOutstandingInput.value = formatCurrencyAmount(paymentCurrency, balanceInPaymentCurrency);
         paymentTotalOutstandingInput.dataset.paymentTotalDueNow = String(currentInvoiceDueInPaymentCurrency);
         syncCurrentBalancePkrEquivalent(currentBalance, invoiceCurrency);
+        syncActivePassengerSummaryDisplay();
 
         if (paymentNoCurrentInvoice) {
             paymentNoCurrentInvoice.hidden = hasCurrentInvoiceAmount;
@@ -4155,9 +6099,60 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (receivedNowInput) {
+        receivedNowInput.addEventListener('focus', () => {
+            logPaymentInputRuntime('focus');
+        });
         receivedNowInput.addEventListener('input', refreshPaymentPreview);
         syncInvoiceDueDateMirrors();
         refreshPaymentPreview();
+    }
+
+    if (paymentCurrentInvoiceInput instanceof HTMLInputElement) {
+        paymentCurrentInvoiceInput.addEventListener('input', () => {
+            if (noteSavedPaymentEditAttempt()) {
+                refreshPaymentPreview();
+                return;
+            }
+
+            applyManualInvoiceAmountOverride(paymentCurrentInvoiceInput.value);
+            refreshPaymentPreview();
+        });
+        paymentCurrentInvoiceInput.addEventListener('change', () => {
+            if (noteSavedPaymentEditAttempt()) {
+                refreshPaymentPreview();
+                return;
+            }
+
+            applyManualInvoiceAmountOverride(paymentCurrentInvoiceInput.value);
+            refreshPaymentPreview();
+        });
+    }
+
+    if (paymentReceiptScopeSelect instanceof HTMLSelectElement) {
+        paymentReceiptScopeSelect.addEventListener('change', () => {
+            syncReceiptScopeTargets();
+            syncPaymentAdvanceAmountCap();
+            refreshPaymentPreview();
+        });
+    }
+
+    if (paymentTargetReceivableSelect instanceof HTMLSelectElement) {
+        paymentTargetReceivableSelect.addEventListener('change', () => {
+            syncPaymentAdvanceAmountCap();
+            refreshPaymentPreview();
+        });
+    }
+
+    if (paymentAdvanceSelect instanceof HTMLSelectElement) {
+        paymentAdvanceSelect.addEventListener('change', () => {
+            syncPaymentAdvanceAmountCap();
+            refreshPaymentPreview();
+        });
+    }
+
+    if (paymentAdvanceAmountInput instanceof HTMLInputElement) {
+        paymentAdvanceAmountInput.addEventListener('input', refreshPaymentPreview);
+        paymentAdvanceAmountInput.addEventListener('change', refreshPaymentPreview);
     }
 
     if (paymentCurrencySelect) {
@@ -4166,12 +6161,14 @@ document.addEventListener('DOMContentLoaded', () => {
             if (noteSavedPaymentEditAttempt()) {
                 syncPaymentTreasurySelector();
                 syncPaymentCurrencyLabels(paymentCurrencySelect.value);
+                await refreshPaymentAdvanceControls();
                 refreshPaymentPreview();
                 return;
             }
 
             syncPaymentTreasurySelector();
             syncPaymentCurrencyLabels(paymentCurrencySelect.value);
+            await refreshPaymentAdvanceControls();
             refreshPaymentPreview();
 
             if (isCurrentInvoiceCrossCurrencySelection(paymentCurrencySelect.value)) {
@@ -4188,6 +6185,14 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    bookingSelectedTravelerIdField?.addEventListener('change', () => {
+        refreshPaymentAdvanceControls();
+    });
+    bookingBranchField?.addEventListener('change', () => {
+        refreshPaymentAdvanceControls();
+    });
+    refreshPaymentAdvanceControls();
+
     if (paymentExchangeSettlementButton) {
         paymentExchangeSettlementButton.addEventListener('click', async () => {
             await openExchangeSettlementModal({ allowManualRatePreview: true });
@@ -4195,49 +6200,100 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (paymentPrintReceiptButton) {
-        paymentPrintReceiptButton.addEventListener('click', async () => {
-            const openLatestReceipt = () => {
-                const receiptId = Number.parseInt(String(paymentPrintReceiptButton.dataset.paymentLatestReceiptId || 0), 10) || 0;
-                const printUrl = String(paymentPrintReceiptButton.dataset.paymentPrintUrl || '').trim();
+        paymentPrintReceiptButton.addEventListener('click', async (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation();
 
-                if (receiptId <= 0 || printUrl === '') {
-                    return false;
-                }
+            const clickId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+            const clickGuard = window.__travelReceiptClickGuard || { clickedAt: 0, clickId: '' };
+            const clickAgeMs = Date.now() - Number(clickGuard.clickedAt || 0);
+            logWorkflowTrace('print-receipt:click-handler-entered', {
+                clickId,
+                previousClickId: String(clickGuard.clickId || ''),
+                previousClickAgeMs: clickAgeMs,
+                eventDetail: Number(event.detail || 0),
+                eventIsTrusted: event.isTrusted === true,
+                printReceiptInFlight,
+            });
 
-                window.open(printUrl, '_blank', 'noopener');
-                return true;
-            };
-
-            if (openLatestReceipt()) {
+            if (clickAgeMs < 1200) {
+                logWorkflowTrace('print-receipt:blocked-duplicate-click', {
+                    clickId,
+                    previousClickId: String(clickGuard.clickId || ''),
+                    previousClickAgeMs: clickAgeMs,
+                });
                 return;
             }
 
-            const enteredPaymentAmount = Math.max(toNumber(receivedNowInput?.value || 0), 0);
-            if (enteredPaymentAmount <= 0.005) {
-                const bookingId = currentBookingId();
-                if (bookingId > 0) {
-                    window.open(
-                        buildWorkspacePathUrl(`workspace/output?booking_id=${bookingId}&doc=booking_summary_receipt`),
-                        '_blank',
-                        'noopener'
-                    );
-                    showFeedback('No payment amount entered. Opened the current booking summary for printing.');
+            window.__travelReceiptClickGuard = {
+                clickedAt: Date.now(),
+                clickId,
+                scriptInstanceId: workspaceScriptInstanceId,
+            };
+
+            if (printReceiptInFlight) {
+                logWorkflowTrace('print-receipt:ignored-in-flight', {
+                    clickId,
+                });
+                return;
+            }
+
+            printReceiptInFlight = true;
+            try {
+                const hasSavedReceipt = hasOpenableCustomerReceipt();
+                const savedPaymentStillApplies = currentSavedPaymentApplies();
+                const enteredPaymentAmount = Math.max(toNumber(receivedNowInput?.value || 0), 0);
+                const shouldSaveBeforePrint = enteredPaymentAmount > 0.005
+                    || !hasSavedReceipt
+                    || (!savedPaymentStillApplies && currentServiceDraftNeedsPersistForWorkflow());
+
+                logWorkflowTrace('print-receipt:clicked', {
+                    clickId,
+                    shouldSaveBeforePrint,
+                    hasSavedReceipt,
+                    savedPaymentStillApplies,
+                    enteredPaymentAmount,
+                });
+
+                if (!shouldSaveBeforePrint && hasSavedReceipt && openCustomerReceiptWindowOnce('print-existing')) {
+                    logWorkflowTrace('print-receipt:opened-existing');
                     return;
                 }
 
-                showFeedback('Select or save the booking first, then print the current booking summary.');
-                return;
-            }
+                if (shouldSaveBeforePrint) {
+                    logWorkflowTrace('print-receipt:save-before-open:start');
+                    const payload = await performSameCurrencyPaymentSave({
+                        autoOpenReceipt: false,
+                    });
+                    logWorkflowTrace('print-receipt:save-before-open:payload-returned', {
+                        clickId,
+                        payloadOk: Boolean(payload),
+                        receiptId: Number.parseInt(String(payload?.receipt_id || 0), 10) || 0,
+                        bookingId: Number.parseInt(String(payload?.booking_id || 0), 10) || 0,
+                    });
+                    if (payload && openCustomerReceiptWindowOnce('print-after-save')) {
+                        logWorkflowTrace('print-receipt:save-before-open:opened-after-save', {
+                            receiptId: Number.parseInt(String(payload.receipt_id || 0), 10) || 0,
+                        });
+                        return;
+                    }
+                    logWorkflowTrace('print-receipt:save-before-open:no-open-after-save', {
+                        payloadOk: Boolean(payload),
+                    });
+                }
 
-            const payload = await performSameCurrencyPaymentSave();
-            if (payload && openLatestReceipt()) {
-                return;
-            }
+                if (hasOpenableCustomerReceipt() && openCustomerReceiptWindowOnce('print-fallback-existing')) {
+                    logWorkflowTrace('print-receipt:opened-fallback-existing');
+                    return;
+                }
 
-            if (!openLatestReceipt()) {
+                logWorkflowTrace('print-receipt:open-failed');
                 showFeedback('Receipt could not be opened yet. Please review the payment and try again.');
+            } finally {
+                printReceiptInFlight = false;
             }
-        });
+        }, true);
     }
 
     const initialPaymentBookingField = [
@@ -4294,6 +6350,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (receivedNowInput) {
         receivedNowInput.addEventListener('input', async () => {
+            logPaymentInputRuntime('input', {
+                enteredValue: receivedNowInput.value,
+            });
             if (noteSavedPaymentEditAttempt()) {
                 refreshPaymentPreview();
                 return;
@@ -4304,6 +6363,9 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         });
         receivedNowInput.addEventListener('change', async () => {
+            logPaymentInputRuntime('change', {
+                changedValue: receivedNowInput.value,
+            });
             if (noteSavedPaymentEditAttempt()) {
                 refreshPaymentPreview();
                 return;
@@ -4352,10 +6414,10 @@ document.addEventListener('DOMContentLoaded', () => {
             paymentSettlementTargetCurrencyInput.value = rateOnly ? '' : String(preview.target.currency || 'PKR');
         }
         if (paymentSettlementTargetReceivableAmountInput) {
-            paymentSettlementTargetReceivableAmountInput.value = rateOnly ? '' : preview.targetSettled.toFixed(2);
+            paymentSettlementTargetReceivableAmountInput.value = rateOnly ? '' : formatNumberInputValue(preview.targetSettled);
         }
         if (paymentSettlementTargetPaymentAmountInput) {
-            paymentSettlementTargetPaymentAmountInput.value = rateOnly ? '' : preview.paymentConsumed.toFixed(2);
+            paymentSettlementTargetPaymentAmountInput.value = rateOnly ? '' : formatNumberInputValue(preview.paymentConsumed);
         }
         syncSettlementRateFieldsFromPreview(preview);
     };
@@ -4420,6 +6482,171 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         return payload;
+    };
+
+    const saveDailyPricingExchangeRate = async (fromCurrency, toCurrency, exchangeRate, effectiveDate) => {
+        if (!(paymentForm instanceof HTMLFormElement)) {
+            throw new Error('Payment form is not available.');
+        }
+
+        const normalizedFrom = String(fromCurrency || '').trim().toUpperCase();
+        const normalizedTo = String(toCurrency || '').trim().toUpperCase();
+        const normalizedDate = normalizeLooseDate(effectiveDate || '')
+            || normalizeLooseDate(paymentReceiptDateInput?.value || '')
+            || new Date().toISOString().slice(0, 10);
+        const normalizedRate = roundExchangeRate(exchangeRate);
+
+        if (normalizedFrom === '' || normalizedTo === '' || normalizedFrom === normalizedTo) {
+            return null;
+        }
+        if (normalizedRate <= 0.005) {
+            throw new Error('A valid daily exchange rate is required.');
+        }
+
+        const formData = new FormData();
+        const csrfToken = paymentForm.elements.namedItem('_token');
+        if (csrfToken instanceof HTMLInputElement) {
+            formData.append('_token', csrfToken.value);
+        }
+
+        const bookingIdField = paymentForm.elements.namedItem('booking_id');
+        const branchIdField = paymentForm.elements.namedItem('branch_id');
+        const fallbackBranchId = String(
+            bookingBranchField?.value
+            || serviceForm?.elements?.namedItem('auto_branch_id')?.value
+            || '0'
+        );
+        formData.append('booking_id', bookingIdField instanceof HTMLInputElement ? bookingIdField.value : String(currentBookingId() || 0));
+        formData.append('branch_id', branchIdField instanceof HTMLInputElement ? branchIdField.value : fallbackBranchId);
+        formData.append('settlement_rate_from_currency', normalizedFrom);
+        formData.append('settlement_rate_to_currency', normalizedTo);
+        formData.append('settlement_exchange_rate', String(normalizedRate));
+        formData.append('settlement_exchange_rate_effective_date', normalizedDate);
+
+        const response = await fetch(paymentExchangeRateSaveUrl, {
+            method: 'POST',
+            body: formData,
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest',
+            },
+            credentials: 'same-origin',
+        });
+
+        const payload = await response.json().catch(() => ({
+            ok: false,
+            message: 'The server returned an invalid exchange-rate response.',
+        }));
+
+        if (!response.ok || payload.ok === false) {
+            throw new Error(String(payload.message || 'Today\'s exchange rate could not be saved.'));
+        }
+
+        const rate = payload.rate || {};
+        const savedFrom = String(rate.from_currency || normalizedFrom).trim().toUpperCase();
+        const savedTo = String(rate.to_currency || normalizedTo).trim().toUpperCase();
+        const savedRate = roundExchangeRate(rate.exchange_rate || normalizedRate);
+        const savedDate = String(rate.effective_date || normalizedDate);
+        dailySettlementRates[`${savedFrom}->${savedTo}`] = {
+            fromCurrency: savedFrom,
+            toCurrency: savedTo,
+            exchangeRate: savedRate,
+            effectiveDate: savedDate,
+            isDerived: false,
+        };
+        if (dailySettlementRatesDataNode) {
+            dailySettlementRatesDataNode.textContent = JSON.stringify(dailySettlementRates);
+        }
+
+        return payload;
+    };
+
+    const ensurePricingExchangeRateReady = async (options = {}) => {
+        const { reason = 'pricing', forcePrompt = false } = options;
+        const invoiceCurrency = currentInvoiceCurrencyCode();
+        const costCurrency = currentCostCurrencyCode();
+        const effectiveDate = currentPricingRateEffectiveDate()
+            || normalizeLooseDate(paymentReceiptDateInput?.value || '')
+            || new Date().toISOString().slice(0, 10);
+
+        if (invoiceCurrency === costCurrency) {
+            if (serviceFields.pricingExchangeRate instanceof HTMLInputElement) {
+                serviceFields.pricingExchangeRate.value = '1';
+            }
+            return true;
+        }
+
+        const existingRate = resolvePricingExchangeRateFromMap(costCurrency, invoiceCurrency, effectiveDate);
+        if (!forcePrompt && existingRate > 0.005) {
+            if (serviceFields.pricingExchangeRate instanceof HTMLInputElement) {
+                serviceFields.pricingExchangeRate.value = String(existingRate);
+            }
+            return true;
+        }
+
+        logCommercialCalculator('pricing-rate-required', reason, {
+            costCurrency,
+            invoiceCurrency,
+            effectiveDate,
+            existingRate,
+        });
+
+        const promptFromCurrency = costCurrency === 'PKR' && invoiceCurrency !== 'PKR'
+            ? invoiceCurrency
+            : costCurrency;
+        const promptToCurrency = costCurrency === 'PKR' && invoiceCurrency !== 'PKR'
+            ? costCurrency
+            : invoiceCurrency;
+        const promptExistingRate = resolvePricingExchangeRateFromMap(promptFromCurrency, promptToCurrency, effectiveDate);
+        const rawRate = window.prompt(
+            `Enter today's exchange rate for this invoice.\n\n1 ${promptFromCurrency} = ? ${promptToCurrency}\nDate: ${effectiveDate}`,
+            promptExistingRate > 0.005 ? String(promptExistingRate) : ''
+        );
+        if (rawRate === null) {
+            showFeedback(`Daily rate is required to convert ${costCurrency} cost into ${invoiceCurrency} invoice amount.`);
+            return false;
+        }
+
+        const enteredRate = roundExchangeRate(rawRate);
+        if (enteredRate <= 0.005) {
+            showFeedback('Enter a valid exchange rate greater than zero.');
+            if (serviceFields.pricingExchangeRate instanceof HTMLInputElement) {
+                serviceFields.pricingExchangeRate.value = '';
+            }
+            return false;
+        }
+
+        try {
+            await saveDailyPricingExchangeRate(promptFromCurrency, promptToCurrency, enteredRate, effectiveDate);
+            const resolvedPricingRate = resolvePricingExchangeRateFromMap(costCurrency, invoiceCurrency, effectiveDate);
+            if (serviceFields.pricingExchangeRate instanceof HTMLInputElement) {
+                serviceFields.pricingExchangeRate.value = String(resolvedPricingRate > 0.005 ? resolvedPricingRate : enteredRate);
+            }
+            if (serviceFields.pricingRateEffectiveDate instanceof HTMLInputElement) {
+                serviceFields.pricingRateEffectiveDate.value = effectiveDate;
+            }
+            logCommercialCalculator('pricing-rate-saved', reason, {
+                costCurrency,
+                invoiceCurrency,
+                promptFromCurrency,
+                promptToCurrency,
+                effectiveDate,
+                enteredRate,
+                resolvedPricingRate,
+            });
+            showFeedback(`Daily rate saved: 1 ${promptFromCurrency} = ${enteredRate} ${promptToCurrency}.`);
+            refreshProfit(`pricing-rate-saved:${reason}`);
+            return true;
+        } catch (error) {
+            showFeedback(error.message || 'Today\'s exchange rate could not be saved.');
+            logCommercialCalculator('pricing-rate-save-failed', reason, {
+                costCurrency,
+                invoiceCurrency,
+                effectiveDate,
+                enteredRate,
+                message: error.message || String(error),
+            });
+            return false;
+        }
     };
 
     const confirmExchangeSettlement = async () => {
@@ -4492,7 +6719,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (!isRateOnlySave && receivedNowInput) {
-            receivedNowInput.value = preview.paymentAmount.toFixed(2);
+            receivedNowInput.value = formatNumberInputValue(preview.paymentAmount);
         }
 
         paymentExchangeConfirmInFlight = true;
@@ -4618,6 +6845,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
+            if (isDirectSupplierPaymentMethod(paymentMethodSelect.value) && directSupplierObligationSelect && !directSupplierObligationSelect.disabled) {
+                directSupplierObligationSelect.focus();
+                return;
+            }
+
             if (
                 paymentTreasuryAccountSelect
                 && paymentTreasuryAccountRow
@@ -4629,6 +6861,18 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             if (paymentPrimarySaveButton) {
+                paymentPrimarySaveButton.focus();
+            }
+        });
+    }
+    if (directSupplierObligationSelect) {
+        directSupplierObligationSelect.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter' && event.code !== 'NumpadEnter') {
+                return;
+            }
+
+            event.preventDefault();
+            if (paymentPrimarySaveButton instanceof HTMLButtonElement) {
                 paymentPrimarySaveButton.focus();
             }
         });
@@ -4742,12 +6986,26 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    const performSameCurrencyPaymentSave = async () => {
+    const performSameCurrencyPaymentSave = async (options = {}) => {
+        const {
+            autoOpenReceipt = false,
+            suppressReceiptCreation = false,
+            workflowOrigin = 'payment',
+        } = options;
+
+        logWorkflowTrace('save-payment:start', {
+            autoOpenReceipt,
+            suppressReceiptCreation,
+            workflowOrigin,
+        });
+
         if (!(paymentForm instanceof HTMLFormElement)) {
+            logWorkflowTrace('save-payment:aborted-no-form');
             return null;
         }
 
         if (paymentSubmitValidationInFlight) {
+            logWorkflowTrace('save-payment:aborted-validation-in-flight');
             return null;
         }
 
@@ -4756,12 +7014,8 @@ document.addEventListener('DOMContentLoaded', () => {
         paymentSubmitDebug.lastBackendResponse = null;
 
         try {
-            if (currentBookingId() <= 0) {
-                showFeedback('Customer-level payment without an open booking is not supported yet. Open an existing booking first.');
-                return null;
-            }
-
             if (currentSavedPaymentApplies()) {
+                logWorkflowTrace('save-payment:aborted-already-saved');
                 showFeedback(savedPaymentLockedMessage());
                 syncSavedPaymentUiState();
                 return null;
@@ -4770,19 +7024,106 @@ document.addEventListener('DOMContentLoaded', () => {
             const isExchangeSettlement = paymentSettlementModeInput?.value === 'exchange';
             const selectedPaymentCurrency = paymentCurrencySelect?.value || paymentCurrentInvoiceInput?.dataset.paymentCurrency || 'PKR';
             const receivedAmount = Math.max(toNumber(receivedNowInput?.value || 0), 0);
-            const sameCurrencyDueNow = Math.max(
+            const selectedAdvanceUsed = paymentAdvanceSelect?.value
+                ? Math.max(toNumber(paymentAdvanceAmountInput?.value || 0), 0)
+                : 0;
+            const usesCustomerAdvance = selectedAdvanceUsed > 0.005;
+            let sameCurrencyDueNow = Math.max(
                 toNumber(paymentTotalOutstandingInput?.dataset.paymentTotalDueNow || paymentTotalOutstandingInput?.value || 0),
                 0
             );
-            const invoiceSnapshot = currentInvoiceSnapshot();
+            let invoiceSnapshot = currentInvoiceSnapshot();
             syncPaymentCurrencyLabels(selectedPaymentCurrency);
 
+            const commitDraftForPayment = async () => {
+                const draftNeedsPersist = currentServiceDraftRequiresPersistBeforePayment();
+                if (!draftNeedsPersist && currentBookingId() > 0 && (currentPersistedServiceId() > 0 || hasValidSavedServiceForPayment())) {
+                    logWorkflowTrace('save-payment:commit-draft-skip-existing', {
+                        draftNeedsPersist,
+                    });
+                    window.workspaceDebugEnterFlow('payment-save-commit-draft-skip-existing', {
+                        currentBookingId: currentBookingId(),
+                        currentPersistedServiceId: currentPersistedServiceId(),
+                        activeServiceId: activeServiceId(),
+                        hasValidSavedServiceForPayment: hasValidSavedServiceForPayment(),
+                        draftNeedsPersist,
+                    });
+                    return true;
+                }
+
+                if (typeof serviceAutosaveReady !== 'function' || !serviceAutosaveReady()) {
+                    logWorkflowTrace('save-payment:commit-draft-not-ready');
+                    showFeedback('Complete customer, invoice date, passenger, service type, and service amount before Save Payment.');
+                    if (currentBookingId() <= 0 && typeof autosaveBookingReady === 'function' && !autosaveBookingReady()) {
+                        focusTarget('input[name="lead_traveler_name"]');
+                    } else if (servicePassengerNameField instanceof HTMLInputElement && servicePassengerNameField.value.trim() === '') {
+                        servicePassengerNameField.focus();
+                    }
+                    return false;
+                }
+
+                logWorkflowTrace('save-payment:commit-draft-start', {
+                    draftNeedsPersist,
+                });
+                window.workspaceDebugEnterFlow('payment-save-commit-draft-start', {
+                    currentBookingId: currentBookingId(),
+                    currentPersistedServiceId: currentPersistedServiceId(),
+                    activeServiceId: activeServiceId(),
+                    draftNeedsPersist,
+                    selectedPaymentCurrency,
+                    receivedAmount,
+                    selectedAdvanceUsed,
+                });
+
+                const servicePayload = await persistServiceAutosave({ allowCreate: true });
+                if (!servicePayload || currentBookingId() <= 0 || currentPersistedServiceId() <= 0) {
+                    logWorkflowTrace('save-payment:commit-draft-failed', {
+                        servicePayloadOk: Boolean(servicePayload),
+                    });
+                    showFeedback('The invoice/service could not be saved. Please review required fields before Save Payment.');
+                    window.workspaceDebugEnterFlow('payment-save-commit-draft-failed', {
+                        currentBookingId: currentBookingId(),
+                        currentPersistedServiceId: currentPersistedServiceId(),
+                        servicePayloadOk: Boolean(servicePayload),
+                    });
+                    return false;
+                }
+
+                refreshSettlementDataFromPayload(servicePayload);
+                refreshPaymentHistoryFromPayload(servicePayload);
+                applyAutosavePaymentFoundation(servicePayload, { syncCommercialEditor: false });
+                invoiceSnapshot = currentInvoiceSnapshot();
+                sameCurrencyDueNow = Math.max(
+                    toNumber(paymentTotalOutstandingInput?.dataset.paymentTotalDueNow || paymentTotalOutstandingInput?.value || 0),
+                    0
+                );
+
+                logWorkflowTrace('save-payment:commit-draft-done', {
+                    savedServiceId: currentPersistedServiceId(),
+                });
+                window.workspaceDebugEnterFlow('payment-save-commit-draft-done', {
+                    currentBookingId: currentBookingId(),
+                    currentPersistedServiceId: currentPersistedServiceId(),
+                    sameCurrencyDueNow,
+                    invoiceCurrency: invoiceSnapshot.invoiceCurrency,
+                });
+
+                return true;
+            };
+
+            if (!await commitDraftForPayment()) {
+                logWorkflowTrace('save-payment:aborted-commit-draft-false');
+                return null;
+            }
+
             if (receivedAmount <= 0.005) {
+                logWorkflowTrace('save-payment:zero-amount-branch');
+                const zeroAmountReceiptAction = suppressReceiptCreation ? 'no_receipt' : 'save';
                 if (receivedNowInput) {
-                    receivedNowInput.value = '0.00';
+                    receivedNowInput.value = '0';
                 }
                 if (quickReceiveInput) {
-                    quickReceiveInput.value = '0.00';
+                    quickReceiveInput.value = '0';
                 }
 
                 paymentSubmitDebug.currentBookingId = currentBookingId();
@@ -4792,8 +7133,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 paymentSubmitDebug.dueDate = paymentDueDateInput?.value || '';
                 paymentSubmitDebug.lastAttemptedPayload = {
                     booking_id: currentBookingId(),
-                    received_amount: '0.00',
-                    receipt_action: 'no_receipt',
+                    received_amount: '0',
+                    receipt_action: suppressReceiptCreation ? 'no_receipt' : 'save',
                 };
 
                 if (paymentPrimarySaveButton) {
@@ -4802,15 +7143,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
 
                 try {
-                    if (typeof serviceAutosaveReady === 'function' && serviceAutosaveReady()) {
-                        const servicePayload = await persistServiceAutosave();
-                        if (servicePayload) {
-                            refreshSettlementDataFromPayload(servicePayload);
-                            refreshPaymentHistoryFromPayload(servicePayload);
-                            applyAutosavePaymentFoundation(servicePayload, { syncCommercialEditor: false });
-                        }
-                    }
-
                     if (typeof autosaveBookingReady === 'function' && autosaveBookingReady()) {
                         const invoicePayload = await persistInvoiceAutosave({ force: true });
                         if (invoicePayload) {
@@ -4823,29 +7155,100 @@ document.addEventListener('DOMContentLoaded', () => {
                     throw new Error(zeroPaymentSaveError instanceof Error ? zeroPaymentSaveError.message : 'Booking could not be updated without payment.');
                 }
 
-                clearPaymentDetailHiddenFields();
-                closePaymentDetailModal();
-                clearSavedPaymentState({
-                    clearAmount: false,
-                    resetPaymentCurrency: false,
-                    closeExchange: true,
-                    showReadyMessage: false,
-                });
-                refreshPaymentPreview();
-                syncSavedPaymentUiState();
+                if (suppressReceiptCreation && !usesCustomerAdvance) {
+                    const payload = {
+                        ok: true,
+                        booking_id: currentBookingId(),
+                        receipt_id: 0,
+                        received_amount: 0,
+                        receipt_action: zeroAmountReceiptAction,
+                        workflow_origin: workflowOrigin,
+                    };
 
-                showFeedback('No payment recorded. Booking remains outstanding and can be paid later.');
+                    showFeedback('Service saved. Add the next passenger/service.');
+                    logWorkflowTrace('save-payment:zero-amount-no-receipt', {
+                        workflowOrigin,
+                        bookingId: payload.booking_id,
+                    });
+                    station.dispatchEvent(new CustomEvent('workspace:service-saved-without-receipt', {
+                        bubbles: true,
+                        detail: payload,
+                    }));
+
+                    return payload;
+                }
+
+                const csrfField = paymentForm.elements.namedItem('_token');
+                const csrfToken = csrfField instanceof HTMLInputElement ? csrfField.value.trim() : '';
+                const formData = new FormData(paymentForm);
+                formData.set('receipt_action', zeroAmountReceiptAction);
+
+                paymentSubmitDebug.csrfFound = csrfToken !== '';
+                paymentSubmitDebug.routeUrl = paymentForm.action;
+                paymentSubmitDebug.lastAttemptedPayload = Object.fromEntries(formData.entries());
+
+                const response = await fetch(paymentForm.action, {
+                    method: 'POST',
+                    body: formData,
+                    headers: {
+                        'X-Requested-With': 'XMLHttpRequest',
+                    },
+                    credentials: 'same-origin',
+                });
+
+                const payload = await response.json().catch(() => ({
+                    ok: false,
+                    message: 'The server returned an invalid receipt response.',
+                }));
+
+                paymentSubmitDebug.lastBackendResponse = payload;
+
+                if (!response.ok || payload.ok === false) {
+                    logWorkflowTrace('save-payment:zero-amount-backend-failed', {
+                        payloadMessage: String(payload.message || ''),
+                    });
+                    throw new Error(String(payload.message || 'Customer receipt could not be saved.'));
+                }
+
+                syncBookingIdFields(Number.parseInt(String(payload.booking_id || 0), 10));
+                applyAutosavedCustomer(payload.customer || null);
+                if (payload.invoice_no) {
+                    setInvoiceNumber(payload.invoice_no);
+                }
+                applyAutosavePaymentFoundation(payload, { syncCommercialEditor: false });
+                updatePrintReceiptTarget(payload.receipt_id || 0, payload.booking_id || currentBookingId());
+                lockSavedPaymentStateFromPayload(payload, 'same_currency');
+                refreshPaymentPreview();
+
+                if (autoOpenReceipt) {
+                    showFeedback('Invoice saved without payment. Use Print Receipt after a payment is recorded.');
+                }
+
+                logWorkflowTrace('save-payment:zero-amount-saved', {
+                    receiptId: Number.parseInt(String(payload.receipt_id || 0), 10) || 0,
+                    advanceApplied: payload.advance_applied || null,
+                    autoOpenReceipt,
+                    suppressReceiptCreation: true,
+                    workflowOrigin,
+                });
+
                 station.dispatchEvent(new CustomEvent('workspace:payment-zero-saved', {
                     bubbles: true,
                     detail: {
-                        booking_id: currentBookingId(),
+                        booking_id: Number.parseInt(String(payload.booking_id || currentBookingId()), 10) || currentBookingId(),
+                        receipt_id: Number.parseInt(String(payload.receipt_id || 0), 10) || 0,
                         received_amount: 0,
                     },
                 }));
-                return null;
+
+                return payload;
             }
 
             if (selectedPaymentCurrency !== invoiceSnapshot.invoiceCurrency) {
+                logWorkflowTrace('save-payment:cross-currency-branch', {
+                    selectedPaymentCurrency,
+                    invoiceCurrency: invoiceSnapshot.invoiceCurrency,
+                });
                 if (invoiceSnapshot.invoiceBalance > 0.005) {
                     if (receivedAmount <= 0.005) {
                         showFeedback('Enter the receiving amount first, or use Exchange Settlement only to save today\'s rate.');
@@ -4877,8 +7280,39 @@ document.addEventListener('DOMContentLoaded', () => {
                 clearExchangeSettlementFields();
             }
 
+            if (typeof serviceAutosaveReady === 'function' && serviceAutosaveReady()) {
+                window.workspaceDebugEnterFlow('payment-save-force-service-persist-start', {
+                    currentBookingId: currentBookingId(),
+                    currentPersistedServiceId: currentPersistedServiceId(),
+                    selectedPaymentCurrency,
+                    receivedAmount,
+                });
+
+                const servicePayload = await persistServiceAutosave({ allowCreate: true });
+                if (servicePayload) {
+                    logWorkflowTrace('save-payment:force-service-persist-done', {
+                        savedServiceId: Number.parseInt(String(servicePayload.service_id || 0), 10) || currentPersistedServiceId(),
+                    });
+                    refreshSettlementDataFromPayload(servicePayload);
+                    refreshPaymentHistoryFromPayload(servicePayload);
+                    applyAutosavePaymentFoundation(servicePayload, { syncCommercialEditor: false });
+                    invoiceSnapshot = currentInvoiceSnapshot();
+                    sameCurrencyDueNow = Math.max(
+                        toNumber(paymentTotalOutstandingInput?.dataset.paymentTotalDueNow || paymentTotalOutstandingInput?.value || 0),
+                        0
+                    );
+                }
+
+                window.workspaceDebugEnterFlow('payment-save-force-service-persist-done', {
+                    currentBookingId: currentBookingId(),
+                    currentPersistedServiceId: currentPersistedServiceId(),
+                    sameCurrencyDueNow,
+                    invoiceCurrency: invoiceSnapshot.invoiceCurrency,
+                });
+            }
+
             if (sameCurrencyDueNow <= 0.005) {
-                showFeedback('No open balance exists in the selected payment currency.');
+                showFeedback('No outstanding balance exists in the selected payment currency.');
                 return null;
             }
 
@@ -4891,7 +7325,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 );
 
             if (!paymentReady && sameCurrencyDueNow <= 0.005) {
-                showFeedback('No open balance exists in the selected payment currency.');
+                showFeedback('No outstanding balance exists in the selected payment currency.');
                 return null;
             }
 
@@ -4900,6 +7334,9 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             if (promptTreasuryAccountSetupIfMissing(paymentMethodSelect?.value || '')) {
+                return null;
+            }
+            if (promptDirectSupplierPayableIfMissing()) {
                 return null;
             }
 
@@ -4965,6 +7402,9 @@ document.addEventListener('DOMContentLoaded', () => {
             paymentSubmitDebug.lastBackendResponse = payload;
 
             if (!response.ok || payload.ok === false) {
+                logWorkflowTrace('save-payment:backend-failed', {
+                    payloadMessage: String(payload.message || ''),
+                });
                 throw new Error(String(payload.message || 'Customer receipt could not be saved.'));
             }
 
@@ -4979,13 +7419,25 @@ document.addEventListener('DOMContentLoaded', () => {
             refreshPaymentPreview();
             const receiptSummary = currentReceiptSummary(payload);
             showFeedback(receiptSummary.receiptNo !== '' ? `Payment saved: ${receiptSummary.receiptNo}` : (payload.message || 'Customer receipt recorded successfully.'));
+            if (autoOpenReceipt && !openCustomerReceiptWindowOnce('save-payment')) {
+                showFeedback('Payment saved. Use Print Receipt if the receipt window did not open automatically.');
+            }
+            logWorkflowTrace('save-payment:saved', {
+                receiptId: Number.parseInt(String(payload.receipt_id || 0), 10) || 0,
+                receiptNo: receiptSummary.receiptNo,
+                autoOpenReceipt,
+            });
             station.dispatchEvent(new CustomEvent('workspace:payment-saved', { bubbles: true, detail: payload }));
             return payload;
         } catch (error) {
             paymentSubmitDebug.lastBackendError = error instanceof Error ? error.message : 'Customer receipt could not be saved.';
+            logWorkflowTrace('save-payment:exception', {
+                error: paymentSubmitDebug.lastBackendError,
+            });
             showFeedback(paymentSubmitDebug.lastBackendError);
             return null;
         } finally {
+            logWorkflowTrace('save-payment:finally');
             paymentSubmitValidationInFlight = false;
             syncSavedPaymentUiState();
         }
@@ -4993,8 +7445,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (paymentPrimarySaveButton) {
         paymentSubmitDebug.saveButtonFound = true;
-        paymentPrimarySaveButton.addEventListener('click', () => {
-            void performSameCurrencyPaymentSave();
+        paymentPrimarySaveButton.addEventListener('click', async () => {
+            await performSameCurrencyPaymentSave({
+                autoOpenReceipt: true,
+            });
         });
         paymentPrimarySaveButton.addEventListener('keydown', (event) => {
             if (event.key !== 'Enter' && event.code !== 'NumpadEnter') {
@@ -5033,6 +7487,195 @@ document.addEventListener('DOMContentLoaded', () => {
     customerDuesCloseButtons.forEach((button) => {
         button.addEventListener('click', () => closeCustomerDuesModal());
     });
+
+    if (customerAdvanceOpenButton) {
+        customerAdvanceOpenButton.addEventListener('click', () => openCustomerAdvanceModal());
+    }
+
+    if (customerAdvanceSearchInput) {
+        let customerAdvanceSearchTimer = 0;
+        customerAdvanceSearchInput.addEventListener('input', () => {
+            window.clearTimeout(customerAdvanceSearchTimer);
+            customerAdvanceSearchTimer = window.setTimeout(() => {
+                renderCustomerAdvanceSearchResults();
+            }, 120);
+        });
+        customerAdvanceSearchInput.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter' && event.code !== 'NumpadEnter') {
+                return;
+            }
+
+            const firstResult = customerAdvanceResults?.querySelector('[data-customer-advance-select]');
+            if (firstResult instanceof HTMLElement) {
+                event.preventDefault();
+                firstResult.click();
+            }
+        });
+    }
+
+    if (customerAdvanceResults) {
+        customerAdvanceResults.addEventListener('click', (event) => {
+            const row = event.target instanceof HTMLElement ? event.target.closest('[data-customer-advance-select]') : null;
+            if (!(row instanceof HTMLElement)) {
+                return;
+            }
+
+            const customerId = Number.parseInt(String(row.dataset.customerAdvanceSelect || '0'), 10) || 0;
+            const customer = findCustomerDirectoryEntryById(customerId);
+            if (!customer) {
+                setCustomerAdvanceFeedback('Customer could not be selected. Search again.', true);
+                return;
+            }
+
+            selectCustomerForAdvance(customer);
+        });
+        customerAdvanceResults.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter' && event.code !== 'NumpadEnter') {
+                return;
+            }
+
+            const row = event.target instanceof HTMLElement ? event.target.closest('[data-customer-advance-select]') : null;
+            if (!(row instanceof HTMLElement)) {
+                return;
+            }
+
+            event.preventDefault();
+            row.click();
+        });
+    }
+
+    if (customerAdvanceNewCustomerButton) {
+        customerAdvanceNewCustomerButton.addEventListener('click', () => {
+            customerAdvanceNewCustomerMode = true;
+            if (customerAdvanceModal instanceof HTMLElement) {
+                customerAdvanceModal.hidden = true;
+                customerAdvanceModal.setAttribute('aria-hidden', 'true');
+            }
+            openNewCustomerModal();
+        });
+    }
+
+    customerAdvanceCloseButtons.forEach((button) => {
+        button.addEventListener('click', () => closeCustomerAdvanceModal());
+    });
+
+    [customerAdvanceBranch, customerAdvanceCurrency, customerAdvanceMethod].forEach((field) => {
+        if (field instanceof HTMLSelectElement) {
+            field.addEventListener('change', () => {
+                if (field === customerAdvanceBranch && customerAdvanceRefundBranch instanceof HTMLSelectElement) {
+                    customerAdvanceRefundBranch.value = customerAdvanceBranch.value;
+                }
+                if (field === customerAdvanceCurrency && customerAdvanceRefundCurrency instanceof HTMLSelectElement) {
+                    customerAdvanceRefundCurrency.value = customerAdvanceCurrency.value;
+                }
+                syncCustomerAdvanceTreasurySelector();
+                syncCustomerAdvanceBankDetailVisibility();
+                syncCustomerAdvanceRefundTreasurySelector();
+                loadCustomerAdvanceRefundOptions();
+            });
+        }
+    });
+
+    [customerAdvanceRefundBranch, customerAdvanceRefundCurrency, customerAdvanceRefundMethod].forEach((field) => {
+        if (field instanceof HTMLSelectElement) {
+            field.addEventListener('change', () => {
+                syncCustomerAdvanceRefundTreasurySelector();
+                loadCustomerAdvanceRefundOptions();
+            });
+        }
+    });
+
+    if (customerAdvanceRefundReceipt instanceof HTMLSelectElement) {
+        customerAdvanceRefundReceipt.addEventListener('change', () => syncCustomerAdvanceRefundAmountFromSelection());
+    }
+
+    if (customerAdvanceForm instanceof HTMLFormElement) {
+        customerAdvanceForm.addEventListener('submit', (event) => {
+            if (customerAdvanceForm.dataset.submitting === '1') {
+                event.preventDefault();
+                return;
+            }
+
+            const travelerId = Number.parseInt(String(customerAdvanceTravelerId?.value || '0'), 10) || 0;
+            const amount = toNumber(customerAdvanceAmount?.value || 0);
+            const requiresTreasury = paymentMethodRequiresTreasurySelection(customerAdvanceMethod?.value || '');
+            const submitter = event.submitter instanceof HTMLElement ? event.submitter : null;
+            const wantsPrint = submitter?.hasAttribute('data-customer-advance-save-print') === true;
+            if (customerAdvancePrintAfterSave instanceof HTMLInputElement) {
+                customerAdvancePrintAfterSave.value = wantsPrint ? '1' : '0';
+            }
+            customerAdvanceForm.target = wantsPrint ? '_blank' : '';
+            if (customerAdvanceReturnTo instanceof HTMLInputElement) {
+                customerAdvanceReturnTo.value = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+            }
+            if (travelerId <= 0) {
+                event.preventDefault();
+                setCustomerAdvanceFeedback('Select or add a customer before saving the advance.');
+                customerAdvanceSearchInput?.focus();
+                return;
+            }
+            if (amount <= 0) {
+                event.preventDefault();
+                setCustomerAdvanceFeedback('Enter the advance amount before saving.');
+                customerAdvanceAmount?.focus();
+                return;
+            }
+            if (requiresTreasury && String(customerAdvanceTreasuryAccount?.value || '').trim() === '') {
+                event.preventDefault();
+                setCustomerAdvanceFeedback('Select the deposit account before saving.');
+                customerAdvanceTreasuryAccount?.focus();
+                return;
+            }
+
+            customerAdvanceForm.dataset.submitting = '1';
+            window.setTimeout(() => {
+                if (customerAdvanceForm instanceof HTMLFormElement) {
+                    customerAdvanceForm.dataset.submitting = '0';
+                }
+            }, 4000);
+        });
+    }
+
+    if (customerAdvanceRefundForm instanceof HTMLFormElement) {
+        customerAdvanceRefundForm.addEventListener('submit', (event) => {
+            const travelerId = Number.parseInt(String(customerAdvanceRefundTravelerId?.value || '0'), 10) || 0;
+            const amount = toNumber(customerAdvanceRefundAmount?.value || 0);
+            const requiresTreasury = paymentMethodRequiresTreasurySelection(customerAdvanceRefundMethod?.value || '');
+            if (customerAdvanceRefundReturnTo instanceof HTMLInputElement) {
+                customerAdvanceRefundReturnTo.value = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+            }
+            if (travelerId <= 0) {
+                event.preventDefault();
+                setCustomerAdvanceRefundFeedback('Select or add a customer before returning advance.');
+                customerAdvanceSearchInput?.focus();
+                return;
+            }
+            if (String(customerAdvanceRefundReceipt?.value || '').trim() === '') {
+                event.preventDefault();
+                setCustomerAdvanceRefundFeedback('Select the advance receipt to return.');
+                customerAdvanceRefundReceipt?.focus();
+                return;
+            }
+            if (amount <= 0) {
+                event.preventDefault();
+                setCustomerAdvanceRefundFeedback('Enter the return amount.');
+                customerAdvanceRefundAmount?.focus();
+                return;
+            }
+            if (requiresTreasury && String(customerAdvanceRefundTreasuryAccount?.value || '').trim() === '') {
+                event.preventDefault();
+                setCustomerAdvanceRefundFeedback('Select the account paid from.');
+                customerAdvanceRefundTreasuryAccount?.focus();
+                return;
+            }
+            const reasonField = customerAdvanceRefundForm.querySelector('[name="advance_refund_reason"]');
+            if (reasonField instanceof HTMLInputElement && String(reasonField.value || '').trim() === '') {
+                event.preventDefault();
+                setCustomerAdvanceRefundFeedback('Enter the reason for returning the advance.');
+                reasonField.focus();
+            }
+        });
+    }
 
     if (customerDuesSearchInput) {
         let duesSearchTimer = 0;
@@ -5114,9 +7757,43 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const fillValue = (field, value) => {
         if (field) {
+            if (field instanceof HTMLInputElement && field.type === 'number') {
+                field.value = formatNumberInputValue(value ?? 0);
+                return;
+            }
+
             field.value = value ?? '';
         }
     };
+
+    const normalizeNumberFieldDisplay = (field) => {
+        if (!(field instanceof HTMLInputElement) || field.type !== 'number') {
+            return;
+        }
+
+        const rawValue = String(field.value ?? '').trim();
+        if (rawValue === '') {
+            return;
+        }
+
+        field.value = formatNumberInputValue(rawValue);
+    };
+
+    const bindWholeNumberInputs = (root = station) => {
+        if (!(root instanceof HTMLElement)) {
+            return;
+        }
+
+        root.querySelectorAll('input[type="number"]').forEach((field) => {
+            if (!(field instanceof HTMLInputElement)) {
+                return;
+            }
+
+            normalizeNumberFieldDisplay(field);
+            field.addEventListener('blur', () => normalizeNumberFieldDisplay(field));
+        });
+    };
+    bindWholeNumberInputs();
 
     const syncServiceCurrencyMirror = () => {
         if (!serviceFields.currencyMirror || !serviceFields.currency) {
@@ -5126,7 +7803,7 @@ document.addEventListener('DOMContentLoaded', () => {
         serviceFields.currencyMirror.value = serviceFields.currency.value || 'PKR';
     };
 
-    const currentBookingId = () => {
+    function currentBookingId() {
         const candidates = [
             invoiceForm?.elements?.namedItem('booking_id'),
             serviceForm?.elements?.namedItem('booking_id'),
@@ -5134,7 +7811,7 @@ document.addEventListener('DOMContentLoaded', () => {
         ];
         const field = candidates.find((candidate) => candidate instanceof HTMLInputElement);
         return field instanceof HTMLInputElement ? Number.parseInt(field.value || '0', 10) : 0;
-    };
+    }
 
     const syncBookingIdFields = (bookingId) => {
         const normalizedBookingId = Number.parseInt(String(bookingId || 0), 10) || 0;
@@ -5181,8 +7858,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return autosavedPersistedServiceId;
         }
 
-        const persistedLine = serviceLines.find((serviceLine) => Number.parseInt(String(serviceLine.serviceId || 0), 10) > 0);
-        return persistedLine ? Number.parseInt(String(persistedLine.serviceId || 0), 10) : 0;
+        return 0;
     };
 
     const setInvoiceNumber = (label) => {
@@ -5210,24 +7886,60 @@ document.addEventListener('DOMContentLoaded', () => {
         );
     };
 
-    const postAutosave = async (url, form) => {
+    const postAutosave = async (url, form, extraFields = {}) => {
         if (!(form instanceof HTMLFormElement) || url === '') {
             throw new Error('Autosave is not available for this form.');
         }
 
-        const response = await fetch(url, {
-            method: 'POST',
-            body: new FormData(form),
-            headers: {
-                'X-Requested-With': 'XMLHttpRequest',
-            },
-            credentials: 'same-origin',
-        });
+        const controller = typeof AbortController === 'function' ? new AbortController() : null;
+        const timeoutId = controller
+            ? window.setTimeout(() => controller.abort(), 20000)
+            : 0;
+        let response;
 
-        const payload = await response.json().catch(() => ({
-            ok: false,
-            message: 'The server returned an invalid autosave response.',
-        }));
+        try {
+            const formData = new FormData(form);
+            Object.entries(extraFields || {}).forEach(([key, value]) => {
+                formData.set(key, String(value));
+            });
+            response = await fetch(url, {
+                method: 'POST',
+                body: formData,
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest',
+                },
+                credentials: 'same-origin',
+                signal: controller ? controller.signal : undefined,
+            });
+        } catch (error) {
+            if (timeoutId) {
+                window.clearTimeout(timeoutId);
+            }
+
+            if (error && typeof error === 'object' && error.name === 'AbortError') {
+                throw new Error('Autosave timed out on this connection. Your current edits are still in the form.');
+            }
+
+            throw new Error('Autosave could not reach the server. Your current edits are still in the form.');
+        }
+
+        if (timeoutId) {
+            window.clearTimeout(timeoutId);
+        }
+
+        const rawResponse = await response.text();
+        let payload = null;
+        try {
+            payload = JSON.parse(rawResponse);
+        } catch (error) {
+            const genericMessage = response.status >= 500
+                ? 'The server hit an internal error while autosaving. Your current edits are still in the form.'
+                : 'The server returned an invalid autosave response.';
+            payload = {
+                ok: false,
+                message: genericMessage,
+            };
+        }
 
         if (!response.ok || !payload.ok) {
             throw new Error(payload.message || 'Autosave failed.');
@@ -5275,23 +7987,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const travelersDataNode = station.querySelector('#workspace-travelers-data');
     const travelers = parseJsonDataNode(travelersDataNode, 'travelers');
     const customerOpenReceivablesDataNode = station.querySelector('#workspace-customer-open-receivables-data');
-    let customerOpenReceivables = parseJsonDataNode(customerOpenReceivablesDataNode, 'customerOpenReceivables');
-    const dailySettlementRatesDataNode = station.querySelector('#workspace-daily-settlement-rates-data');
-    let dailySettlementRates = parseBalanceMap(dailySettlementRatesDataNode?.textContent || '{}');
+    customerOpenReceivables = parseJsonDataNode(customerOpenReceivablesDataNode, 'customerOpenReceivables');
+    dailySettlementRatesDataNode = station.querySelector('#workspace-daily-settlement-rates-data');
+    dailySettlementRates = parseBalanceMap(dailySettlementRatesDataNode?.textContent || '{}');
     const paymentReceiptsDataNode = station.querySelector('#workspace-payment-receipts-data');
     let paymentReceipts = parseJsonDataNode(paymentReceiptsDataNode, 'paymentReceipts');
     const paymentAllocationsDataNode = station.querySelector('#workspace-payment-allocations-data');
     let paymentAllocations = parseJsonDataNode(paymentAllocationsDataNode, 'paymentAllocations');
     const customerDuesFinderUrl = String(customerDuesModal?.dataset.customerDuesUrl || '').trim();
-    let customerDuesFinderState = {
-        query: '',
-        selectedTravelerId: 0,
-        currency: '',
-        customers: [],
-        selectedCustomer: null,
-        openInvoices: [],
-        requestToken: 0,
-    };
     const supplierHistoryFinderUrl = String(supplierHistoryModal?.dataset.supplierHistoryUrl || '').trim();
     let supplierHistoryFinderState = {
         query: '',
@@ -5299,6 +8002,14 @@ document.addEventListener('DOMContentLoaded', () => {
         requestToken: 0,
     };
     const normalizeCustomerDuesQuery = (value) => String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+    function findCustomerDirectoryEntryById(customerId) {
+        const normalizedId = Number.parseInt(String(customerId || '0'), 10) || 0;
+        if (normalizedId <= 0) {
+            return null;
+        }
+
+        return customerDirectory.find((entry) => Number.parseInt(String(entry?.id || '0'), 10) === normalizedId) || null;
+    }
     const formatAllocationTypeLabel = (value) => {
         if (String(value || '') === 'Previous Outstanding') {
             return 'Previous Balance';
@@ -5316,6 +8027,44 @@ document.addEventListener('DOMContentLoaded', () => {
             openInvoices: [],
         };
     };
+    function syncCustomerDuesFinderWithWorkspaceCustomer() {
+        const selectedTravelerId = Number.parseInt(String(bookingSelectedTravelerIdField?.value || '0'), 10) || 0;
+        if (selectedTravelerId <= 0) {
+            resetCustomerDuesSelection();
+            return {
+                travelerId: 0,
+                customer: null,
+                query: customerDuesSearchInput?.value || customerDuesFinderState.query || '',
+            };
+        }
+
+        const activeCustomer = findCustomerDirectoryEntryById(selectedTravelerId);
+        const preferredQuery = String(
+            activeCustomer?.full_name
+            || resolveBookingLeadField()?.value
+            || customerDuesSearchInput?.value
+            || customerDuesFinderState.query
+            || ''
+        ).trim();
+
+        customerDuesFinderState = {
+            ...customerDuesFinderState,
+            selectedTravelerId,
+            selectedCustomer: activeCustomer,
+            query: preferredQuery,
+            openInvoices: [],
+        };
+
+        if (customerDuesSearchInput instanceof HTMLInputElement) {
+            customerDuesSearchInput.value = preferredQuery;
+        }
+
+        return {
+            travelerId: selectedTravelerId,
+            customer: activeCustomer,
+            query: preferredQuery,
+        };
+    }
     const workflowGates = {
         customerStage: station.querySelector('[data-workflow-gate="customer-stage"]'),
         serviceEntry: station.querySelector('[data-workflow-gate="service-entry"]'),
@@ -5376,9 +8125,44 @@ document.addEventListener('DOMContentLoaded', () => {
     const serviceRefundTreasurySelect = serviceRefundForm?.elements?.namedItem('refund_treasury_account_id') instanceof HTMLSelectElement
         ? serviceRefundForm.elements.namedItem('refund_treasury_account_id')
         : null;
+    const serviceSupplierRefundMethodSelect = serviceRefundForm?.elements?.namedItem('supplier_refund_payment_method') instanceof HTMLSelectElement
+        ? serviceRefundForm.elements.namedItem('supplier_refund_payment_method')
+        : null;
+    const serviceSupplierRefundTreasuryRow = station.querySelector('[data-service-supplier-refund-treasury-row]');
+    const serviceSupplierRefundTreasurySelect = serviceRefundForm?.elements?.namedItem('supplier_refund_treasury_account_id') instanceof HTMLSelectElement
+        ? serviceRefundForm.elements.namedItem('supplier_refund_treasury_account_id')
+        : null;
     const serviceRefundBranchIdField = station.querySelector('[data-service-refund-branch-id]');
     const serviceRefundCurrencyField = station.querySelector('[data-service-refund-currency]');
     const serviceRefundDestinationRows = Array.from(station.querySelectorAll('[data-service-refund-destination-row]'));
+    const serviceCorrectionSettlementForm = station.querySelector('form[data-service-correction-bar="settlement"]');
+    const serviceCorrectionSettlementSummaryNote = serviceCorrectionSettlementForm?.querySelector('[data-service-correction-settlement-summary]') || null;
+    const serviceCorrectionRefundForm = station.querySelector('form[data-service-correction-refund-form], form[data-service-correction-bar="refund"]');
+    const serviceCorrectionRefundMethodSelect = serviceCorrectionRefundForm?.elements?.namedItem('refund_payment_method') instanceof HTMLSelectElement
+        ? serviceCorrectionRefundForm.elements.namedItem('refund_payment_method')
+        : null;
+    const serviceCorrectionRefundTreasuryRow = serviceCorrectionRefundForm?.querySelector('[data-service-correction-refund-treasury-row]') || null;
+    const serviceCorrectionRefundTreasurySelect = serviceCorrectionRefundForm?.elements?.namedItem('refund_treasury_account_id') instanceof HTMLSelectElement
+        ? serviceCorrectionRefundForm.elements.namedItem('refund_treasury_account_id')
+        : null;
+    const serviceCorrectionSupplierRefundMethodSelect = serviceCorrectionRefundForm?.elements?.namedItem('supplier_refund_payment_method') instanceof HTMLSelectElement
+        ? serviceCorrectionRefundForm.elements.namedItem('supplier_refund_payment_method')
+        : null;
+    const serviceCorrectionSupplierRefundTreasuryRow = serviceCorrectionRefundForm?.querySelector('[data-service-correction-supplier-refund-treasury-row]') || null;
+    const serviceCorrectionSupplierRefundTreasurySelect = serviceCorrectionRefundForm?.elements?.namedItem('supplier_refund_treasury_account_id') instanceof HTMLSelectElement
+        ? serviceCorrectionRefundForm.elements.namedItem('supplier_refund_treasury_account_id')
+        : null;
+    const serviceCorrectionRefundBranchIdField = serviceCorrectionRefundForm?.querySelector('[data-service-correction-refund-branch-id]') || null;
+    const serviceCorrectionRefundCurrencyField = serviceCorrectionRefundForm?.querySelector('[data-service-correction-refund-currency]') || null;
+    const serviceCorrectionRefundDestinationRows = serviceCorrectionRefundForm
+        ? Array.from(serviceCorrectionRefundForm.querySelectorAll('[data-service-correction-refund-destination-row]'))
+        : [];
+    const serviceCorrectionBars = {
+        settlement: serviceCorrectionSettlementForm,
+        settlementReverse: station.querySelector('form[data-service-correction-bar="settlement-reverse"]'),
+        refund: station.querySelector('form[data-service-correction-bar="refund"]'),
+        refundReverse: station.querySelector('form[data-service-correction-bar="refund-reverse"]'),
+    };
     const serviceSettlementId = station.querySelector('[data-service-settlement-id]');
     const serviceSettlementButton = station.querySelector('[data-service-settlement-button]');
     const serviceReissueId = station.querySelector('[data-service-reissue-id]');
@@ -5492,7 +8276,10 @@ document.addEventListener('DOMContentLoaded', () => {
         lineNumber: station.querySelector('[data-service-field="lineNumber"]'),
         supplier: station.querySelector('[data-service-field="supplier"]'),
         currency: station.querySelector('[data-service-field="currency"]'),
+        costCurrency: station.querySelector('[data-service-field="cost_currency"]'),
         currencyMirror: station.querySelector('[data-service-field="currency-mirror"]'),
+        pricingExchangeRate: station.querySelector('[data-service-field="pricing_exchange_rate"]'),
+        pricingRateEffectiveDate: station.querySelector('[data-service-field="pricing_rate_effective_date"]'),
         status: station.querySelector('[data-service-field="status"]'),
         dueDate: station.querySelector('[data-service-field="due_date"]'),
         remarks: station.querySelector('[data-service-field="remarks"]'),
@@ -5505,16 +8292,59 @@ document.addEventListener('DOMContentLoaded', () => {
     const lossAmountInput = commercialLookup('commercial-loss-amount', '[data-service-loss-amount]');
     const servicePassengerNameField = commercialLookup('active-service-passenger-name', '[data-service-passenger-name]');
     const servicePassengerOptions = station.querySelector('#service-passenger-options');
-    const syncServicePassengerName = (fallbackName = '') => {
+    const normalizeServicePassengerValue = (value) => normalizePassengerName(String(value || ''));
+    const servicePassengerManualOverride = () => servicePassengerNameField?.dataset.passengerManualOverride === '1';
+    const setServicePassengerTracking = (value, options = {}) => {
+        if (!servicePassengerNameField) {
+            return;
+        }
+
+        const normalizedValue = normalizeServicePassengerValue(value);
+        const travelerId = serviceFields.travelerId ? String(serviceFields.travelerId.value || '0') : '0';
+        const traveler = travelers.find((item) => String(item.travelerId || '0') === travelerId);
+        const matchesTraveler = traveler && normalizeServicePassengerValue(traveler.fullName) === normalizedValue;
+        const inferredManualOverride = options.manual === true
+            || (
+                options.manual !== false
+                && normalizedValue !== ''
+                && !matchesTraveler
+            );
+
+        servicePassengerNameField.dataset.passengerAutoValue = options.autoValue ?? (matchesTraveler ? String(value || '') : '');
+        servicePassengerNameField.dataset.passengerManualOverride = inferredManualOverride ? '1' : '0';
+    };
+    const syncServicePassengerName = (fallbackName = '', options = {}) => {
         if (!servicePassengerNameField) {
             return;
         }
 
         const travelerId = serviceFields.travelerId ? String(serviceFields.travelerId.value || '0') : '0';
         const traveler = travelers.find((item) => String(item.travelerId || '0') === travelerId);
-        servicePassengerNameField.value = traveler && traveler.fullName
+        const resolvedName = traveler && traveler.fullName
             ? traveler.fullName
             : fallbackName;
+
+        const currentValue = String(servicePassengerNameField.value || '');
+        const normalizedCurrent = normalizeServicePassengerValue(currentValue);
+        const normalizedResolved = normalizeServicePassengerValue(resolvedName);
+        const normalizedAuto = normalizeServicePassengerValue(servicePassengerNameField.dataset.passengerAutoValue || '');
+        const shouldPreserveManualValue = options.force !== true
+            && servicePassengerManualOverride()
+            && normalizedCurrent !== ''
+            && normalizedCurrent !== normalizedAuto
+            && normalizedCurrent !== normalizedResolved;
+
+        if (shouldPreserveManualValue) {
+            return;
+        }
+
+        servicePassengerNameField.value = resolvedName;
+        setServicePassengerTracking(resolvedName, {
+            manual: typeof options.manual === 'boolean'
+                ? options.manual
+                : (!traveler && normalizedResolved !== ''),
+            autoValue: traveler && traveler.fullName ? traveler.fullName : '',
+        });
     };
     const syncServiceTravelerIdFromName = () => {
         if (!servicePassengerNameField || !serviceFields.travelerId) {
@@ -5525,6 +8355,14 @@ document.addEventListener('DOMContentLoaded', () => {
         serviceFields.travelerId.value = traveler && Number.parseInt(String(traveler.travelerId || 0), 10) > 0
             ? String(traveler.travelerId)
             : '0';
+        const currentName = String(servicePassengerNameField.value || '');
+        const normalizedCurrent = normalizeServicePassengerValue(currentName);
+        const normalizedTraveler = normalizeServicePassengerValue(traveler?.fullName || '');
+
+        setServicePassengerTracking(currentName, {
+            manual: normalizedCurrent !== '' && normalizedCurrent !== normalizedTraveler,
+            autoValue: traveler?.fullName || '',
+        });
     };
     const ensureServiceTravelerOption = (customer) => {
         if (!servicePassengerOptions || !customer || !customer.id) {
@@ -5564,9 +8402,22 @@ document.addEventListener('DOMContentLoaded', () => {
         const serviceId = serviceFields.serviceId
             ? Number.parseInt(String(serviceFields.serviceId.value || 0), 10)
             : 0;
-        if (serviceId <= 0 || serviceFields.travelerId.value === '0' || serviceFields.travelerId.value === '') {
+        const currentPassenger = normalizeServicePassengerValue(servicePassengerNameField.value);
+        const currentAutoPassenger = normalizeServicePassengerValue(servicePassengerNameField.dataset.passengerAutoValue || '');
+        const customerPassenger = normalizeServicePassengerValue(customer.full_name || '');
+        const hasMeaningfulManualPassenger = servicePassengerManualOverride()
+            && currentPassenger !== ''
+            && currentPassenger !== currentAutoPassenger
+            && currentPassenger !== customerPassenger;
+        const shouldDefaultPassenger = serviceId <= 0 && !hasMeaningfulManualPassenger;
+
+        if (shouldDefaultPassenger) {
             fillValue(serviceFields.travelerId, customer.id);
             fillValue(servicePassengerNameField, customer.full_name || '');
+            setServicePassengerTracking(customer.full_name || '', {
+                manual: false,
+                autoValue: customer.full_name || '',
+            });
         }
     };
     const serviceMetricInputs = {
@@ -5584,7 +8435,13 @@ document.addEventListener('DOMContentLoaded', () => {
         commission: station.querySelector('[data-service-metric="commission"]'),
         serviceCharge: commercialLookup('commercial-service-charge', '[data-service-metric="service_charge"]'),
     };
+    const servicePercentInputs = {
+        serviceCharge: commercialLookup('commercial-service-charge-percent', '[data-service-percent="service_charge"]'),
+        discount: commercialLookup('commercial-discount-percent', '[data-service-percent="discount"]'),
+        vat: commercialLookup('commercial-vat-percent', '[data-service-percent="vat"]'),
+    };
     const serviceDiscountInput = commercialLookup('commercial-discount-amount', '[data-service-discount]');
+    const manualSaleAdjustmentInput = commercialLookup('commercial-sale-adjustment', '[data-service-sale-adjustment]');
     const bottomTotalFields = {
         fare: station.querySelector('#commercial-bottom-fare'),
         taxes: station.querySelector('#commercial-bottom-taxes'),
@@ -5593,6 +8450,62 @@ document.addEventListener('DOMContentLoaded', () => {
         receivable: station.querySelector('#commercial-bottom-receivable'),
         payable: station.querySelector('#commercial-bottom-payable'),
         profit: station.querySelector('#commercial-bottom-profit'),
+    };
+    let commercialDiagnosticCount = 0;
+    let commercialDiagnosticLastPayload = '';
+    const logCommercialCalculator = (stage, source = '', extra = {}) => {
+        if (commercialDiagnosticCount >= 80) {
+            return;
+        }
+
+        const snapshot = {
+            stage,
+            source,
+            serviceType: String(serviceTypeField?.value || ''),
+            invoiceCurrency: String(serviceFields.currency?.value || ''),
+            costCurrency: String(serviceFields.costCurrency?.value || ''),
+            pricingExchangeRate: String(serviceFields.pricingExchangeRate?.value || ''),
+            mktFareRaw: String(serviceMetricInputs.sale?.value ?? ''),
+            mktFareNumber: toNumber(serviceMetricInputs.sale?.value || 0),
+            serviceAmountRaw: String(serviceMetricInputs.serviceCharge?.value ?? ''),
+            serviceAmountNumber: toNumber(serviceMetricInputs.serviceCharge?.value || 0),
+            discountRaw: String(serviceDiscountInput?.value ?? ''),
+            discountNumber: toNumber(serviceDiscountInput?.value || 0),
+            vatOutputRaw: String(serviceMetricInputs.vat?.value ?? ''),
+            vatOutputNumber: toNumber(serviceMetricInputs.vat?.value || 0),
+            purchaseCostRaw: String(serviceMetricInputs.cost?.value ?? ''),
+            purchaseCostNumber: toNumber(serviceMetricInputs.cost?.value || 0),
+            frtxRaw: String(airlinePayableField?.value ?? airlinePayableField?.textContent ?? ''),
+            finalSaleRaw: String(finalSalePriceInput?.value ?? ''),
+            saleAdjustmentRaw: String(manualSaleAdjustmentInput?.value ?? ''),
+            paymentInvoiceRaw: String(paymentCurrentInvoiceInput?.value ?? ''),
+            paymentInvoiceData: String(paymentCurrentInvoiceInput?.dataset.paymentCurrentInvoice ?? ''),
+            paymentBalanceRaw: String(paymentCurrentBalanceInput?.value ?? ''),
+            paymentBalanceData: String(paymentCurrentBalanceInput?.dataset.paymentPersistedInvoiceBalance ?? ''),
+            selectorCounts: commercialTrace.selectorCounts,
+            activeElement: describeTarget(document.activeElement),
+            ...extra,
+        };
+        const payloadKey = JSON.stringify({
+            stage: snapshot.stage,
+            source: snapshot.source,
+            mktFareRaw: snapshot.mktFareRaw,
+            serviceAmountRaw: snapshot.serviceAmountRaw,
+            finalSaleRaw: snapshot.finalSaleRaw,
+            paymentInvoiceRaw: snapshot.paymentInvoiceRaw,
+            guard: snapshot.guard || '',
+        });
+
+        if (payloadKey === commercialDiagnosticLastPayload && stage !== 'guard-failed') {
+            return;
+        }
+
+        commercialDiagnosticLastPayload = payloadKey;
+        commercialDiagnosticCount += 1;
+        pushWorkspaceClientError('commercial_calculator', {
+            message: `Commercial calculator ${stage}`,
+            extra: snapshot,
+        });
     };
     updateCommercialTrace({
         bootStatus: 'bindings-created',
@@ -5633,6 +8546,7 @@ document.addEventListener('DOMContentLoaded', () => {
         pnr: station.querySelector('[data-ticket-field="pnr"]'),
         ticketNumber: station.querySelector('[data-ticket-field="ticket_number"]'),
         airline: station.querySelector('[data-ticket-field="airline"]'),
+        ticketType: station.querySelector('[data-ticket-field="ticket_type"]'),
         class: station.querySelector('[data-ticket-field="class"]'),
         sectorFrom: station.querySelector('[data-ticket-field="sector_from"]'),
         sectorTo: station.querySelector('[data-ticket-field="sector_to"]'),
@@ -5649,6 +8563,35 @@ document.addEventListener('DOMContentLoaded', () => {
         saleAmount: station.querySelector('[data-ticket-metric="sale_amount"]'),
     };
     const ticketRouteDisplay = station.querySelector('[data-ticket-route-display]');
+    const financialCorrectionForm = station.querySelector('[data-service-event-bar="financial-correction"]');
+    const financialCorrectionCostInput = financialCorrectionForm?.elements?.namedItem('corrected_cost_basis') instanceof HTMLInputElement
+        ? financialCorrectionForm.elements.namedItem('corrected_cost_basis')
+        : null;
+    const financialCorrectionServiceAmountInput = financialCorrectionForm?.elements?.namedItem('corrected_service_charge') instanceof HTMLInputElement
+        ? financialCorrectionForm.elements.namedItem('corrected_service_charge')
+        : null;
+    const financialCorrectionDiscountInput = financialCorrectionForm?.elements?.namedItem('corrected_discount_amount') instanceof HTMLInputElement
+        ? financialCorrectionForm.elements.namedItem('corrected_discount_amount')
+        : null;
+    const financialCorrectionCustomerTotalInput = financialCorrectionForm?.elements?.namedItem('corrected_final_sale_price') instanceof HTMLInputElement
+        ? financialCorrectionForm.elements.namedItem('corrected_final_sale_price')
+        : null;
+    const financialCorrectionInvoiceCurrencySelect = financialCorrectionForm?.elements?.namedItem('corrected_invoice_currency') instanceof HTMLSelectElement
+        ? financialCorrectionForm.elements.namedItem('corrected_invoice_currency')
+        : null;
+    const financialCorrectionCostCurrencySelect = financialCorrectionForm?.elements?.namedItem('corrected_cost_currency') instanceof HTMLSelectElement
+        ? financialCorrectionForm.elements.namedItem('corrected_cost_currency')
+        : null;
+    const financialCorrectionRateInput = financialCorrectionForm?.elements?.namedItem('corrected_pricing_exchange_rate') instanceof HTMLInputElement
+        ? financialCorrectionForm.elements.namedItem('corrected_pricing_exchange_rate')
+        : null;
+    const financialCorrectionRateDateInput = financialCorrectionForm?.elements?.namedItem('corrected_pricing_rate_effective_date') instanceof HTMLInputElement
+        ? financialCorrectionForm.elements.namedItem('corrected_pricing_rate_effective_date')
+        : null;
+    const financialCorrectionLossInput = financialCorrectionForm?.querySelector('[data-financial-correction-loss]');
+    const financialCorrectionLossNote = financialCorrectionForm?.querySelector('[data-financial-correction-loss-note]');
+    const ticketRouteMask = '---/---/---';
+    const ticketRouteEditablePositions = [0, 1, 2, 4, 5, 6, 8, 9, 10];
     const subtypeFields = {
         visaCountry: station.querySelector('[data-subtype-field="visaCountry"]'),
         visaType: station.querySelector('[data-subtype-field="visaType"]'),
@@ -5695,6 +8638,110 @@ document.addEventListener('DOMContentLoaded', () => {
         otherProviderName: station.querySelector('[data-subtype-field="otherProviderName"]'),
         otherRemarks: station.querySelector('[data-subtype-field="otherRemarks"]'),
     };
+
+    const sanitizeTicketRouteCharacters = (value) => String(value || '')
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, '')
+        .slice(0, ticketRouteEditablePositions.length);
+
+    const formatTicketRouteMask = (value) => {
+        const routeCharacters = sanitizeTicketRouteCharacters(value).split('');
+        const maskedCharacters = ticketRouteMask.split('');
+        ticketRouteEditablePositions.forEach((position, index) => {
+            maskedCharacters[position] = routeCharacters[index] || '-';
+        });
+        return maskedCharacters.join('');
+    };
+
+    const ticketRouteCharactersFromMaskedValue = (value) => sanitizeTicketRouteCharacters(value);
+
+    const ticketRouteCharacterArrayFromMaskedValue = (value) => {
+        const characters = ticketRouteCharactersFromMaskedValue(value).split('');
+        while (characters.length < ticketRouteEditablePositions.length) {
+            characters.push('');
+        }
+        return characters;
+    };
+
+    const ticketRouteDisplayValueFromSegments = (from, to) => formatTicketRouteMask(`${from || ''}${to || ''}`);
+
+    const nearestTicketRoutePosition = (position) => {
+        if (!Number.isFinite(position)) {
+            return ticketRouteEditablePositions[0];
+        }
+
+        for (let index = 0; index < ticketRouteEditablePositions.length; index += 1) {
+            if (ticketRouteEditablePositions[index] >= position) {
+                return ticketRouteEditablePositions[index];
+            }
+        }
+
+        return ticketRouteEditablePositions[ticketRouteEditablePositions.length - 1];
+    };
+
+    const previousTicketRoutePosition = (position) => {
+        for (let index = ticketRouteEditablePositions.length - 1; index >= 0; index -= 1) {
+            if (ticketRouteEditablePositions[index] < position) {
+                return ticketRouteEditablePositions[index];
+            }
+        }
+
+        return ticketRouteEditablePositions[0];
+    };
+
+    const nextTicketRouteCaretPosition = (editableIndex) => {
+        const nextPosition = ticketRouteEditablePositions[editableIndex + 1];
+        return typeof nextPosition === 'number' ? nextPosition : ticketRouteEditablePositions[ticketRouteEditablePositions.length - 1] + 1;
+    };
+
+    const setTicketRouteCaret = (position) => {
+        if (!(ticketRouteDisplay instanceof HTMLInputElement)) {
+            return;
+        }
+
+        const safePosition = Math.max(0, Math.min(ticketRouteMask.length, position));
+        window.requestAnimationFrame(() => {
+            ticketRouteDisplay.setSelectionRange(safePosition, safePosition);
+        });
+    };
+
+    const syncTicketRouteStorage = (maskedValue) => {
+        const routeCharacters = ticketRouteCharactersFromMaskedValue(maskedValue);
+        const fromSegment = routeCharacters.slice(0, 3);
+        const middleSegment = routeCharacters.slice(3, 6);
+        const lastSegment = routeCharacters.slice(6, 9);
+        const toSegmentParts = [];
+
+        if (middleSegment !== '') {
+            toSegmentParts.push(middleSegment);
+        }
+        if (lastSegment !== '') {
+            toSegmentParts.push(lastSegment);
+        }
+
+        fillValue(ticketFields.sectorFrom, fromSegment);
+        fillValue(ticketFields.sectorTo, toSegmentParts.join('/'));
+    };
+
+    const syncTicketRouteDisplay = (from, to) => {
+        if (!(ticketRouteDisplay instanceof HTMLInputElement)) {
+            return;
+        }
+
+        const maskedValue = ticketRouteDisplayValueFromSegments(from, to);
+        fillValue(ticketRouteDisplay, maskedValue);
+        syncTicketRouteStorage(maskedValue);
+    };
+
+    const normalizeTicketRouteDisplayInteraction = () => {
+        if (!(ticketRouteDisplay instanceof HTMLInputElement)) {
+            return;
+        }
+
+        const maskedValue = formatTicketRouteMask(ticketRouteDisplay.value);
+        fillValue(ticketRouteDisplay, maskedValue);
+        syncTicketRouteStorage(maskedValue);
+    };
     const serviceScaffoldFields = [
         ticketMetricFields.fare,
         serviceMetricInputs.sale,
@@ -5709,6 +8756,9 @@ document.addEventListener('DOMContentLoaded', () => {
         serviceMetricInputs.commission,
         airlineCommissionExtra,
         airlineCommissionAdjustment,
+        servicePercentInputs.serviceCharge,
+        servicePercentInputs.discount,
+        servicePercentInputs.vat,
         serviceMetricInputs.serviceCharge,
         serviceDiscountInput,
         serviceMetricInputs.vat,
@@ -5731,6 +8781,152 @@ document.addEventListener('DOMContentLoaded', () => {
         headerRemarksInput,
     ].filter((field) => field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement);
 
+    if (ticketRouteDisplay instanceof HTMLInputElement) {
+        normalizeTicketRouteDisplayInteraction();
+
+        ticketRouteDisplay.addEventListener('focus', () => {
+            normalizeTicketRouteDisplayInteraction();
+            const routeCharacters = ticketRouteCharactersFromMaskedValue(ticketRouteDisplay.value);
+            const targetPosition = routeCharacters.length < ticketRouteEditablePositions.length
+                ? ticketRouteEditablePositions[routeCharacters.length]
+                : ticketRouteEditablePositions[ticketRouteEditablePositions.length - 1] + 1;
+            setTicketRouteCaret(targetPosition);
+        });
+
+        ticketRouteDisplay.addEventListener('click', () => {
+            const selectionStart = typeof ticketRouteDisplay.selectionStart === 'number'
+                ? ticketRouteDisplay.selectionStart
+                : 0;
+            setTicketRouteCaret(nearestTicketRoutePosition(selectionStart));
+        });
+
+        ticketRouteDisplay.addEventListener('keydown', (event) => {
+            const selectionStart = typeof ticketRouteDisplay.selectionStart === 'number'
+                ? ticketRouteDisplay.selectionStart
+                : 0;
+            const selectionEnd = typeof ticketRouteDisplay.selectionEnd === 'number'
+                ? ticketRouteDisplay.selectionEnd
+                : selectionStart;
+            const routeCharacters = ticketRouteCharacterArrayFromMaskedValue(ticketRouteDisplay.value);
+            const normalizedKey = String(event.key || '');
+            const isCharacterKey = /^[a-z0-9]$/i.test(normalizedKey);
+
+            if (event.ctrlKey || event.metaKey || event.altKey) {
+                return;
+            }
+
+            if (normalizedKey === 'Tab') {
+                return;
+            }
+
+            if (normalizedKey === 'ArrowLeft') {
+                event.preventDefault();
+                setTicketRouteCaret(previousTicketRoutePosition(selectionStart));
+                return;
+            }
+
+            if (normalizedKey === 'ArrowRight') {
+                event.preventDefault();
+                setTicketRouteCaret(nearestTicketRoutePosition(selectionStart + 1));
+                return;
+            }
+
+            if (normalizedKey === 'Home') {
+                event.preventDefault();
+                setTicketRouteCaret(ticketRouteEditablePositions[0]);
+                return;
+            }
+
+            if (normalizedKey === 'End') {
+                event.preventDefault();
+                setTicketRouteCaret(ticketRouteEditablePositions[ticketRouteEditablePositions.length - 1] + 1);
+                return;
+            }
+
+            if (normalizedKey === 'Backspace') {
+                event.preventDefault();
+                const targetPosition = selectionStart !== selectionEnd
+                    ? nearestTicketRoutePosition(selectionStart)
+                    : previousTicketRoutePosition(selectionStart);
+                const editableIndex = ticketRouteEditablePositions.indexOf(targetPosition);
+                if (editableIndex >= 0) {
+                    routeCharacters[editableIndex] = '';
+                    const maskedValue = formatTicketRouteMask(routeCharacters.join(''));
+                    fillValue(ticketRouteDisplay, maskedValue);
+                    syncTicketRouteStorage(maskedValue);
+                    setTicketRouteCaret(targetPosition);
+                }
+                return;
+            }
+
+            if (normalizedKey === 'Delete') {
+                event.preventDefault();
+                const targetPosition = nearestTicketRoutePosition(selectionStart);
+                const editableIndex = ticketRouteEditablePositions.indexOf(targetPosition);
+                if (editableIndex >= 0) {
+                    routeCharacters[editableIndex] = '';
+                    const maskedValue = formatTicketRouteMask(routeCharacters.join(''));
+                    fillValue(ticketRouteDisplay, maskedValue);
+                    syncTicketRouteStorage(maskedValue);
+                    setTicketRouteCaret(targetPosition);
+                }
+                return;
+            }
+
+            if (!isCharacterKey) {
+                event.preventDefault();
+                return;
+            }
+
+            event.preventDefault();
+            const targetPosition = nearestTicketRoutePosition(selectionStart);
+            const editableIndex = ticketRouteEditablePositions.indexOf(targetPosition);
+            if (editableIndex < 0) {
+                return;
+            }
+
+            routeCharacters[editableIndex] = normalizedKey.toUpperCase();
+            const maskedValue = formatTicketRouteMask(routeCharacters.join(''));
+            fillValue(ticketRouteDisplay, maskedValue);
+            syncTicketRouteStorage(maskedValue);
+            setTicketRouteCaret(nextTicketRouteCaretPosition(editableIndex));
+        });
+
+        ticketRouteDisplay.addEventListener('paste', (event) => {
+            event.preventDefault();
+            const pastedText = event.clipboardData ? event.clipboardData.getData('text') : '';
+            const pastedCharacters = sanitizeTicketRouteCharacters(pastedText).split('');
+            if (!pastedCharacters.length) {
+                return;
+            }
+
+            const routeCharacters = ticketRouteCharacterArrayFromMaskedValue(ticketRouteDisplay.value);
+            let editableIndex = ticketRouteEditablePositions.indexOf(nearestTicketRoutePosition(
+                typeof ticketRouteDisplay.selectionStart === 'number' ? ticketRouteDisplay.selectionStart : 0
+            ));
+            if (editableIndex < 0) {
+                editableIndex = 0;
+            }
+
+            pastedCharacters.forEach((character) => {
+                if (editableIndex >= routeCharacters.length) {
+                    return;
+                }
+                routeCharacters[editableIndex] = character;
+                editableIndex += 1;
+            });
+
+            const maskedValue = formatTicketRouteMask(routeCharacters.join(''));
+            fillValue(ticketRouteDisplay, maskedValue);
+            syncTicketRouteStorage(maskedValue);
+            setTicketRouteCaret(nextTicketRouteCaretPosition(Math.min(editableIndex - 1, ticketRouteEditablePositions.length - 1)));
+        });
+
+        ticketRouteDisplay.addEventListener('input', () => {
+            normalizeTicketRouteDisplayInteraction();
+        });
+    }
+
     const activeServiceId = () => {
         const rawValue = serviceFields.serviceId instanceof HTMLInputElement ? serviceFields.serviceId.value : '0';
         const parsedValue = Number.parseInt(String(rawValue || 0), 10);
@@ -5744,6 +8940,9 @@ document.addEventListener('DOMContentLoaded', () => {
         type: serviceTypeField?.value || 'air ticket',
         supplier: serviceFields.supplier?.value || '',
         currency: serviceFields.currency?.value || 'PKR',
+        costCurrency: serviceFields.costCurrency?.value || serviceFields.currency?.value || 'PKR',
+        pricingExchangeRate: toNumber(serviceFields.pricingExchangeRate?.value || 1),
+        pricingRateEffectiveDate: serviceFields.pricingRateEffectiveDate?.value || '',
         status: serviceFields.status?.value || 'Open',
         displayStatus: serviceFields.status?.value || 'Open',
         dueDate: serviceFields.dueDate?.value || '',
@@ -5769,6 +8968,7 @@ document.addEventListener('DOMContentLoaded', () => {
         pnr: ticketFields.pnr?.value || '',
         ticketNumber: ticketFields.ticketNumber?.value || '',
         airline: ticketFields.airline?.value || '',
+        ticketType: ticketFields.ticketType?.value || 'international',
         class: ticketFields.class?.value || '',
         sectorFrom: ticketFields.sectorFrom?.value || '',
         sectorTo: ticketFields.sectorTo?.value || '',
@@ -6061,7 +9261,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         const advanceCurrency = String(supplierAdvanceFxCandidate.currency || '').toUpperCase();
-        const payableCurrency = String(serviceFields.currency?.value || '').trim().toUpperCase();
+        const payableCurrency = String(serviceFields.costCurrency?.value || serviceFields.currency?.value || '').trim().toUpperCase();
         const amount = Math.max(toNumber(serviceMetricInputs.cost?.value || serviceFields.purchaseCost?.value || 0), 0);
         if (advanceCurrency === '' || payableCurrency === '' || amount <= 0) {
             clearSupplierAdvanceFxFields();
@@ -6122,7 +9322,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         const supplierName = String(serviceFields.supplier?.value || '').trim();
-        const currency = String(serviceFields.currency?.value || '').trim().toUpperCase();
+        const currency = String(serviceFields.costCurrency?.value || serviceFields.currency?.value || '').trim().toUpperCase();
         const { bookingId, branchId } = currentServiceBranchId();
 
         if (supplierName === '' || currency === '' || (bookingId <= 0 && branchId <= 0)) {
@@ -6235,7 +9435,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const serviceLineDetailLabel = (serviceLine = {}) => {
         const type = String(serviceLine.type || 'air ticket');
         if (type === 'air ticket') {
-            return [serviceLine.sectorFrom || '', serviceLine.sectorTo || ''].filter(Boolean).join('-') || serviceLine.remarks || '';
+            return [serviceLine.sectorFrom || '', serviceLine.sectorTo || ''].filter(Boolean).join('/') || serviceLine.remarks || '';
         }
 
         if (type === 'visa') {
@@ -6269,15 +9469,277 @@ document.addEventListener('DOMContentLoaded', () => {
             : roundToTwo(toNumber(serviceMetricInputs.sale?.value));
     };
 
+    const currentInvoiceCurrencyCode = () => String(serviceFields.currency?.value || 'PKR').trim().toUpperCase() || 'PKR';
+
+    const currentCostCurrencyCode = () => String(serviceFields.costCurrency?.value || currentInvoiceCurrencyCode()).trim().toUpperCase() || currentInvoiceCurrencyCode();
+
+    const currentPricingRateEffectiveDate = () => {
+        const explicitDate = String(serviceFields.pricingRateEffectiveDate?.value || '').trim();
+        if (explicitDate !== '') {
+            return explicitDate;
+        }
+
+        const dueDate = String(serviceFields.dueDate?.value || '').trim();
+        if (dueDate !== '') {
+            return dueDate;
+        }
+
+        const bookingDateField = invoiceForm?.elements?.namedItem('booking_date');
+        if (bookingDateField instanceof HTMLInputElement && bookingDateField.value.trim() !== '') {
+            return bookingDateField.value.trim();
+        }
+
+        return '';
+    };
+
+    const resolvePricingExchangeRateFromMap = (fromCurrency, toCurrency, effectiveDate = '') => {
+        const normalizedFrom = String(fromCurrency || '').trim().toUpperCase();
+        const normalizedTo = String(toCurrency || '').trim().toUpperCase();
+        if (normalizedFrom === '' || normalizedTo === '') {
+            return 0;
+        }
+        if (normalizedFrom === normalizedTo) {
+            return 1;
+        }
+
+        const directKey = `${normalizedFrom}->${normalizedTo}`;
+        const reverseKey = `${normalizedTo}->${normalizedFrom}`;
+        const directRate = toNumber(dailySettlementRates?.[directKey]?.exchangeRate || 0);
+        if (directRate > 0) {
+            return directRate;
+        }
+
+        const reverseRate = toNumber(dailySettlementRates?.[reverseKey]?.exchangeRate || 0);
+        if (reverseRate > 0) {
+            return roundExchangeRate(1 / reverseRate);
+        }
+
+        const preferredQuote = preferredSettlementQuote(normalizedTo, normalizedFrom, dailySettlementRates || {}, effectiveDate);
+        const preferredRate = toNumber(preferredQuote?.exchangeRate || 0);
+        if (preferredRate <= 0) {
+            return 0;
+        }
+
+        if (String(preferredQuote?.rateFromCurrency || '').toUpperCase() === normalizedFrom
+            && String(preferredQuote?.rateToCurrency || '').toUpperCase() === normalizedTo) {
+            return preferredRate;
+        }
+
+        if (String(preferredQuote?.rateFromCurrency || '').toUpperCase() === normalizedTo
+            && String(preferredQuote?.rateToCurrency || '').toUpperCase() === normalizedFrom) {
+            return roundExchangeRate(1 / preferredRate);
+        }
+
+        return 0;
+    };
+
+    const currentPricingExchangeRate = (options = {}) => {
+        const invoiceCurrency = options.invoiceCurrency || currentInvoiceCurrencyCode();
+        const costCurrency = options.costCurrency || currentCostCurrencyCode();
+        if (invoiceCurrency === costCurrency) {
+            return 1;
+        }
+
+        const postedRate = toNumber(serviceFields.pricingExchangeRate?.value || 0);
+        if (postedRate > 0) {
+            return postedRate;
+        }
+
+        return resolvePricingExchangeRateFromMap(costCurrency, invoiceCurrency, options.effectiveDate || currentPricingRateEffectiveDate());
+    };
+
+    const refreshPricingExchangeRateSnapshot = () => {
+        if (!(serviceFields.pricingExchangeRate instanceof HTMLInputElement)) {
+            return currentPricingExchangeRate();
+        }
+
+        const invoiceCurrency = currentInvoiceCurrencyCode();
+        const costCurrency = currentCostCurrencyCode();
+        if (invoiceCurrency === costCurrency) {
+            serviceFields.pricingExchangeRate.value = '1';
+            return 1;
+        }
+
+        const defaultRate = resolvePricingExchangeRateFromMap(costCurrency, invoiceCurrency, currentPricingRateEffectiveDate());
+        serviceFields.pricingExchangeRate.value = defaultRate > 0 ? String(defaultRate) : '';
+        return defaultRate;
+    };
+
+    const currentConvertedPayableAmount = () => {
+        const purchaseCost = currentServicePayableAmount();
+        return convertCostAmountToInvoiceCurrency(purchaseCost);
+    };
+
+    const convertCostAmountToInvoiceCurrency = (amount) => {
+        const invoiceCurrency = currentInvoiceCurrencyCode();
+        const costCurrency = currentCostCurrencyCode();
+        const rate = currentPricingExchangeRate({ invoiceCurrency, costCurrency });
+        if (invoiceCurrency !== costCurrency && rate <= 0.005) {
+            return 0;
+        }
+        return roundToTwo(toNumber(amount) * (invoiceCurrency === costCurrency ? 1 : rate));
+    };
+
+    const currentReceivableAmountInCostCurrency = () => roundToTwo(
+        currentServicePayableAmount()
+        + toNumber(serviceMetricInputs.serviceCharge?.value)
+        + toNumber(serviceMetricInputs.vat?.value)
+        - toNumber(serviceDiscountInput?.value)
+    );
+
+    const currentConvertedReceivableAmount = () => convertCostAmountToInvoiceCurrency(
+        currentReceivableAmountInCostCurrency()
+    );
+
+    const syncPricingSnapshotFields = () => {
+        if (serviceFields.pricingRateEffectiveDate instanceof HTMLInputElement) {
+            serviceFields.pricingRateEffectiveDate.value = currentPricingRateEffectiveDate();
+        }
+
+        if (serviceFields.pricingExchangeRate instanceof HTMLInputElement) {
+            refreshPricingExchangeRateSnapshot();
+        }
+    };
+
     const defaultFinalSalePrice = (receivableBaseOverride = null) => {
+        if (isAirTicketServiceType()) {
+            return currentConvertedReceivableAmount();
+        }
+
         const receivableBase = receivableBaseOverride !== null && Number.isFinite(receivableBaseOverride)
             ? receivableBaseOverride
-            : currentServicePayableAmount();
+            : currentConvertedPayableAmount();
 
         return receivableBase
             + toNumber(serviceMetricInputs.serviceCharge?.value)
             + toNumber(serviceMetricInputs.vat?.value)
             - toNumber(serviceDiscountInput?.value);
+    };
+
+    let commercialPercentSyncing = false;
+
+    const percentBaseForCommercialField = (fieldKey) => {
+        const payable = currentServicePayableAmount();
+        if (fieldKey === 'serviceCharge') {
+            return payable;
+        }
+
+        if (fieldKey === 'discount') {
+            return payable + toNumber(serviceMetricInputs.serviceCharge?.value);
+        }
+
+        if (fieldKey === 'vat') {
+            return Math.max(
+                toNumber(serviceMetricInputs.serviceCharge?.value) - toNumber(serviceDiscountInput?.value),
+                0
+            );
+        }
+
+        return 0;
+    };
+
+    const commercialAmountInputForPercent = (fieldKey) => {
+        if (fieldKey === 'serviceCharge') {
+            return serviceMetricInputs.serviceCharge;
+        }
+
+        if (fieldKey === 'discount') {
+            return serviceDiscountInput;
+        }
+
+        if (fieldKey === 'vat') {
+            return serviceMetricInputs.vat;
+        }
+
+        return null;
+    };
+
+    const commercialPercentInputForAmount = (fieldKey) => {
+        if (fieldKey === 'serviceCharge') {
+            return servicePercentInputs.serviceCharge;
+        }
+
+        if (fieldKey === 'discount') {
+            return servicePercentInputs.discount;
+        }
+
+        if (fieldKey === 'vat') {
+            return servicePercentInputs.vat;
+        }
+
+        return null;
+    };
+
+    const applyCommercialPercentToAmount = (fieldKey) => {
+        const percentInput = commercialPercentInputForAmount(fieldKey);
+        const amountInput = commercialAmountInputForPercent(fieldKey);
+        if (!(percentInput instanceof HTMLInputElement) || !(amountInput instanceof HTMLInputElement)) {
+            return;
+        }
+
+        const base = percentBaseForCommercialField(fieldKey);
+        const percentage = Math.max(toNumber(percentInput.value), 0);
+        const amount = roundToTwo(base * percentage / 100);
+
+        percentInput.dataset.percentActive = percentage > 0.005 ? '1' : '0';
+        commercialPercentSyncing = true;
+        amountInput.value = formatNumberInputValue(amount);
+        commercialPercentSyncing = false;
+        logCommercialCalculator('amount-from-percent', fieldKey, {
+            fieldKey,
+            base,
+            percentage,
+            amount,
+            amountValue: amountInput.value,
+        });
+
+        if (finalSalePriceInput instanceof HTMLInputElement) {
+            finalSalePriceInput.dataset.manualOverride = '0';
+        }
+
+        refreshProfit(`percent:${fieldKey}`);
+        syncTicketCommercialMirrors();
+    };
+
+    const syncCommercialPercentFromAmount = (fieldKey, options = {}) => {
+        if (commercialPercentSyncing) {
+            return;
+        }
+
+        const { markManualAmount = false } = options;
+
+        const percentInput = commercialPercentInputForAmount(fieldKey);
+        const amountInput = commercialAmountInputForPercent(fieldKey);
+        if (!(percentInput instanceof HTMLInputElement) || !(amountInput instanceof HTMLInputElement)) {
+            return;
+        }
+
+        const base = percentBaseForCommercialField(fieldKey);
+        const amount = toNumber(amountInput.value);
+        percentInput.value = base > 0.005 ? formatNumberInputValue(roundToTwo(amount / base * 100)) : '0';
+        logCommercialCalculator('percent-from-amount', fieldKey, {
+            fieldKey,
+            base,
+            amount,
+            percentValue: percentInput.value,
+            markManualAmount,
+        });
+        if (markManualAmount) {
+            percentInput.dataset.percentActive = '0';
+        }
+    };
+
+    const syncAllCommercialPercentsFromAmounts = () => {
+        ['serviceCharge', 'discount', 'vat'].forEach(syncCommercialPercentFromAmount);
+    };
+
+    const reapplyActiveCommercialPercents = (fieldKeys = ['serviceCharge', 'discount', 'vat']) => {
+        fieldKeys.forEach((fieldKey) => {
+            const percentInput = commercialPercentInputForAmount(fieldKey);
+            if (percentInput instanceof HTMLInputElement && percentInput.dataset.percentActive === '1') {
+                applyCommercialPercentToAmount(fieldKey);
+            }
+        });
     };
 
     const currentServiceTaxTotal = () => {
@@ -6290,6 +9752,155 @@ document.addEventListener('DOMContentLoaded', () => {
             + toNumber(serviceMetricInputs.tax?.value)
         );
     };
+
+    const refreshFinancialCorrectionLossPreview = () => {
+        if (!financialCorrectionForm || !(financialCorrectionLossInput instanceof HTMLInputElement) || !(financialCorrectionCustomerTotalInput instanceof HTMLInputElement)) {
+            return;
+        }
+
+        const serviceType = String(financialCorrectionForm.dataset.financialCorrectionServiceType || 'air ticket').trim().toLowerCase();
+        const correctionCurrency = String(financialCorrectionInvoiceCurrencySelect?.value || financialCorrectionForm.dataset.financialCorrectionCurrency || serviceFields.currency?.value || 'PKR').trim().toUpperCase() || 'PKR';
+        const correctionCostCurrency = String(financialCorrectionCostCurrencySelect?.value || financialCorrectionForm.dataset.financialCorrectionCostCurrency || correctionCurrency).trim().toUpperCase() || correctionCurrency;
+        const correctionRate = Math.max(toNumber(financialCorrectionRateInput?.value || financialCorrectionForm.dataset.financialCorrectionRate || 1), 0);
+        const correctionTaxTotal = toNumber(financialCorrectionForm.dataset.financialCorrectionTaxTotal || 0);
+        const correctionVatAmount = toNumber(financialCorrectionForm.dataset.financialCorrectionVat || 0);
+        const correctedCostBasis = toNumber(financialCorrectionCostInput?.value || 0);
+        const correctedServiceAmount = toNumber(financialCorrectionServiceAmountInput?.value || 0);
+        const correctedDiscountAmount = toNumber(financialCorrectionDiscountInput?.value || 0);
+        const correctedPayableInCostCurrency = serviceType === 'air ticket'
+            ? roundToTwo(correctedCostBasis + correctionTaxTotal)
+            : roundToTwo(correctedCostBasis);
+        const correctedPayableAmount = roundToTwo(
+            correctedPayableInCostCurrency * (correctionCurrency === correctionCostCurrency ? 1 : (correctionRate || 1))
+        );
+        const correctedCustomerTotal = roundToTwo(
+            correctedPayableAmount
+            + correctedServiceAmount
+            + correctionVatAmount
+            - correctedDiscountAmount
+        );
+        const lossAmount = Math.max(roundToTwo(correctedPayableAmount - correctedCustomerTotal), 0);
+        const hasLoss = lossAmount > 0.005;
+
+        financialCorrectionCustomerTotalInput.value = formatNumberInputValue(correctedCustomerTotal);
+        financialCorrectionLossInput.value = formatNumberInputValue(lossAmount);
+
+        if (financialCorrectionLossNote instanceof HTMLElement) {
+            financialCorrectionLossNote.hidden = !hasLoss;
+            if (hasLoss) {
+                financialCorrectionLossNote.innerHTML = `Loss sale preview: <strong>${formatCurrencyAmount(correctionCurrency, lossAmount)}</strong>. Customer Total is below supplier payable, so this edit will record a loss instead of reducing Mkt. Fare automatically.`;
+            }
+        }
+    };
+
+    const syncFinancialCorrectionEditor = (serviceLine, canEdit) => {
+        if (!(financialCorrectionForm instanceof HTMLFormElement) || !serviceLine) {
+            return;
+        }
+
+        const serviceId = Number.parseInt(String(serviceLine.serviceId || 0), 10) || 0;
+        const boundServiceId = Number.parseInt(String(financialCorrectionForm.dataset.financialCorrectionBoundServiceId || 0), 10) || 0;
+        const serviceSelectionChanged = boundServiceId !== serviceId;
+        const serviceType = String(serviceLine.type || 'air ticket').trim().toLowerCase();
+        const currency = String(serviceLine.currency || serviceFields.currency?.value || 'PKR').trim().toUpperCase() || 'PKR';
+        const costCurrency = String(serviceLine.costCurrency || serviceFields.costCurrency?.value || currency).trim().toUpperCase() || currency;
+        const pricingExchangeRate = toNumber(serviceLine.pricingExchangeRate || 1) || 1;
+        const pricingRateEffectiveDate = String(serviceLine.pricingRateEffectiveDate || serviceFields.pricingRateEffectiveDate?.value || '').trim();
+        const correctedCostBasis = serviceType === 'air ticket'
+            ? toNumber(serviceLine.salePrice)
+            : toNumber(serviceLine.purchaseCost);
+        const correctedServiceCharge = toNumber(serviceLine.serviceCharge);
+        const correctedDiscount = toNumber(serviceLine.discountAmount);
+        const correctedVat = toNumber(serviceLine.vat);
+        const correctionTaxTotal = roundToTwo(
+            toNumber(serviceLine.spyiAmount)
+            + toNumber(serviceLine.aqYrPkAmount)
+            + toNumber(serviceLine.yqAmount)
+            + toNumber(serviceLine.othAmount)
+            + toNumber(serviceLine.vatInput)
+            + toNumber(serviceLine.taxes)
+        );
+        const correctedPayable = serviceType === 'air ticket'
+            ? roundToTwo(correctedCostBasis + correctionTaxTotal)
+            : roundToTwo(correctedCostBasis);
+        const correctedPayableInInvoiceCurrency = roundToTwo(
+            correctedPayable * (currency === costCurrency ? 1 : pricingExchangeRate)
+        );
+        const correctedCustomerTotal = toNumber(serviceLine.finalSalePrice);
+        const lossAmount = Math.max(roundToTwo(correctedPayableInInvoiceCurrency - correctedCustomerTotal), 0);
+
+        const serviceIdField = financialCorrectionForm.elements.namedItem('service_id');
+        if (serviceIdField instanceof HTMLInputElement) {
+            serviceIdField.value = canEdit ? String(serviceId) : '';
+        }
+
+        financialCorrectionForm.dataset.financialCorrectionServiceType = serviceType;
+        financialCorrectionForm.dataset.financialCorrectionTaxTotal = String(correctionTaxTotal);
+        financialCorrectionForm.dataset.financialCorrectionVat = String(correctedVat);
+        financialCorrectionForm.dataset.financialCorrectionCurrency = currency;
+        financialCorrectionForm.dataset.financialCorrectionCostCurrency = costCurrency;
+        financialCorrectionForm.dataset.financialCorrectionRate = String(pricingExchangeRate);
+        financialCorrectionForm.dataset.financialCorrectionBoundServiceId = String(serviceId);
+        financialCorrectionForm.hidden = !canEdit;
+        setServiceEventBarControlsEnabled(financialCorrectionForm, canEdit);
+
+        const costLabel = financialCorrectionCostInput?.closest('label')?.querySelector('span');
+        if (costLabel instanceof HTMLElement) {
+            costLabel.textContent = serviceType === 'air ticket' ? 'Mkt. Fare' : 'Cost';
+        }
+        if (serviceSelectionChanged) {
+            fillValue(financialCorrectionCostInput, formatNumberInputValue(correctedCostBasis));
+            fillValue(financialCorrectionServiceAmountInput, formatNumberInputValue(correctedServiceCharge));
+            fillValue(financialCorrectionDiscountInput, formatNumberInputValue(correctedDiscount));
+            fillValue(financialCorrectionCustomerTotalInput, formatNumberInputValue(correctedCustomerTotal));
+            fillValue(financialCorrectionLossInput, formatNumberInputValue(lossAmount));
+            fillValue(financialCorrectionInvoiceCurrencySelect, currency);
+            fillValue(financialCorrectionCostCurrencySelect, costCurrency);
+            fillValue(financialCorrectionRateInput, String(pricingExchangeRate));
+            fillValue(financialCorrectionRateDateInput, pricingRateEffectiveDate);
+
+            const reasonField = financialCorrectionForm.elements.namedItem('financial_correction_reason');
+            const noteField = financialCorrectionForm.elements.namedItem('financial_correction_note');
+            fillValue(reasonField, '');
+            fillValue(noteField, '');
+        }
+
+        if (financialCorrectionLossNote instanceof HTMLElement) {
+            financialCorrectionLossNote.hidden = lossAmount <= 0.005;
+            if (lossAmount > 0.005) {
+                financialCorrectionLossNote.innerHTML = `Loss sale preview: <strong>${formatCurrencyAmount(currency, lossAmount)}</strong>. Customer Total is below supplier payable, so this edit will record a loss instead of reducing ${serviceType === 'air ticket' ? 'Mkt. Fare' : 'Cost'} automatically.`;
+            }
+        }
+    };
+
+    [
+        financialCorrectionCostInput,
+        financialCorrectionServiceAmountInput,
+        financialCorrectionDiscountInput,
+        financialCorrectionInvoiceCurrencySelect,
+        financialCorrectionCostCurrencySelect,
+        financialCorrectionRateInput,
+    ].forEach((input) => {
+        if (!(input instanceof HTMLInputElement || input instanceof HTMLSelectElement)) {
+            return;
+        }
+
+        input.addEventListener('input', refreshFinancialCorrectionLossPreview);
+        input.addEventListener('change', refreshFinancialCorrectionLossPreview);
+    });
+
+    financialCorrectionForm?.addEventListener('submit', () => {
+        const activeRow = serviceRows.find((row) => row.classList.contains('is-active'));
+        const activeIndex = activeRow instanceof HTMLElement
+            ? Number.parseInt(String(activeRow.dataset.serviceIndex || '-1'), 10)
+            : -1;
+        const activeLine = activeIndex >= 0 ? serviceLines[activeIndex] : null;
+        const activeServiceId = Number.parseInt(String(activeLine?.serviceId || 0), 10) || 0;
+        const serviceIdField = financialCorrectionForm.elements.namedItem('service_id');
+        if (serviceIdField instanceof HTMLInputElement && activeServiceId > 0) {
+            serviceIdField.value = String(activeServiceId);
+        }
+    });
 
     const refreshAirlineCommissionTotal = () => {
         if (!airlineCommissionTotal) {
@@ -6347,12 +9958,18 @@ document.addEventListener('DOMContentLoaded', () => {
     const serviceLinePayableAmount = (serviceLine) => {
         const serviceType = String(serviceLine?.type || 'air ticket');
         const purchaseCost = toNumber(serviceLine?.purchaseCost);
+        const invoiceCurrency = String(serviceLine?.currency || 'PKR').trim().toUpperCase();
+        const costCurrency = String(serviceLine?.costCurrency || invoiceCurrency).trim().toUpperCase();
+        const pricingExchangeRate = toNumber(serviceLine?.pricingExchangeRate || 1);
+        const convertedPurchaseCost = roundToTwo(
+            purchaseCost * (invoiceCurrency === costCurrency ? 1 : pricingExchangeRate)
+        );
 
         if (serviceType === 'air ticket') {
-            return purchaseCost;
+            return convertedPurchaseCost;
         }
 
-        return purchaseCost > 0.005 ? purchaseCost : toNumber(serviceLine?.salePrice);
+        return purchaseCost > 0.005 ? convertedPurchaseCost : toNumber(serviceLine?.salePrice);
     };
 
     const serviceReceivableAmount = (serviceLine) => {
@@ -6361,9 +9978,21 @@ document.addEventListener('DOMContentLoaded', () => {
             return savedFinalSale;
         }
 
-        const receivableBase = String(serviceLine.type || 'air ticket') === 'air ticket'
-            ? toNumber(serviceLine.purchaseCost)
-            : toNumber(serviceLine.salePrice);
+        if (String(serviceLine.type || 'air ticket') === 'air ticket') {
+            const invoiceCurrency = String(serviceLine?.currency || 'PKR').trim().toUpperCase();
+            const costCurrency = String(serviceLine?.costCurrency || invoiceCurrency).trim().toUpperCase();
+            const pricingExchangeRate = toNumber(serviceLine?.pricingExchangeRate || 1);
+            const costCurrencyReceivable = roundToTwo(
+                toNumber(serviceLine.purchaseCost)
+                + toNumber(serviceLine.serviceCharge)
+                + toNumber(serviceLine.vat)
+                - toNumber(serviceLine.discountAmount)
+            );
+
+            return roundToTwo(costCurrencyReceivable * (invoiceCurrency === costCurrency ? 1 : pricingExchangeRate));
+        }
+
+        const receivableBase = toNumber(serviceLine.salePrice);
 
         return roundToTwo(
             receivableBase
@@ -6375,15 +10004,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const hasManualFinalSaleOverride = (serviceLine) => {
         const savedFinalSale = toNumber(serviceLine.finalSalePrice);
-        const receivableBase = String(serviceLine.type || 'air ticket') === 'air ticket'
-            ? toNumber(serviceLine.purchaseCost)
-            : toNumber(serviceLine.salePrice);
-        const suggestedFinalSale = roundToTwo(
-            receivableBase
-            + toNumber(serviceLine.serviceCharge)
-            + toNumber(serviceLine.vat)
-            - toNumber(serviceLine.discountAmount)
-        );
+        const suggestedFinalSale = serviceReceivableAmount({
+            ...serviceLine,
+            finalSalePrice: 0,
+        });
 
         if (Math.abs(savedFinalSale) <= 0.005 && Math.abs(suggestedFinalSale) > 0.005) {
             return false;
@@ -6421,13 +10045,48 @@ document.addEventListener('DOMContentLoaded', () => {
             ? Math.max(activeReceivable, 0)
             : 0;
         const provisionalTotal = roundToTwo(Math.max(persistedTotal + activeInvoiceTotal, 0));
+        const alreadyReceived = Math.max(toNumber(paymentAlreadyReceivedInput?.dataset.paymentPersistedReceived || paymentAlreadyReceivedInput?.value || 0), 0);
+        const provisionalBalance = roundToTwo(Math.max(provisionalTotal - alreadyReceived, 0));
+        const paymentCurrency = paymentCurrencySelect?.value || invoiceCurrency;
 
         paymentCurrentInvoiceInput.dataset.paymentCurrency = invoiceCurrency;
         paymentCurrentInvoiceInput.dataset.paymentCurrentInvoice = String(provisionalTotal);
+        paymentCurrentInvoiceInput.value = formatNumberInputValue(provisionalTotal);
+        if (paymentCurrentBalanceInput) {
+            paymentCurrentBalanceInput.dataset.paymentPersistedInvoiceBalance = String(provisionalBalance);
+            paymentCurrentBalanceInput.value = formatCurrencyAmount(invoiceCurrency, provisionalBalance);
+        }
+        station.querySelectorAll('[data-payment-current-invoice-row], [data-payment-current-balance-row]').forEach((row) => {
+            if (row instanceof HTMLElement) {
+                row.hidden = provisionalTotal <= 0.005 && provisionalBalance <= 0.005;
+            }
+        });
+        if (paymentTotalOutstandingInput) {
+            paymentTotalOutstandingInput.dataset.paymentTotalOutstanding = String(provisionalBalance);
+            paymentTotalOutstandingInput.dataset.paymentTotalDueNow = paymentCurrency === invoiceCurrency
+                ? String(provisionalBalance)
+                : '0';
+            paymentTotalOutstandingInput.value = formatCurrencyAmount(
+                paymentCurrency,
+                paymentCurrency === invoiceCurrency ? provisionalBalance : 0
+            );
+        }
         updateCommercialTrace({
             lastEventFired: 'syncPaymentInvoiceTotals',
-            lastFieldWritten: `payment current invoice dataset=${provisionalTotal.toFixed(2)}`,
+            lastFieldWritten: `payment current invoice=${provisionalTotal.toFixed(2)}, balance=${provisionalBalance.toFixed(2)}`,
             lastOverwriteSource: 'syncPaymentInvoiceTotals',
+        });
+        logCommercialCalculator('payment-totals-synced', 'syncPaymentInvoiceTotals', {
+            activeReceivable,
+            activeCurrency,
+            invoiceCurrency,
+            paymentCurrency,
+            activeLineId,
+            persistedTotal,
+            activeInvoiceTotal,
+            provisionalTotal,
+            alreadyReceived,
+            provisionalBalance,
         });
         syncServiceCurrencyMirror();
         refreshPaymentPreview();
@@ -6457,16 +10116,33 @@ document.addEventListener('DOMContentLoaded', () => {
                     : commercialTrace.firstFailurePoint,
                 lastOverwriteSource: `refreshProfit guard failed (${missingRequirements})`,
             });
+            logCommercialCalculator('guard-failed', source, {
+                missingRequirements,
+                hasServiceProfit: Boolean(serviceProfit),
+                hasSale: Boolean(serviceMetricInputs.sale),
+                hasCost: Boolean(serviceMetricInputs.cost),
+                hasTax: Boolean(serviceMetricInputs.tax),
+                hasVat: Boolean(serviceMetricInputs.vat),
+                hasCommission: Boolean(serviceMetricInputs.commission),
+                hasServiceCharge: Boolean(serviceMetricInputs.serviceCharge),
+                hasFinalSale: Boolean(finalSalePriceInput),
+            });
             return;
         }
 
         refreshAirlineCommissionTotal();
+        syncPricingSnapshotFields();
         const isAirTicket = isAirTicketServiceType();
         const taxTotal = currentServiceTaxTotal();
         const supplierPayable = currentServicePayableAmount();
+        const convertedPayable = isAirTicket ? currentConvertedPayableAmount() : supplierPayable;
+        const invoiceCurrency = currentInvoiceCurrencyCode();
+        const costCurrency = currentCostCurrencyCode();
+        const pricingRate = currentPricingExchangeRate({ invoiceCurrency, costCurrency });
+        const missingPricingRate = invoiceCurrency !== costCurrency && pricingRate <= 0.005;
         const airlinePayable = isAirTicket ? supplierPayable : 0;
         const otherPayable = isAirTicket ? 0 : supplierPayable;
-        const totalPayable = airlinePayable + otherPayable;
+        const totalPayable = convertedPayable;
         const currentManualOverride = finalSalePriceInput.dataset.manualOverride === '1';
         const suggestedFinalSalePrice = defaultFinalSalePrice(totalPayable);
         updateCommercialTrace({
@@ -6475,12 +10151,25 @@ document.addEventListener('DOMContentLoaded', () => {
             lastFrTxComputed: airlinePayable.toFixed(2),
             lastFinalSaleComputed: suggestedFinalSalePrice.toFixed(2),
         });
+        logCommercialCalculator('refresh-start', source, {
+            isAirTicket,
+            taxTotal,
+            supplierPayable,
+            convertedPayable,
+            airlinePayable,
+            otherPayable,
+            totalPayable,
+            pricingRate,
+            missingPricingRate,
+            currentManualOverride,
+            suggestedFinalSalePrice,
+        });
         const existingFinalSalePrice = toNumber(finalSalePriceInput.value);
         const staleZeroManualOverride = currentManualOverride
             && existingFinalSalePrice <= 0.005
             && suggestedFinalSalePrice > 0.005;
         if (!currentManualOverride || finalSalePriceInput.value === '' || staleZeroManualOverride) {
-            finalSalePriceInput.value = suggestedFinalSalePrice.toFixed(2);
+            finalSalePriceInput.value = formatNumberInputValue(suggestedFinalSalePrice);
             finalSalePriceInput.dataset.manualOverride = staleZeroManualOverride ? '0' : '0';
             updateCommercialTrace({
                 lastFieldWritten: `final sale=${finalSalePriceInput.value}`,
@@ -6489,12 +10178,15 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         const finalSalePrice = toNumber(finalSalePriceInput.value);
         const receivable = finalSalePrice;
+        const manualSaleAdjustment = currentManualOverride
+            ? roundToTwo(finalSalePrice - suggestedFinalSalePrice)
+            : 0;
         const profit = receivable - totalPayable;
         const lossAmount = Math.max(totalPayable - finalSalePrice, 0);
         const hasLoss = lossAmount > 0.005;
 
         if (serviceMetricInputs.cost) {
-            serviceMetricInputs.cost.value = supplierPayable.toFixed(2);
+            serviceMetricInputs.cost.value = formatNumberInputValue(supplierPayable);
             updateCommercialTrace({
                 lastFieldWritten: `purchase_cost=${serviceMetricInputs.cost.value}`,
                 lastOverwriteSource: source,
@@ -6553,6 +10245,11 @@ document.addEventListener('DOMContentLoaded', () => {
         if (bottomTotalFields.profit) {
             bottomTotalFields.profit.value = formatMoney(profit);
         }
+        if (manualSaleAdjustmentInput) {
+            manualSaleAdjustmentInput.value = formatNumberInputValue(manualSaleAdjustment);
+            manualSaleAdjustmentInput.classList.toggle('is-positive', manualSaleAdjustment > 0.005);
+            manualSaleAdjustmentInput.classList.toggle('is-negative', manualSaleAdjustment < -0.005);
+        }
         syncPaymentInvoiceTotals(receivable);
 
         serviceProfit.textContent = formatMoney(profit);
@@ -6564,7 +10261,7 @@ document.addEventListener('DOMContentLoaded', () => {
             lossReasonPanel.hidden = !hasLoss;
         }
         if (lossAmountInput) {
-            lossAmountInput.value = lossAmount.toFixed(2);
+            lossAmountInput.value = formatNumberInputValue(lossAmount);
         }
         if (serviceFields.lossReason) {
             serviceFields.lossReason.required = hasLoss;
@@ -6573,6 +10270,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 serviceFields.lossReason.value = '';
             }
         }
+
+        refreshFinancialCorrectionLossPreview();
 
         if (commercialDebug) {
             updateCommercialTrace({
@@ -6583,6 +10282,17 @@ document.addEventListener('DOMContentLoaded', () => {
                 lastFinalSaleComputed: finalSalePrice.toFixed(2),
             }, { log: false });
         }
+        logCommercialCalculator('refresh-complete', source, {
+            finalSalePrice,
+            receivable,
+            manualSaleAdjustment,
+            profit,
+            lossAmount,
+            hasLoss,
+            paymentInvoiceValue: paymentCurrentInvoiceInput?.value || '',
+            paymentBalanceValue: paymentCurrentBalanceInput?.value || '',
+            serviceProfitText: serviceProfit.textContent || '',
+        });
 
         const activeRow = station.querySelector('[data-service-row].is-active');
         if (!activeRow) {
@@ -6607,21 +10317,70 @@ document.addEventListener('DOMContentLoaded', () => {
         const hasCancellationEvent = Number.parseInt(String(serviceLine.latestCancelEventId || 0), 10) > 0
             || serviceLine.hasCancellationEvent === true
             || String(serviceLine.hasCancellationEvent || '') === '1';
+        const isCancelled = status === 'cancelled' || hasCancellationEvent;
+        const settlementFinanciallySettled = serviceLine.latestCancelFinanciallySettled === true
+            || String(serviceLine.latestCancelFinanciallySettled || '') === '1';
+        const customerRefundFollowUp = toNumber(serviceLine.customerRefundableCreditAmount || 0);
+        const supplierRefundFollowUp = toNumber(serviceLine.supplierRefundableCreditAmount || 0);
+        const releasedCustomerCredit = toNumber(serviceLine.latestCancelReleasedCustomerCreditAmount || 0);
+        const releasedSupplierCredit = toNumber(serviceLine.latestCancelReleasedSupplierCreditAmount || 0);
+        const latestCustomerRefundAmountOnly = toNumber(serviceLine.latestCustomerRefundAmountOnly || 0);
+        const latestSupplierRefundAmountOnly = toNumber(serviceLine.latestSupplierRefundAmountOnly || 0);
+        const latestCustomerRefundEventId = Number.parseInt(String(serviceLine.latestCustomerRefundEventId || 0), 10);
+        const latestSupplierRefundEventId = Number.parseInt(String(serviceLine.latestSupplierRefundEventId || 0), 10);
+        const hasRefundEvent = Number.parseInt(String(serviceLine.latestRefundEventId || 0), 10) > 0;
+        const hasRefundReverseOptions = latestCustomerRefundEventId > 0 || latestSupplierRefundEventId > 0;
+        const hasPostedRefundActivity = latestCustomerRefundAmountOnly > 0.005 || latestSupplierRefundAmountOnly > 0.005;
+        const refundFollowUpComplete = isCancelled
+            && settlementFinanciallySettled
+            && customerRefundFollowUp <= 0.005
+            && supplierRefundFollowUp <= 0.005
+            && hasPostedRefundActivity;
+        const refundFollowUpOpen = !refundFollowUpComplete && (
+            !isCancelled
+            || settlementFinanciallySettled
+            || customerRefundFollowUp > 0.005
+            || supplierRefundFollowUp > 0.005
+            || hasRefundReverseOptions
+            || (!settlementFinanciallySettled && (releasedCustomerCredit > 0.005 || releasedSupplierCredit > 0.005))
+            || (!hasRefundEvent && (releasedCustomerCredit > 0.005 || releasedSupplierCredit > 0.005))
+        );
         const canSettleCancellation = canShowServiceEventActions
-            && (status === 'cancelled' || hasCancellationEvent || settlementInitiallyVisible);
+            && (isCancelled || settlementInitiallyVisible)
+            && !settlementFinanciallySettled;
+        const canRefundService = canShowServiceEventActions && refundFollowUpOpen;
 
         if (isPersisted) {
             hideSupplierAdvanceNote();
         }
 
+        const cancelledNote = station.querySelector('[data-service-cancelled-note]');
+        const canOpenBookingEditor = canShowServiceEventActions;
+        const canOpenPenaltyRefundEditor = canShowServiceEventActions || isCancelled;
+        if (cancelledNote instanceof HTMLElement) {
+            cancelledNote.hidden = !canShowServiceEventActions || !isCancelled;
+        }
+
+        serviceEditBookingOpenButtons.forEach((button) => {
+            if (button instanceof HTMLButtonElement) {
+                button.disabled = !canOpenBookingEditor;
+            }
+        });
+
+        servicePenaltyRefundOpenButtons.forEach((button) => {
+            if (button instanceof HTMLButtonElement) {
+                button.disabled = !canOpenPenaltyRefundEditor;
+            }
+        });
+
         if (serviceEventBars.cancel) {
-            serviceEventBars.cancel.hidden = !canShowServiceEventActions;
-            setServiceEventBarControlsEnabled(serviceEventBars.cancel, canShowServiceEventActions && status !== 'cancelled');
+            serviceEventBars.cancel.hidden = !canShowServiceEventActions || isCancelled;
+            setServiceEventBarControlsEnabled(serviceEventBars.cancel, canShowServiceEventActions && !isCancelled);
         }
 
         if (serviceEventBars.refund) {
-            serviceEventBars.refund.hidden = !canShowServiceEventActions;
-            setServiceEventBarControlsEnabled(serviceEventBars.refund, canShowServiceEventActions);
+            serviceEventBars.refund.hidden = !canRefundService;
+            setServiceEventBarControlsEnabled(serviceEventBars.refund, canRefundService);
         }
 
         if (serviceEventBars.settlement) {
@@ -6635,13 +10394,41 @@ document.addEventListener('DOMContentLoaded', () => {
             setServiceEventBarControlsEnabled(serviceEventBars.reissue, canShowServiceEventActions && type === 'air ticket');
         }
 
+        if (serviceCorrectionBars.settlement instanceof HTMLElement) {
+            serviceCorrectionBars.settlement.hidden = !(canShowServiceEventActions && settlementFinanciallySettled);
+        }
+
+        if (serviceCorrectionBars.settlementReverse instanceof HTMLElement) {
+            serviceCorrectionBars.settlementReverse.hidden = !(canShowServiceEventActions && settlementFinanciallySettled);
+            serviceCorrectionBars.settlementReverse.querySelectorAll('button').forEach((button) => {
+                if (button instanceof HTMLButtonElement) {
+                    button.disabled = hasRefundReverseOptions;
+                }
+            });
+        }
+
+        if (serviceCorrectionBars.refund instanceof HTMLElement) {
+            serviceCorrectionBars.refund.hidden = !(canShowServiceEventActions && hasRefundReverseOptions);
+        }
+
+        if (serviceCorrectionBars.refundReverse instanceof HTMLElement) {
+            serviceCorrectionBars.refundReverse.hidden = !(canShowServiceEventActions && hasRefundReverseOptions);
+        }
+
+        syncFinancialCorrectionEditor(serviceLine, canShowServiceEventActions);
+
         if (serviceSubmitButton) {
-            serviceSubmitButton.textContent = isPersisted ? 'Update Service' : (hasPersistedServices() ? 'Save New Service' : 'Save First Service');
+            serviceSubmitButton.textContent = 'Update Service';
+            serviceSubmitButton.hidden = !isPersisted;
+            serviceSubmitButton.setAttribute('aria-hidden', isPersisted ? 'false' : 'true');
+            serviceSubmitButton.tabIndex = isPersisted ? 0 : -1;
         }
 
         if (activeServiceMode) {
             activeServiceMode.textContent = isPersisted ? 'Editing Service Line' : (hasPersistedServices() ? 'New Service Line' : 'First Service Line');
         }
+
+        lockSavedServiceFinancialEditor();
 
         if (serviceDeactivateId) {
             serviceDeactivateId.value = isPersisted ? String(serviceLine.serviceId || '') : '';
@@ -6656,7 +10443,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (serviceCancelButton) {
-            serviceCancelButton.disabled = !canShowServiceEventActions || status === 'cancelled';
+            serviceCancelButton.disabled = !canShowServiceEventActions || isCancelled;
         }
 
         if (serviceRefundId) {
@@ -6668,7 +10455,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (serviceRefundButton) {
-            serviceRefundButton.disabled = !canShowServiceEventActions;
+            serviceRefundButton.disabled = !canRefundService;
         }
 
         if (serviceSettlementId) {
@@ -6679,6 +10466,10 @@ document.addEventListener('DOMContentLoaded', () => {
             serviceSettlementButton.disabled = !canSettleCancellation && serviceEventBars.settlement?.hidden !== false;
         }
 
+        syncSettlementFormFromServiceLine(serviceLine);
+        syncSettlementCorrectionFormFromServiceLine(serviceLine);
+        syncRefundCorrectionFormFromServiceLine(serviceLine);
+
         if (serviceReissueId) {
             serviceReissueId.value = canShowServiceEventActions && type === 'air ticket' ? String(serviceLine.serviceId || '') : '';
         }
@@ -6688,6 +10479,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         syncRefundTreasurySelector();
+        syncSupplierRefundTreasurySelector();
+        syncCorrectionRefundTreasurySelector();
+        syncCorrectionSupplierRefundTreasurySelector();
     };
     reapplyActiveServiceActionState = () => {
         const activeServiceRow = serviceRows.find((row) => row.classList.contains('is-active'));
@@ -6720,31 +10514,59 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     };
 
-    const syncRefundTreasurySelector = () => {
-        if (!serviceRefundMethodSelect || !serviceRefundTreasurySelect || !serviceRefundTreasuryRow) {
+    const eligibleRefundTreasuryAccountsFor = (method, branchField, currencyField) => {
+        const normalizedMethod = String(method || '').trim();
+        const currency = currencyField instanceof HTMLInputElement || currencyField instanceof HTMLSelectElement
+            ? String(currencyField.value || '').trim().toUpperCase()
+            : '';
+        const branchId = branchField instanceof HTMLInputElement || branchField instanceof HTMLSelectElement
+            ? Number.parseInt(String(branchField.value || '0'), 10) || 0
+            : 0;
+        const compatibleTypes = paymentTreasuryTypesForMethod(normalizedMethod);
+
+        return paymentTreasuryAccounts.filter((account) => {
+            return (branchId <= 0 || Number.parseInt(String(account?.branchId || 0), 10) === branchId)
+                && compatibleTypes.includes(String(account?.accountType || '').trim())
+                && String(account?.currency || '').trim().toUpperCase() === currency;
+        });
+    };
+
+    const syncRefundTreasurySelectorFor = ({
+        form,
+        methodSelect,
+        treasuryRow,
+        treasurySelect,
+        branchField,
+        currencyField,
+        destinationRows,
+        toggleFormClass = true,
+    }) => {
+        if (!methodSelect || !treasurySelect || !treasuryRow) {
             return;
         }
 
-        const method = String(serviceRefundMethodSelect.value || '').trim();
+        const method = String(methodSelect.value || '').trim();
         const requiresTreasury = paymentMethodRequiresTreasurySelection(method);
-        const eligibleAccounts = requiresTreasury ? eligibleRefundTreasuryAccounts() : [];
-        const selectedBefore = String(serviceRefundTreasurySelect.value || '').trim();
+        const eligibleAccounts = requiresTreasury
+            ? eligibleRefundTreasuryAccountsFor(method, branchField, currencyField)
+            : [];
+        const selectedBefore = String(treasurySelect.value || '').trim();
         const preferredAccount = defaultPaymentTreasuryAccount(eligibleAccounts);
 
-        serviceRefundTreasurySelect.innerHTML = '';
+        treasurySelect.innerHTML = '';
 
         const promptOption = document.createElement('option');
         promptOption.value = '';
         promptOption.textContent = eligibleAccounts.length > 0
             ? (method === 'cash' ? 'Select refund cash account' : 'Select refund bank account')
             : 'No eligible refund account configured';
-        serviceRefundTreasurySelect.appendChild(promptOption);
+        treasurySelect.appendChild(promptOption);
 
         eligibleAccounts.forEach((account) => {
             const option = document.createElement('option');
             option.value = String(account.id || '');
             option.textContent = buildPaymentTreasuryLabel(account);
-            serviceRefundTreasurySelect.appendChild(option);
+            treasurySelect.appendChild(option);
         });
 
         let nextValue = '';
@@ -6753,17 +10575,17 @@ document.addEventListener('DOMContentLoaded', () => {
         } else if (preferredAccount) {
             nextValue = String(preferredAccount.id || '');
         }
-        serviceRefundTreasurySelect.value = nextValue;
+        treasurySelect.value = nextValue;
 
-        serviceRefundTreasuryRow.hidden = !requiresTreasury;
-        serviceRefundTreasurySelect.disabled = !requiresTreasury;
+        treasuryRow.hidden = !requiresTreasury;
+        treasurySelect.disabled = !requiresTreasury;
 
         const showBankDestination = method === 'bank_transfer';
-        if (serviceRefundForm) {
-            serviceRefundForm.classList.toggle('legacy-service-event-bar--refund-bank', showBankDestination);
-            serviceRefundForm.classList.toggle('legacy-service-event-bar--refund-cash', !showBankDestination);
+        if (toggleFormClass && form instanceof HTMLFormElement) {
+            form.classList.toggle('legacy-service-event-bar--refund-bank', showBankDestination);
+            form.classList.toggle('legacy-service-event-bar--refund-cash', !showBankDestination);
         }
-        serviceRefundDestinationRows.forEach((row) => {
+        destinationRows.forEach((row) => {
             row.hidden = !showBankDestination;
             const field = row.querySelector('input, select, textarea');
             if (field instanceof HTMLInputElement || field instanceof HTMLSelectElement || field instanceof HTMLTextAreaElement) {
@@ -6771,8 +10593,83 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         });
     };
+
+    const syncRefundTreasurySelector = () => {
+        if (!serviceRefundMethodSelect || !serviceRefundTreasurySelect || !serviceRefundTreasuryRow) {
+            return;
+        }
+
+        syncRefundTreasurySelectorFor({
+            form: serviceRefundForm,
+            methodSelect: serviceRefundMethodSelect,
+            treasuryRow: serviceRefundTreasuryRow,
+            treasurySelect: serviceRefundTreasurySelect,
+            branchField: serviceRefundBranchIdField,
+            currencyField: serviceRefundCurrencyField,
+            destinationRows: serviceRefundDestinationRows,
+        });
+    };
     if (serviceRefundMethodSelect) {
         serviceRefundMethodSelect.addEventListener('change', syncRefundTreasurySelector);
+    }
+
+    const syncSupplierRefundTreasurySelector = () => {
+        if (!serviceSupplierRefundMethodSelect || !serviceSupplierRefundTreasurySelect || !serviceSupplierRefundTreasuryRow) {
+            return;
+        }
+
+        syncRefundTreasurySelectorFor({
+            form: serviceRefundForm,
+            methodSelect: serviceSupplierRefundMethodSelect,
+            treasuryRow: serviceSupplierRefundTreasuryRow,
+            treasurySelect: serviceSupplierRefundTreasurySelect,
+            branchField: serviceRefundBranchIdField,
+            currencyField: serviceRefundCurrencyField,
+            destinationRows: [],
+            toggleFormClass: false,
+        });
+    };
+    if (serviceSupplierRefundMethodSelect) {
+        serviceSupplierRefundMethodSelect.addEventListener('change', syncSupplierRefundTreasurySelector);
+    }
+
+    const syncCorrectionRefundTreasurySelector = () => {
+        if (!serviceCorrectionRefundMethodSelect || !serviceCorrectionRefundTreasurySelect || !serviceCorrectionRefundTreasuryRow) {
+            return;
+        }
+
+        syncRefundTreasurySelectorFor({
+            form: serviceCorrectionRefundForm,
+            methodSelect: serviceCorrectionRefundMethodSelect,
+            treasuryRow: serviceCorrectionRefundTreasuryRow,
+            treasurySelect: serviceCorrectionRefundTreasurySelect,
+            branchField: serviceCorrectionRefundBranchIdField,
+            currencyField: serviceCorrectionRefundCurrencyField,
+            destinationRows: serviceCorrectionRefundDestinationRows,
+        });
+    };
+    if (serviceCorrectionRefundMethodSelect) {
+        serviceCorrectionRefundMethodSelect.addEventListener('change', syncCorrectionRefundTreasurySelector);
+    }
+
+    const syncCorrectionSupplierRefundTreasurySelector = () => {
+        if (!serviceCorrectionSupplierRefundMethodSelect || !serviceCorrectionSupplierRefundTreasurySelect || !serviceCorrectionSupplierRefundTreasuryRow) {
+            return;
+        }
+
+        syncRefundTreasurySelectorFor({
+            form: serviceCorrectionRefundForm,
+            methodSelect: serviceCorrectionSupplierRefundMethodSelect,
+            treasuryRow: serviceCorrectionSupplierRefundTreasuryRow,
+            treasurySelect: serviceCorrectionSupplierRefundTreasurySelect,
+            branchField: serviceCorrectionRefundBranchIdField,
+            currencyField: serviceCorrectionRefundCurrencyField,
+            destinationRows: [],
+            toggleFormClass: false,
+        });
+    };
+    if (serviceCorrectionSupplierRefundMethodSelect) {
+        serviceCorrectionSupplierRefundMethodSelect.addEventListener('change', syncCorrectionSupplierRefundTreasurySelector);
     }
 
     const loadServiceLine = (index) => {
@@ -6795,6 +10692,9 @@ document.addEventListener('DOMContentLoaded', () => {
         fillValue(serviceTypeField, serviceLine.type || 'air ticket');
         fillValue(serviceFields.supplier, serviceLine.supplier || '');
         fillValue(serviceFields.currency, serviceLine.currency || 'PKR');
+        fillValue(serviceFields.costCurrency, serviceLine.costCurrency || serviceLine.currency || 'PKR');
+        fillValue(serviceFields.pricingExchangeRate, serviceLine.pricingExchangeRate || 1);
+        fillValue(serviceFields.pricingRateEffectiveDate, serviceLine.pricingRateEffectiveDate || '');
         fillValue(serviceFields.status, serviceLine.status || 'Open');
         fillValue(serviceFields.dueDate, serviceLine.dueDate || '');
         fillValue(serviceFields.remarks, serviceLine.remarks || '');
@@ -6824,10 +10724,11 @@ document.addEventListener('DOMContentLoaded', () => {
         fillValue(ticketFields.pnr, serviceLine.pnr || '');
         fillValue(ticketFields.ticketNumber, serviceLine.ticketNumber || '');
         fillValue(ticketFields.airline, serviceLine.airline || '');
-        fillValue(ticketFields.class, serviceLine.class || '');
+        fillValue(ticketFields.ticketType, serviceLine.ticketType || 'international');
+        fillValue(ticketFields.class, serviceLine.class || 'economy');
         fillValue(ticketFields.sectorFrom, serviceLine.sectorFrom || '');
         fillValue(ticketFields.sectorTo, serviceLine.sectorTo || '');
-        fillValue(ticketRouteDisplay, [serviceLine.sectorFrom || '', serviceLine.sectorTo || ''].filter(Boolean).join('-'));
+        syncTicketRouteDisplay(serviceLine.sectorFrom || '', serviceLine.sectorTo || '');
         fillValue(ticketFields.departureDate, serviceLine.departureDate || '');
         fillValue(ticketFields.returnDate, serviceLine.returnDate || '');
         fillValue(ticketFields.ticketRemarks, serviceLine.ticketRemarks || '');
@@ -6853,6 +10754,7 @@ document.addEventListener('DOMContentLoaded', () => {
             lastOverwriteSource: 'loadServiceLine',
         });
         refreshProfit(`loadServiceLine(${index})`);
+        syncAllCommercialPercentsFromAmounts();
         refreshSubtypeVisibility();
     };
 
@@ -6867,6 +10769,9 @@ document.addEventListener('DOMContentLoaded', () => {
         fillValue(serviceTypeField, 'air ticket');
         fillValue(serviceFields.supplier, '');
         fillValue(serviceFields.currency, paymentCurrentInvoiceInput?.dataset.paymentCurrency || 'PKR');
+        fillValue(serviceFields.costCurrency, paymentCurrentInvoiceInput?.dataset.paymentCurrency || 'PKR');
+        fillValue(serviceFields.pricingExchangeRate, 1);
+        fillValue(serviceFields.pricingRateEffectiveDate, '');
         fillValue(serviceFields.status, 'Open');
         fillValue(serviceFields.dueDate, '');
         fillValue(serviceFields.remarks, '');
@@ -6887,6 +10792,9 @@ document.addEventListener('DOMContentLoaded', () => {
         fillValue(serviceMetricInputs.commission, 0);
         fillValue(serviceMetricInputs.serviceCharge, 0);
         fillValue(serviceDiscountInput, 0);
+        fillValue(servicePercentInputs.serviceCharge, 0);
+        fillValue(servicePercentInputs.discount, 0);
+        fillValue(servicePercentInputs.vat, 0);
         fillValue(finalSalePriceInput, 0);
         if (finalSalePriceInput) {
             finalSalePriceInput.dataset.manualOverride = '0';
@@ -6896,10 +10804,11 @@ document.addEventListener('DOMContentLoaded', () => {
         fillValue(ticketFields.pnr, '');
         fillValue(ticketFields.ticketNumber, '');
         fillValue(ticketFields.airline, '');
-        fillValue(ticketFields.class, '');
+        fillValue(ticketFields.ticketType, 'international');
+        fillValue(ticketFields.class, 'economy');
         fillValue(ticketFields.sectorFrom, '');
         fillValue(ticketFields.sectorTo, '');
-        fillValue(ticketRouteDisplay, '');
+        syncTicketRouteDisplay('', '');
         fillValue(ticketFields.departureDate, '');
         fillValue(ticketFields.returnDate, '');
         fillValue(ticketFields.ticketRemarks, '');
@@ -6918,6 +10827,32 @@ document.addEventListener('DOMContentLoaded', () => {
             activeServiceReference.textContent = 'SV-DRAFT';
         }
 
+        syncSettlementFormFromServiceLine({
+            currency: paymentCurrentInvoiceInput?.dataset.paymentCurrency || 'PKR',
+            latestCancelCustomerPenaltyAmount: 0,
+            latestCancelSupplierPenaltyAmount: 0,
+            latestCancelExpectedSupplierRefundAmount: 0,
+            latestCancelReleasedCustomerCreditAmount: 0,
+            latestCancelReleasedSupplierCreditAmount: 0,
+            latestCancelFinanciallySettled: false,
+            latestCancelReason: '',
+            latestCancelEventDate: '',
+        });
+        syncSettlementCorrectionFormFromServiceLine({
+            currency: paymentCurrentInvoiceInput?.dataset.paymentCurrency || 'PKR',
+            latestCancelCustomerPenaltyAmount: 0,
+            latestCancelSupplierPenaltyAmount: 0,
+            latestCancelExpectedSupplierRefundAmount: 0,
+            latestCancelReleasedCustomerCreditAmount: 0,
+            latestCancelReleasedSupplierCreditAmount: 0,
+            latestCancelFinanciallySettled: false,
+            latestCancelReason: '',
+            latestCancelEventDate: '',
+        });
+        syncRefundCorrectionFormFromServiceLine({
+            latestCustomerRefundAmountOnly: 0,
+            latestSupplierRefundAmountOnly: 0,
+        });
         updateServiceActionState({ serviceId: 0 });
         primeServiceScaffoldFields();
         updateCommercialTrace({
@@ -6936,28 +10871,31 @@ document.addEventListener('DOMContentLoaded', () => {
         serviceTableBody.innerHTML = '';
         serviceLines.forEach((serviceLine, serviceIndex) => {
             const row = document.createElement('tr');
-            const lineTicket = serviceLineReferenceLabel(serviceLine);
             const lineSector = serviceLineDetailLabel(serviceLine);
-            const lineFare = toNumber(serviceLine.fare) > 0.005 ? toNumber(serviceLine.fare) : toNumber(serviceLine.salePrice);
-            const lineTaxes = toNumber(serviceLine.spyiAmount)
-                + toNumber(serviceLine.aqYrPkAmount)
-                + toNumber(serviceLine.yqAmount)
-                + toNumber(serviceLine.othAmount)
-                + toNumber(serviceLine.vatInput)
-                + toNumber(serviceLine.taxes);
-            const lineOther = toNumber(serviceLine.serviceCharge);
-            const lineSpTotal = Math.abs(toNumber(serviceLine.rowSpTotal)) > 0.005
-                ? toNumber(serviceLine.rowSpTotal)
-                : serviceReceivableAmount(serviceLine);
             const lineReceivable = Math.abs(toNumber(serviceLine.rowReceivable)) > 0.005
                 ? toNumber(serviceLine.rowReceivable)
                 : serviceReceivableAmount(serviceLine);
-            const linePayable = Math.abs(toNumber(serviceLine.rowPayable)) > 0.005
-                ? toNumber(serviceLine.rowPayable)
-                : serviceLinePayableAmount(serviceLine);
-            const lineProfit = Math.abs(toNumber(serviceLine.rowProfit)) > 0.005
-                ? toNumber(serviceLine.rowProfit)
-                : (lineReceivable - linePayable);
+            const lineCurrency = String(serviceLine.currency || paymentCurrentInvoiceInput?.dataset.paymentCurrency || 'PKR').toUpperCase();
+            const lineReference = String(serviceLine.lineNumber || '').trim();
+            const linePaid = Math.min(Math.max(paymentAllocations.reduce((total, allocation) => {
+                const receiptStatus = String(allocation?.receiptStatusRaw || allocation?.receiptStatus || '').trim().toLowerCase();
+                const allocationType = String(allocation?.allocationType || '').trim().toLowerCase();
+                const allocationReference = String(allocation?.serviceLineReference || '').trim();
+                const allocationCurrency = String(allocation?.receivableCurrency || allocation?.currency || '').trim().toUpperCase();
+                if (receiptStatus === 'void'
+                    || allocationType !== 'current invoice'
+                    || allocationReference !== lineReference
+                    || allocationCurrency !== lineCurrency) {
+                    return total;
+                }
+
+                return total + Math.max(toNumber(allocation?.receivableAmountAllocated ?? allocation?.allocatedAmount ?? 0), 0);
+            }, 0), 0), lineReceivable);
+            const lineOutstanding = Math.max(lineReceivable - linePaid, 0);
+            const linePnr = String(serviceLine.pnr || '').trim() || 'N/A';
+            const linePassengerName = String(serviceLine.passengerName || '').trim() || 'Passenger';
+            const lineRelation = serviceIndex === 0 ? 'Self' : 'Passenger';
+            const lineRemarks = serviceIndex === 0 ? 'Lead Traveler' : '';
             const isActive = activeServiceId > 0
                 ? Number.parseInt(String(serviceLine.serviceId || 0), 10) === activeServiceId
                 : serviceIndex === 0;
@@ -6967,18 +10905,14 @@ document.addEventListener('DOMContentLoaded', () => {
             row.dataset.serviceIndex = String(serviceIndex);
             row.innerHTML = `
                 <td>${serviceIndex + 1}</td>
-                <td>${String(serviceLine.type || 'air ticket').replace(/\b\w/g, (character) => character.toUpperCase())}</td>
-                <td>${lineTicket}</td>
-                <td>${serviceLine.passengerName || ''}</td>
-                <td>${lineSector || serviceLine.remarks || ''}</td>
-                <td>${formatMoney(lineFare)}</td>
-                <td>${formatMoney(lineTaxes)}</td>
-                <td>${formatMoney(lineOther)}</td>
-                <td>${formatMoney(lineSpTotal)}</td>
-                <td>${formatMoney(lineReceivable)}</td>
-                <td>${formatMoney(linePayable)}</td>
-                <td class="profit-cell ${lineProfit < 0 ? 'negative' : 'positive'}">${formatMoney(lineProfit)}</td>
-                <td>${String(serviceLine.displayStatus || serviceLine.status || 'Open').slice(0, 4).toUpperCase()}</td>
+                <td>${escapeHtml(linePassengerName)}</td>
+                <td>${escapeHtml(lineRelation)}</td>
+                <td>${escapeHtml(linePnr)}</td>
+                <td>${escapeHtml(lineSector || 'N/A')}</td>
+                <td data-passenger-summary-invoice>${escapeHtml(formatCurrencyAmount(lineCurrency, lineReceivable))}</td>
+                <td data-passenger-summary-paid>${escapeHtml(formatCurrencyAmount(lineCurrency, linePaid))}</td>
+                <td data-passenger-summary-outstanding>${escapeHtml(formatCurrencyAmount(lineCurrency, lineOutstanding))}</td>
+                <td>${escapeHtml(lineRemarks)}</td>
             `;
             serviceTableBody.appendChild(row);
         });
@@ -7083,6 +11017,9 @@ document.addEventListener('DOMContentLoaded', () => {
         mergedLine.lineNumber = mergedLine.lineNumber || draftSnapshot.lineNumber || 'SV-DRAFT';
         mergedLine.type = mergedLine.type || draftSnapshot.type || 'air ticket';
         mergedLine.currency = mergedLine.currency || draftSnapshot.currency || 'PKR';
+        mergedLine.costCurrency = mergedLine.costCurrency || draftSnapshot.costCurrency || mergedLine.currency || 'PKR';
+        mergedLine.pricingExchangeRate = toNumber(mergedLine.pricingExchangeRate || draftSnapshot.pricingExchangeRate || 1) || 1;
+        mergedLine.pricingRateEffectiveDate = mergedLine.pricingRateEffectiveDate || draftSnapshot.pricingRateEffectiveDate || '';
         mergedLine.status = mergedLine.status || 'Open';
         mergedLine.displayStatus = mergedLine.displayStatus || mergedLine.status || 'Open';
         mergedLine.passengerName = mergedLine.passengerName || draftSnapshot.passengerName || '';
@@ -7098,6 +11035,14 @@ document.addEventListener('DOMContentLoaded', () => {
         mergedLine.rowProfit = Math.abs(toNumber(mergedLine.rowProfit)) > 0.005
             ? toNumber(mergedLine.rowProfit)
             : (mergedLine.rowReceivable - mergedLine.rowPayable);
+        const hasAllocatedAmount = Object.prototype.hasOwnProperty.call(mergedLine, 'allocatedAmount');
+        const hasOutstandingAmount = Object.prototype.hasOwnProperty.call(mergedLine, 'outstandingAmount');
+        mergedLine.allocatedAmount = hasAllocatedAmount
+            ? Math.max(Math.min(toNumber(mergedLine.allocatedAmount), mergedLine.rowReceivable), 0)
+            : 0;
+        mergedLine.outstandingAmount = hasOutstandingAmount
+            ? Math.max(toNumber(mergedLine.outstandingAmount), 0)
+            : Math.max(mergedLine.rowReceivable - mergedLine.allocatedAmount, 0);
         mergedLine.persisted = mergedLine.serviceId > 0;
         mergedLine.saved = mergedLine.serviceId > 0;
         mergedLine.paymentEligible = payload.payment_eligible === true
@@ -7168,25 +11113,151 @@ document.addEventListener('DOMContentLoaded', () => {
     Object.values(serviceMetricInputs).forEach((input) => {
         if (input) {
             input.addEventListener('input', () => {
+                if (finalSalePriceInput instanceof HTMLInputElement) {
+                    finalSalePriceInput.dataset.manualOverride = '0';
+                }
                 updateCommercialTrace({
                     listenerAttached: true,
                     lastEventFired: `input:${input.name || input.id || 'metric'}`,
                 });
+                logCommercialCalculator('metric-input', input.name || input.id || 'metric', {
+                    targetId: input.id || '',
+                    targetName: input.name || '',
+                    targetValue: input.value,
+                });
                 refreshProfit(`input:${input.name || input.id || 'metric'}`);
                 syncTicketCommercialMirrors();
+                if (input === serviceMetricInputs.sale
+                    || input === serviceMetricInputs.tax
+                    || input === serviceMetricInputs.otherFare
+                    || input === serviceMetricInputs.sotoFare
+                    || input === serviceMetricInputs.spyiAmount
+                    || input === serviceMetricInputs.aqYrPkAmount
+                    || input === serviceMetricInputs.yqAmount
+                    || input === serviceMetricInputs.othAmount
+                    || input === serviceMetricInputs.vatInput) {
+                    reapplyActiveCommercialPercents();
+                }
             });
         }
     });
     updateCommercialTrace({
         listenerAttached: Object.values(serviceMetricInputs).some((input) => Boolean(input)),
     });
+    logCommercialCalculator('boot-bindings', 'workspace-init', {
+        listenerAttached: Object.values(serviceMetricInputs).some((input) => Boolean(input)),
+        hasCommercialEditor: commercialEditor instanceof HTMLElement,
+        hasPaymentCurrentInvoiceInput: paymentCurrentInvoiceInput instanceof HTMLInputElement,
+        hasPaymentCurrentBalanceInput: paymentCurrentBalanceInput instanceof HTMLInputElement,
+    });
+
+    if (commercialEditor instanceof HTMLElement) {
+        commercialEditor.addEventListener('input', (event) => {
+            const target = event.target;
+            if (!(target instanceof HTMLInputElement)) {
+                return;
+            }
+
+            if (
+                target.matches('[data-service-metric], [data-service-discount], [data-service-percent], [data-service-final-sale]')
+            ) {
+                logCommercialCalculator('delegated-input', target.name || target.id || 'field', {
+                    targetId: target.id || '',
+                    targetName: target.name || '',
+                    targetValue: target.value,
+                    matchesMetric: target.matches('[data-service-metric]'),
+                    matchesDiscount: target.matches('[data-service-discount]'),
+                    matchesPercent: target.matches('[data-service-percent]'),
+                    matchesFinalSale: target.matches('[data-service-final-sale]'),
+                });
+                refreshProfit(`commercial-delegate:${target.name || target.id || 'field'}`);
+                syncTicketCommercialMirrors();
+            }
+        });
+        commercialEditor.addEventListener('change', async (event) => {
+            const target = event.target;
+            if (!(target instanceof HTMLInputElement || target instanceof HTMLSelectElement)) {
+                return;
+            }
+
+            if (
+                target.matches('[data-service-metric], [data-service-discount], [data-service-percent], [data-service-final-sale], [data-service-field="currency"], [data-service-field="cost_currency"]')
+            ) {
+                if (
+                    finalSalePriceInput instanceof HTMLInputElement
+                    && target.matches('[data-service-field="currency"], [data-service-field="cost_currency"]')
+                ) {
+                    finalSalePriceInput.dataset.manualOverride = '0';
+                }
+                const invoiceCurrencyChanged = target.matches('[data-service-field="currency"]');
+                const costCurrencyChanged = target.matches('[data-service-field="cost_currency"]');
+                if (invoiceCurrencyChanged && paymentCurrencySelect instanceof HTMLSelectElement) {
+                    const normalizedInvoiceCurrency = String(target.value || 'PKR').trim().toUpperCase() || 'PKR';
+                    paymentCurrencySelect.dataset.paymentManualSelection = '0';
+                    paymentCurrencySelect.dataset.paymentManualContext = '';
+                    paymentCurrencySelect.value = normalizedInvoiceCurrency;
+                    syncPaymentTreasurySelector();
+                    syncPaymentCurrencyLabels(normalizedInvoiceCurrency);
+                    if (paymentExchangeModal && !paymentExchangeModal.hidden) {
+                        closeExchangeSettlementModal();
+                    }
+                }
+                logCommercialCalculator('delegated-change', target.name || target.id || 'field', {
+                    targetId: target.id || '',
+                    targetName: target.name || '',
+                    targetValue: target.value,
+                    matchesCurrency: invoiceCurrencyChanged,
+                    matchesCostCurrency: costCurrencyChanged,
+                });
+                refreshProfit(`commercial-delegate-change:${target.name || target.id || 'field'}`);
+                syncTicketCommercialMirrors();
+                if (invoiceCurrencyChanged || costCurrencyChanged) {
+                    await ensurePricingExchangeRateReady({
+                        reason: invoiceCurrencyChanged ? 'invoice-currency-change' : 'cost-currency-change',
+                    });
+                    refreshPaymentPreview();
+                }
+            }
+        });
+    }
+
+    Object.entries(servicePercentInputs).forEach(([fieldKey, input]) => {
+        if (!(input instanceof HTMLInputElement)) {
+            return;
+        }
+
+        input.addEventListener('input', () => {
+            updateCommercialTrace({
+                listenerAttached: true,
+                lastEventFired: `input:${input.id || fieldKey}`,
+            });
+            applyCommercialPercentToAmount(fieldKey);
+        });
+    });
+
+    [
+        ['serviceCharge', serviceMetricInputs.serviceCharge],
+        ['vat', serviceMetricInputs.vat],
+    ].forEach(([fieldKey, input]) => {
+        if (!(input instanceof HTMLInputElement)) {
+            return;
+        }
+
+        input.addEventListener('input', () => {
+            syncCommercialPercentFromAmount(fieldKey, { markManualAmount: true });
+        });
+    });
 
     if (serviceDiscountInput) {
         serviceDiscountInput.addEventListener('input', () => {
+            if (finalSalePriceInput instanceof HTMLInputElement) {
+                finalSalePriceInput.dataset.manualOverride = '0';
+            }
             updateCommercialTrace({
                 listenerAttached: true,
                 lastEventFired: `input:${serviceDiscountInput.name || serviceDiscountInput.id || 'discount'}`,
             });
+            syncCommercialPercentFromAmount('discount', { markManualAmount: true });
             refreshProfit(`input:${serviceDiscountInput.name || serviceDiscountInput.id || 'discount'}`);
         });
     }
@@ -7203,6 +11274,15 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    [financialCorrectionCostInput, financialCorrectionCustomerTotalInput].forEach((field) => {
+        if (!(field instanceof HTMLInputElement)) {
+            return;
+        }
+
+        field.addEventListener('input', refreshFinancialCorrectionLossPreview);
+        field.addEventListener('change', refreshFinancialCorrectionLossPreview);
+    });
+
     [airlineCommissionExtra, airlineCommissionAdjustment].forEach((input) => {
         if (input) {
             input.addEventListener('input', refreshAirlineCommissionTotal);
@@ -7213,16 +11293,31 @@ document.addEventListener('DOMContentLoaded', () => {
         serviceTypeField.addEventListener('change', () => {
             refreshSubtypeVisibility();
             refreshProfit('change:service_type');
-            scheduleServiceAutosave();
+            if (fieldAutosaveEnabled) {
+                scheduleServiceAutosave();
+            }
         });
     }
 
     if (serviceFields.currency) {
         serviceFields.currency.addEventListener('change', () => {
+            if (serviceFields.pricingExchangeRate instanceof HTMLInputElement) {
+                serviceFields.pricingExchangeRate.value = '';
+            }
             refreshProfit(`change:${serviceFields.currency.name || 'currency'}`);
             syncTicketCommercialMirrors();
             syncServiceCurrencyMirror();
             refreshPaymentPreview();
+        });
+    }
+
+    if (serviceFields.costCurrency) {
+        serviceFields.costCurrency.addEventListener('change', () => {
+            if (serviceFields.pricingExchangeRate instanceof HTMLInputElement) {
+                serviceFields.pricingExchangeRate.value = '';
+            }
+            refreshProfit(`change:${serviceFields.costCurrency.name || 'cost_currency'}`);
+            scheduleSupplierAdvanceBalanceRefresh(0);
         });
     }
 
@@ -7304,6 +11399,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (canResetServiceCurrency && serviceFields.currency instanceof HTMLSelectElement && branchCurrency !== '') {
             serviceFields.currency.value = branchCurrency;
         }
+        if (canResetServiceCurrency && serviceFields.costCurrency instanceof HTMLSelectElement && branchCurrency !== '') {
+            serviceFields.costCurrency.value = branchCurrency;
+        }
 
         if (paymentCurrencySelect instanceof HTMLSelectElement && branchCurrency !== '') {
             delete paymentCurrencySelect.dataset.paymentManualSelection;
@@ -7342,17 +11440,25 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (invoiceForm) {
         invoiceForm.addEventListener('submit', (event) => {
-            if (autosaveInvoiceUrl === '') {
-                return;
-            }
-
             event.preventDefault();
-            void persistInvoiceAutosave({ force: true });
+            showFeedback('Use Save Payment to save the invoice, service, and receipt together.');
+            focusTarget('[data-payment-submit-action="save"]');
         });
     }
 
     if (serviceForm) {
         serviceForm.addEventListener('submit', (event) => {
+            window.workspaceDebugEnterFlow('service-form-submit', {
+                activeElement: document.activeElement instanceof HTMLElement
+                    ? `${document.activeElement.tagName.toLowerCase()}${document.activeElement.id ? `#${document.activeElement.id}` : ''}${document.activeElement.getAttribute('name') ? `[name="${document.activeElement.getAttribute('name')}"]` : ''}`
+                    : 'none',
+                autosaveServiceUrl,
+                suppressAutosave,
+                persistedServiceId: currentPersistedServiceId(),
+                bookingId: serviceForm.elements.namedItem('booking_id') instanceof HTMLInputElement
+                    ? Number.parseInt(serviceForm.elements.namedItem('booking_id').value || '0', 10)
+                    : 0,
+            });
             syncAutoBookingFields();
             syncServiceTravelerIdFromName();
 
@@ -7367,38 +11473,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const bookingIdField = serviceForm.elements.namedItem('booking_id');
             const bookingId = bookingIdField instanceof HTMLInputElement ? Number.parseInt(bookingIdField.value || '0', 10) : 0;
-            if (bookingId > 0) {
+            if (bookingId > 0 && currentPersistedServiceId() > 0) {
                 return;
             }
 
-            const bookingDate = serviceForm.elements.namedItem('auto_booking_date');
-            const customerName = serviceForm.elements.namedItem('auto_lead_traveler_name');
-            const partyLabel = serviceForm.elements.namedItem('auto_party_label');
-            const selectedCustomerId = serviceForm.elements.namedItem('auto_selected_customer_id');
-            const hasDate = bookingDate instanceof HTMLInputElement && bookingDate.value.trim() !== '';
-            const hasCustomer = (customerName instanceof HTMLInputElement && customerName.value.trim() !== '')
-                || (selectedCustomerId instanceof HTMLInputElement && Number.parseInt(selectedCustomerId.value || '0', 10) > 0)
-                || (partyLabel instanceof HTMLInputElement && partyLabel.value.trim() !== '');
-
-            if (!hasDate || !hasCustomer) {
-                event.preventDefault();
-                showFeedback('Select a customer and invoice date before saving the first service.');
-                if (!hasCustomer) {
-                    focusTarget('input[name="lead_traveler_name"]');
-                }
-                return;
-            }
-
-            if (autosaveServiceUrl !== '') {
-                event.preventDefault();
-                void persistServiceAutosave();
-            }
+            event.preventDefault();
+            showFeedback('Use Save Payment to save the invoice, service, and receipt together.');
+            focusTarget('[data-payment-submit-action="save"]');
         });
 
-        const serviceAutosaveFields = new Set([
-            'service_type',
-            'currency',
-            'service_traveler_id',
+    const serviceAutosaveFields = new Set([
+        'service_type',
+        'currency',
+        'cost_currency',
+        'service_traveler_id',
             'service_passenger_name',
             'ticket_number',
             'ticket_pnr',
@@ -7407,6 +11495,7 @@ document.addEventListener('DOMContentLoaded', () => {
             'ticket_sector_to',
             'ticket_departure_date',
             'ticket_return_date',
+            'ticket_type',
             'ticket_class',
             'ticket_fare',
             'ticket_tax',
@@ -7425,6 +11514,8 @@ document.addEventListener('DOMContentLoaded', () => {
             'service_charge',
             'discount_amount',
             'final_sale_price',
+            'pricing_exchange_rate',
+            'pricing_rate_effective_date',
             'remarks',
             'supplier_name',
             'due_date',
@@ -7472,13 +11563,32 @@ document.addEventListener('DOMContentLoaded', () => {
             'other_label',
             'other_reference_number',
             'other_service_date',
-            'other_provider_name',
-            'other_remarks',
-        ]);
+        'other_provider_name',
+        'other_remarks',
+    ]);
+    const protectedSavedServiceFinancialFields = new Set([
+        'cost_currency',
+        'sale_price',
+        'purchase_cost',
+        'taxes',
+        'other_fare',
+        'soto_fare',
+        'spyi_amount',
+        'aq_yr_pk_amount',
+        'yq_amount',
+        'oth_amount',
+        'vat_input',
+        'commission',
+        'service_charge',
+        'discount_amount',
+        'vat',
+        'final_sale_price',
+        'pricing_exchange_rate',
+    ]);
 
-        const isServiceAutosaveTarget = (target) => {
-            if (!(target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement)) {
-                return false;
+    const isServiceAutosaveTarget = (target) => {
+        if (!(target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement)) {
+            return false;
             }
 
             if (!serviceAutosaveFields.has(target.name)) {
@@ -7489,30 +11599,70 @@ document.addEventListener('DOMContentLoaded', () => {
                 return true;
             }
 
-            return target.getAttribute('form') === 'legacy-service-form';
-        };
+        return target.getAttribute('form') === 'legacy-service-form';
+    };
 
-        station.addEventListener('change', (event) => {
-            if (suppressAutosave || !isServiceAutosaveTarget(event.target)) {
-                return;
-            }
+    const isProtectedSavedServiceFinancialField = (target) => {
+        if (!(target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement)) {
+            return false;
+        }
 
-            scheduleServiceAutosave();
-        }, true);
+        if (currentPersistedServiceId() <= 0) {
+            return false;
+        }
 
-        station.addEventListener('focusout', (event) => {
-            if (suppressAutosave || !isServiceAutosaveTarget(event.target)) {
-                return;
-            }
+        return protectedSavedServiceFinancialFields.has(String(target.name || '').trim());
+    };
 
-            scheduleServiceAutosave();
-        }, true);
+    station.addEventListener('change', (event) => {
+        if (!fieldAutosaveEnabled || suppressAutosave || !isServiceAutosaveTarget(event.target)) {
+            return;
+        }
+
+        if (isProtectedSavedServiceFinancialField(event.target)) {
+            window.workspaceDebugEnterFlow('service-autosave-change-skip-protected', {
+                target: String(event.target.name || ''),
+                currentPersistedServiceId: currentPersistedServiceId(),
+                value: String(event.target.value || ''),
+            });
+            return;
+        }
+
+        window.workspaceDebugEnterFlow('service-autosave-change-schedule', {
+            target: String(event.target.name || ''),
+            currentPersistedServiceId: currentPersistedServiceId(),
+            value: String(event.target.value || ''),
+        });
+        scheduleServiceAutosave();
+    }, true);
+
+    station.addEventListener('focusout', (event) => {
+        if (!fieldAutosaveEnabled || suppressAutosave || !isServiceAutosaveTarget(event.target)) {
+            return;
+        }
+
+        if (isProtectedSavedServiceFinancialField(event.target)) {
+            window.workspaceDebugEnterFlow('service-autosave-focusout-skip-protected', {
+                target: String(event.target.name || ''),
+                currentPersistedServiceId: currentPersistedServiceId(),
+                value: String(event.target.value || ''),
+            });
+            return;
+        }
+
+        window.workspaceDebugEnterFlow('service-autosave-focusout-schedule', {
+            target: String(event.target.name || ''),
+            currentPersistedServiceId: currentPersistedServiceId(),
+            value: String(event.target.value || ''),
+        });
+        scheduleServiceAutosave();
+    }, true);
     }
 
     if (invoiceForm) {
         const invoiceAutosaveFields = new Set(['branch_id', 'booking_date', 'booking_status', 'party_label', 'remarks']);
         invoiceForm.addEventListener('change', (event) => {
-            if (suppressAutosave || !(event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement || event.target instanceof HTMLTextAreaElement)) {
+            if (!fieldAutosaveEnabled || suppressAutosave || !(event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement || event.target instanceof HTMLTextAreaElement)) {
                 return;
             }
 
@@ -7528,7 +11678,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
 
         invoiceForm.addEventListener('focusout', (event) => {
-            if (suppressAutosave || !(event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement)) {
+            if (!fieldAutosaveEnabled || suppressAutosave || !(event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement)) {
                 return;
             }
 
@@ -7548,14 +11698,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const customerDirectory = parseJsonDataNode(customerDirectoryDataNode, 'customerDirectory');
     const travelerRows = Array.from(station.querySelectorAll('[data-traveler-row]'));
     const activeTravelerReference = station.querySelector('[data-active-traveler-reference]');
-    const bookingLeadField = station.querySelector('input[name="lead_traveler_name"]');
-    const bookingMobileField = station.querySelector('[data-booking-mobile-field]');
-    const bookingPassportField = station.querySelector('[data-booking-passport-field]');
-    const bookingSelectedTravelerIdField = station.querySelector('[data-booking-selected-customer-id]');
-    const customerSummaryClient = station.querySelector('[data-customer-summary-client]');
-    const customerSummaryMobile = station.querySelector('[data-customer-summary-mobile]');
-    const customerSummaryFamily = station.querySelector('[data-customer-summary-family]');
-    const customerSummaryColor = station.querySelector('[data-customer-summary-color]');
     const formatCustomerColorTag = (colorTag) => {
         return colorTag
             ? String(colorTag).replace(/_/g, ' ').replace(/\b\w/g, (match) => match.toUpperCase())
@@ -7565,14 +11707,33 @@ document.addEventListener('DOMContentLoaded', () => {
         const previousBalanceTotals = customer?.previous_balance_totals && typeof customer.previous_balance_totals === 'object'
             ? customer.previous_balance_totals
             : {};
+        const fullOutstandingTotals = customer?.full_outstanding_totals && typeof customer.full_outstanding_totals === 'object'
+            ? customer.full_outstanding_totals
+            : previousBalanceTotals;
         fillValue(customerSummaryClient, customer?.id ? String(customer.id) : '-');
         fillValue(customerSummaryMobile, customer?.mobile || '-');
         fillValue(customerSummaryFamily, customer?.family_id || '-');
         fillValue(customerSummaryColor, formatCustomerColorTag(customer?.color_tag || ''));
         if (paymentPreviousBalanceInput) {
             paymentPreviousBalanceInput.dataset.paymentPreviousBalanceMap = JSON.stringify(previousBalanceTotals);
-            paymentPreviousBalanceInput.dataset.paymentOpenBalanceMap = JSON.stringify(previousBalanceTotals);
+            paymentPreviousBalanceInput.dataset.paymentOpenBalanceMap = JSON.stringify(fullOutstandingTotals);
             paymentPreviousBalanceInput.dataset.paymentPreviousBalance = '0';
+            const invoiceSnapshot = currentInvoiceSnapshot();
+            const outstandingRefresh = syncOpenBalanceDisplay(
+                invoiceSnapshot.invoiceCurrency,
+                invoiceSnapshot.invoiceBalance
+            );
+            sendWorkspaceClientError({
+                type: 'customer_outstanding_refresh',
+                message: 'Customer outstanding balance refreshed after customer selection.',
+                customerId: Number.parseInt(String(customer?.id || 0), 10) || 0,
+                customerName: String(customer?.full_name || ''),
+                previousBalanceTotals,
+                fullOutstandingTotals,
+                invoiceCurrency: invoiceSnapshot.invoiceCurrency,
+                invoiceBalance: invoiceSnapshot.invoiceBalance,
+                visibleOutstandingMap: outstandingRefresh.openBalanceMap,
+            });
         }
     };
     const hasSelectedCustomer = () => {
@@ -7651,6 +11812,18 @@ document.addEventListener('DOMContentLoaded', () => {
             || toNumber(serviceLine.purchaseCost) > 0.005;
     });
 
+    const currentServiceDraftRequiresPersistBeforePayment = () => {
+        if (currentBookingId() <= 0) {
+            return false;
+        }
+
+        if (activeServiceId() > 0 || currentPersistedServiceId() > 0) {
+            return false;
+        }
+
+        return serviceAutosaveReady() && serviceHasMeaningfulDraftData();
+    };
+
     const serviceHasFinancialValue = () => {
         return toNumber(finalSalePriceInput?.value || 0) > 0.005
             || toNumber(serviceMetricInputs.cost?.value || 0) > 0.005
@@ -7726,6 +11899,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const fullCustomerOutstandingMap = totals.full_customer_outstanding_map && typeof totals.full_customer_outstanding_map === 'object'
             ? totals.full_customer_outstanding_map
             : null;
+        const customerCreditMap = totals.customer_credit_map && typeof totals.customer_credit_map === 'object'
+            ? totals.customer_credit_map
+            : null;
         const otherCurrencyPreviousBalanceMap = totals.other_currency_previous_balance_map && typeof totals.other_currency_previous_balance_map === 'object'
             ? totals.other_currency_previous_balance_map
             : null;
@@ -7787,10 +11963,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (paymentCurrentInvoiceInput && !preserveLiveInvoicePreview) {
             paymentCurrentInvoiceInput.dataset.paymentCurrency = currentInvoiceCurrency;
             paymentCurrentInvoiceInput.dataset.paymentCurrentInvoice = String(receivable);
-            paymentCurrentInvoiceInput.value = formatCurrencyAmount(
-                currentInvoiceCurrency,
-                receivable
-            );
+            paymentCurrentInvoiceInput.value = formatNumberInputValue(receivable);
         }
         if (paymentAlreadyReceivedInput && !preserveLiveInvoicePreview) {
             paymentAlreadyReceivedInput.dataset.paymentPersistedReceived = String(totalReceived);
@@ -7801,23 +11974,26 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         if (paymentCurrentBalanceInput && !preserveLiveInvoicePreview) {
             paymentCurrentBalanceInput.dataset.paymentPersistedInvoiceBalance = String(currentBalance);
+            paymentCurrentBalanceInput.dataset.paymentSavedInvoiceBalance = String(currentBalance);
         }
         if (paymentTotalOutstandingInput && !preserveLiveInvoicePreview) {
-            paymentTotalOutstandingInput.dataset.paymentTotalOutstanding = String(totalOutstanding);
-            paymentTotalOutstandingInput.dataset.paymentTotalDueNow = String(totalOutstanding);
+            paymentTotalOutstandingInput.dataset.paymentTotalOutstanding = String(currentBalance);
+            paymentTotalOutstandingInput.dataset.paymentTotalDueNow = String(currentBalance);
         }
         if (paymentCurrentBalancePkrInput && !preserveLiveInvoicePreview) {
             paymentCurrentBalancePkrInput.dataset.paymentPkrRate = String(currentBalancePkrRate);
             if (currentInvoiceCurrency !== 'PKR' && currentBalancePkrRate > 0.005) {
                 paymentCurrentBalancePkrInput.value = formatCurrencyAmount('PKR', currentBalancePkrEquivalent);
             } else {
-                paymentCurrentBalancePkrInput.value = 'PKR 0.00';
+                paymentCurrentBalancePkrInput.value = 'PKR 0';
             }
         }
         if (paymentPreviousBalanceInput) {
             paymentPreviousBalanceInput.dataset.paymentPreviousBalanceMap = JSON.stringify(previousBalanceMap || {});
             paymentPreviousBalanceInput.dataset.paymentOpenBalanceMap = JSON.stringify(fullCustomerOutstandingMap || previousBalanceMap || {});
         }
+
+        syncCustomerCreditDisplay(currentInvoiceCurrency, customerCreditMap || undefined);
 
         if (serviceFields.currency && currentBookingId() <= 0 && Number.parseInt(String(serviceFields.serviceId?.value || '0'), 10) <= 0) {
             serviceFields.currency.value = currentInvoiceCurrency;
@@ -7851,7 +12027,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const applyAutosavePaymentFoundation = (payload = {}, options = {}) => {
         refreshSettlementDataFromPayload(payload);
         refreshPaymentHistoryFromPayload(payload);
+        syncDirectSupplierObligationOptions(payload);
         updateTotalsFromAutosave(payload.totals || {}, options);
+        renderServiceRows(activeServiceId());
+        bindServiceRowClicks();
     };
 
     const persistInvoiceAutosave = (options = {}) => {
@@ -7864,8 +12043,18 @@ document.addEventListener('DOMContentLoaded', () => {
             return Promise.resolve(null);
         }
 
-        const { force = false } = options;
+        const { force = false, allowCreate = false } = options;
         if (!autosaveBookingReady()) {
+            return Promise.resolve(null);
+        }
+
+        if (currentBookingId() <= 0 && !allowCreate) {
+            window.workspaceDebugEnterFlow('invoice-autosave-skip-draft-create-disabled', {
+                force,
+                allowCreate,
+                selectedCustomerId: Number.parseInt(String(bookingSelectedTravelerIdField?.value || '0'), 10) || 0,
+                leadName: String(bookingLeadField?.value || '').trim(),
+            });
             return Promise.resolve(null);
         }
 
@@ -7877,6 +12066,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (invoiceAutosaveInFlight) {
             pendingInvoiceAutosave = true;
             pendingInvoiceAutosaveForce = pendingInvoiceAutosaveForce || force;
+            pendingInvoiceAutosaveAllowCreate = pendingInvoiceAutosaveAllowCreate || allowCreate;
             return invoiceAutosavePromise;
         }
 
@@ -7887,7 +12077,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 setInvoiceNumber('Draft');
             }
 
-            const payload = await postAutosave(autosaveInvoiceUrl, invoiceForm);
+            const payload = await postAutosave(
+                autosaveInvoiceUrl,
+                invoiceForm,
+                allowCreate ? { commit_intent: 'payment_save' } : {}
+            );
             lastInvoiceAutosaveKey = serializeForm(invoiceForm);
             syncBookingIdFields(Number.parseInt(String(payload.booking_id || 0), 10));
             applyAutosavedCustomer(payload.customer || null);
@@ -7906,24 +12100,36 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (pendingInvoiceAutosave) {
                 const queuedForce = pendingInvoiceAutosaveForce;
+                const queuedAllowCreate = pendingInvoiceAutosaveAllowCreate;
                 pendingInvoiceAutosave = false;
                 pendingInvoiceAutosaveForce = false;
+                pendingInvoiceAutosaveAllowCreate = false;
                 window.setTimeout(() => {
-                    void persistInvoiceAutosave({ force: queuedForce });
+                    void persistInvoiceAutosave({ force: queuedForce, allowCreate: queuedAllowCreate });
                 }, 0);
                 return;
             }
 
             pendingInvoiceAutosaveForce = false;
+            pendingInvoiceAutosaveAllowCreate = false;
         });
 
         return invoiceAutosavePromise;
     };
 
-    const persistServiceAutosave = () => {
+    const persistServiceAutosave = (options = {}) => {
         if (!(serviceForm instanceof HTMLFormElement) || autosaveServiceUrl === '') {
             return Promise.resolve(null);
         }
+        const { allowCreate = false } = options;
+
+        window.workspaceDebugEnterFlow('persist-service-start', {
+            suppressAutosave,
+            currentBookingId: currentBookingId(),
+            currentPersistedServiceId: currentPersistedServiceId(),
+            serviceAutosaveReady: serviceAutosaveReady(),
+            allowCreate,
+        });
 
         if (browserIsOffline()) {
             setAutosaveStatus('dirty', 'Offline draft pending');
@@ -7931,15 +12137,27 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (!serviceAutosaveReady()) {
+            window.workspaceDebugEnterFlow('persist-service-skip-not-ready', {
+                currentBookingId: currentBookingId(),
+                currentPersistedServiceId: currentPersistedServiceId(),
+                serviceType: String(serviceTypeField?.value || ''),
+                salePrice: toNumber(serviceMetricInputs.sale?.value || 0),
+                serviceCharge: toNumber(serviceMetricInputs.serviceCharge?.value || 0),
+            });
             return Promise.resolve(null);
         }
 
         if (!hasRequiredLossReason({ focus: true, announce: true })) {
+            window.workspaceDebugEnterFlow('persist-service-skip-loss-reason', {
+                currentBookingId: currentBookingId(),
+                currentPersistedServiceId: currentPersistedServiceId(),
+            });
             return Promise.resolve(null);
         }
 
         if (serviceAutosaveInFlight) {
             pendingServiceAutosave = true;
+            pendingServiceAutosaveAllowCreate = pendingServiceAutosaveAllowCreate || allowCreate;
             return serviceAutosavePromise;
         }
 
@@ -7950,7 +12168,15 @@ document.addEventListener('DOMContentLoaded', () => {
             prepareSupplierAdvanceFxUse();
 
             if (currentBookingId() <= 0) {
-                const invoicePayload = await persistInvoiceAutosave({ force: true });
+                if (!allowCreate) {
+                    window.workspaceDebugEnterFlow('persist-service-skip-draft-create-disabled', {
+                        currentBookingId: currentBookingId(),
+                        currentPersistedServiceId: currentPersistedServiceId(),
+                    });
+                    return null;
+                }
+
+                const invoicePayload = await persistInvoiceAutosave({ force: true, allowCreate: true });
                 if (!invoicePayload || Number.parseInt(String(invoicePayload.booking_id || '0'), 10) <= 0) {
                     return null;
                 }
@@ -7962,13 +12188,13 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             setAutosaveStatus('saving', 'Saving...');
-            const payload = await postAutosave(autosaveServiceUrl, serviceForm);
+            const payload = await postAutosave(autosaveServiceUrl, serviceForm, { commit_intent: 'payment_save' });
             const currentPayloadKey = serializeForm(serviceForm);
             const responseIsStale = currentPayloadKey !== payloadKey;
             lastInvoiceAutosaveKey = serializeForm(invoiceForm);
             lastServiceAutosaveKey = serializeForm(serviceForm);
             applySavedServiceUiState(payload, {
-                preserveLiveEditorState: responseIsStale,
+                preserveLiveEditorState: true,
             });
             if (responseIsStale) {
                 refreshProfit('autosave-stale-response');
@@ -7983,11 +12209,16 @@ document.addEventListener('DOMContentLoaded', () => {
         }).finally(() => {
             serviceAutosaveInFlight = false;
             if (pendingServiceAutosave) {
+                const queuedAllowCreate = pendingServiceAutosaveAllowCreate;
                 pendingServiceAutosave = false;
+                pendingServiceAutosaveAllowCreate = false;
                 window.setTimeout(() => {
-                    void persistServiceAutosave();
+                    void persistServiceAutosave({ allowCreate: queuedAllowCreate });
                 }, 0);
+                return;
             }
+
+            pendingServiceAutosaveAllowCreate = false;
         });
 
         return serviceAutosavePromise;
@@ -8070,18 +12301,29 @@ document.addEventListener('DOMContentLoaded', () => {
             || serviceLines.some((serviceLine) => Number.parseInt(String(serviceLine.serviceId || 0), 10) > 0);
         const serviceReady = customerReady || hasPersistedService;
         const postServiceReady = autosavedHasSavedService || hasPersistedService || hasSavedServiceRows();
+        const addServiceReady = postServiceReady || serviceAutosaveReady();
 
         setGateState(workflowGates.customerStage, customerReady);
         setGateState(workflowGates.serviceEntry, serviceReady);
         setGateState(workflowGates.postService, postServiceReady);
         setGateState(workflowGates.paymentStage, true);
-        setElementsEnabled(addServiceButtons, postServiceReady);
-        if (postServiceReady) {
+        setElementsEnabled(addServiceButtons, addServiceReady);
+        if (addServiceReady) {
             forceElementsEnabled(addServiceButtons);
         }
         setElementsEnabled(paymentHistoryButtons, true);
         setElementsEnabled(paymentSubmitButtons, true);
     };
+
+    if (serviceForm instanceof HTMLFormElement) {
+        serviceForm.addEventListener('input', () => updateWorkflowState());
+        serviceForm.addEventListener('change', () => updateWorkflowState());
+    }
+
+    if (invoiceForm instanceof HTMLFormElement) {
+        invoiceForm.addEventListener('input', () => updateWorkflowState());
+        invoiceForm.addEventListener('change', () => updateWorkflowState());
+    }
 
     const travelerFields = {
         travelerId: station.querySelector('[data-traveler-field="travelerId"]'),
@@ -8106,6 +12348,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let customerAutocompleteSelectionIndex = 0;
     let filteredAutocompleteCustomers = customerDirectory.slice(0, 12);
     let suppressCustomerAutocompleteInput = false;
+    let customerAdvanceNewCustomerMode = false;
     const resolveBookingLeadField = (preferredField = null) => {
         if (preferredField instanceof HTMLInputElement) {
             return preferredField;
@@ -8172,7 +12415,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (paymentCurrentInvoiceInput) {
             const currency = String(paymentCurrentInvoiceInput.dataset.paymentCurrency || 'PKR');
             paymentCurrentInvoiceInput.dataset.paymentCurrentInvoice = '0';
-            paymentCurrentInvoiceInput.value = formatCurrencyAmount(currency, 0);
+            paymentCurrentInvoiceInput.value = formatNumberInputValue(0);
         }
         if (paymentAlreadyReceivedInput) {
             const currency = String(paymentCurrentInvoiceInput?.dataset.paymentCurrency || 'PKR');
@@ -8181,10 +12424,22 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         if (paymentCurrentBalanceInput) {
             paymentCurrentBalanceInput.dataset.paymentPersistedInvoiceBalance = '0';
+            paymentCurrentBalanceInput.dataset.paymentSavedInvoiceBalance = '0';
             paymentCurrentBalanceInput.value = formatCurrencyAmount(
                 String(paymentCurrentInvoiceInput?.dataset.paymentCurrency || 'PKR'),
                 0
             );
+        }
+        if (paymentCustomerCreditInput) {
+            paymentCustomerCreditInput.dataset.paymentCustomerCredit = '0';
+            paymentCustomerCreditInput.dataset.paymentCustomerCreditMap = '{}';
+            paymentCustomerCreditInput.value = formatCurrencyAmount(
+                String(paymentCurrentInvoiceInput?.dataset.paymentCurrency || 'PKR'),
+                0
+            );
+        }
+        if (paymentCustomerCreditRow) {
+            paymentCustomerCreditRow.hidden = true;
         }
         if (paymentTotalOutstandingInput) {
             paymentTotalOutstandingInput.dataset.paymentTotalOutstanding = '0';
@@ -8242,13 +12497,12 @@ document.addEventListener('DOMContentLoaded', () => {
         refreshPaymentPreview();
         updateWorkflowState();
         hideCustomerAutocomplete();
-        showFeedback(`${customer.full_name || 'Customer'} loaded into the booking form.`);
         closeCustomerPicker();
         station.dispatchEvent(new CustomEvent('workspace:customer-selected', {
             bubbles: true,
             detail: customer || {},
         }));
-        if (autosaveInvoiceUrl !== '') {
+        if (fieldAutosaveEnabled && autosaveInvoiceUrl !== '') {
             void persistInvoiceAutosave({ force: true });
         }
         window.setTimeout(() => {
@@ -8667,6 +12921,12 @@ document.addEventListener('DOMContentLoaded', () => {
         newCustomerModal.hidden = true;
         newCustomerModal.setAttribute('aria-hidden', 'true');
         resetNewCustomerForm();
+        if (customerAdvanceNewCustomerMode && customerAdvanceModal instanceof HTMLElement) {
+            customerAdvanceNewCustomerMode = false;
+            customerAdvanceModal.hidden = false;
+            customerAdvanceModal.setAttribute('aria-hidden', 'false');
+            window.setTimeout(() => customerAdvanceSearchInput?.focus(), 40);
+        }
     }
 
     const consumeRequestedCustomerEdit = () => {
@@ -8732,6 +12992,21 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 filteredCustomers = searchableCustomerDirectory();
                 filteredAutocompleteCustomers = searchableCustomerDirectory().slice(0, 12);
+                if (customerAdvanceNewCustomerMode) {
+                    customerAdvanceNewCustomerMode = false;
+                    closeNewCustomerModal();
+                    if (customerAdvanceModal instanceof HTMLElement) {
+                        customerAdvanceModal.hidden = false;
+                        customerAdvanceModal.setAttribute('aria-hidden', 'false');
+                    }
+                    selectCustomerForAdvance(customer);
+                    setCustomerAdvanceFeedback(payload.message || 'Customer selected for advance.', true);
+                    window.setTimeout(() => {
+                        customerAdvanceAmount?.focus();
+                        customerAdvanceAmount?.select();
+                    }, 60);
+                    return;
+                }
                 startFreshWorkspaceForCustomer(customer);
             }
 
@@ -8959,6 +13234,153 @@ document.addEventListener('DOMContentLoaded', () => {
     syncOfflineEditLockMode();
     renderOfflineStatus();
 
+    function openServiceEditBookingModal(options = {}) {
+        if (!(serviceEditBookingModal instanceof HTMLElement)) {
+            return;
+        }
+
+        try {
+            window.sessionStorage.setItem(pendingServiceEditBookingModalKey, '1');
+            window.sessionStorage.removeItem(pendingPenaltyRefundModalKey);
+        } catch (error) {
+            // ignore storage failures
+        }
+
+        serviceEditBookingModal.hidden = false;
+        serviceEditBookingModal.setAttribute('aria-hidden', 'false');
+
+        window.setTimeout(() => {
+            const preferredField = serviceEditBookingModal.querySelector(
+                '[data-service-event-bar="cancel"]:not([hidden]) input[name="cancel_reason"], '
+                + '[data-service-event-bar="settlement"]:not([hidden]) input[name="customer_penalty_amount"], '
+                + '[data-service-event-bar="refund"]:not([hidden]) input[name="customer_refund_amount"], '
+                + '[data-service-event-bar="reissue"]:not([hidden]) input[name="new_ticket_number"], '
+                + '[data-service-event-bar="financial-correction"]:not([hidden]) input[name="corrected_cost_basis"]'
+            );
+            if (preferredField instanceof HTMLElement) {
+                preferredField.focus();
+                if (preferredField instanceof HTMLInputElement) {
+                    preferredField.select();
+                }
+            }
+        }, 40);
+
+        if (options.silent !== true) {
+            showFeedback('Booking edit opened.');
+        }
+    }
+    window.workspaceOpenServiceEditBookingModal = openServiceEditBookingModal;
+
+    function closeServiceEditBookingModal() {
+        if (!(serviceEditBookingModal instanceof HTMLElement)) {
+            return;
+        }
+
+        try {
+            window.sessionStorage.removeItem(pendingServiceEditBookingModalKey);
+        } catch (error) {
+            // ignore storage failures
+        }
+
+        serviceEditBookingModal.hidden = true;
+        serviceEditBookingModal.setAttribute('aria-hidden', 'true');
+    }
+    window.workspaceCloseServiceEditBookingModal = closeServiceEditBookingModal;
+
+    function openServicePenaltyRefundModal(options = {}) {
+        if (!(servicePenaltyRefundModal instanceof HTMLElement)) {
+            return;
+        }
+
+        try {
+            window.sessionStorage.removeItem(pendingServiceEditBookingModalKey);
+            window.sessionStorage.setItem(pendingPenaltyRefundModalKey, '1');
+        } catch (error) {
+            // ignore storage failures
+        }
+
+        servicePenaltyRefundModal.hidden = false;
+        servicePenaltyRefundModal.setAttribute('aria-hidden', 'false');
+
+        window.setTimeout(() => {
+            const preferredField = servicePenaltyRefundModal.querySelector(
+                '[data-service-correction-bar="settlement"]:not([hidden]) input[name="customer_penalty_amount"], '
+                + '[data-service-correction-bar="refund"]:not([hidden]) input[name="customer_refund_amount"], '
+                + '[data-service-correction-bar="settlement-reverse"]:not([hidden]) input[name="settlement_reverse_reason"], '
+                + '[data-service-correction-bar="refund-reverse"]:not([hidden]) input[name="refund_reverse_reason"]'
+            );
+            if (preferredField instanceof HTMLElement) {
+                preferredField.focus();
+                if (preferredField instanceof HTMLInputElement) {
+                    preferredField.select();
+                }
+            }
+        }, 40);
+
+        if (options.silent !== true) {
+            showFeedback('Penalty / refund editor opened.');
+        }
+    }
+    window.workspaceOpenServicePenaltyRefundModal = openServicePenaltyRefundModal;
+
+    function closeServicePenaltyRefundModal() {
+        if (!(servicePenaltyRefundModal instanceof HTMLElement)) {
+            return;
+        }
+
+        try {
+            window.sessionStorage.removeItem(pendingPenaltyRefundModalKey);
+        } catch (error) {
+            // ignore storage failures
+        }
+
+        servicePenaltyRefundModal.hidden = true;
+        servicePenaltyRefundModal.setAttribute('aria-hidden', 'true');
+    }
+    window.workspaceCloseServicePenaltyRefundModal = closeServicePenaltyRefundModal;
+
+    const restorePenaltyRefundModalState = () => {
+        let shouldRestore = '';
+        try {
+            shouldRestore = window.sessionStorage.getItem(pendingPenaltyRefundModalKey) || '';
+        } catch (error) {
+            return;
+        }
+
+        if (shouldRestore !== '1') {
+            return;
+        }
+
+        if (!(servicePenaltyRefundModal instanceof HTMLElement)) {
+            return;
+        }
+
+        window.setTimeout(() => {
+            openServicePenaltyRefundModal({ silent: true });
+        }, 80);
+    };
+
+    const restoreServiceEditBookingModalState = () => {
+        let shouldRestore = '';
+        try {
+            shouldRestore = window.sessionStorage.getItem(pendingServiceEditBookingModalKey) || '';
+        } catch (error) {
+            return;
+        }
+
+        if (shouldRestore !== '1') {
+            return;
+        }
+
+        if (!(serviceEditBookingModal instanceof HTMLElement)) {
+            return;
+        }
+
+        window.setTimeout(() => {
+            openServiceEditBookingModal({ silent: true });
+        }, 80);
+    };
+
     function openPaymentHistoryModal() {
         if (!paymentHistoryModal) {
             return;
@@ -9004,14 +13426,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (!Array.isArray(supplierHistoryFinderState.results) || supplierHistoryFinderState.results.length === 0) {
             supplierHistoryResultsBody.innerHTML = normalizeCustomerDuesQuery(supplierHistoryFinderState.query) === ''
-                ? '<tr><td colspan="11" class="empty-cell">No recent supplier payment history is available.</td></tr>'
-                : '<tr><td colspan="11" class="empty-cell">No supplier payment history matched this search.</td></tr>';
+                ? '<tr><td colspan="13" class="empty-cell">No recent supplier payment history is available.</td></tr>'
+                : '<tr><td colspan="13" class="empty-cell">No supplier payment history matched this search.</td></tr>';
             return;
         }
 
         supplierHistoryResultsBody.innerHTML = supplierHistoryFinderState.results.map((row) => `<tr>
             <td>${escapeHtml(String(row?.supplier_name || ''))}</td>
-            <td>${escapeHtml(String(row?.booking_reference || ''))}</td>
+            <td>${Number.parseInt(String(row?.booking_id || 0), 10) > 0 && String(row?.booking_url || '').trim() !== ''
+                ? `<a class="report-booking-link" href="${escapeHtml(String(row?.booking_url || '#'))}">${escapeHtml(String(row?.booking_reference || ''))}</a>`
+                : escapeHtml(String(row?.booking_reference || ''))}</td>
+            <td>${escapeHtml(String(row?.passenger_name || ''))}</td>
+            <td>${escapeHtml(String(row?.route || ''))}</td>
             <td>${escapeHtml(String(row?.booking_date || ''))}</td>
             <td>${escapeHtml(String(row?.branch_name || ''))}</td>
             <td>${escapeHtml(String(row?.currency || 'PKR'))}</td>
@@ -9078,15 +13504,16 @@ document.addEventListener('DOMContentLoaded', () => {
             setSupplierHistoryFeedback(error instanceof Error ? error.message : 'Supplier payment finder could not be loaded.');
         }
     };
+    window.workspaceLoadSupplierHistoryFinder = (options = {}) => loadSupplierHistoryFinder(options);
 
-    const renderCustomerDuesFinder = () => {
+    function renderCustomerDuesFinder() {
         if (customerDuesSelectedSummary instanceof HTMLElement) {
             const selectedCustomer = customerDuesFinderState.selectedCustomer;
             const balanceLabel = selectedCustomer && selectedCustomer.open_balance_totals
                 ? formatCurrencyTotalsInline(selectedCustomer.open_balance_totals)
-                : 'No open balance.';
+                : 'No outstanding balance.';
             customerDuesSelectedSummary.textContent = selectedCustomer
-                ? `${selectedCustomer.full_name || 'Customer'} | Open Balance: ${balanceLabel}`
+                ? `${selectedCustomer.full_name || 'Customer'} | Outstanding Balance: ${balanceLabel}`
                 : 'No customer selected.';
         }
 
@@ -9129,7 +13556,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 </tr>`).join('');
             }
         }
-    };
+    }
 
     const loadCustomerDuesFinder = async ({ query = customerDuesFinderState.query, travelerId = customerDuesFinderState.selectedTravelerId, currency = customerDuesFinderState.currency } = {}) => {
         if (customerDuesFinderUrl === '') {
@@ -9197,18 +13624,26 @@ document.addEventListener('DOMContentLoaded', () => {
             setCustomerDuesFeedback(error instanceof Error ? error.message : 'Customer dues finder could not be loaded.');
         }
     };
+    window.workspaceLoadCustomerDuesFinder = (options = {}) => loadCustomerDuesFinder(options);
 
     function openCustomerDuesModal() {
         if (!customerDuesModal) {
             return;
         }
 
+        clearSavedPaymentState({
+            clearAmount: true,
+            closeExchange: true,
+        });
+        logPaymentInputRuntime('open-customer-dues-modal');
+
         customerDuesModal.hidden = false;
         customerDuesModal.setAttribute('aria-hidden', 'false');
+        const workspaceCustomerContext = syncCustomerDuesFinderWithWorkspaceCustomer();
         renderCustomerDuesFinder();
         void loadCustomerDuesFinder({
-            query: customerDuesSearchInput?.value || customerDuesFinderState.query,
-            travelerId: customerDuesFinderState.selectedTravelerId,
+            query: workspaceCustomerContext.query,
+            travelerId: workspaceCustomerContext.travelerId,
             currency: customerDuesCurrencyFilter?.value || customerDuesFinderState.currency,
         });
         window.setTimeout(() => {
@@ -9216,6 +13651,7 @@ document.addEventListener('DOMContentLoaded', () => {
             customerDuesSearchInput?.select();
         }, 40);
     }
+    window.workspaceOpenCustomerDuesModal = openCustomerDuesModal;
 
     function closeCustomerDuesModal() {
         if (!customerDuesModal) {
@@ -9225,6 +13661,408 @@ document.addEventListener('DOMContentLoaded', () => {
         customerDuesModal.hidden = true;
         customerDuesModal.setAttribute('aria-hidden', 'true');
     }
+    window.workspaceCloseCustomerDuesModal = closeCustomerDuesModal;
+
+    const setCustomerAdvanceFeedback = (message, visible = true) => {
+        if (!(customerAdvanceFeedback instanceof HTMLElement)) {
+            return;
+        }
+
+        customerAdvanceFeedback.textContent = message || '';
+        customerAdvanceFeedback.hidden = !visible || String(message || '').trim() === '';
+    };
+
+    const setCustomerAdvanceRefundFeedback = (message, visible = true) => {
+        if (!(customerAdvanceRefundFeedback instanceof HTMLElement)) {
+            return;
+        }
+
+        customerAdvanceRefundFeedback.textContent = message || '';
+        customerAdvanceRefundFeedback.hidden = !visible || String(message || '').trim() === '';
+    };
+
+    const selectedCustomerForAdvance = () => {
+        if (customerDuesFinderState.selectedCustomer && typeof customerDuesFinderState.selectedCustomer === 'object') {
+            return customerDuesFinderState.selectedCustomer;
+        }
+
+        const selectedAdvanceTravelerId = Number.parseInt(String(customerAdvanceTravelerId?.value || 0), 10) || 0;
+        if (selectedAdvanceTravelerId > 0) {
+            const selectedAdvanceCustomer = findCustomerDirectoryEntryById(selectedAdvanceTravelerId);
+            if (selectedAdvanceCustomer) {
+                return selectedAdvanceCustomer;
+            }
+        }
+
+        const workspaceTravelerId = Number.parseInt(String(bookingSelectedTravelerIdField?.value || 0), 10) || 0;
+        if (workspaceTravelerId > 0) {
+            const workspaceCustomer = findCustomerDirectoryEntryById(workspaceTravelerId);
+            if (workspaceCustomer) {
+                return workspaceCustomer;
+            }
+        }
+
+        const selectedTravelerId = Number.parseInt(String(customerDuesFinderState.selectedTravelerId || 0), 10) || 0;
+        if (selectedTravelerId <= 0 || !Array.isArray(customerDuesFinderState.customers)) {
+            return null;
+        }
+
+        return customerDuesFinderState.customers.find((customer) => {
+            return Number.parseInt(String(customer?.id || 0), 10) === selectedTravelerId;
+        }) || null;
+    };
+
+    function customerAdvanceSearchMatches(customer, query) {
+        const normalizedQuery = String(query || '').trim().toLowerCase();
+        if (normalizedQuery === '') {
+            return true;
+        }
+
+        return customerLabel(customer).includes(normalizedQuery);
+    }
+
+    function renderCustomerAdvanceSearchResults() {
+        if (!(customerAdvanceResults instanceof HTMLElement)) {
+            return;
+        }
+
+        const query = String(customerAdvanceSearchInput?.value || '').trim();
+        const results = searchableCustomerDirectory()
+            .filter((customer) => customerAdvanceSearchMatches(customer, query))
+            .slice(0, 8);
+
+        customerAdvanceResults.innerHTML = '';
+        if (results.length === 0) {
+            customerAdvanceResults.hidden = false;
+            customerAdvanceResults.innerHTML = '<div class="customer-advance-results__empty">No customer found. Use New Customer if needed.</div>';
+            return;
+        }
+
+        const table = document.createElement('table');
+        table.className = 'legacy-table customer-advance-results__table';
+        table.innerHTML = '<thead><tr><th>Customer</th><th>Mobile</th><th>Passport</th></tr></thead><tbody></tbody>';
+        const body = table.querySelector('tbody');
+        results.forEach((customer) => {
+            const row = document.createElement('tr');
+            row.dataset.customerAdvanceSelect = String(customer.id || '');
+            row.tabIndex = 0;
+            row.classList.add('customer-advance-results__row');
+            row.innerHTML = `
+                <td>${escapeHtml(String(customer.full_name || ''))}</td>
+                <td>${escapeHtml(String(customer.mobile || '-'))}</td>
+                <td>${escapeHtml(String(customer.passport_number || '-'))}</td>
+            `;
+            body?.appendChild(row);
+        });
+        customerAdvanceResults.appendChild(table);
+        customerAdvanceResults.hidden = false;
+    }
+
+    function selectCustomerForAdvance(customer) {
+        if (!customer) {
+            return;
+        }
+
+        const travelerId = Number.parseInt(String(customer.id || 0), 10) || 0;
+        if (travelerId <= 0) {
+            return;
+        }
+
+        if (customerAdvanceTravelerId instanceof HTMLInputElement) {
+            customerAdvanceTravelerId.value = String(travelerId);
+        }
+        if (customerAdvanceCustomerName instanceof HTMLInputElement) {
+            customerAdvanceCustomerName.value = String(customer.full_name || 'Customer');
+        }
+        if (customerAdvanceSearchInput instanceof HTMLInputElement) {
+            customerAdvanceSearchInput.value = String(customer.full_name || '');
+        }
+        if (customerAdvanceBranch instanceof HTMLSelectElement && Number.parseInt(String(customer.branch_id || 0), 10) > 0) {
+            customerAdvanceBranch.value = String(customer.branch_id);
+        }
+        if (customerAdvanceCurrency instanceof HTMLSelectElement) {
+            customerAdvanceCurrency.value = preferredCustomerAdvanceCurrency(customer);
+        }
+        if (customerAdvanceRefundTravelerId instanceof HTMLInputElement) {
+            customerAdvanceRefundTravelerId.value = String(travelerId);
+        }
+        if (customerAdvanceRefundBranch instanceof HTMLSelectElement && Number.parseInt(String(customer.branch_id || 0), 10) > 0) {
+            customerAdvanceRefundBranch.value = String(customer.branch_id);
+        }
+        if (customerAdvanceRefundCurrency instanceof HTMLSelectElement) {
+            customerAdvanceRefundCurrency.value = preferredCustomerAdvanceCurrency(customer);
+        }
+        if (customerAdvanceResults instanceof HTMLElement) {
+            customerAdvanceResults.hidden = true;
+            customerAdvanceResults.innerHTML = '';
+        }
+
+        setCustomerAdvanceFeedback('', false);
+        setCustomerAdvanceRefundFeedback('', false);
+        syncCustomerAdvanceTreasurySelector();
+        syncCustomerAdvanceRefundTreasurySelector();
+        loadCustomerAdvanceRefundOptions();
+    }
+
+    const preferredCustomerAdvanceCurrency = (customer) => {
+        const filterCurrency = String(customerDuesCurrencyFilter?.value || customerDuesFinderState.currency || '').trim().toUpperCase();
+        if (['PKR', 'AED', 'USD'].includes(filterCurrency)) {
+            return filterCurrency;
+        }
+
+        const totals = customer && typeof customer.open_balance_totals === 'object' && customer.open_balance_totals !== null
+            ? customer.open_balance_totals
+            : {};
+        const currency = Object.keys(totals).find((key) => ['PKR', 'AED', 'USD'].includes(String(key || '').toUpperCase()));
+
+        return String(currency || currentInvoiceSnapshot().invoiceCurrency || 'PKR').toUpperCase();
+    };
+
+    const eligibleCustomerAdvanceTreasuryAccounts = () => {
+        const method = String(customerAdvanceMethod?.value || '').trim();
+        const currency = String(customerAdvanceCurrency?.value || '').trim().toUpperCase();
+        const branchId = Number.parseInt(String(customerAdvanceBranch?.value || '0'), 10) || 0;
+        const compatibleTypes = paymentTreasuryTypesForMethod(method);
+
+        return paymentTreasuryAccounts.filter((account) => {
+            return (branchId <= 0 || Number.parseInt(String(account?.branchId || 0), 10) === branchId)
+                && compatibleTypes.includes(String(account?.accountType || '').trim())
+                && String(account?.currency || '').trim().toUpperCase() === currency;
+        });
+    };
+
+    const syncCustomerAdvanceTreasurySelector = () => {
+        if (!(customerAdvanceTreasuryAccount instanceof HTMLSelectElement)) {
+            return;
+        }
+
+        const method = String(customerAdvanceMethod?.value || '').trim();
+        const requiresTreasury = paymentMethodRequiresTreasurySelection(method);
+        const eligibleAccounts = requiresTreasury ? eligibleCustomerAdvanceTreasuryAccounts() : [];
+        const selectedBefore = String(customerAdvanceTreasuryAccount.value || '').trim();
+        const preferredAccount = defaultPaymentTreasuryAccount(eligibleAccounts);
+
+        customerAdvanceTreasuryAccount.innerHTML = '';
+
+        const promptOption = document.createElement('option');
+        promptOption.value = '';
+        promptOption.textContent = eligibleAccounts.length > 0
+            ? (method === 'cash' ? 'Select cash account' : 'Select bank account')
+            : 'No eligible account configured';
+        customerAdvanceTreasuryAccount.appendChild(promptOption);
+
+        eligibleAccounts.forEach((account) => {
+            const option = document.createElement('option');
+            option.value = String(account.id || '');
+            option.textContent = String(account.accountName || account.label || '').trim();
+            customerAdvanceTreasuryAccount.appendChild(option);
+        });
+
+        if (selectedBefore !== '' && eligibleAccounts.some((account) => String(account.id || '') === selectedBefore)) {
+            customerAdvanceTreasuryAccount.value = selectedBefore;
+        } else if (preferredAccount) {
+            customerAdvanceTreasuryAccount.value = String(preferredAccount.id || '');
+        } else {
+            customerAdvanceTreasuryAccount.value = '';
+        }
+
+        customerAdvanceTreasuryAccount.disabled = !requiresTreasury;
+    };
+
+    const syncCustomerAdvanceBankDetailVisibility = () => {
+        if (!(customerAdvanceBankDetailField instanceof HTMLElement)) {
+            return;
+        }
+
+        const method = String(customerAdvanceMethod?.value || '').trim();
+        customerAdvanceBankDetailField.hidden = method === '' || method === 'cash';
+    };
+
+    const eligibleCustomerAdvanceRefundTreasuryAccounts = () => {
+        const method = String(customerAdvanceRefundMethod?.value || '').trim();
+        const currency = String(customerAdvanceRefundCurrency?.value || '').trim().toUpperCase();
+        const branchId = Number.parseInt(String(customerAdvanceRefundBranch?.value || '0'), 10) || 0;
+        const compatibleTypes = paymentTreasuryTypesForMethod(method);
+
+        return paymentTreasuryAccounts.filter((account) => {
+            return (branchId <= 0 || Number.parseInt(String(account?.branchId || 0), 10) === branchId)
+                && compatibleTypes.includes(String(account?.accountType || '').trim())
+                && String(account?.currency || '').trim().toUpperCase() === currency;
+        });
+    };
+
+    const syncCustomerAdvanceRefundTreasurySelector = () => {
+        if (!(customerAdvanceRefundTreasuryAccount instanceof HTMLSelectElement)) {
+            return;
+        }
+
+        const method = String(customerAdvanceRefundMethod?.value || '').trim();
+        const requiresTreasury = paymentMethodRequiresTreasurySelection(method);
+        const eligibleAccounts = requiresTreasury ? eligibleCustomerAdvanceRefundTreasuryAccounts() : [];
+        const selectedBefore = String(customerAdvanceRefundTreasuryAccount.value || '').trim();
+        const preferredAccount = defaultPaymentTreasuryAccount(eligibleAccounts);
+
+        customerAdvanceRefundTreasuryAccount.innerHTML = '';
+
+        const promptOption = document.createElement('option');
+        promptOption.value = '';
+        promptOption.textContent = requiresTreasury
+            ? 'Select account'
+            : 'Not required';
+        customerAdvanceRefundTreasuryAccount.appendChild(promptOption);
+
+        eligibleAccounts.forEach((account) => {
+            const option = document.createElement('option');
+            option.value = String(account.id || '');
+            option.textContent = String(account.accountName || account.label || '').trim();
+            customerAdvanceRefundTreasuryAccount.appendChild(option);
+        });
+
+        if (selectedBefore !== '' && eligibleAccounts.some((account) => String(account.id || '') === selectedBefore)) {
+            customerAdvanceRefundTreasuryAccount.value = selectedBefore;
+        } else if (preferredAccount) {
+            customerAdvanceRefundTreasuryAccount.value = String(preferredAccount.id || '');
+        } else {
+            customerAdvanceRefundTreasuryAccount.value = '';
+        }
+
+        customerAdvanceRefundTreasuryAccount.disabled = !requiresTreasury;
+    };
+
+    const syncCustomerAdvanceRefundAmountFromSelection = () => {
+        if (!(customerAdvanceRefundReceipt instanceof HTMLSelectElement) || !(customerAdvanceRefundAmount instanceof HTMLInputElement)) {
+            return;
+        }
+
+        const option = customerAdvanceRefundReceipt.selectedOptions?.[0] || null;
+        const amount = option instanceof HTMLOptionElement ? toNumber(option.dataset.availableAmount || 0) : 0;
+        if (amount > 0) {
+            customerAdvanceRefundAmount.value = formatMoney(amount);
+        }
+    };
+
+    async function loadCustomerAdvanceRefundOptions() {
+        if (!(customerAdvanceRefundReceipt instanceof HTMLSelectElement)) {
+            return;
+        }
+
+        const travelerId = Number.parseInt(String(customerAdvanceRefundTravelerId?.value || customerAdvanceTravelerId?.value || '0'), 10) || 0;
+        const branchId = Number.parseInt(String(customerAdvanceRefundBranch?.value || customerAdvanceBranch?.value || '0'), 10) || 0;
+        const currency = String(customerAdvanceRefundCurrency?.value || customerAdvanceCurrency?.value || 'PKR').trim().toUpperCase();
+
+        customerAdvanceRefundReceipt.innerHTML = '<option value="">Select customer advance</option>';
+        if (travelerId <= 0 || branchId <= 0 || customerAdvanceAvailableUrl === '') {
+            return;
+        }
+
+        const params = new URLSearchParams({
+            branch_id: String(branchId),
+            traveler_id: String(travelerId),
+            currency,
+        });
+
+        try {
+            const response = await fetch(`${customerAdvanceAvailableUrl}?${params.toString()}`, {
+                credentials: 'same-origin',
+                headers: { Accept: 'application/json' },
+            });
+            const payload = await response.json();
+            const advances = uniqueCustomerAdvanceRows(payload.advances);
+            advances.forEach((advance) => {
+                const availableAmount = toNumber(advance.unallocated_amount || 0);
+                const option = document.createElement('option');
+                option.value = String(advance.id || '');
+                option.dataset.availableAmount = String(availableAmount);
+                option.textContent = `${advance.receipt_no || 'Advance'} / ${currency} ${formatMoney(availableAmount)}`;
+                customerAdvanceRefundReceipt.appendChild(option);
+            });
+        } catch (error) {
+            setCustomerAdvanceRefundFeedback('Available advances could not be loaded.');
+        }
+    }
+
+    function openCustomerAdvanceModal() {
+        if (!customerAdvanceModal) {
+            return;
+        }
+
+        const selectedCustomer = selectedCustomerForAdvance();
+        if (selectedCustomer) {
+            selectCustomerForAdvance(selectedCustomer);
+        } else {
+            if (customerAdvanceTravelerId instanceof HTMLInputElement) {
+                customerAdvanceTravelerId.value = '';
+            }
+            if (customerAdvanceCustomerName instanceof HTMLInputElement) {
+                customerAdvanceCustomerName.value = '';
+            }
+            if (customerAdvanceSearchInput instanceof HTMLInputElement) {
+                customerAdvanceSearchInput.value = '';
+            }
+            if (customerAdvanceResults instanceof HTMLElement) {
+                customerAdvanceResults.hidden = true;
+                customerAdvanceResults.innerHTML = '';
+            }
+            if (customerAdvanceCurrency instanceof HTMLSelectElement) {
+                customerAdvanceCurrency.value = String(currentInvoiceSnapshot().invoiceCurrency || 'PKR').toUpperCase();
+            }
+            if (customerAdvanceRefundTravelerId instanceof HTMLInputElement) {
+                customerAdvanceRefundTravelerId.value = '';
+            }
+        }
+        if (customerAdvanceAmount instanceof HTMLInputElement) {
+            customerAdvanceAmount.value = '0';
+        }
+
+        setCustomerAdvanceFeedback('', false);
+        setCustomerAdvanceRefundFeedback('', false);
+        syncCustomerAdvanceTreasurySelector();
+        syncCustomerAdvanceBankDetailVisibility();
+        syncCustomerAdvanceRefundTreasurySelector();
+        loadCustomerAdvanceRefundOptions();
+        customerAdvanceModal.hidden = false;
+        customerAdvanceModal.setAttribute('aria-hidden', 'false');
+        window.setTimeout(() => {
+            if (selectedCustomer) {
+                customerAdvanceAmount?.focus();
+                customerAdvanceAmount?.select();
+            } else {
+                customerAdvanceSearchInput?.focus();
+            }
+        }, 40);
+    }
+    window.workspaceOpenCustomerAdvanceModal = openCustomerAdvanceModal;
+
+    function closeCustomerAdvanceModal() {
+        if (!customerAdvanceModal) {
+            return;
+        }
+
+        customerAdvanceNewCustomerMode = false;
+        customerAdvanceModal.hidden = true;
+        customerAdvanceModal.setAttribute('aria-hidden', 'true');
+        refreshPaymentAdvanceControls();
+    }
+    window.workspaceCloseCustomerAdvanceModal = closeCustomerAdvanceModal;
+
+    window.addEventListener('focus', () => {
+        refreshPaymentAdvanceControls();
+        if (customerAdvanceModal instanceof HTMLElement && !customerAdvanceModal.hidden) {
+            loadCustomerAdvanceRefundOptions();
+        }
+    });
+
+    window.addEventListener('pageshow', () => {
+        refreshPaymentAdvanceControls();
+    });
+
+    station.addEventListener('workspace:customer-selected', () => {
+        syncCustomerDuesFinderWithWorkspaceCustomer();
+        refreshPaymentAdvanceControls();
+        if (!customerDuesModal?.hidden) {
+            renderCustomerDuesFinder();
+        }
+    });
 
     function openSupplierHistoryModal() {
         if (!supplierHistoryModal) {
@@ -9242,6 +14080,7 @@ document.addEventListener('DOMContentLoaded', () => {
             supplierHistorySearchInput?.select();
         }, 40);
     }
+    window.workspaceOpenSupplierHistoryModal = openSupplierHistoryModal;
 
     function closeSupplierHistoryModal() {
         if (!supplierHistoryModal) {
@@ -9251,6 +14090,7 @@ document.addEventListener('DOMContentLoaded', () => {
         supplierHistoryModal.hidden = true;
         supplierHistoryModal.setAttribute('aria-hidden', 'true');
     }
+    window.workspaceCloseSupplierHistoryModal = closeSupplierHistoryModal;
 
     function openSupplierSettlementModal() {
         if (!supplierSettlementModal) {
@@ -9304,8 +14144,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (simplePostpaidTotal) {
             simplePostpaidTotal.textContent = selectedCurrencies.length === 1
-                ? `${selectedCurrencies[0]} ${selectedTotal.toFixed(2)}`
-                : selectedTotal.toFixed(2);
+                ? `${selectedCurrencies[0]} ${formatNumberInputValue(selectedTotal)}`
+                : formatNumberInputValue(selectedTotal);
         }
 
         let feedbackMessage = '';
@@ -9346,7 +14186,7 @@ document.addEventListener('DOMContentLoaded', () => {
             globalPrepaidCurrencyField.value = String(options.currency);
         }
         if (globalPrepaidAmountField && options.focusAmount !== false) {
-            globalPrepaidAmountField.value = globalPrepaidAmountField.value || '0.00';
+            globalPrepaidAmountField.value = globalPrepaidAmountField.value || '0';
         }
         globalPrepaidSupplierModal.dataset.returnToTicketType = options.returnToTicketType ? '1' : '0';
         globalPrepaidSupplierModal.hidden = false;
@@ -9361,6 +14201,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }, 70);
     }
+    window.workspaceOpenGlobalPrepaidSupplierModal = openGlobalPrepaidSupplierModal;
 
     function closeGlobalPrepaidSupplierModal() {
         if (!globalPrepaidSupplierModal) {
@@ -9488,6 +14329,48 @@ document.addEventListener('DOMContentLoaded', () => {
     paymentHistoryCloseButtons.forEach((button) => {
         button.addEventListener('click', closePaymentHistoryModal);
     });
+
+    serviceEditBookingOpenButtons.forEach((button) => {
+        button.addEventListener('click', () => openServiceEditBookingModal());
+    });
+
+    serviceEditBookingCloseButtons.forEach((button) => {
+        button.addEventListener('click', closeServiceEditBookingModal);
+    });
+
+    if (serviceEditBookingModal instanceof HTMLElement) {
+        serviceEditBookingModal.querySelectorAll('form').forEach((form) => {
+            form.addEventListener('submit', () => {
+                try {
+                    window.sessionStorage.setItem(pendingServiceEditBookingModalKey, '1');
+                    window.sessionStorage.removeItem(pendingPenaltyRefundModalKey);
+                } catch (error) {
+                    // ignore storage failures
+                }
+            });
+        });
+    }
+
+    servicePenaltyRefundOpenButtons.forEach((button) => {
+        button.addEventListener('click', () => openServicePenaltyRefundModal());
+    });
+
+    servicePenaltyRefundCloseButtons.forEach((button) => {
+        button.addEventListener('click', closeServicePenaltyRefundModal);
+    });
+
+    if (servicePenaltyRefundModal instanceof HTMLElement) {
+        servicePenaltyRefundModal.querySelectorAll('form').forEach((form) => {
+            form.addEventListener('submit', () => {
+                try {
+                    window.sessionStorage.removeItem(pendingServiceEditBookingModalKey);
+                    window.sessionStorage.setItem(pendingPenaltyRefundModalKey, '1');
+                } catch (error) {
+                    // ignore storage failures
+                }
+            });
+        });
+    }
 
     supplierSettlementCloseButtons.forEach((button) => {
         button.addEventListener('click', closeSupplierSettlementModal);
@@ -9806,10 +14689,21 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         if (paymentCurrentBalancePkrInput) {
             paymentCurrentBalancePkrInput.dataset.paymentPkrRate = '0';
-            paymentCurrentBalancePkrInput.value = 'PKR 0.00';
+            paymentCurrentBalancePkrInput.value = 'PKR 0';
         }
         if (paymentCurrentBalancePkrRow) {
             paymentCurrentBalancePkrRow.hidden = true;
+        }
+        if (paymentCustomerCreditInput) {
+            paymentCustomerCreditInput.dataset.paymentCustomerCredit = '0';
+            paymentCustomerCreditInput.dataset.paymentCustomerCreditMap = '{}';
+            paymentCustomerCreditInput.value = formatCurrencyAmount(
+                paymentCurrentInvoiceInput?.dataset.paymentCurrency || 'PKR',
+                0
+            );
+        }
+        if (paymentCustomerCreditRow) {
+            paymentCustomerCreditRow.hidden = true;
         }
     };
 
@@ -9903,7 +14797,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
-            if (autosaveBookingReady()) {
+            if (fieldAutosaveEnabled && autosaveBookingReady()) {
                 scheduleInvoiceAutosave();
             }
         });
@@ -9912,7 +14806,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
-            if (!customerAutocompletePanel?.contains(document.activeElement) && autosaveBookingReady()) {
+            if (fieldAutosaveEnabled && !customerAutocompletePanel?.contains(document.activeElement) && autosaveBookingReady()) {
                 scheduleInvoiceAutosave();
             }
         });
@@ -10061,6 +14955,91 @@ document.addEventListener('DOMContentLoaded', () => {
             return 0;
         }
     })();
+    const serviceWorkflowState = (() => {
+        try {
+            const params = new URLSearchParams(window.location.search);
+            return {
+                step: String(params.get('service_workflow') || '').trim().toLowerCase(),
+                autoPrintRefund: params.get('auto_print_refund') === '1',
+            };
+        } catch (error) {
+            return {
+                step: '',
+                autoPrintRefund: false,
+            };
+        }
+    })();
+
+    const clearServiceWorkflowStateFromUrl = () => {
+        try {
+            const url = new URL(window.location.href);
+            url.searchParams.delete('service_workflow');
+            url.searchParams.delete('auto_print_refund');
+            window.history.replaceState({}, document.title, `${url.pathname}${url.search}${url.hash}`);
+        } catch (error) {
+            // Ignore URL cleanup issues; workflow restoration is still complete.
+        }
+    };
+
+    const ensureServiceWorkflowModalForSelector = (selector) => {
+        const normalizedSelector = String(selector || '');
+        if (normalizedSelector.includes('[data-service-event-bar="financial-correction"]')
+            || normalizedSelector.includes('[data-service-event-bar="reissue"]')) {
+            openServiceEditBookingModal({ silent: true });
+            return;
+        }
+
+        if (
+            normalizedSelector.includes('[data-service-event-bar="cancel"]')
+            || normalizedSelector.includes('[data-service-event-bar="settlement"]')
+            || normalizedSelector.includes('[data-service-event-bar="refund"]')
+            || normalizedSelector.includes('[data-service-event-bar="cancel-reopen"]')
+        ) {
+            openServiceEditBookingModal({ silent: true });
+        }
+    };
+
+    const focusServiceWorkflowField = (selector, message = '') => {
+        const tryFocus = () => {
+            const field = station.querySelector(selector);
+            if (!(field instanceof HTMLElement)) {
+                return false;
+            }
+
+            const form = field.closest('form');
+            if (form instanceof HTMLElement && form.hidden) {
+                return false;
+            }
+
+            field.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+            window.setTimeout(() => focusTarget(selector), 80);
+            if (message !== '') {
+                showFeedback(message);
+            }
+
+            return true;
+        };
+
+        if (tryFocus()) {
+            return;
+        }
+
+        ensureServiceWorkflowModalForSelector(selector);
+
+        [120, 320, 700].forEach((delay) => {
+            window.setTimeout(tryFocus, delay);
+        });
+    };
+
+    const openLatestRefundReceipt = () => {
+        const printLink = station.querySelector('[data-service-event-bar="refund"] a[href*="doc=service_refund_receipt"]');
+        if (!(printLink instanceof HTMLAnchorElement) || printLink.href === '') {
+            return false;
+        }
+
+        const popup = window.open(printLink.href, '_blank', 'noopener');
+        return popup !== null;
+    };
 
     if (serviceLines.length > 0) {
         const requestedServiceIndex = requestedServiceId > 0
@@ -10077,14 +15056,37 @@ document.addEventListener('DOMContentLoaded', () => {
             lastOverwriteSource: 'boot-no-service-lines',
         });
         refreshProfit('boot-no-service-lines');
+        syncAllCommercialPercentsFromAmounts();
         refreshSubtypeVisibility();
     }
+
+    window.setTimeout(() => {
+        refreshProfit('boot-deferred-commercial-refresh');
+        syncTicketCommercialMirrors();
+    }, 0);
 
     if (travelers.length > 0) {
         loadTraveler(0);
     }
 
     setAutosaveStatus('idle', currentBookingId() > 0 ? 'Saved' : 'Draft');
+    updateWhatsappLedgerActionState();
+
+    if (paymentWhatsappLedgerButton instanceof HTMLButtonElement) {
+        paymentWhatsappLedgerButton.addEventListener('click', (event) => {
+            event.preventDefault();
+            openWhatsappLedgerFlow();
+        });
+    }
+
+    [customerAutocompleteInput, bookingMobileField, bookingBranchField, businessSourceInput].forEach((field) => {
+        if (!(field instanceof HTMLInputElement) && !(field instanceof HTMLSelectElement)) {
+            return;
+        }
+
+        field.addEventListener('input', () => updateWhatsappLedgerActionState());
+        field.addEventListener('change', () => updateWhatsappLedgerActionState());
+    });
 
     updateWorkflowState();
     reapplyActiveServiceActionState();
@@ -10125,6 +15127,45 @@ document.addEventListener('DOMContentLoaded', () => {
             showDocumentUploadFeedback(toastMessage);
             showFeedback(toastMessage);
         }
+    }
+
+    if (serviceWorkflowState.step !== '') {
+        const workflowStep = serviceWorkflowState.step;
+        window.setTimeout(() => {
+            reapplyActiveServiceActionState();
+            unlockVisibleSettlementBar();
+
+            if (workflowStep === 'cancelled') {
+                focusServiceWorkflowField(
+                    '[data-service-event-bar="settlement"] input[name="customer_penalty_amount"]',
+                    'Cancellation recorded. Continue with settlement if needed.'
+                );
+            } else if (workflowStep === 'settled') {
+                focusServiceWorkflowField(
+                    '[data-service-event-bar="refund"] input[name="customer_refund_amount"]',
+                    'Settlement saved. Refund is ready if money must be returned to the customer.'
+                );
+            } else if (workflowStep === 'refunded') {
+                focusServiceWorkflowField(
+                    '[data-service-event-bar="refund"] input[name="customer_refund_amount"]',
+                    'Refund posted. Opening the refund receipt.'
+                );
+
+                if (serviceWorkflowState.autoPrintRefund) {
+                    window.setTimeout(() => {
+                        const opened = openLatestRefundReceipt();
+                        if (!opened) {
+                            showFeedback('Refund posted. Use Print Refund if the receipt window did not open automatically.');
+                        }
+                    }, 220);
+                }
+            } else if (workflowStep === 'penalty_refund_corrected') {
+                closeServicePenaltyRefundModal();
+                showFeedback('Penalty / refund correction saved.');
+            }
+
+            clearServiceWorkflowStateFromUrl();
+        }, 120);
     }
 
     if (reminderToggleButtons.length > 0) {
@@ -10380,7 +15421,26 @@ document.addEventListener('DOMContentLoaded', () => {
         const focusMode = focusParams.get('focus');
         const shouldHonorCustomerFocus = focusMode === 'customer' && navigationType !== 'reload';
 
-        if (focusMode === 'customer' && bookingLeadField) {
+        if (focusMode === 'payment-save' && paymentPrimarySaveButton) {
+            window.setTimeout(() => {
+                paymentPrimarySaveButton.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+                paymentPrimarySaveButton.focus();
+            }, 120);
+        } else if (focusMode === 'refund-customer') {
+            window.setTimeout(() => {
+                const refundAmountField = station.querySelector('[data-service-event-bar="refund"] input[name="customer_refund_amount"]');
+                if (refundAmountField instanceof HTMLElement) {
+                    refundAmountField.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+                    refundAmountField.focus();
+                    if (refundAmountField instanceof HTMLInputElement) {
+                        refundAmountField.select();
+                    }
+                } else if (paymentPrimarySaveButton) {
+                    paymentPrimarySaveButton.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+                    paymentPrimarySaveButton.focus();
+                }
+            }, 120);
+        } else if (focusMode === 'customer' && bookingLeadField) {
             if (shouldHonorCustomerFocus) {
                 window.setTimeout(() => {
                     bookingLeadField.focus();
@@ -10408,6 +15468,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     restorePendingFreshWorkspaceCustomer();
     restorePendingFreshWorkspaceAction();
+    restoreServiceEditBookingModalState();
+    restorePenaltyRefundModalState();
     consumeRequestedCustomerEdit();
     restoreWorkspaceStateAfterTreasuryReturn();
     window.addEventListener('focus', handleTreasurySetupReturn);

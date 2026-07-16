@@ -35,6 +35,7 @@ return static function (\PDO $db): void {
     $db->exec("INSERT INTO payment_methods (code, name, ledger_target, charges_target, sort_order, is_system, is_active) VALUES
         ('cash', 'Cash', 'Cash On Hand', NULL, 10, 1, 1),
         ('bank_transfer', 'Bank Transfer', 'Bank Clearing', NULL, 20, 1, 1),
+        ('customer_paid_supplier', 'Customer Paid Supplier', 'Supplier Direct Clearing', NULL, 25, 1, 1),
         ('debit_card', 'Debit Card', 'Card Clearing', 'Card Charges Expense', 30, 1, 1),
         ('credit_card', 'Credit Card', 'Card Clearing', 'Card Charges Expense', 40, 1, 1)
         ON DUPLICATE KEY UPDATE

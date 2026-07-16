@@ -31,8 +31,11 @@ final class BookingServiceRepository extends BaseRepository
                 bs.traveler_id,
                 COALESCE(t.full_name, bs.passenger_name_snapshot) AS passenger_name,
                 bs.currency,
+                bs.cost_currency,
                 bs.sale_price,
                 bs.purchase_cost,
+                bs.pricing_exchange_rate,
+                bs.pricing_rate_effective_date,
                 bs.taxes,
                 bs.other_fare,
                 bs.soto_fare,
@@ -144,8 +147,11 @@ final class BookingServiceRepository extends BaseRepository
                 bs.traveler_id,
                 COALESCE(t.full_name, bs.passenger_name_snapshot) AS passenger_name,
                 bs.currency,
+                bs.cost_currency,
                 bs.sale_price,
                 bs.purchase_cost,
+                bs.pricing_exchange_rate,
+                bs.pricing_rate_effective_date,
                 bs.taxes,
                 bs.other_fare,
                 bs.soto_fare,
@@ -231,8 +237,11 @@ final class BookingServiceRepository extends BaseRepository
                 bs.traveler_id,
                 bs.passenger_name_snapshot,
                 bs.currency,
+                bs.cost_currency,
                 bs.sale_price,
                 bs.purchase_cost,
+                bs.pricing_exchange_rate,
+                bs.pricing_rate_effective_date,
                 bs.taxes,
                 bs.other_fare,
                 bs.soto_fare,
@@ -337,11 +346,11 @@ final class BookingServiceRepository extends BaseRepository
             $statement = $this->db->prepare(
                 'INSERT INTO booking_services (
                     booking_id, branch_id, line_reference, display_order, service_type, supplier_id, supplier_name_snapshot, traveler_id, passenger_name_snapshot,
-                    currency, sale_price, purchase_cost, taxes, other_fare, soto_fare, spyi_amount, aq_yr_pk_amount, yq_amount, oth_amount, vat_input, vat, commission, service_charge, discount_amount, final_sale_price, net_profit_loss, due_date, service_status,
+                    currency, cost_currency, sale_price, purchase_cost, pricing_exchange_rate, pricing_rate_effective_date, taxes, other_fare, soto_fare, spyi_amount, aq_yr_pk_amount, yq_amount, oth_amount, vat_input, vat, commission, service_charge, discount_amount, final_sale_price, net_profit_loss, due_date, service_status,
                     remarks, loss_reason, loss_reason_recorded_at, is_active, created_by_user_id, updated_by_user_id
                  ) VALUES (
                     :booking_id, :branch_id, :line_reference, :display_order, :service_type, :supplier_id, :supplier_name_snapshot, :traveler_id, :passenger_name_snapshot,
-                    :currency, :sale_price, :purchase_cost, :taxes, :other_fare, :soto_fare, :spyi_amount, :aq_yr_pk_amount, :yq_amount, :oth_amount, :vat_input, :vat, :commission, :service_charge, :discount_amount, :final_sale_price, :net_profit_loss, :due_date, :service_status,
+                    :currency, :cost_currency, :sale_price, :purchase_cost, :pricing_exchange_rate, :pricing_rate_effective_date, :taxes, :other_fare, :soto_fare, :spyi_amount, :aq_yr_pk_amount, :yq_amount, :oth_amount, :vat_input, :vat, :commission, :service_charge, :discount_amount, :final_sale_price, :net_profit_loss, :due_date, :service_status,
                     :remarks, :loss_reason, :loss_reason_recorded_at, 1, :created_by_user_id, :updated_by_user_id
                  )'
             );
@@ -356,8 +365,11 @@ final class BookingServiceRepository extends BaseRepository
                 'traveler_id' => $masterData['traveler_id'],
                 'passenger_name_snapshot' => $masterData['passenger_name_snapshot'],
                 'currency' => $masterData['currency'],
+                'cost_currency' => $masterData['cost_currency'],
                 'sale_price' => $masterData['sale_price'],
                 'purchase_cost' => $masterData['purchase_cost'],
+                'pricing_exchange_rate' => $masterData['pricing_exchange_rate'],
+                'pricing_rate_effective_date' => $masterData['pricing_rate_effective_date'],
                 'taxes' => $masterData['taxes'],
                 'other_fare' => $masterData['other_fare'],
                 'soto_fare' => $masterData['soto_fare'],
@@ -399,8 +411,11 @@ final class BookingServiceRepository extends BaseRepository
                      traveler_id = :traveler_id,
                      passenger_name_snapshot = :passenger_name_snapshot,
                      currency = :currency,
+                     cost_currency = :cost_currency,
                      sale_price = :sale_price,
                      purchase_cost = :purchase_cost,
+                     pricing_exchange_rate = :pricing_exchange_rate,
+                     pricing_rate_effective_date = :pricing_rate_effective_date,
                      taxes = :taxes,
                      other_fare = :other_fare,
                      soto_fare = :soto_fare,
@@ -431,8 +446,11 @@ final class BookingServiceRepository extends BaseRepository
                 'traveler_id' => $masterData['traveler_id'],
                 'passenger_name_snapshot' => $masterData['passenger_name_snapshot'],
                 'currency' => $masterData['currency'],
+                'cost_currency' => $masterData['cost_currency'],
                 'sale_price' => $masterData['sale_price'],
                 'purchase_cost' => $masterData['purchase_cost'],
+                'pricing_exchange_rate' => $masterData['pricing_exchange_rate'],
+                'pricing_rate_effective_date' => $masterData['pricing_rate_effective_date'],
                 'taxes' => $masterData['taxes'],
                 'other_fare' => $masterData['other_fare'],
                 'soto_fare' => $masterData['soto_fare'],
@@ -456,6 +474,63 @@ final class BookingServiceRepository extends BaseRepository
             ]);
 
             $this->replaceSubtypeRecord($serviceId, (string) $masterData['service_type'], $subtypeData);
+        });
+    }
+
+    public function updateServiceFinancialFields(int $serviceId, array $financialData): void
+    {
+        $this->transaction(function () use ($serviceId, $financialData): void {
+            $statement = $this->db->prepare(
+                'UPDATE booking_services
+                 SET sale_price = :sale_price,
+                     currency = :currency,
+                     cost_currency = :cost_currency,
+                     purchase_cost = :purchase_cost,
+                     pricing_exchange_rate = :pricing_exchange_rate,
+                     pricing_rate_effective_date = :pricing_rate_effective_date,
+                     commission = :commission,
+                     service_charge = :service_charge,
+                     discount_amount = :discount_amount,
+                     final_sale_price = :final_sale_price,
+                     net_profit_loss = :net_profit_loss,
+                     remarks = :remarks,
+                     loss_reason = :loss_reason,
+                     loss_reason_recorded_at = :loss_reason_recorded_at,
+                     updated_by_user_id = :updated_by_user_id
+                 WHERE id = :id'
+            );
+            $statement->execute([
+                'id' => $serviceId,
+                'sale_price' => $financialData['sale_price'],
+                'currency' => $financialData['currency'],
+                'cost_currency' => $financialData['cost_currency'],
+                'purchase_cost' => $financialData['purchase_cost'],
+                'pricing_exchange_rate' => $financialData['pricing_exchange_rate'],
+                'pricing_rate_effective_date' => $financialData['pricing_rate_effective_date'],
+                'commission' => $financialData['commission'] ?? 0,
+                'service_charge' => $financialData['service_charge'] ?? 0,
+                'discount_amount' => $financialData['discount_amount'] ?? 0,
+                'final_sale_price' => $financialData['final_sale_price'],
+                'net_profit_loss' => $financialData['net_profit_loss'],
+                'remarks' => $financialData['remarks'] ?? null,
+                'loss_reason' => $financialData['loss_reason'] ?? null,
+                'loss_reason_recorded_at' => $financialData['loss_reason_recorded_at'] ?? null,
+                'updated_by_user_id' => $financialData['actor_user_id'],
+            ]);
+
+            if ((string) ($financialData['service_type'] ?? '') === 'air ticket') {
+                $airTicketStatement = $this->db->prepare(
+                    'UPDATE service_air_ticket
+                     SET supplier_cost = :supplier_cost,
+                         sale_amount = :sale_amount
+                     WHERE booking_service_id = :service_id'
+                );
+                $airTicketStatement->execute([
+                    'service_id' => $serviceId,
+                    'supplier_cost' => $financialData['purchase_cost'],
+                    'sale_amount' => $financialData['final_sale_price'],
+                ]);
+            }
         });
     }
 

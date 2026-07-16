@@ -1,9 +1,0 @@
-supplier_id_or_code,supplier_name,branch,supplier_type
-DEMO-SUP-PIA,PIA,Shared,normal_payable
-SUP-00006,"air blue","Imdad International Travel Agency",normal_payable
-DEMO-SUP-EMIRATES,Emirates,Shared,normal_payable
-DEMO-SUP-SERENE,"Serene Air",Shared,normal_payable
-DEMO-SUP-DXBVISA,"Dubai Visa Agent","Noble Route",normal_payable
-DEMO-SUP-UMRAH,"Umrah Package Supplier",Shared,running_balance
-DEMO-SUP-HOTEL,"Hotel Partner",Shared,normal_payable
-DEMO-SUP-TRANS,"Transport Vendor",Shared,normal_payable

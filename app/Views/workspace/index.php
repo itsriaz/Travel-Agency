@@ -11,6 +11,7 @@ $currentSearchTerm = trim((string) ($currentSearchTerm ?? ''));
 $travelerSearchResults = is_array($travelerSearchResults ?? null) ? $travelerSearchResults : [];
 $travelerSearchTerm = trim((string) ($travelerSearchTerm ?? ''));
 $serviceSupplierOptions = is_array($serviceSupplierOptions ?? null) ? $serviceSupplierOptions : [];
+$businessSourceOptions = is_array($businessSourceOptions ?? null) ? $businessSourceOptions : [];
 $supplierModeOptions = is_array($supplierModeOptions ?? null) ? $supplierModeOptions : [
     'normal_payable' => 'Normal Payable',
     'running_balance' => 'Running Balance',
@@ -34,6 +35,7 @@ $reminderTypeOptions = is_array($reminderTypeOptions ?? null) ? $reminderTypeOpt
 $reminderChannels = is_array($reminderChannels ?? null) ? $reminderChannels : ['Call', 'WhatsApp', 'Email', 'Counter Follow-Up', 'System'];
 $reminderLinkTargets = is_array($reminderLinkTargets ?? null) ? $reminderLinkTargets : [];
 $editingReminder = is_array($editingReminder ?? null) ? $editingReminder : null;
+$recentBookings = is_array($recentBookings ?? null) ? $recentBookings : [];
 $serviceSaveDebug = is_array($serviceSaveDebug ?? null) ? $serviceSaveDebug : null;
 $workspaceIsNew = (bool) ($workspaceIsNew ?? false);
 $canPostServiceEvents = in_array((string) (($user ?? [])['roleCode'] ?? ($user ?? [])['role_code'] ?? ''), ['super_admin', 'branch_admin'], true);
@@ -128,6 +130,11 @@ $workspaceBooking = [
     'id' => (int) ($currentBookingRecord['id'] ?? 0),
     'number' => (string) ($currentBookingRecord['booking_reference'] ?? 'Auto on Save'),
     'branchId' => $activeBranchId,
+    'businessSourceId' => (int) ($currentBookingRecord['business_source_id'] ?? 0),
+    'businessSourceName' => (string) ($currentBookingRecord['business_source_name'] ?? ''),
+    'businessSourcePhone' => (string) ($currentBookingRecord['business_source_phone'] ?? ''),
+    'businessSourceAddress' => (string) ($currentBookingRecord['business_source_address'] ?? ''),
+    'businessSourceDescription' => (string) ($currentBookingRecord['business_source_description'] ?? ''),
     'branch' => $activeBranchLabel,
     'bookingDate' => (string) ($currentBookingRecord['booking_date'] ?? date('Y-m-d')),
     'dueDate' => (string) ($currentBookingRecord['due_date'] ?? ''),
@@ -141,15 +148,15 @@ $workspaceBooking = [
     'defaultCurrency' => $activeBranchBaseCurrency,
     'serviceMix' => 'No services yet',
     'currency' => 'Awaiting first service',
-    'totalSale' => 'PKR 0.00',
-    'totalCost' => 'PKR 0.00',
-    'profitLoss' => 'PKR 0.00',
-    'totalReceivable' => 'PKR 0.00',
-    'totalPayable' => 'PKR 0.00',
-    'totalReceived' => 'PKR 0.00',
-    'totalOutstanding' => 'PKR 0.00',
-    'totalSupplierPaid' => 'PKR 0.00',
-    'totalSupplierOutstanding' => 'PKR 0.00',
+    'totalSale' => 'PKR 0',
+    'totalCost' => 'PKR 0',
+    'profitLoss' => 'PKR 0',
+    'totalReceivable' => 'PKR 0',
+    'totalPayable' => 'PKR 0',
+    'totalReceived' => 'PKR 0',
+    'totalOutstanding' => 'PKR 0',
+    'totalSupplierPaid' => 'PKR 0',
+    'totalSupplierOutstanding' => 'PKR 0',
     'remarks' => $bookingRemarks,
     'partyNotes' => $partyNotes,
     'createdAt' => (string) ($currentBookingRecord['created_at'] ?? ''),
@@ -158,15 +165,22 @@ $workspaceBooking = [
 
 $serviceLines = array_map(static function (array $serviceRow): array {
     $isAirTicket = (string) ($serviceRow['service_type'] ?? 'air ticket') === 'air ticket';
+    $invoiceCurrency = (string) ($serviceRow['currency'] ?? 'PKR');
+    $costCurrency = (string) ($serviceRow['cost_currency'] ?? $invoiceCurrency);
+    $pricingExchangeRate = (float) ($serviceRow['pricing_exchange_rate'] ?? 1);
+    $convertedPurchaseCost = round(
+        (float) ($serviceRow['purchase_cost'] ?? 0) * ($invoiceCurrency === $costCurrency ? 1 : max($pricingExchangeRate, 0)),
+        2
+    );
     $derivedFinalSalePrice = $isAirTicket
-        ? (float) ($serviceRow['purchase_cost'] ?? 0) + (float) ($serviceRow['service_charge'] ?? 0) + (float) ($serviceRow['vat'] ?? 0) - (float) ($serviceRow['discount_amount'] ?? 0)
+        ? $convertedPurchaseCost + (float) ($serviceRow['service_charge'] ?? 0) + (float) ($serviceRow['vat'] ?? 0) - (float) ($serviceRow['discount_amount'] ?? 0)
         : (float) ($serviceRow['sale_price'] ?? 0) + (float) ($serviceRow['service_charge'] ?? 0) + (float) ($serviceRow['vat'] ?? 0) - (float) ($serviceRow['discount_amount'] ?? 0);
     $finalSalePrice = array_key_exists('final_sale_price', $serviceRow) && $serviceRow['final_sale_price'] !== null
         ? (float) $serviceRow['final_sale_price']
         : $derivedFinalSalePrice;
     $profit = array_key_exists('net_profit_loss', $serviceRow)
         ? (float) ($serviceRow['net_profit_loss'] ?? 0)
-        : round($finalSalePrice - (float) ($serviceRow['purchase_cost'] ?? 0), 2);
+        : round($finalSalePrice - $convertedPurchaseCost, 0);
 
     return [
         'serviceId' => (int) ($serviceRow['id'] ?? 0),
@@ -176,9 +190,12 @@ $serviceLines = array_map(static function (array $serviceRow): array {
         'supplier' => (string) ($serviceRow['supplier_name'] ?? $serviceRow['supplier_name_snapshot'] ?? 'Supplier not selected'),
         'travelerId' => (int) ($serviceRow['traveler_id'] ?? 0),
         'passengerName' => (string) ($serviceRow['passenger_name'] ?? $serviceRow['passenger_name_snapshot'] ?? ''),
-        'currency' => (string) ($serviceRow['currency'] ?? 'PKR'),
+        'currency' => $invoiceCurrency,
+        'costCurrency' => $costCurrency,
         'salePrice' => (float) ($serviceRow['sale_price'] ?? 0),
         'purchaseCost' => (float) ($serviceRow['purchase_cost'] ?? 0),
+        'pricingExchangeRate' => $pricingExchangeRate > 0 ? round($pricingExchangeRate, 8) : 1.0,
+        'pricingRateEffectiveDate' => (string) ($serviceRow['pricing_rate_effective_date'] ?? ''),
         'taxes' => (float) ($serviceRow['taxes'] ?? 0),
         'otherFare' => (float) ($serviceRow['other_fare'] ?? 0),
         'sotoFare' => (float) ($serviceRow['soto_fare'] ?? 0),
@@ -197,11 +214,24 @@ $serviceLines = array_map(static function (array $serviceRow): array {
         'status' => (string) ($serviceRow['service_status'] ?? 'Open'),
         'displayStatus' => (string) (($serviceRow['is_active'] ?? 1) ? ($serviceRow['service_status'] ?? 'Open') : 'Inactive'),
         'latestRefundEventId' => (int) ($serviceRow['latest_refund_event_id'] ?? 0),
+        'latestCustomerRefundEventId' => (int) ($serviceRow['latest_customer_refund_event_id'] ?? 0),
+        'latestCustomerRefundAmountOnly' => (float) ($serviceRow['latest_customer_refund_amount_only'] ?? 0),
+        'latestSupplierRefundEventId' => (int) ($serviceRow['latest_supplier_refund_event_id'] ?? 0),
+        'latestSupplierRefundAmountOnly' => (float) ($serviceRow['latest_supplier_refund_amount_only'] ?? 0),
         'latestRefundEventDate' => (string) ($serviceRow['latest_refund_event_date'] ?? ''),
         'latestRefundCustomerAmount' => (float) ($serviceRow['latest_refund_customer_amount'] ?? 0),
         'latestRefundSupplierAmount' => (float) ($serviceRow['latest_refund_supplier_amount'] ?? 0),
         'latestCancelEventId' => (int) ($serviceRow['latest_cancel_event_id'] ?? 0),
         'hasCancellationEvent' => (int) ($serviceRow['latest_cancel_event_id'] ?? 0) > 0,
+        'latestCancelFinanciallySettled' => (bool) ($serviceRow['latest_cancel_financially_settled'] ?? false),
+        'latestCancelCustomerPenaltyAmount' => (float) ($serviceRow['latest_cancel_customer_penalty_amount'] ?? 0),
+        'latestCancelSupplierPenaltyAmount' => (float) ($serviceRow['latest_cancel_supplier_penalty_amount'] ?? 0),
+        'latestCancelExpectedSupplierRefundAmount' => (float) ($serviceRow['latest_cancel_expected_supplier_refund_amount'] ?? 0),
+        'latestCancelReleasedCustomerCreditAmount' => (float) ($serviceRow['latest_cancel_released_customer_credit_amount'] ?? 0),
+        'latestCancelReleasedSupplierCreditAmount' => (float) ($serviceRow['latest_cancel_released_supplier_credit_amount'] ?? 0),
+        'customerRefundableCreditAmount' => (float) ($serviceRow['customer_refundable_credit_amount'] ?? 0),
+        'supplierRefundableCreditAmount' => (float) ($serviceRow['supplier_refundable_credit_amount'] ?? 0),
+        'customerRefundReceivedAmount' => (float) ($serviceRow['customer_refund_received_amount'] ?? 0),
         'remarks' => (string) ($serviceRow['remarks'] ?? ''),
         'lossReason' => (string) ($serviceRow['loss_reason'] ?? ''),
         'pnr' => (string) ($serviceRow['pnr'] ?? ''),
@@ -278,22 +308,25 @@ if ($serviceLines === []) {
         'travelerId' => (int) ($selectedTravelerProfile['id'] ?? 0),
         'passengerName' => $workspaceBooking['lead'],
         'currency' => $workspaceBooking['defaultCurrency'],
-        'salePrice' => 0.00,
-        'purchaseCost' => 0.00,
-        'taxes' => 0.00,
-        'otherFare' => 0.00,
-        'sotoFare' => 0.00,
-        'spyiAmount' => 0.00,
-        'aqYrPkAmount' => 0.00,
-        'yqAmount' => 0.00,
-        'othAmount' => 0.00,
-        'vatInput' => 0.00,
-        'vat' => 0.00,
-        'commission' => 0.00,
-        'serviceCharge' => 0.00,
-        'discountAmount' => 0.00,
-        'finalSalePrice' => 0.00,
-        'netProfitLoss' => 0.00,
+        'costCurrency' => $workspaceBooking['defaultCurrency'],
+        'salePrice' => 0,
+        'purchaseCost' => 0,
+        'pricingExchangeRate' => 1.0,
+        'pricingRateEffectiveDate' => '',
+        'taxes' => 0,
+        'otherFare' => 0,
+        'sotoFare' => 0,
+        'spyiAmount' => 0,
+        'aqYrPkAmount' => 0,
+        'yqAmount' => 0,
+        'othAmount' => 0,
+        'vatInput' => 0,
+        'vat' => 0,
+        'commission' => 0,
+        'serviceCharge' => 0,
+        'discountAmount' => 0,
+        'finalSalePrice' => 0,
+        'netProfitLoss' => 0,
         'dueDate' => '',
         'status' => $workspaceBooking['id'] > 0 ? 'Open' : 'Save Booking First',
         'displayStatus' => $workspaceBooking['id'] > 0 ? 'Open' : 'Save Booking First',
@@ -307,12 +340,12 @@ if ($serviceLines === []) {
         'departureDate' => '',
         'returnDate' => '',
         'class' => '',
-        'fare' => 0.00,
-        'ticketTax' => 0.00,
-        'ticketVat' => 0.00,
-        'ticketCommission' => 0.00,
-        'supplierCost' => 0.00,
-        'saleAmount' => 0.00,
+        'fare' => 0,
+        'ticketTax' => 0,
+        'ticketVat' => 0,
+        'ticketCommission' => 0,
+        'supplierCost' => 0,
+        'saleAmount' => 0,
         'ticketRemarks' => '',
         'visaCountry' => '',
         'visaType' => '',
@@ -359,7 +392,7 @@ if ($serviceLines === []) {
         'otherProviderName' => '',
         'otherRemarks' => '',
         'isActive' => 1,
-        'profit' => 0.00,
+        'profit' => 0,
     ];
 }
 
@@ -507,7 +540,7 @@ $checkpoints = [
     ['checkpoint' => 'Services / Finance', 'status' => $persistedServiceLines !== [] ? 'Live Sync Active' : 'Awaiting First Service', 'nextStep' => 'Saving service lines now creates live receivable and payable positions'],
 ];
 
-$formatMoney = static fn (float $amount): string => number_format($amount, 2);
+$formatMoney = static fn (float $amount): string => number_format(round($amount, 0), 0);
 $sumByCurrency = static function (array $rows, string $currencyKey, callable $amountResolver): array {
     $totals = [];
     foreach ($rows as $row) {
@@ -523,7 +556,7 @@ $sumByCurrency = static function (array $rows, string $currencyKey, callable $am
 };
 $formatCurrencyTotals = static function (array $totals) use ($formatMoney): string {
     if ($totals === []) {
-        return 'PKR 0.00';
+        return 'PKR 0';
     }
 
     $parts = [];
@@ -555,6 +588,23 @@ $metricRows = static function (array $totals) use ($formatMoney): array {
 };
 
 $lineMetricKey = static fn (string $lineReference, string $currency): string => trim($lineReference) . '|' . strtoupper(trim($currency));
+$allocatedByLine = [];
+foreach (($customerPaymentFoundation['allocations'] ?? []) as $allocationRow) {
+    $receiptStatus = mb_strtolower(trim((string) ($allocationRow['receiptStatusRaw'] ?? $allocationRow['receiptStatus'] ?? '')));
+    $allocationBookingReference = trim((string) ($allocationRow['bookingReference'] ?? ''));
+    $lineReference = trim((string) ($allocationRow['serviceLineReference'] ?? ''));
+    $currency = trim((string) ($allocationRow['receivableCurrency'] ?? $allocationRow['currency'] ?? ''));
+    if ($receiptStatus === 'void'
+        || $allocationBookingReference !== (string) ($workspaceBooking['number'] ?? '')
+        || $lineReference === ''
+        || $currency === '') {
+        continue;
+    }
+
+    $allocationKey = $lineMetricKey($lineReference, $currency);
+    $allocatedByLine[$allocationKey] = ($allocatedByLine[$allocationKey] ?? 0.0)
+        + (float) ($allocationRow['receivableAmountAllocated'] ?? $allocationRow['allocatedAmount'] ?? 0);
+}
 $receivableByLine = [];
 foreach (($customerPaymentFoundation['serviceReceivables'] ?? []) as $receivableRow) {
     $lineReference = trim((string) ($receivableRow['serviceLineReference'] ?? ''));
@@ -588,19 +638,43 @@ foreach (($supplierFoundation['obligations'] ?? []) as $obligationRow) {
 foreach ($serviceLines as &$serviceLine) {
     $lineKey = $lineMetricKey((string) ($serviceLine['lineNumber'] ?? ''), (string) ($serviceLine['currency'] ?? ''));
     $derivedReceivable = round((float) ($serviceLine['finalSalePrice'] ?? 0), 2);
-    $derivedPayable = round((float) ($serviceLine['purchaseCost'] ?? 0), 2);
-    $resolvedReceivable = array_key_exists($lineKey, $receivableByLine)
+    $derivedPayable = round(
+        (float) ($serviceLine['purchaseCost'] ?? 0)
+        * ((string) ($serviceLine['currency'] ?? 'PKR') === (string) ($serviceLine['costCurrency'] ?? $serviceLine['currency'] ?? 'PKR')
+            ? 1
+            : max((float) ($serviceLine['pricingExchangeRate'] ?? 1), 0)),
+        2
+    );
+    $hasReceivableRow = array_key_exists($lineKey, $receivableByLine);
+    $cancelSettled = (bool) ($serviceLine['latestCancelFinanciallySettled'] ?? false);
+    $cancelFinalCharge = round((float) ($serviceLine['latestCancelCustomerFinalChargeAmount'] ?? 0), 2);
+    $resolvedReceivable = $hasReceivableRow
         ? (float) ($receivableByLine[$lineKey]['dueAmount'] ?? 0)
-        : $derivedReceivable;
+        : ($cancelSettled ? max($cancelFinalCharge, 0) : $derivedReceivable);
+    $resolvedAllocatedSource = (float) ($allocatedByLine[$lineKey] ?? 0);
+    if (! $hasReceivableRow && $cancelSettled && $resolvedAllocatedSource <= 0.005) {
+        $resolvedAllocatedSource = $resolvedReceivable;
+    }
+    $resolvedAllocated = min(max($resolvedAllocatedSource, 0), max($resolvedReceivable, 0));
+    $resolvedOutstanding = max($resolvedReceivable - $resolvedAllocated, 0);
     $resolvedPayable = array_key_exists($lineKey, $payableByLine)
-        ? (float) ($payableByLine[$lineKey]['grossAmount'] ?? 0)
-        : $derivedPayable;
+        ? (float) ($payableByLine[$lineKey]['netPayableAmount'] ?? 0)
+        : (array_key_exists('rowPayable', $serviceLine)
+            ? (float) ($serviceLine['rowPayable'] ?? 0)
+            : $derivedPayable);
+    $resolvedProfit = array_key_exists('rowProfit', $serviceLine)
+        ? (float) ($serviceLine['rowProfit'] ?? 0)
+        : (array_key_exists('profit', $serviceLine)
+            ? (float) ($serviceLine['profit'] ?? 0)
+            : round($resolvedReceivable - $derivedPayable, 2));
 
     $serviceLine['rowSpTotal'] = round($resolvedReceivable, 2);
     $serviceLine['rowReceivable'] = round($resolvedReceivable, 2);
+    $serviceLine['allocatedAmount'] = round($resolvedAllocated, 2);
+    $serviceLine['outstandingAmount'] = round(max($resolvedOutstanding, 0), 2);
     $serviceLine['rowPayable'] = round($resolvedPayable, 2);
-    $serviceLine['rowProfit'] = round($resolvedReceivable - $resolvedPayable, 2);
-    $serviceLine['rowFinancialSource'] = array_key_exists($lineKey, $receivableByLine) || array_key_exists($lineKey, $payableByLine)
+    $serviceLine['rowProfit'] = round($resolvedProfit, 2);
+    $serviceLine['rowFinancialSource'] = $hasReceivableRow || array_key_exists($lineKey, $payableByLine)
         ? 'persisted'
         : 'commercial_fallback';
     $serviceLine['profit'] = $serviceLine['rowProfit'];
@@ -855,6 +929,126 @@ if ($editingReminderForm['id'] > 0) {
         $editingReminderForm['linkedTarget'] = 'supplier_obligation:' . (int) $editingReminder['supplier_obligation_id'];
     }
 }
+
+$travelerDirectoryById = [];
+$travelerDirectoryByName = [];
+foreach ($travelers as $travelerRow) {
+    $travelerId = (int) ($travelerRow['travelerId'] ?? 0);
+    $travelerName = trim((string) ($travelerRow['fullName'] ?? ''));
+    if ($travelerId > 0) {
+        $travelerDirectoryById[$travelerId] = $travelerRow;
+    }
+    if ($travelerName !== '') {
+        $travelerDirectoryByName[mb_strtolower($travelerName)] = $travelerRow;
+    }
+}
+
+$passengerSummaryRows = [];
+foreach ($serviceLines as $serviceLine) {
+    $passengerName = trim((string) ($serviceLine['passengerName'] ?? ''));
+    if ($passengerName === '') {
+        continue;
+    }
+
+    $travelerId = (int) ($serviceLine['travelerId'] ?? 0);
+    $travelerProfile = $travelerId > 0
+        ? ($travelerDirectoryById[$travelerId] ?? null)
+        : ($travelerDirectoryByName[mb_strtolower($passengerName)] ?? null);
+
+    $serviceRoute = trim((string) ($serviceLine['sectorFrom'] ?? ''));
+    $sectorTo = trim((string) ($serviceLine['sectorTo'] ?? ''));
+    if ($serviceRoute !== '' && $sectorTo !== '') {
+        $serviceRoute .= ' / ' . $sectorTo;
+    } elseif ($serviceRoute === '' && $sectorTo !== '') {
+        $serviceRoute = $sectorTo;
+    }
+    if ($serviceRoute === '') {
+        $serviceRoute = 'N/A';
+    }
+
+    $summaryKey = $travelerId > 0 ? 'traveler:' . $travelerId : 'name:' . mb_strtolower($passengerName);
+    if (! isset($passengerSummaryRows[$summaryKey])) {
+        $relation = trim((string) ($travelerProfile['type'] ?? ''));
+        if ($relation === '') {
+            $relation = count($passengerSummaryRows) === 0 ? 'Self' : 'Passenger';
+        }
+        $remarks = trim((string) ($travelerProfile['notes'] ?? ''));
+        if ($remarks === '' && count($passengerSummaryRows) === 0) {
+            $remarks = 'Lead Traveler';
+        }
+
+        $passengerSummaryRows[$summaryKey] = [
+            'travelerId' => $travelerId,
+            'passengerName' => $passengerName,
+            'relation' => $relation,
+            'routes' => [],
+            'pnrs' => [],
+            'invoiceAmount' => 0.0,
+            'paidAmount' => 0.0,
+            'outstandingAmount' => 0.0,
+            'currency' => (string) ($serviceLine['currency'] ?? $invoiceCurrency),
+            'remarks' => $remarks,
+        ];
+    }
+
+    $passengerSummaryRows[$summaryKey]['routes'][$serviceRoute] = true;
+    $servicePnr = trim((string) ($serviceLine['pnr'] ?? ''));
+    if ($servicePnr !== '') {
+        $passengerSummaryRows[$summaryKey]['pnrs'][$servicePnr] = true;
+    }
+    $passengerSummaryRows[$summaryKey]['invoiceAmount'] += round((float) ($serviceLine['rowReceivable'] ?? 0), 2);
+    $passengerSummaryRows[$summaryKey]['paidAmount'] += max(
+        0,
+        round((float) ($serviceLine['allocatedAmount'] ?? 0), 2)
+    );
+    $passengerSummaryRows[$summaryKey]['outstandingAmount'] += round((float) ($serviceLine['outstandingAmount'] ?? 0), 2);
+}
+
+if ($passengerSummaryRows === []) {
+    foreach ($travelers as $travelerIndex => $travelerRow) {
+        $passengerName = trim((string) ($travelerRow['fullName'] ?? ''));
+        if ($passengerName === '') {
+            continue;
+        }
+
+        $summaryKey = 'traveler:' . (int) ($travelerRow['travelerId'] ?? 0) . ':' . $travelerIndex;
+        $passengerSummaryRows[$summaryKey] = [
+            'travelerId' => (int) ($travelerRow['travelerId'] ?? 0),
+            'passengerName' => $passengerName,
+            'relation' => $travelerIndex === 0 ? 'Self' : (string) ($travelerRow['type'] ?? 'Passenger'),
+            'routes' => ['N/A' => true],
+            'pnrs' => [],
+            'invoiceAmount' => 0.0,
+            'paidAmount' => 0.0,
+            'outstandingAmount' => 0.0,
+            'currency' => $invoiceCurrency,
+            'remarks' => $travelerIndex === 0 ? 'Lead Traveler' : (string) ($travelerRow['notes'] ?? ''),
+        ];
+    }
+}
+
+$passengerSummaryRows = array_values(array_map(
+    static function (array $row) use ($formatMoney): array {
+        $routeLabels = array_keys($row['routes'] ?? []);
+        sort($routeLabels);
+        $pnrLabels = array_keys($row['pnrs'] ?? []);
+        sort($pnrLabels);
+        $currency = (string) ($row['currency'] ?? 'PKR');
+
+        return [
+            'travelerId' => (int) ($row['travelerId'] ?? 0),
+            'passengerName' => (string) ($row['passengerName'] ?? ''),
+            'relation' => (string) ($row['relation'] ?? 'Passenger'),
+            'pnr' => $pnrLabels !== [] ? implode(' / ', $pnrLabels) : 'N/A',
+            'route' => $routeLabels !== [] ? implode(' | ', $routeLabels) : 'N/A',
+            'invoiceAmountDisplay' => $currency . ' ' . $formatMoney((float) ($row['invoiceAmount'] ?? 0)),
+            'paidDisplay' => $currency . ' ' . $formatMoney((float) ($row['paidAmount'] ?? 0)),
+            'outstandingDisplay' => $currency . ' ' . $formatMoney((float) ($row['outstandingAmount'] ?? 0)),
+            'remarks' => (string) ($row['remarks'] ?? ''),
+        ];
+    },
+    $passengerSummaryRows
+));
 
 $ledgerMetrics = [
     ['label' => 'Booking No.', 'values' => [['currency' => '', 'amount' => $workspaceBooking['number']]]],

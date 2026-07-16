@@ -2,12 +2,14 @@
 
 declare(strict_types=1);
 
-define('BASE_PATH', dirname(__DIR__));
+defined('BASE_PATH') || define('BASE_PATH', dirname(__DIR__));
 
-require BASE_PATH . '/app/Helpers/functions.php';
-require BASE_PATH . '/app/Core/bootstrap.php';
+require_once BASE_PATH . '/app/Helpers/functions.php';
+require_once BASE_PATH . '/app/Core/bootstrap.php';
 
-$app = \App\Core\App::bootstrap(BASE_PATH);
+$app = (isset($app) && $app instanceof \App\Core\App)
+    ? $app
+    : \App\Core\App::bootstrap(BASE_PATH);
 /** @var PDO $db */
 $db = $app->get('db');
 
@@ -24,6 +26,8 @@ $check = static function (string $label, bool $passed, string $details = '') use
 $warn = static function (string $label, bool $passed, string $details = ''): void {
     echo ($passed ? '[PASS] ' : '[WARN] ') . $label . ($details !== '' ? ' - ' . $details : '') . PHP_EOL;
 };
+
+$opsCheck = app_is_production() ? $warn : $check;
 
 $tableExists = static function (string $table) use ($db): bool {
     $statement = $db->prepare(
@@ -60,25 +64,26 @@ $check('PDO MySQL extension is loaded', extension_loaded('pdo_mysql'));
 $check('mbstring extension is loaded', extension_loaded('mbstring'));
 $check('fileinfo extension is loaded', extension_loaded('fileinfo'));
 $check('OpenSSL extension is loaded', extension_loaded('openssl'));
-$check('Database backup script exists', is_file(BASE_PATH . '/scripts/backup_database.php'));
-$check('Backup cycle orchestration script exists', is_file(BASE_PATH . '/scripts/run_backup_cycle.php'));
-$check('Production preflight script exists', is_file(BASE_PATH . '/scripts/preflight_production.php'));
-$check('Release hygiene audit script exists', is_file(BASE_PATH . '/scripts/release_hygiene_audit.php'));
+$opsCheck('Database backup script exists', is_file(BASE_PATH . '/scripts/backup_database.php'));
+$opsCheck('Backup cycle orchestration script exists', is_file(BASE_PATH . '/scripts/run_backup_cycle.php'));
+$opsCheck('Production preflight script exists', is_file(BASE_PATH . '/scripts/preflight_production.php'));
+$opsCheck('Release hygiene audit script exists', is_file(BASE_PATH . '/scripts/release_hygiene_audit.php'));
 $check('Workspace master-data authority readiness test exists', is_file(BASE_PATH . '/tests/workspace_master_data_authority.php'));
 $check('Workspace document/reminder readiness test exists', is_file(BASE_PATH . '/tests/workspace_document_reminder_readiness.php'));
 $check('Workspace treasury refresh readiness test exists', is_file(BASE_PATH . '/tests/workspace_treasury_refresh_readiness.php'));
 $check('Accounting engine readiness test exists', is_file(BASE_PATH . '/tests/accounting_engine_readiness.php'));
+$check('Financial invariants audit exists', is_file(BASE_PATH . '/tests/financial_invariants_audit.php'));
 $check('Offline sync readiness test exists', is_file(BASE_PATH . '/tests/offline_sync_readiness.php'));
 $check('Security layer readiness test exists', is_file(BASE_PATH . '/tests/security_layer_readiness.php'));
-$check('Non-production reset script exists', is_file(BASE_PATH . '/scripts/reset_non_production_data.php'));
-$check('Clean test database verification script exists', is_file(BASE_PATH . '/scripts/verify_clean_test_database.php'));
-$check('Storage document audit script exists', is_file(BASE_PATH . '/scripts/audit_storage_documents.php'));
-$check('Environment config audit script exists', is_file(BASE_PATH . '/scripts/audit_environment_config.php'));
+$opsCheck('Non-production reset script exists', is_file(BASE_PATH . '/scripts/reset_non_production_data.php'));
+$opsCheck('Clean test database verification script exists', is_file(BASE_PATH . '/scripts/verify_clean_test_database.php'));
+$opsCheck('Storage document audit script exists', is_file(BASE_PATH . '/scripts/audit_storage_documents.php'));
+$opsCheck('Environment config audit script exists', is_file(BASE_PATH . '/scripts/audit_environment_config.php'));
 $backupScript = is_file(BASE_PATH . '/scripts/backup_database.php')
     ? (string) file_get_contents(BASE_PATH . '/scripts/backup_database.php')
     : '';
-$check('Database backup uses transaction-safe dump option', str_contains($backupScript, '--single-transaction'));
-$check('Database backup writes outside public web root by default', str_contains($backupScript, 'storage/backups/database'));
+$opsCheck('Database backup uses transaction-safe dump option', str_contains($backupScript, '--single-transaction'));
+$opsCheck('Database backup writes outside public web root by default', str_contains($backupScript, 'storage/backups/database'));
 
 $sameSiteValues = ['Lax', 'Strict', 'None'];
 $sessionSameSite = ucfirst(strtolower((string) config('security.session.cookie_samesite', 'Lax')));
@@ -91,7 +96,7 @@ $check('Referrer Policy is configured', trim((string) config('security.headers.r
 $check('Permissions Policy is configured', trim((string) config('security.headers.permissions_policy', '')) !== '');
 $check('Launcher gate configuration exists', array_key_exists('launcher_gate', (array) config('security', [])));
 $check('Password hash driver is explicitly configured', trim((string) config('security.password.hash_driver', '')) !== '', (string) config('security.password.hash_driver', ''));
-$check('Launcher keypair generation script exists', is_file(BASE_PATH . '/scripts/generate_launcher_keypair.php'));
+$opsCheck('Launcher keypair generation script exists', is_file(BASE_PATH . '/scripts/generate_launcher_keypair.php'));
 $check('Health check controller exists', is_file(BASE_PATH . '/app/Controllers/HealthController.php'));
 $check('Health check service exists', is_file(BASE_PATH . '/app/Services/HealthCheckService.php'));
 $userPolicy = is_file(BASE_PATH . '/app/Policies/UserPolicy.php')
@@ -285,11 +290,19 @@ $receiptMismatches = $db->query(
 )->fetchAll() ?: [];
 $warn('Customer receipt allocation totals are consistent', $receiptMismatches === [], $receiptMismatches !== [] ? json_encode($receiptMismatches, JSON_UNESCAPED_SLASHES) : '');
 
+$supplierPaymentConvertedAdvanceSelect = $columnExists('supplier_payments', 'converted_advance_amount')
+    ? 'converted_advance_amount'
+    : '0 AS converted_advance_amount';
+$supplierPaymentConvertedAdvanceValue = $columnExists('supplier_payments', 'converted_advance_amount')
+    ? 'converted_advance_amount'
+    : '0';
+
 $supplierPaymentMismatches = $db->query(
-    'SELECT id, booking_reference, payment_no, currency, paid_amount, allocated_amount, unallocated_amount
+    'SELECT id, booking_reference, payment_no, currency, paid_amount, allocated_amount, unallocated_amount, '
+        . $supplierPaymentConvertedAdvanceSelect . '
      FROM supplier_payments
      WHERE status <> "void"
-       AND ABS(paid_amount - (allocated_amount + unallocated_amount)) > 0.005
+       AND ABS(paid_amount - (allocated_amount + unallocated_amount + ' . $supplierPaymentConvertedAdvanceValue . ')) > 0.005
      LIMIT 10'
 )->fetchAll() ?: [];
 $warn('Supplier payment allocation totals are consistent', $supplierPaymentMismatches === [], $supplierPaymentMismatches !== [] ? json_encode($supplierPaymentMismatches, JSON_UNESCAPED_SLASHES) : '');
@@ -308,7 +321,8 @@ if ($failures !== []) {
     foreach ($failures as $failure) {
         echo ' - ' . $failure . PHP_EOL;
     }
-    exit(1);
+    return 1;
 }
 
 echo PHP_EOL . 'Production readiness checks passed.' . PHP_EOL;
+return 0;

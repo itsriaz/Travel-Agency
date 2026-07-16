@@ -20,6 +20,11 @@ final class AuditLog
         }
 
         try {
+            $countryCode = self::detectedCountryCode();
+            if ($countryCode !== '' && ! isset($payload['country_code']) && ! isset($payload['request_country_code'])) {
+                $payload['request_country_code'] = $countryCode;
+            }
+
             $statement = $db->prepare(
                 'INSERT INTO audit_logs (event_name, actor_user_id, ip_address, user_agent, payload_json, created_at)
                  VALUES (:event_name, :actor_user_id, :ip_address, :user_agent, :payload_json, NOW())'
@@ -35,5 +40,32 @@ final class AuditLog
         } catch (Throwable) {
             // Foundation stub: audit logging must never break the request lifecycle.
         }
+    }
+
+    private static function detectedCountryCode(): string
+    {
+        $headerNames = config('branches.login.country_headers', []);
+        if (! is_array($headerNames)) {
+            return '';
+        }
+
+        foreach ($headerNames as $headerName) {
+            $normalizedHeaderName = trim((string) $headerName);
+            if ($normalizedHeaderName === '') {
+                continue;
+            }
+
+            $value = trim((string) ($_SERVER[$normalizedHeaderName] ?? $_ENV[$normalizedHeaderName] ?? ''));
+            if ($value === '') {
+                continue;
+            }
+
+            $countryCode = strtoupper(substr($value, 0, 2));
+            if (preg_match('/^[A-Z]{2}$/', $countryCode) === 1) {
+                return $countryCode;
+            }
+        }
+
+        return '';
     }
 }

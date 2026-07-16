@@ -80,8 +80,15 @@ final class CustomerPaymentRepository extends BaseRepository
             ? ' LEFT JOIN treasury_accounts ta ON ta.id = customer_receipts.treasury_account_id'
             : '';
 
+        $ownershipSelect = $this->columnExists('customer_receipts', 'traveler_id')
+            ? ', customer_receipts.traveler_id'
+            : ', NULL AS traveler_id';
+        $purposeSelect = $this->columnExists('customer_receipts', 'receipt_purpose')
+            ? ', customer_receipts.receipt_purpose'
+            : ', "booking_payment" AS receipt_purpose';
+
         $statement = $this->db->prepare(
-            'SELECT customer_receipts.id, customer_receipts.branch_id, customer_receipts.booking_reference, customer_receipts.receipt_no, customer_receipts.receipt_date, customer_receipts.currency, ' . $this->customerReceiptTenderedAmountSelect('customer_receipts') . ',
+            'SELECT customer_receipts.id, customer_receipts.branch_id' . $ownershipSelect . $purposeSelect . ', customer_receipts.booking_reference, customer_receipts.receipt_no, customer_receipts.receipt_date, customer_receipts.currency, ' . $this->customerReceiptTenderedAmountSelect('customer_receipts') . ',
                     customer_receipts.received_amount, customer_receipts.allocated_amount,
                     customer_receipts.unallocated_amount, ' . $this->customerReceiptReturnedAmountSelect('customer_receipts') . ', customer_receipts.payment_method, customer_receipts.reference_number, customer_receipts.bank_card_detail, customer_receipts.charges_amount, customer_receipts.status,
                     customer_receipts.exchange_rate_to_booking, customer_receipts.remarks' . $treasurySelect . ',
@@ -438,6 +445,57 @@ final class CustomerPaymentRepository extends BaseRepository
             return [];
         }
 
+        if ($this->columnExists('customer_receipts', 'traveler_id')) {
+            $statement = $this->db->prepare(
+                'SELECT
+                    customer_rows.traveler_id,
+                    MAX(customer_rows.customer_name) AS customer_name,
+                    MAX(customer_rows.contact_mobile) AS contact_mobile,
+                    SUM(customer_rows.open_receivable_count) AS open_receivable_count,
+                    SUM(customer_rows.open_receivable_amount) AS open_receivable_amount
+                 FROM (
+                    SELECT
+                        b.lead_traveler_id AS traveler_id,
+                        COALESCE(t.full_name, bp.lead_traveler_name, "Customer") AS customer_name,
+                        MAX(COALESCE(t.mobile, bp.contact_mobile, "")) AS contact_mobile,
+                        COUNT(cri.id) AS open_receivable_count,
+                        COALESCE(SUM(cri.outstanding_amount), 0) AS open_receivable_amount
+                    FROM bookings b
+                    LEFT JOIN customer_receivable_items cri
+                        ON cri.booking_reference = b.booking_reference
+                       AND cri.status IN ("open", "partially_paid")
+                       AND cri.outstanding_amount > 0
+                    LEFT JOIN booking_parties bp ON bp.booking_id = b.id
+                    LEFT JOIN travelers t ON t.id = b.lead_traveler_id
+                    WHERE b.branch_id = :booking_branch_id
+                      AND b.lead_traveler_id IS NOT NULL
+                      AND b.lead_traveler_id > 0
+                    GROUP BY b.lead_traveler_id, COALESCE(t.full_name, bp.lead_traveler_name, "Customer")
+                    UNION ALL
+                    SELECT
+                        cr.traveler_id,
+                        COALESCE(t.full_name, "Customer") AS customer_name,
+                        COALESCE(t.mobile, "") AS contact_mobile,
+                        0 AS open_receivable_count,
+                        0.00 AS open_receivable_amount
+                    FROM customer_receipts cr
+                    LEFT JOIN travelers t ON t.id = cr.traveler_id
+                    WHERE cr.branch_id = :receipt_branch_id
+                      AND cr.traveler_id IS NOT NULL
+                      AND cr.traveler_id > 0
+                      AND cr.unallocated_amount > 0
+                 ) customer_rows
+                 GROUP BY customer_rows.traveler_id
+                 ORDER BY customer_name ASC'
+            );
+            $statement->execute([
+                'booking_branch_id' => $branchId,
+                'receipt_branch_id' => $branchId,
+            ]);
+
+            return $statement->fetchAll() ?: [];
+        }
+
         $statement = $this->db->prepare(
             'SELECT
                 b.lead_traveler_id AS traveler_id,
@@ -466,6 +524,65 @@ final class CustomerPaymentRepository extends BaseRepository
     {
         if ($branchId <= 0 || $travelerId <= 0) {
             return [];
+        }
+
+        if ($this->columnExists('customer_receipts', 'traveler_id')) {
+            $statement = $this->db->prepare(
+                'SELECT
+                    currency_rows.currency,
+                    SUM(currency_rows.open_receivable_count) AS open_receivable_count,
+                    SUM(currency_rows.open_receivable_amount) AS open_receivable_amount
+                 FROM (
+                    SELECT
+                        cri.currency,
+                        COUNT(cri.id) AS open_receivable_count,
+                        COALESCE(SUM(cri.outstanding_amount), 0) AS open_receivable_amount
+                    FROM customer_receivable_items cri
+                    INNER JOIN bookings b ON b.booking_reference = cri.booking_reference
+                    WHERE b.branch_id = :receivable_branch_id
+                      AND b.lead_traveler_id = :receivable_traveler_id
+                      AND cri.status IN ("open", "partially_paid")
+                      AND cri.outstanding_amount > 0
+                    GROUP BY cri.currency
+                    UNION ALL
+                    SELECT
+                        cr.currency,
+                        0 AS open_receivable_count,
+                        0.00 AS open_receivable_amount
+                    FROM customer_receipts cr
+                    WHERE cr.branch_id = :receipt_branch_id
+                      AND cr.traveler_id = :receipt_traveler_id
+                      AND cr.unallocated_amount > 0
+                    GROUP BY cr.currency
+                 ) currency_rows
+                 GROUP BY currency_rows.currency
+                 ORDER BY FIELD(currency_rows.currency, "PKR", "AED", "USD"), currency_rows.currency ASC'
+            );
+            $statement->execute([
+                'receivable_branch_id' => $branchId,
+                'receivable_traveler_id' => $travelerId,
+                'receipt_branch_id' => $branchId,
+                'receipt_traveler_id' => $travelerId,
+            ]);
+
+            $rows = $statement->fetchAll() ?: [];
+            $byCurrency = [];
+            foreach ($rows as $row) {
+                $currency = strtoupper(trim((string) ($row['currency'] ?? '')));
+                if ($currency === '') {
+                    continue;
+                }
+                $byCurrency[$currency] = $row;
+            }
+            foreach (['PKR', 'AED', 'USD'] as $currency) {
+                $byCurrency[$currency] ??= [
+                    'currency' => $currency,
+                    'open_receivable_count' => 0,
+                    'open_receivable_amount' => 0,
+                ];
+            }
+
+            return array_values(array_replace(array_flip(['PKR', 'AED', 'USD']), $byCurrency));
         }
 
         $statement = $this->db->prepare(
@@ -580,6 +697,498 @@ final class CustomerPaymentRepository extends BaseRepository
         return $statement->fetchAll() ?: [];
     }
 
+    public function availableCustomerAdvances(int $branchId, int $travelerId, string $currency): array
+    {
+        if (
+            $branchId <= 0
+            || $travelerId <= 0
+            || trim($currency) === ''
+            || ! $this->columnExists('customer_receipts', 'traveler_id')
+            || ! $this->columnExists('customer_receipts', 'receipt_purpose')
+        ) {
+            return [];
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT
+                cr.id,
+                cr.receipt_no,
+                cr.receipt_date,
+                cr.currency,
+                cr.received_amount,
+                cr.allocated_amount,
+                cr.unallocated_amount,
+                cr.returned_amount,
+                cr.payment_method,
+                cr.reference_number,
+                cr.remarks,
+                COALESCE(t.full_name, "Customer") AS customer_name
+             FROM customer_receipts cr
+             LEFT JOIN travelers t ON t.id = cr.traveler_id
+             WHERE cr.branch_id = :branch_id
+               AND cr.traveler_id = :traveler_id
+               AND cr.currency = :currency
+               AND cr.receipt_purpose = "customer_advance"
+               AND cr.status <> "void"
+               AND cr.unallocated_amount > 0
+             ORDER BY cr.receipt_date ASC, cr.id ASC'
+        );
+        $statement->execute([
+            'branch_id' => $branchId,
+            'traveler_id' => $travelerId,
+            'currency' => strtoupper(trim($currency)),
+        ]);
+
+        return $statement->fetchAll() ?: [];
+    }
+
+    public function customerNameByTraveler(int $travelerId): string
+    {
+        if ($travelerId <= 0) {
+            return 'Customer';
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT full_name
+             FROM travelers
+             WHERE id = :id
+             LIMIT 1'
+        );
+        $statement->execute(['id' => $travelerId]);
+        $name = trim((string) ($statement->fetchColumn() ?: ''));
+
+        return $name !== '' ? $name : 'Customer';
+    }
+
+    public function refundCustomerAdvance(array $data): array
+    {
+        return $this->transaction(function () use ($data): array {
+            $receiptId = (int) ($data['customer_receipt_id'] ?? 0);
+            $amount = round((float) ($data['amount'] ?? 0), 2);
+            if ($receiptId <= 0 || $amount <= 0) {
+                throw new RuntimeException('Select an advance and enter a refund amount greater than zero.');
+            }
+
+            $statement = $this->db->prepare(
+                'SELECT id, branch_id, traveler_id, receipt_no, receipt_date, currency, received_amount, allocated_amount,
+                        unallocated_amount, returned_amount, payment_method, status
+                 FROM customer_receipts
+                 WHERE id = :receipt_id
+                 FOR UPDATE'
+            );
+            $statement->execute(['receipt_id' => $receiptId]);
+            $receipt = $statement->fetch();
+            if ($receipt === false) {
+                throw new RuntimeException('The selected customer advance could not be found.');
+            }
+
+            if ((int) ($receipt['branch_id'] ?? 0) !== (int) ($data['branch_id'] ?? 0)
+                || (int) ($receipt['traveler_id'] ?? 0) !== (int) ($data['traveler_id'] ?? 0)
+                || strtoupper((string) ($receipt['currency'] ?? '')) !== strtoupper((string) ($data['currency'] ?? ''))
+            ) {
+                throw new RuntimeException('The selected advance does not match this customer, branch, and currency.');
+            }
+
+            $availableAmount = round((float) ($receipt['unallocated_amount'] ?? 0), 2);
+            if ($amount > $availableAmount + 0.005) {
+                throw new RuntimeException('Refund amount cannot exceed available customer advance.');
+            }
+
+            $newUnallocated = round(max(0, $availableAmount - $amount), 2);
+            $newReturned = round((float) ($receipt['returned_amount'] ?? 0) + $amount, 2);
+            $status = $newUnallocated > 0.005
+                ? 'received'
+                : ((float) ($receipt['allocated_amount'] ?? 0) > 0.005 ? 'fully_allocated' : 'received');
+
+            $update = $this->db->prepare(
+                'UPDATE customer_receipts
+                 SET unallocated_amount = :unallocated_amount,
+                     returned_amount = :returned_amount,
+                     status = :status
+                 WHERE id = :receipt_id'
+            );
+            $update->execute([
+                'unallocated_amount' => $newUnallocated,
+                'returned_amount' => $newReturned,
+                'status' => $status,
+                'receipt_id' => $receiptId,
+            ]);
+
+            $insert = $this->db->prepare(
+                'INSERT INTO customer_advance_refunds (
+                    customer_receipt_id, branch_id, traveler_id, refund_date, currency, amount,
+                    payment_method, treasury_account_id, reference_number, reason, remarks, created_by_user_id
+                 ) VALUES (
+                    :customer_receipt_id, :branch_id, :traveler_id, :refund_date, :currency, :amount,
+                    :payment_method, :treasury_account_id, :reference_number, :reason, :remarks, :created_by_user_id
+                 )'
+            );
+            $insert->execute([
+                'customer_receipt_id' => $receiptId,
+                'branch_id' => (int) $data['branch_id'],
+                'traveler_id' => (int) $data['traveler_id'],
+                'refund_date' => $data['refund_date'],
+                'currency' => strtoupper((string) $data['currency']),
+                'amount' => $amount,
+                'payment_method' => $data['payment_method'],
+                'treasury_account_id' => $data['treasury_account_id'] ?? null,
+                'reference_number' => $data['reference_number'] ?? null,
+                'reason' => $data['reason'],
+                'remarks' => $data['remarks'] ?? null,
+                'created_by_user_id' => $data['actor_user_id'] ?? null,
+            ]);
+            $refundId = (int) $this->db->lastInsertId();
+
+            AuditLog::record($this->app, 'customer.advance.refunded', [
+                'user_id' => $data['actor_user_id'] ?? null,
+                'customer_receipt_id' => $receiptId,
+                'customer_advance_refund_id' => $refundId,
+                'traveler_id' => (int) $data['traveler_id'],
+                'currency' => strtoupper((string) $data['currency']),
+                'amount' => $amount,
+            ]);
+
+            return [
+                'refund_id' => $refundId,
+                'receipt_id' => $receiptId,
+                'receipt_no' => (string) ($receipt['receipt_no'] ?? ''),
+                'branch_id' => (int) ($receipt['branch_id'] ?? 0),
+                'traveler_id' => (int) ($receipt['traveler_id'] ?? 0),
+                'currency' => strtoupper((string) ($receipt['currency'] ?? 'PKR')),
+                'amount' => $amount,
+                'refund_date' => (string) $data['refund_date'],
+                'payment_method' => (string) $data['payment_method'],
+                'treasury_account_id' => $data['treasury_account_id'] ?? null,
+            ];
+        });
+    }
+
+    public function attachCustomerAdvanceRefundJournalEntry(int $refundId, int $journalEntryId): void
+    {
+        $statement = $this->db->prepare(
+            'UPDATE customer_advance_refunds
+             SET journal_entry_id = :journal_entry_id
+             WHERE id = :refund_id'
+        );
+        $statement->execute([
+            'journal_entry_id' => $journalEntryId,
+            'refund_id' => $refundId,
+        ]);
+    }
+
+    public function findCustomerAdvanceRefundById(int $refundId): ?array
+    {
+        if ($refundId <= 0 || ! $this->tableExists('customer_advance_refunds')) {
+            return null;
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT car.id, car.customer_receipt_id, car.branch_id, car.traveler_id, car.refund_date,
+                    car.currency, car.amount, car.payment_method, car.treasury_account_id,
+                    car.reference_number, car.reason, car.remarks, car.journal_entry_id,
+                    cr.receipt_no, COALESCE(t.full_name, "Customer") AS customer_name
+             FROM customer_advance_refunds car
+             INNER JOIN customer_receipts cr ON cr.id = car.customer_receipt_id
+             LEFT JOIN travelers t ON t.id = car.traveler_id
+             WHERE car.id = :id
+             LIMIT 1'
+        );
+        $statement->execute(['id' => $refundId]);
+        $row = $statement->fetch();
+
+        return $row !== false ? $row : null;
+    }
+
+    public function latestCustomerAdvanceReceiptJournalId(int $receiptId, string $receiptNo): ?int
+    {
+        if ($this->tableExists('customer_advance_corrections')) {
+            $statement = $this->db->prepare(
+                'SELECT new_journal_entry_id
+                 FROM customer_advance_corrections
+                 WHERE customer_receipt_id = :receipt_id
+                   AND correction_type = "advance_received"
+                   AND new_journal_entry_id IS NOT NULL
+                 ORDER BY id DESC
+                 LIMIT 1'
+            );
+            $statement->execute(['receipt_id' => $receiptId]);
+            $journalId = (int) ($statement->fetchColumn() ?: 0);
+            if ($journalId > 0) {
+                return $journalId;
+            }
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT id
+             FROM journal_entries
+             WHERE source_type = "customer_receipt_recorded"
+               AND source_reference = :receipt_no
+             ORDER BY id DESC
+             LIMIT 1'
+        );
+        $statement->execute(['receipt_no' => $receiptNo]);
+        $journalId = (int) ($statement->fetchColumn() ?: 0);
+
+        return $journalId > 0 ? $journalId : null;
+    }
+
+    public function latestCustomerAdvanceRefundJournalId(int $refundId): ?int
+    {
+        if ($this->tableExists('customer_advance_corrections')) {
+            $statement = $this->db->prepare(
+                'SELECT new_journal_entry_id
+                 FROM customer_advance_corrections
+                 WHERE customer_advance_refund_id = :refund_id
+                   AND correction_type = "advance_returned"
+                   AND new_journal_entry_id IS NOT NULL
+                 ORDER BY id DESC
+                 LIMIT 1'
+            );
+            $statement->execute(['refund_id' => $refundId]);
+            $journalId = (int) ($statement->fetchColumn() ?: 0);
+            if ($journalId > 0) {
+                return $journalId;
+            }
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT journal_entry_id
+             FROM customer_advance_refunds
+             WHERE id = :refund_id
+             LIMIT 1'
+        );
+        $statement->execute(['refund_id' => $refundId]);
+        $journalId = (int) ($statement->fetchColumn() ?: 0);
+
+        return $journalId > 0 ? $journalId : null;
+    }
+
+    public function correctCustomerAdvanceReceipt(array $data): array
+    {
+        return $this->transaction(function () use ($data): array {
+            $receiptId = (int) ($data['customer_receipt_id'] ?? 0);
+            $newAmount = round((float) ($data['amount'] ?? 0), 2);
+            if ($receiptId <= 0 || $newAmount <= 0) {
+                throw new RuntimeException('Select an advance receipt and enter an amount greater than zero.');
+            }
+
+            $statement = $this->db->prepare(
+                'SELECT id, branch_id, traveler_id, receipt_no, receipt_date, currency, received_amount,
+                        allocated_amount, unallocated_amount, returned_amount, payment_method,
+                        treasury_account_id, reference_number, remarks, status
+                 FROM customer_receipts
+                 WHERE id = :receipt_id
+                 FOR UPDATE'
+            );
+            $statement->execute(['receipt_id' => $receiptId]);
+            $receipt = $statement->fetch();
+            if ($receipt === false) {
+                throw new RuntimeException('The selected customer advance could not be found.');
+            }
+
+            if ((int) ($receipt['branch_id'] ?? 0) !== (int) ($data['branch_id'] ?? 0)
+                || (int) ($receipt['traveler_id'] ?? 0) !== (int) ($data['traveler_id'] ?? 0)
+                || strtoupper((string) ($receipt['currency'] ?? '')) !== strtoupper((string) ($data['currency'] ?? ''))
+            ) {
+                throw new RuntimeException('The selected advance does not match this customer, branch, and currency.');
+            }
+
+            $allocatedAmount = round((float) ($receipt['allocated_amount'] ?? 0), 2);
+            $returnedAmount = round((float) ($receipt['returned_amount'] ?? 0), 2);
+            if ($newAmount + 0.005 < $allocatedAmount + $returnedAmount) {
+                throw new RuntimeException('Corrected advance amount cannot be less than the amount already applied or returned.');
+            }
+
+            $newUnallocated = round($newAmount - $allocatedAmount - $returnedAmount, 2);
+            $status = $newUnallocated > 0.005
+                ? 'received'
+                : ($allocatedAmount > 0.005 ? 'fully_allocated' : 'received');
+
+            $update = $this->db->prepare(
+                'UPDATE customer_receipts
+                 SET receipt_date = :receipt_date,
+                     received_amount = :received_amount,
+                     tendered_amount = :received_amount,
+                     unallocated_amount = :unallocated_amount,
+                     payment_method = :payment_method,
+                     treasury_account_id = :treasury_account_id,
+                     reference_number = :reference_number,
+                     remarks = :remarks,
+                     status = :status
+                 WHERE id = :receipt_id'
+            );
+            $update->execute([
+                'receipt_date' => $data['entry_date'],
+                'received_amount' => $newAmount,
+                'unallocated_amount' => $newUnallocated,
+                'payment_method' => $data['payment_method'],
+                'treasury_account_id' => $data['treasury_account_id'] ?? null,
+                'reference_number' => $data['reference_number'] ?? null,
+                'remarks' => $data['remarks'] ?? null,
+                'status' => $status,
+                'receipt_id' => $receiptId,
+            ]);
+
+            return [
+                'old' => $receipt,
+                'new' => array_merge($receipt, [
+                    'receipt_date' => $data['entry_date'],
+                    'received_amount' => $newAmount,
+                    'unallocated_amount' => $newUnallocated,
+                    'payment_method' => $data['payment_method'],
+                    'treasury_account_id' => $data['treasury_account_id'] ?? null,
+                    'reference_number' => $data['reference_number'] ?? null,
+                    'remarks' => $data['remarks'] ?? null,
+                    'status' => $status,
+                ]),
+            ];
+        });
+    }
+
+    public function correctCustomerAdvanceRefund(array $data): array
+    {
+        return $this->transaction(function () use ($data): array {
+            $refundId = (int) ($data['customer_advance_refund_id'] ?? 0);
+            $newAmount = round((float) ($data['amount'] ?? 0), 2);
+            if ($refundId <= 0 || $newAmount <= 0) {
+                throw new RuntimeException('Select an advance return and enter an amount greater than zero.');
+            }
+
+            $statement = $this->db->prepare(
+                'SELECT car.id, car.customer_receipt_id, car.branch_id, car.traveler_id, car.refund_date,
+                        car.currency, car.amount, car.payment_method, car.treasury_account_id,
+                        car.reference_number, car.reason, car.remarks, car.journal_entry_id,
+                        cr.receipt_no, cr.allocated_amount, cr.unallocated_amount, cr.returned_amount
+                 FROM customer_advance_refunds car
+                 INNER JOIN customer_receipts cr ON cr.id = car.customer_receipt_id
+                 WHERE car.id = :refund_id
+                 FOR UPDATE'
+            );
+            $statement->execute(['refund_id' => $refundId]);
+            $refund = $statement->fetch();
+            if ($refund === false) {
+                throw new RuntimeException('The selected customer advance return could not be found.');
+            }
+
+            if ((int) ($refund['branch_id'] ?? 0) !== (int) ($data['branch_id'] ?? 0)
+                || (int) ($refund['traveler_id'] ?? 0) !== (int) ($data['traveler_id'] ?? 0)
+                || strtoupper((string) ($refund['currency'] ?? '')) !== strtoupper((string) ($data['currency'] ?? ''))
+            ) {
+                throw new RuntimeException('The selected advance return does not match this customer, branch, and currency.');
+            }
+
+            $oldAmount = round((float) ($refund['amount'] ?? 0), 2);
+            $newUnallocated = round((float) ($refund['unallocated_amount'] ?? 0) + $oldAmount - $newAmount, 2);
+            $newReturned = round((float) ($refund['returned_amount'] ?? 0) - $oldAmount + $newAmount, 2);
+            if ($newUnallocated < -0.005 || $newReturned < -0.005) {
+                throw new RuntimeException('Corrected return amount is not valid for the remaining customer advance.');
+            }
+
+            $status = $newUnallocated > 0.005
+                ? 'received'
+                : ((float) ($refund['allocated_amount'] ?? 0) > 0.005 ? 'fully_allocated' : 'received');
+
+            $receiptUpdate = $this->db->prepare(
+                'UPDATE customer_receipts
+                 SET unallocated_amount = :unallocated_amount,
+                     returned_amount = :returned_amount,
+                     status = :status
+                 WHERE id = :receipt_id'
+            );
+            $receiptUpdate->execute([
+                'unallocated_amount' => max(0, $newUnallocated),
+                'returned_amount' => max(0, $newReturned),
+                'status' => $status,
+                'receipt_id' => (int) $refund['customer_receipt_id'],
+            ]);
+
+            $refundUpdate = $this->db->prepare(
+                'UPDATE customer_advance_refunds
+                 SET refund_date = :refund_date,
+                     amount = :amount,
+                     payment_method = :payment_method,
+                     treasury_account_id = :treasury_account_id,
+                     reference_number = :reference_number,
+                     reason = :reason,
+                     remarks = :remarks
+                 WHERE id = :refund_id'
+            );
+            $refundUpdate->execute([
+                'refund_date' => $data['entry_date'],
+                'amount' => $newAmount,
+                'payment_method' => $data['payment_method'],
+                'treasury_account_id' => $data['treasury_account_id'] ?? null,
+                'reference_number' => $data['reference_number'] ?? null,
+                'reason' => $data['reason'],
+                'remarks' => $data['remarks'] ?? null,
+                'refund_id' => $refundId,
+            ]);
+
+            return [
+                'old' => $refund,
+                'new' => array_merge($refund, [
+                    'refund_date' => $data['entry_date'],
+                    'amount' => $newAmount,
+                    'payment_method' => $data['payment_method'],
+                    'treasury_account_id' => $data['treasury_account_id'] ?? null,
+                    'reference_number' => $data['reference_number'] ?? null,
+                    'reason' => $data['reason'],
+                    'remarks' => $data['remarks'] ?? null,
+                ]),
+            ];
+        });
+    }
+
+    public function recordCustomerAdvanceCorrection(array $data): int
+    {
+        if (! $this->tableExists('customer_advance_corrections')) {
+            return 0;
+        }
+
+        $statement = $this->db->prepare(
+            'INSERT INTO customer_advance_corrections (
+                correction_type, customer_receipt_id, customer_advance_refund_id, branch_id, traveler_id,
+                old_entry_date, new_entry_date, currency, old_amount, new_amount,
+                old_payment_method, new_payment_method, old_treasury_account_id, new_treasury_account_id,
+                old_reference_number, new_reference_number, old_remarks, new_remarks, reason,
+                old_journal_entry_id, reversal_journal_entry_id, new_journal_entry_id, created_by_user_id
+             ) VALUES (
+                :correction_type, :customer_receipt_id, :customer_advance_refund_id, :branch_id, :traveler_id,
+                :old_entry_date, :new_entry_date, :currency, :old_amount, :new_amount,
+                :old_payment_method, :new_payment_method, :old_treasury_account_id, :new_treasury_account_id,
+                :old_reference_number, :new_reference_number, :old_remarks, :new_remarks, :reason,
+                :old_journal_entry_id, :reversal_journal_entry_id, :new_journal_entry_id, :created_by_user_id
+             )'
+        );
+        $statement->execute([
+            'correction_type' => $data['correction_type'],
+            'customer_receipt_id' => (int) $data['customer_receipt_id'],
+            'customer_advance_refund_id' => $data['customer_advance_refund_id'] ?? null,
+            'branch_id' => (int) $data['branch_id'],
+            'traveler_id' => (int) $data['traveler_id'],
+            'old_entry_date' => $data['old_entry_date'] ?? null,
+            'new_entry_date' => $data['new_entry_date'],
+            'currency' => strtoupper((string) $data['currency']),
+            'old_amount' => round((float) ($data['old_amount'] ?? 0), 2),
+            'new_amount' => round((float) ($data['new_amount'] ?? 0), 2),
+            'old_payment_method' => $data['old_payment_method'] ?? null,
+            'new_payment_method' => $data['new_payment_method'],
+            'old_treasury_account_id' => $data['old_treasury_account_id'] ?? null,
+            'new_treasury_account_id' => $data['new_treasury_account_id'] ?? null,
+            'old_reference_number' => $data['old_reference_number'] ?? null,
+            'new_reference_number' => $data['new_reference_number'] ?? null,
+            'old_remarks' => $data['old_remarks'] ?? null,
+            'new_remarks' => $data['new_remarks'] ?? null,
+            'reason' => $data['reason'],
+            'old_journal_entry_id' => $data['old_journal_entry_id'] ?? null,
+            'reversal_journal_entry_id' => $data['reversal_journal_entry_id'] ?? null,
+            'new_journal_entry_id' => $data['new_journal_entry_id'] ?? null,
+            'created_by_user_id' => $data['created_by_user_id'] ?? null,
+        ]);
+
+        return (int) $this->db->lastInsertId();
+    }
+
     public function updateOpenReceivableDueDates(string $bookingReference, string $dueDate, ?int $actorUserId = null): int
     {
         return $this->transaction(function () use ($bookingReference, $dueDate, $actorUserId): int {
@@ -673,7 +1282,7 @@ final class CustomerPaymentRepository extends BaseRepository
              WHERE booking_reference = :booking_reference
                AND service_line_reference = :service_line_reference
                AND due_group = :due_group
-             ORDER BY id ASC
+             ORDER BY id DESC
              LIMIT 1'
         );
         $statement->execute([
@@ -982,6 +1591,226 @@ final class CustomerPaymentRepository extends BaseRepository
         ];
     }
 
+    public function applyRefundAgainstBookingReceiptCredit(
+        string $bookingReference,
+        string $currency,
+        float $refundAmount,
+        ?int $actorUserId = null,
+        ?string $reason = null
+    ): array {
+        $targetAmount = round($refundAmount, 2);
+        if ($targetAmount <= 0.005) {
+            return [
+                'applied_amount' => 0.0,
+                'affected_receipt_ids' => [],
+            ];
+        }
+
+        $hasReturnedAmount = $this->columnExists('customer_receipts', 'returned_amount');
+        $remainingAmount = $targetAmount;
+        $appliedAmount = 0.0;
+        $affectedReceiptIds = [];
+
+        $receiptStatement = $this->db->prepare(
+            'SELECT id, receipt_no, receipt_date, allocated_amount, unallocated_amount'
+            . ($hasReturnedAmount ? ', returned_amount' : ', 0.00 AS returned_amount') . '
+             FROM customer_receipts
+             WHERE booking_reference = :booking_reference
+               AND currency = :currency
+               AND status <> "void"
+               AND unallocated_amount > 0.005
+             ORDER BY receipt_date ASC, id ASC
+             FOR UPDATE'
+        );
+        $receiptStatement->execute([
+            'booking_reference' => $bookingReference,
+            'currency' => $currency,
+        ]);
+        $receipts = $receiptStatement->fetchAll() ?: [];
+
+        $updateStatement = $this->db->prepare(
+            'UPDATE customer_receipts
+             SET unallocated_amount = :unallocated_amount,
+                 status = :status'
+                 . ($hasReturnedAmount ? ', returned_amount = :returned_amount' : '') . '
+             WHERE id = :receipt_id'
+        );
+
+        foreach ($receipts as $receipt) {
+            if ($remainingAmount <= 0.005) {
+                break;
+            }
+
+            $receiptId = (int) ($receipt['id'] ?? 0);
+            $currentUnallocatedAmount = round((float) ($receipt['unallocated_amount'] ?? 0), 2);
+            if ($receiptId <= 0 || $currentUnallocatedAmount <= 0.005) {
+                continue;
+            }
+
+            $appliedToReceipt = round(min($remainingAmount, $currentUnallocatedAmount), 2);
+            if ($appliedToReceipt <= 0.005) {
+                continue;
+            }
+
+            $newUnallocatedAmount = round(max($currentUnallocatedAmount - $appliedToReceipt, 0), 2);
+            $allocatedAmount = round((float) ($receipt['allocated_amount'] ?? 0), 2);
+            $newReturnedAmount = round((float) ($receipt['returned_amount'] ?? 0) + $appliedToReceipt, 2);
+            if ($allocatedAmount > 0.005) {
+                $newStatus = $newUnallocatedAmount <= 0.005 ? 'fully_allocated' : 'partially_allocated';
+            } else {
+                $newStatus = $newUnallocatedAmount <= 0.005
+                    ? ($hasReturnedAmount && $newReturnedAmount > 0.005 ? 'returned' : 'received')
+                    : 'received';
+            }
+
+            $params = [
+                'receipt_id' => $receiptId,
+                'unallocated_amount' => $newUnallocatedAmount,
+                'status' => $newStatus,
+            ];
+            if ($hasReturnedAmount) {
+                $params['returned_amount'] = $newReturnedAmount;
+            }
+            $updateStatement->execute($params);
+
+            $remainingAmount = round(max($remainingAmount - $appliedToReceipt, 0), 2);
+            $appliedAmount = round($appliedAmount + $appliedToReceipt, 2);
+            $affectedReceiptIds[] = $receiptId;
+
+            AuditLog::record($this->app, 'customer.receipt.refund_applied', [
+                'user_id' => $actorUserId,
+                'customer_receipt_id' => $receiptId,
+                'booking_reference' => $bookingReference,
+                'receipt_no' => (string) ($receipt['receipt_no'] ?? ''),
+                'currency' => $currency,
+                'refund_amount_applied' => $appliedToReceipt,
+                'remaining_unallocated_amount' => $newUnallocatedAmount,
+                'returned_amount' => $newReturnedAmount,
+                'reason' => $reason,
+            ]);
+        }
+
+        if ($remainingAmount > 0.005) {
+            throw new \RuntimeException('Unable to match the refund against released customer receipt credit.');
+        }
+
+        return [
+            'applied_amount' => $appliedAmount,
+            'affected_receipt_ids' => array_values(array_unique($affectedReceiptIds)),
+        ];
+    }
+
+    public function restoreRefundToBookingReceiptCredit(
+        string $bookingReference,
+        string $currency,
+        float $refundAmount,
+        ?int $actorUserId = null,
+        ?string $reason = null
+    ): array {
+        $targetAmount = round($refundAmount, 2);
+        if ($targetAmount <= 0.005) {
+            return [
+                'restored_amount' => 0.0,
+                'affected_receipt_ids' => [],
+            ];
+        }
+
+        $hasReturnedAmount = $this->columnExists('customer_receipts', 'returned_amount');
+        if (! $hasReturnedAmount) {
+            throw new RuntimeException('Customer receipt returned amount tracking is required to reverse service refunds.');
+        }
+
+        $remainingAmount = $targetAmount;
+        $restoredAmount = 0.0;
+        $affectedReceiptIds = [];
+
+        $receiptStatement = $this->db->prepare(
+            'SELECT id, receipt_no, receipt_date, allocated_amount, unallocated_amount, returned_amount
+             FROM customer_receipts
+             WHERE booking_reference = :booking_reference
+               AND currency = :currency
+               AND status <> "void"
+               AND returned_amount > 0.005
+             ORDER BY receipt_date DESC, id DESC
+             FOR UPDATE'
+        );
+        $receiptStatement->execute([
+            'booking_reference' => $bookingReference,
+            'currency' => $currency,
+        ]);
+        $receipts = $receiptStatement->fetchAll() ?: [];
+
+        $updateStatement = $this->db->prepare(
+            'UPDATE customer_receipts
+             SET unallocated_amount = :unallocated_amount,
+                 returned_amount = :returned_amount,
+                 status = :status
+             WHERE id = :receipt_id'
+        );
+
+        foreach ($receipts as $receipt) {
+            if ($remainingAmount <= 0.005) {
+                break;
+            }
+
+            $receiptId = (int) ($receipt['id'] ?? 0);
+            $currentReturnedAmount = round((float) ($receipt['returned_amount'] ?? 0), 2);
+            $currentUnallocatedAmount = round((float) ($receipt['unallocated_amount'] ?? 0), 2);
+            $allocatedAmount = round((float) ($receipt['allocated_amount'] ?? 0), 2);
+            if ($receiptId <= 0 || $currentReturnedAmount <= 0.005) {
+                continue;
+            }
+
+            $restoredToReceipt = round(min($remainingAmount, $currentReturnedAmount), 2);
+            if ($restoredToReceipt <= 0.005) {
+                continue;
+            }
+
+            $newReturnedAmount = round(max($currentReturnedAmount - $restoredToReceipt, 0), 2);
+            $newUnallocatedAmount = round($currentUnallocatedAmount + $restoredToReceipt, 2);
+
+            if ($allocatedAmount > 0.005) {
+                $newStatus = $newUnallocatedAmount <= 0.005 ? 'fully_allocated' : 'partially_allocated';
+            } else {
+                $newStatus = $newUnallocatedAmount > 0.005
+                    ? 'received'
+                    : ($newReturnedAmount > 0.005 ? 'returned' : 'received');
+            }
+
+            $updateStatement->execute([
+                'receipt_id' => $receiptId,
+                'unallocated_amount' => $newUnallocatedAmount,
+                'returned_amount' => $newReturnedAmount,
+                'status' => $newStatus,
+            ]);
+
+            $remainingAmount = round(max($remainingAmount - $restoredToReceipt, 0), 2);
+            $restoredAmount = round($restoredAmount + $restoredToReceipt, 2);
+            $affectedReceiptIds[] = $receiptId;
+
+            AuditLog::record($this->app, 'customer.receipt.refund_restored', [
+                'user_id' => $actorUserId,
+                'customer_receipt_id' => $receiptId,
+                'booking_reference' => $bookingReference,
+                'receipt_no' => (string) ($receipt['receipt_no'] ?? ''),
+                'currency' => $currency,
+                'refund_amount_restored' => $restoredToReceipt,
+                'remaining_unallocated_amount' => $newUnallocatedAmount,
+                'returned_amount' => $newReturnedAmount,
+                'reason' => $reason,
+            ]);
+        }
+
+        if ($remainingAmount > 0.005) {
+            throw new RuntimeException('Unable to restore the service refund back into customer receipt credit.');
+        }
+
+        return [
+            'restored_amount' => $restoredAmount,
+            'affected_receipt_ids' => array_values(array_unique($affectedReceiptIds)),
+        ];
+    }
+
     public function createReceivableItem(array $data): int
     {
         return $this->transaction(function () use ($data): int {
@@ -1032,18 +1861,20 @@ final class CustomerPaymentRepository extends BaseRepository
             $hasTreasuryAccountLink = $this->columnExists('customer_receipts', 'treasury_account_id');
             $hasTenderedAmount = $this->columnExists('customer_receipts', 'tendered_amount');
             $hasReturnedAmount = $this->columnExists('customer_receipts', 'returned_amount');
+            $hasTravelerId = $this->columnExists('customer_receipts', 'traveler_id');
+            $hasReceiptPurpose = $this->columnExists('customer_receipts', 'receipt_purpose');
             $tenderedAmount = (float) ($data['tendered_amount'] ?? $receivedAmount);
             $returnedAmount = (float) ($data['returned_amount'] ?? 0);
 
             $statement = $this->db->prepare(
                 'INSERT INTO customer_receipts (
-                    branch_id, booking_reference, receipt_no, receipt_date, currency,
+                    branch_id' . ($hasTravelerId ? ', traveler_id' : '') . ($hasReceiptPurpose ? ', receipt_purpose' : '') . ', booking_reference, receipt_no, receipt_date, currency,
                     ' . ($hasTenderedAmount ? 'tendered_amount, ' : '') . 'received_amount, allocated_amount, unallocated_amount, ' . ($hasReturnedAmount ? 'returned_amount, ' : '') . 'payment_method,
                     reference_number, bank_card_detail, charges_amount, status, exchange_rate_to_booking'
                     . ($hasTreasuryAccountLink ? ', treasury_account_id' : '') . ',
                     remarks, created_by_user_id
                  ) VALUES (
-                    :branch_id, :booking_reference, :receipt_no, :receipt_date, :currency,
+                    :branch_id' . ($hasTravelerId ? ', :traveler_id' : '') . ($hasReceiptPurpose ? ', :receipt_purpose' : '') . ', :booking_reference, :receipt_no, :receipt_date, :currency,
                     ' . ($hasTenderedAmount ? ':tendered_amount, ' : '') . ':received_amount, 0, :unallocated_amount, ' . ($hasReturnedAmount ? ':returned_amount, ' : '') . ':payment_method,
                     :reference_number, :bank_card_detail, :charges_amount, :status, :exchange_rate_to_booking'
                     . ($hasTreasuryAccountLink ? ', :treasury_account_id' : '') . ',
@@ -1058,8 +1889,6 @@ final class CustomerPaymentRepository extends BaseRepository
                 'currency' => $data['currency'],
                 'received_amount' => $receivedAmount,
                 'unallocated_amount' => $receivedAmount,
-                'tendered_amount' => $tenderedAmount,
-                'returned_amount' => $returnedAmount,
                 'payment_method' => $data['payment_method'],
                 'reference_number' => $data['reference_number'] ?? null,
                 'bank_card_detail' => $data['bank_card_detail'] ?? null,
@@ -1069,6 +1898,18 @@ final class CustomerPaymentRepository extends BaseRepository
                 'remarks' => $data['remarks'] ?? null,
                 'created_by_user_id' => $data['actor_user_id'] ?? null,
             ];
+            if ($hasTenderedAmount) {
+                $params['tendered_amount'] = $tenderedAmount;
+            }
+            if ($hasReturnedAmount) {
+                $params['returned_amount'] = $returnedAmount;
+            }
+            if ($hasTravelerId) {
+                $params['traveler_id'] = isset($data['traveler_id']) ? (int) $data['traveler_id'] : null;
+            }
+            if ($hasReceiptPurpose) {
+                $params['receipt_purpose'] = (string) ($data['receipt_purpose'] ?? 'booking_payment');
+            }
             if ($hasTreasuryAccountLink) {
                 $params['treasury_account_id'] = $data['treasury_account_id'] ?? null;
             }
@@ -1147,6 +1988,40 @@ final class CustomerPaymentRepository extends BaseRepository
         });
     }
 
+    public function availableReceiptCreditsForBooking(string $bookingReference, string $currency, array $preferredReceiptIds = []): array
+    {
+        $bookingReference = trim($bookingReference);
+        $currency = strtoupper(trim($currency));
+        if ($bookingReference === '' || $currency === '') {
+            return [];
+        }
+
+        $orderClause = 'ORDER BY receipt_date DESC, id DESC';
+        if ($preferredReceiptIds !== []) {
+            $preferredReceiptIds = array_values(array_filter(array_map('intval', $preferredReceiptIds), static fn (int $id): bool => $id > 0));
+            if ($preferredReceiptIds !== []) {
+                $preferredList = implode(', ', $preferredReceiptIds);
+                $orderClause = "ORDER BY CASE WHEN id IN ({$preferredList}) THEN 0 ELSE 1 END, receipt_date DESC, id DESC";
+            }
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT id, receipt_no, receipt_date, currency, received_amount, allocated_amount, unallocated_amount, status
+             FROM customer_receipts
+             WHERE booking_reference = :booking_reference
+               AND currency = :currency
+               AND status <> "void"
+               AND unallocated_amount > 0.005
+             ' . $orderClause
+        );
+        $statement->execute([
+            'booking_reference' => $bookingReference,
+            'currency' => $currency,
+        ]);
+
+        return $statement->fetchAll() ?: [];
+    }
+
     public function bookingOutstandingSummary(string $bookingReference): array
     {
         $summary = [
@@ -1183,6 +2058,27 @@ final class CustomerPaymentRepository extends BaseRepository
         $receipts = $receiptStatement->fetch() ?: [];
 
         return array_merge($summary, $receivables, $receipts);
+    }
+
+    public function bookingUnallocatedCreditTotal(string $bookingReference, string $currency): float
+    {
+        if ($bookingReference === '' || $currency === '') {
+            return 0.0;
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT COALESCE(SUM(unallocated_amount), 0)
+             FROM customer_receipts
+             WHERE booking_reference = :booking_reference
+               AND currency = :currency
+               AND status <> "void"'
+        );
+        $statement->execute([
+            'booking_reference' => $bookingReference,
+            'currency' => $currency,
+        ]);
+
+        return round((float) ($statement->fetchColumn() ?: 0), 2);
     }
 
     public function outstandingByLeadTraveler(
@@ -1407,28 +2303,71 @@ final class CustomerPaymentRepository extends BaseRepository
 
     public function serviceWiseOutstanding(string $bookingReference): array
     {
+        $allocatedAmountExpression = $this->receivableAllocationAmountExpression('allocation_row');
         $statement = $this->db->prepare(
             'SELECT
-                service_line_reference,
-                currency,
-                SUM(due_amount) AS due_amount,
-                SUM(allocated_amount) AS allocated_amount,
-                SUM(outstanding_amount) AS outstanding_amount,
-                MIN(due_date) AS next_due_date,
-                MAX(status) AS latest_status
-             FROM customer_receivable_items
-             WHERE booking_reference = :booking_reference
-               AND status <> "cancelled"
-             GROUP BY service_line_reference, currency
-             ORDER BY service_line_reference ASC'
+                receivable.service_line_reference,
+                receivable.currency,
+                receivable.due_amount AS due_amount,
+                COALESCE(allocation_totals.allocated_amount, 0) AS allocated_amount,
+                GREATEST(receivable.due_amount - COALESCE(allocation_totals.allocated_amount, 0), 0) AS outstanding_amount,
+                receivable.due_date AS next_due_date,
+                CASE
+                    WHEN GREATEST(receivable.due_amount - COALESCE(allocation_totals.allocated_amount, 0), 0) <= 0.005 THEN "paid"
+                    WHEN COALESCE(allocation_totals.allocated_amount, 0) > 0.005 THEN "partially_paid"
+                    ELSE "open"
+                END AS latest_status
+             FROM customer_receivable_items receivable
+             LEFT JOIN bookings receivable_booking
+                ON receivable_booking.booking_reference = receivable.booking_reference
+             LEFT JOIN booking_services receivable_service
+                ON receivable_service.booking_id = receivable_booking.id
+               AND receivable_service.line_reference = receivable.service_line_reference
+             INNER JOIN (
+                SELECT MAX(id) AS id
+                FROM customer_receivable_items
+                WHERE booking_reference = :booking_reference
+                  AND due_group = "service_sale"
+                  AND status <> "cancelled"
+                GROUP BY service_line_reference
+             ) latest_receivable
+                ON latest_receivable.id = receivable.id
+             LEFT JOIN (
+                SELECT
+                    allocation_row.customer_receivable_item_id,
+                    SUM(' . $allocatedAmountExpression . ') AS allocated_amount
+                FROM customer_receipt_allocations allocation_row
+                INNER JOIN customer_receipts receipt
+                    ON receipt.id = allocation_row.customer_receipt_id
+                   AND receipt.status <> "void"
+                GROUP BY allocation_row.customer_receivable_item_id
+             ) allocation_totals
+                ON allocation_totals.customer_receivable_item_id = receivable.id
+             WHERE receivable.booking_reference = :receivable_booking_reference
+               AND receivable.due_group = "service_sale"
+               AND receivable.status <> "cancelled"
+               AND (
+                    receivable_service.id IS NULL
+                    OR (
+                        COALESCE(receivable_service.is_active, 1) = 1
+                        AND LOWER(REPLACE(COALESCE(receivable_service.service_status, ""), " ", "_")) <> "cancelled"
+                    )
+               )
+             ORDER BY receivable.service_line_reference ASC'
         );
-        $statement->execute(['booking_reference' => $bookingReference]);
+        $statement->execute([
+            'booking_reference' => $bookingReference,
+            'receivable_booking_reference' => $bookingReference,
+        ]);
 
         return $statement->fetchAll() ?: [];
     }
 
     public function receiptHistory(string $bookingReference): array
     {
+        $purposeSelect = $this->columnExists('customer_receipts', 'receipt_purpose')
+            ? ', cr.receipt_purpose'
+            : ', "booking_payment" AS receipt_purpose';
         $treasurySelect = $this->columnExists('customer_receipts', 'treasury_account_id')
             ? ', cr.treasury_account_id,
                 ta.account_name AS treasury_account_name,
@@ -1457,7 +2396,7 @@ final class CustomerPaymentRepository extends BaseRepository
                 cr.charges_amount,
                 cr.status,
                 cr.exchange_rate_to_booking,
-                cr.remarks' . $treasurySelect . ',
+                cr.remarks' . $purposeSelect . $treasurySelect . ',
                 ' . $this->customerReceiptVoidMetadataSelect('cr') . '
              FROM customer_receipts cr
              ' . $treasuryJoin . '
@@ -1473,6 +2412,9 @@ final class CustomerPaymentRepository extends BaseRepository
     {
         $receivableAmountExpression = $this->receivableAllocationAmountExpression('a');
         $remainingAfterAllocationExpression = $this->receivableRemainingAfterAllocationExpression('a', 'i');
+        $receiptPurposeSelect = $this->columnExists('customer_receipts', 'receipt_purpose')
+            ? 'r.receipt_purpose'
+            : '"booking_payment" AS receipt_purpose';
 
         $statement = $this->db->prepare(
             'SELECT
@@ -1492,6 +2434,7 @@ final class CustomerPaymentRepository extends BaseRepository
                 r.id AS receipt_id,
                 r.receipt_no,
                 r.receipt_date,
+                ' . $receiptPurposeSelect . ',
                 r.status AS receipt_status,
                 i.id AS receivable_item_id,
                 i.booking_reference AS receivable_booking_reference,
@@ -1531,6 +2474,9 @@ final class CustomerPaymentRepository extends BaseRepository
         $placeholders = implode(', ', array_fill(0, count($receivableItemIds), '?'));
         $receivableAmountExpression = $this->receivableAllocationAmountExpression('a');
         $remainingAfterAllocationExpression = $this->receivableRemainingAfterAllocationExpression('a', 'i');
+        $receiptPurposeSelect = $this->columnExists('customer_receipts', 'receipt_purpose')
+            ? 'r.receipt_purpose'
+            : "'booking_payment' AS receipt_purpose";
         $statement = $this->db->prepare(
             "SELECT
                 a.id AS allocation_id,
@@ -1551,6 +2497,7 @@ final class CustomerPaymentRepository extends BaseRepository
                 r.receipt_no,
                 r.receipt_date,
                 r.currency AS receipt_currency,
+                {$receiptPurposeSelect},
                 r.status AS receipt_status,
                 i.id AS receivable_item_id,
                 i.booking_reference AS receivable_booking_reference,

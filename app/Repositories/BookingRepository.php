@@ -44,16 +44,17 @@ final class BookingRepository extends BaseRepository
 
             $statement = $this->db->prepare(
                 'INSERT INTO bookings (
-                    booking_reference, branch_id, booking_status, booking_date, due_date, departure_date, return_date, remarks,
+                    booking_reference, branch_id, business_source_id, booking_status, booking_date, due_date, departure_date, return_date, remarks,
                     created_by_user_id, updated_by_user_id
                  ) VALUES (
-                    :booking_reference, :branch_id, :booking_status, :booking_date, :due_date, :departure_date, :return_date, :remarks,
+                    :booking_reference, :branch_id, :business_source_id, :booking_status, :booking_date, :due_date, :departure_date, :return_date, :remarks,
                     :created_by_user_id, :updated_by_user_id
                  )'
             );
             $statement->execute([
                 'booking_reference' => $reference,
                 'branch_id' => $bookingData['branch_id'],
+                'business_source_id' => $bookingData['business_source_id'],
                 'booking_status' => $bookingData['booking_status'],
                 'booking_date' => $bookingData['booking_date'],
                 'due_date' => $bookingData['due_date'],
@@ -77,6 +78,7 @@ final class BookingRepository extends BaseRepository
             $statement = $this->db->prepare(
                 'UPDATE bookings
                  SET branch_id = :branch_id,
+                     business_source_id = :business_source_id,
                      booking_status = :booking_status,
                      booking_date = :booking_date,
                      due_date = :due_date,
@@ -89,6 +91,7 @@ final class BookingRepository extends BaseRepository
             $statement->execute([
                 'id' => $bookingId,
                 'branch_id' => $bookingData['branch_id'],
+                'business_source_id' => $bookingData['business_source_id'],
                 'booking_status' => $bookingData['booking_status'],
                 'booking_date' => $bookingData['booking_date'],
                 'due_date' => $bookingData['due_date'],
@@ -147,6 +150,7 @@ final class BookingRepository extends BaseRepository
                 b.id,
                 b.booking_reference,
                 b.branch_id,
+                b.business_source_id,
                 b.lead_traveler_id,
                 b.booking_status,
                 b.booking_date,
@@ -166,10 +170,15 @@ final class BookingRepository extends BaseRepository
                 br.city AS branch_city,
                 br.country_code,
                 br.base_currency,
+                bsr.name AS business_source_name,
+                bsr.phone AS business_source_phone,
+                bsr.address AS business_source_address,
+                bsr.description AS business_source_description,
                 CASE WHEN created_user.username IS NOT NULL AND created_user.username <> "" THEN created_user.username ELSE created_user.email END AS created_by_name,
                 CASE WHEN updated_user.username IS NOT NULL AND updated_user.username <> "" THEN updated_user.username ELSE updated_user.email END AS updated_by_name
              FROM bookings b
              INNER JOIN branches br ON br.id = b.branch_id
+             LEFT JOIN business_sources bsr ON bsr.id = b.business_source_id
              LEFT JOIN booking_parties bp ON bp.booking_id = b.id
              LEFT JOIN users created_user ON created_user.id = b.created_by_user_id
              LEFT JOIN users updated_user ON updated_user.id = b.updated_by_user_id
@@ -195,6 +204,7 @@ final class BookingRepository extends BaseRepository
                 b.id,
                 b.booking_reference,
                 b.branch_id,
+                b.business_source_id,
                 b.lead_traveler_id,
                 b.booking_status,
                 b.booking_date,
@@ -214,10 +224,15 @@ final class BookingRepository extends BaseRepository
                 br.city AS branch_city,
                 br.country_code,
                 br.base_currency,
+                bsr.name AS business_source_name,
+                bsr.phone AS business_source_phone,
+                bsr.address AS business_source_address,
+                bsr.description AS business_source_description,
                 CASE WHEN created_user.username IS NOT NULL AND created_user.username <> '' THEN created_user.username ELSE created_user.email END AS created_by_name,
                 CASE WHEN updated_user.username IS NOT NULL AND updated_user.username <> '' THEN updated_user.username ELSE updated_user.email END AS updated_by_name
              FROM bookings b
              INNER JOIN branches br ON br.id = b.branch_id
+             LEFT JOIN business_sources bsr ON bsr.id = b.business_source_id
              LEFT JOIN booking_parties bp ON bp.booking_id = b.id
              LEFT JOIN users created_user ON created_user.id = b.created_by_user_id
              LEFT JOIN users updated_user ON updated_user.id = b.updated_by_user_id
@@ -264,6 +279,7 @@ final class BookingRepository extends BaseRepository
                     b.updated_at,
                     br.name AS branch_name,
                     br.base_currency,
+                    COALESCE(bsr.name, '') AS business_source_name,
                     bp.lead_traveler_name,
                     bp.contact_mobile,
                     bp.passport_number,
@@ -276,6 +292,7 @@ final class BookingRepository extends BaseRepository
                     COALESCE(recv.total_outstanding, 0) AS total_outstanding
                 FROM bookings b
                 INNER JOIN branches br ON br.id = b.branch_id
+                LEFT JOIN business_sources bsr ON bsr.id = b.business_source_id
                 LEFT JOIN booking_parties bp ON bp.booking_id = b.id
                 LEFT JOIN (
                     SELECT
@@ -312,8 +329,10 @@ final class BookingRepository extends BaseRepository
         if ($query !== '') {
             $sql .= '
                 AND (
-                    b.booking_reference LIKE ?
+                    CAST(b.id AS CHAR) = ?
+                    OR b.booking_reference LIKE ?
                     OR bp.lead_traveler_name LIKE ?
+                    OR COALESCE(bsr.name, "") LIKE ?
                     OR COALESCE(bp.contact_mobile, "") LIKE ?
                     OR COALESCE(bp.passport_number, "") LIKE ?
                     OR COALESCE(svc.service_line_reference, "") LIKE ?
@@ -328,6 +347,8 @@ final class BookingRepository extends BaseRepository
                           AND crx.receipt_no LIKE ?
                     )
                 )';
+            $params[] = trim($query);
+            $params[] = $likeQuery;
             $params[] = $likeQuery;
             $params[] = $likeQuery;
             $params[] = $likeQuery;
@@ -346,6 +367,83 @@ final class BookingRepository extends BaseRepository
 
         $statement = $this->db->prepare($sql);
         $statement->execute($params);
+
+        return $statement->fetchAll() ?: [];
+    }
+
+    public function recentBookingsForWorkspace(array $accessibleBranchIds, int $limit = 12): array
+    {
+        if ($accessibleBranchIds === []) {
+            return [];
+        }
+
+        $placeholders = implode(', ', array_fill(0, count($accessibleBranchIds), '?'));
+        $sql = "SELECT
+                    b.id,
+                    b.booking_reference,
+                    b.booking_date,
+                    b.updated_at,
+                    bp.lead_traveler_name AS customer_name,
+                    br.name AS branch_name,
+                    br.base_currency,
+                    COALESCE(svc.passenger_names, '') AS passenger_names,
+                    COALESCE(svc.pnrs, '') AS pnrs,
+                    COALESCE(svc.routes, '') AS routes,
+                    COALESCE(recv.invoice_currency, br.base_currency, 'PKR') AS invoice_currency,
+                    COALESCE(recv.invoice_amount, 0) AS invoice_amount,
+                    COALESCE(recv.paid_amount, 0) AS paid_amount,
+                    COALESCE(recv.outstanding_amount, 0) AS outstanding_amount
+                FROM bookings b
+                INNER JOIN branches br ON br.id = b.branch_id
+                LEFT JOIN booking_parties bp ON bp.booking_id = b.id
+                LEFT JOIN (
+                    SELECT
+                        bs.booking_id,
+                        GROUP_CONCAT(DISTINCT NULLIF(COALESCE(t.full_name, bs.passenger_name_snapshot), '') ORDER BY COALESCE(t.full_name, bs.passenger_name_snapshot) SEPARATOR ', ') AS passenger_names,
+                        GROUP_CONCAT(DISTINCT NULLIF(COALESCE(sat.pnr, ''), '') ORDER BY sat.pnr SEPARATOR ', ') AS pnrs,
+                        GROUP_CONCAT(
+                            DISTINCT NULLIF(
+                                CONCAT_WS('/',
+                                    NULLIF(COALESCE(sat.sector_from, ''), ''),
+                                    NULLIF(COALESCE(sat.sector_to, ''), '')
+                                ),
+                                ''
+                            )
+                            ORDER BY sat.sector_from, sat.sector_to SEPARATOR ', '
+                        ) AS routes
+                    FROM booking_services bs
+                    LEFT JOIN travelers t ON t.id = bs.traveler_id
+                    LEFT JOIN service_air_ticket sat ON sat.booking_service_id = bs.id
+                    GROUP BY bs.booking_id
+                ) svc ON svc.booking_id = b.id
+                LEFT JOIN (
+                    SELECT
+                        cri.booking_reference,
+                        MAX(cri.currency) AS invoice_currency,
+                        SUM(cri.due_amount) AS invoice_amount,
+                        SUM(COALESCE(allocation_totals.allocated_amount, 0)) AS paid_amount,
+                        SUM(GREATEST(cri.due_amount - COALESCE(allocation_totals.allocated_amount, 0), 0)) AS outstanding_amount
+                    FROM customer_receivable_items cri
+                    LEFT JOIN (
+                        SELECT
+                            cra.customer_receivable_item_id,
+                            SUM(COALESCE(cra.receivable_amount_allocated, cra.allocated_amount, 0)) AS allocated_amount
+                        FROM customer_receipt_allocations cra
+                        INNER JOIN customer_receipts cr
+                            ON cr.id = cra.customer_receipt_id
+                           AND cr.status <> 'void'
+                        GROUP BY cra.customer_receivable_item_id
+                    ) allocation_totals
+                        ON allocation_totals.customer_receivable_item_id = cri.id
+                    WHERE cri.status <> 'cancelled'
+                    GROUP BY cri.booking_reference
+                ) recv ON recv.booking_reference = b.booking_reference
+                WHERE b.branch_id IN ({$placeholders})
+                ORDER BY COALESCE(b.updated_at, b.booking_date) DESC, b.id DESC
+                LIMIT " . max(1, $limit);
+
+        $statement = $this->db->prepare($sql);
+        $statement->execute(array_map('intval', $accessibleBranchIds));
 
         return $statement->fetchAll() ?: [];
     }

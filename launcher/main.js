@@ -33,6 +33,22 @@ function readConfig() {
 
 const config = readConfig();
 
+async function hardRefreshWindow(win) {
+  if (!win || win.isDestroyed()) {
+    return;
+  }
+
+  try {
+    await win.webContents.session.clearCache();
+  } catch {
+    // Cache clear should not block the reload path.
+  }
+
+  if (!win.isDestroyed()) {
+    win.webContents.reloadIgnoringCache();
+  }
+}
+
 function normalizedPem(value) {
   return String(value || '').replace(/\\n/g, '\n').trim();
 }
@@ -210,6 +226,19 @@ function createAppWindow(initialUrl, parentWindow = null) {
     }
   });
 
+  win.webContents.on('before-input-event', (event, input) => {
+    const key = String(input.key || '').toLowerCase();
+    const isRefreshKey = key === 'f5'
+      || ((input.control || input.meta) && key === 'r');
+
+    if (!isRefreshKey) {
+      return;
+    }
+
+    event.preventDefault();
+    hardRefreshWindow(win);
+  });
+
   if (parentWindow) {
     win.once('ready-to-show', () => {
       win.show();
@@ -295,6 +324,98 @@ function createWindow() {
   return win;
 }
 
+function sanitizePathSegment(value, fallback = 'Ledger') {
+  const normalized = String(value || '')
+    .trim()
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return normalized !== '' ? normalized : fallback;
+}
+
+function timestampLabel() {
+  const now = new Date();
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
+}
+
+async function exportLedgerPdfToDocuments(payload = {}) {
+  const ledgerUrl = String(payload.ledgerUrl || '').trim();
+  if (ledgerUrl === '') {
+    throw new Error('Ledger URL is required.');
+  }
+
+  const customerName = sanitizePathSegment(payload.customerName, 'Customer');
+  const invoiceNo = sanitizePathSegment(payload.invoiceNo, 'Ledger');
+  const phoneDigits = String(payload.phoneDigits || '').trim();
+  const folderRoot = path.join(app.getPath('documents'), 'Travel Agency Operations', 'Ledgers');
+  const folderName = sanitizePathSegment(`${customerName} - ${invoiceNo}`, 'Ledger Export');
+  const targetDir = path.join(folderRoot, folderName);
+
+  await fs.promises.mkdir(targetDir, { recursive: true });
+
+  const fileName = sanitizePathSegment(`${invoiceNo} - ${customerName} - ${timestampLabel()}`, 'Ledger') + '.pdf';
+  const filePath = path.join(targetDir, fileName);
+
+  const exportWindow = new BrowserWindow({
+    show: false,
+    width: 1400,
+    height: 900,
+    autoHideMenuBar: true,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      preload: path.join(__dirname, 'preload.js')
+    }
+  });
+
+  try {
+    await exportWindow.loadURL(ledgerUrl);
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    const pdfBuffer = await exportWindow.webContents.printToPDF({
+      printBackground: true,
+      landscape: true,
+      pageSize: 'A4',
+      margins: {
+        top: 0,
+        bottom: 0,
+        left: 0,
+        right: 0
+      }
+    });
+
+    await fs.promises.writeFile(filePath, pdfBuffer);
+  } finally {
+    if (!exportWindow.isDestroyed()) {
+      exportWindow.close();
+    }
+  }
+
+  shell.showItemInFolder(filePath);
+
+  let whatsappUrl = '';
+  if (phoneDigits !== '') {
+    const messageParts = [
+      payload.customerName ? `Account ledger for ${String(payload.customerName).trim()}` : 'Account ledger',
+      payload.invoiceNo ? `(${String(payload.invoiceNo).trim()})` : '',
+      `has been saved as ${path.basename(filePath)}.`,
+      'Please attach the saved PDF from the opened folder.'
+    ].filter((part) => part !== '');
+    whatsappUrl = `https://wa.me/${encodeURIComponent(phoneDigits)}?text=${encodeURIComponent(messageParts.join(' '))}`;
+  } else {
+    whatsappUrl = 'https://web.whatsapp.com/';
+  }
+  shell.openExternal(whatsappUrl);
+
+  return {
+    ok: true,
+    filePath,
+    directory: targetDir,
+    whatsappUrl
+  };
+}
+
 ipcMain.handle('launcher:config', async () => ({
   serverUrl: config.serverUrl,
   windowTitle: config.windowTitle,
@@ -305,6 +426,13 @@ ipcMain.handle('launcher:openOnline', async () => {
   const focused = BrowserWindow.getFocusedWindow();
   if (focused) {
     await focused.loadURL(config.serverUrl);
+  }
+});
+
+ipcMain.handle('launcher:hardRefresh', async () => {
+  const focused = BrowserWindow.getFocusedWindow();
+  if (focused) {
+    await hardRefreshWindow(focused);
   }
 });
 
@@ -321,6 +449,8 @@ ipcMain.handle('launcher:syncDrafts', async (_event, payload) => serverRequest('
     drafts: payload.drafts
   })
 }));
+
+ipcMain.handle('launcher:saveLedgerPdfAndOpenWhatsApp', async (_event, payload) => exportLedgerPdfToDocuments(payload));
 
 app.whenReady().then(() => {
   installLauncherGateHeaders();

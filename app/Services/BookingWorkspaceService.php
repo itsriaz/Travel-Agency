@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services;
 
 use App\Helpers\AuditLog;
+use App\Repositories\BusinessSourceRepository;
 use App\Repositories\BookingRepository;
 use App\Repositories\TravelerRepository;
 use RuntimeException;
@@ -24,6 +25,7 @@ final class BookingWorkspaceService extends Service
     {
         $repository = new BookingRepository($this->app);
         $branchOptions = $repository->branchOptions($accessibleBranchIds);
+        $businessSourceOptions = (new BusinessSourceRepository($this->app))->activeOptions();
         $resolvedBookingReference = trim((string) $bookingReference);
 
         if (! $newMode && ($bookingId === null || $bookingId <= 0) && $resolvedBookingReference !== '') {
@@ -59,25 +61,45 @@ final class BookingWorkspaceService extends Service
 
         if (! $newMode && $currentBooking === null && $searchTerm !== '') {
             $exactReference = strtoupper($searchTerm);
+            $exactBookingId = ctype_digit(trim($searchTerm)) ? (int) trim($searchTerm) : 0;
             foreach ($searchResults as $searchResult) {
                 $exactReceiptNo = strtoupper((string) ($searchResult['receipt_no'] ?? ''));
                 $exactTicketNo = strtoupper((string) ($searchResult['ticket_number'] ?? ''));
                 $exactPnr = strtoupper((string) ($searchResult['pnr'] ?? ''));
 
                 if (
+                    ($exactBookingId > 0 && (int) ($searchResult['id'] ?? 0) === $exactBookingId)
+                    || ($exactBookingId > 0 && strtoupper((string) ($searchResult['booking_reference'] ?? '')) === 'BK-' . str_pad((string) $exactBookingId, 6, '0', STR_PAD_LEFT))
+                    || (
                     strtoupper((string) ($searchResult['booking_reference'] ?? '')) === $exactReference
                     || $exactReceiptNo === $exactReference
                     || $exactTicketNo === $exactReference
                     || $exactPnr === $exactReference
+                    )
                 ) {
                     $currentBooking = $repository->findBookingById((int) ($searchResult['id'] ?? 0));
                     break;
+                }
+            }
+
+            if ($currentBooking === null && count($searchResults) === 1) {
+                $singleMatch = $searchResults[0];
+                $leadTravelerName = mb_strtolower(trim((string) ($singleMatch['lead_traveler_name'] ?? '')));
+                $normalizedSearchTerm = mb_strtolower(trim($searchTerm));
+
+                if (
+                    $normalizedSearchTerm !== ''
+                    && $leadTravelerName !== ''
+                    && str_contains($leadTravelerName, $normalizedSearchTerm)
+                ) {
+                    $currentBooking = $repository->findBookingById((int) ($singleMatch['id'] ?? 0));
                 }
             }
         }
 
         return [
             'branchOptions' => $branchOptions,
+            'businessSourceOptions' => $businessSourceOptions,
             'currentBooking' => $currentBooking,
             'searchResults' => $searchResults,
             'searchTerm' => trim($searchTerm),
@@ -201,6 +223,17 @@ final class BookingWorkspaceService extends Service
             throw new RuntimeException('Please select a valid booking status.');
         }
 
+        $businessSourceRepository = new BusinessSourceRepository($this->app);
+        $businessSourceId = (int) ($input['business_source_id'] ?? 0);
+        if ($businessSourceId <= 0) {
+            $businessSourceId = $businessSourceRepository->defaultId();
+        }
+
+        $businessSource = $businessSourceRepository->findById($businessSourceId);
+        if ($businessSource === null || (int) ($businessSource['is_active'] ?? 0) !== 1) {
+            throw new RuntimeException('Please select a valid account.');
+        }
+
         $bookingDate = $this->normalizeDate((string) ($input['booking_date'] ?? ''), 'Booking date');
         $departureDate = $this->normalizeOptionalDate((string) ($input['departure_date'] ?? ''));
         $returnDate = $this->normalizeOptionalDate((string) ($input['return_date'] ?? ''));
@@ -213,6 +246,7 @@ final class BookingWorkspaceService extends Service
         return [
             'booking' => [
                 'branch_id' => $branchId,
+                'business_source_id' => $businessSourceId,
                 'booking_status' => $status,
                 'booking_date' => $bookingDate,
                 'due_date' => $dueDate,

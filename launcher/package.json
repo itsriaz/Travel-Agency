@@ -1,12 +1,13 @@
 {
   "name": "travel-agency-launcher",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Windows desktop launcher for Travel Agency Operations",
-  "author": "Imdad International Travel Agency / Noble Route",
+  "author": "Imdad International Travel Agency / Noble Route Travel And Tours LLC",
   "main": "main.js",
   "private": true,
   "scripts": {
     "start": "electron .",
+    "audit:workflow": "electron workflow-audit.js",
     "package:win": "electron-builder --win portable",
     "package:win:installer": "electron-builder --win nsis"
   },
@@ -17,6 +18,11 @@
   "build": {
     "appId": "com.imdadnobleroute.travelops",
     "productName": "Travel Agency Operations",
+    "artifactName": "ImdadInt Travel Agency Operations Launcher Setup ${version}.${ext}",
+    "copyright": "Copyright 2026 Imdad International Travel Agency / Noble Route Travel And Tours LLC",
+    "directories": {
+      "output": "dist"
+    },
     "files": [
       "main.js",
       "preload.js",
@@ -28,10 +34,16 @@
       "launcher-config.example.json",
       "launcher-config.production.example.json",
       "launcher_gate_private.pem",
+      "assets/**/*",
       "package.json"
     ],
     "win": {
       "target": "portable",
+      "icon": "assets/app-icon.ico",
+      "executableName": "Travel Agency Operations",
+      "publisherName": "Imdad International Travel Agency / Noble Route Travel And Tours LLC",
+      "requestedExecutionLevel": "asInvoker",
+      "verifyUpdateCodeSignature": false,
       "signAndEditExecutable": false,
       "forceCodeSigning": false
     },
@@ -39,7 +51,16 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "perMachine": false,
-      "runAfterFinish": true
+      "runAfterFinish": true,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "installerIcon": "assets/app-icon.ico",
+      "uninstallerIcon": "assets/app-icon.ico",
+      "installerHeaderIcon": "assets/app-icon.ico",
+      "shortcutName": "Travel Agency Operations",
+      "uninstallDisplayName": "Travel Agency Operations",
+      "displayLanguageSelector": false,
+      "deleteAppDataOnUninstall": false
     }
   }
 }

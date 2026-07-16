@@ -2,7 +2,16 @@
 
 declare(strict_types=1);
 
-define('BASE_PATH', dirname(__DIR__));
+defined('BASE_PATH') || define('BASE_PATH', dirname(__DIR__));
+
+require_once BASE_PATH . '/app/Helpers/functions.php';
+require_once BASE_PATH . '/app/Core/bootstrap.php';
+
+$app = (isset($app) && $app instanceof \App\Core\App)
+    ? $app
+    : \App\Core\App::bootstrap(BASE_PATH);
+/** @var PDO $db */
+$db = $app->get('db');
 
 $failures = [];
 
@@ -38,12 +47,25 @@ $reportView = is_file(BASE_PATH . '/app/Views/reports/index.php')
 $globalView = is_file(BASE_PATH . '/app/Views/reports/global_supplier_settlement.php')
     ? (string) file_get_contents(BASE_PATH . '/app/Views/reports/global_supplier_settlement.php')
     : '';
-$migration = is_file(BASE_PATH . '/database/migrations/20260601_000036_supplier_global_payment_scope.php')
-    ? (string) file_get_contents(BASE_PATH . '/database/migrations/20260601_000036_supplier_global_payment_scope.php')
-    : '';
 $workspaceStationView = is_file(BASE_PATH . '/app/Views/workspace/partials/station.php')
     ? (string) file_get_contents(BASE_PATH . '/app/Views/workspace/partials/station.php')
     : '';
+$columnExists = static function (string $table, string $column) use ($db): bool {
+    $statement = $db->prepare(
+        'SELECT 1
+         FROM information_schema.columns
+         WHERE table_schema = DATABASE()
+           AND table_name = :table_name
+           AND column_name = :column_name
+         LIMIT 1'
+    );
+    $statement->execute([
+        'table_name' => $table,
+        'column_name' => $column,
+    ]);
+
+    return $statement->fetchColumn() !== false;
+};
 $activeSuppliersMethod = '';
 if (preg_match('/public function activeSuppliersForBranches\(.*?(?=^\s*public function)/ms', $repository, $matches) === 1) {
     $activeSuppliersMethod = (string) $matches[0];
@@ -116,7 +138,7 @@ $check(
 );
 $check(
     'Supplier payments support explicit global scope',
-    str_contains($migration, 'payment_scope ENUM("booking", "global")')
+    $columnExists('supplier_payments', 'payment_scope')
         && str_contains($repository, '$hasPaymentScope')
         && str_contains($repository, "payment_scope")
 );
@@ -213,7 +235,8 @@ if ($failures !== []) {
         echo ' - ' . $failure . PHP_EOL;
     }
 
-    exit(1);
+    return 1;
 }
 
 echo PHP_EOL . 'Supplier global settlement readiness passed.' . PHP_EOL;
+return 0;

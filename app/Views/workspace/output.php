@@ -32,6 +32,56 @@ $formatCurrencyTotals = static function (array $totals) use ($formatMoney): stri
 
     return implode(' / ', $parts);
 };
+$serviceTaxTotalAmount = static function (array $service): float {
+    return (float) ($service['spyi_amount'] ?? 0)
+        + (float) ($service['aq_yr_pk_amount'] ?? 0)
+        + (float) ($service['yq_amount'] ?? 0)
+        + (float) ($service['oth_amount'] ?? 0)
+        + (float) ($service['vat_input'] ?? 0)
+        + (float) ($service['taxes'] ?? 0);
+};
+$serviceConvertedPayableAmount = static function (array $service) use ($serviceTaxTotalAmount): float {
+    $invoiceCurrency = trim((string) ($service['currency'] ?? 'PKR')) ?: 'PKR';
+    $costCurrency = trim((string) ($service['cost_currency'] ?? $invoiceCurrency)) ?: $invoiceCurrency;
+    $pricingExchangeRate = (float) ($service['pricing_exchange_rate'] ?? 1);
+    $isAirTicket = (string) ($service['service_type'] ?? 'air ticket') === 'air ticket';
+    $payableAmount = $isAirTicket
+        ? (float) ($service['purchase_cost'] ?? 0)
+        : ((float) ($service['purchase_cost'] ?? 0) > 0.005 ? (float) ($service['purchase_cost'] ?? 0) : (float) ($service['sale_price'] ?? 0));
+
+    return round($payableAmount * ($invoiceCurrency === $costCurrency ? 1 : max($pricingExchangeRate, 0)), 2);
+};
+$serviceReceivableAmount = static function (array $service) use ($serviceTaxTotalAmount): float {
+    $savedFinalSale = (float) ($service['final_sale_price'] ?? 0);
+    if (abs($savedFinalSale) > 0.005) {
+        return $savedFinalSale;
+    }
+
+    $invoiceCurrency = trim((string) ($service['currency'] ?? 'PKR')) ?: 'PKR';
+    $costCurrency = trim((string) ($service['cost_currency'] ?? $invoiceCurrency)) ?: $invoiceCurrency;
+    $pricingExchangeRate = (float) ($service['pricing_exchange_rate'] ?? 1);
+    $isAirTicket = (string) ($service['service_type'] ?? 'air ticket') === 'air ticket';
+
+    if ($isAirTicket) {
+        $costCurrencyReceivable = round(
+            (float) ($service['purchase_cost'] ?? 0)
+            + (float) ($service['service_charge'] ?? 0)
+            + (float) ($service['vat'] ?? 0)
+            - (float) ($service['discount_amount'] ?? 0),
+            2
+        );
+
+        return round($costCurrencyReceivable * ($invoiceCurrency === $costCurrency ? 1 : max($pricingExchangeRate, 0)), 2);
+    }
+
+    return round(
+        (float) ($service['sale_price'] ?? 0)
+        + (float) ($service['service_charge'] ?? 0)
+        + (float) ($service['vat'] ?? 0)
+        - (float) ($service['discount_amount'] ?? 0),
+        2
+    );
+};
 $formatStatusLabel = static function (?string $status): string {
     $normalized = str_replace(' ', '_', mb_strtolower(trim((string) $status)));
     if ($normalized === 'void') {
@@ -60,7 +110,14 @@ $contactPhoneLines = static function (array $contact): array {
     $lines = [];
     $landline = trim((string) ($contact['landline'] ?? ''));
     if ($landline !== '') {
-        $lines[] = ['label' => 'Landline', 'value' => $landline];
+        $lines[] = [
+            'label' => trim((string) ($contact['landline_label'] ?? 'Phone')) ?: 'Phone',
+            'name' => trim((string) ($contact['landline_label'] ?? 'Phone')) ?: 'Phone',
+            'role' => '',
+            'value' => $landline,
+            'type' => 'phone',
+            'whatsapp' => false,
+        ];
     }
 
     foreach (($contact['contacts'] ?? []) as $row) {
@@ -76,13 +133,52 @@ $contactPhoneLines = static function (array $contact): array {
         $name = trim((string) ($row['name'] ?? ''));
         $role = trim((string) ($row['role'] ?? ''));
         $label = trim($name . ($role !== '' && $role !== $name ? ' - ' . $role : ''));
-        $lines[] = ['label' => $label !== '' ? $label : 'Contact', 'value' => $phone];
+        $lines[] = [
+            'label' => $label !== '' ? $label : 'Contact',
+            'name' => $name !== '' ? $name : 'Contact',
+            'role' => $role,
+            'value' => $phone,
+            'type' => 'mobile',
+            'whatsapp' => true,
+        ];
     }
 
     return $lines;
 };
+$receiptIcon = static function (string $name): string {
+    return match ($name) {
+        'phone' => '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.62 10.79a15.47 15.47 0 0 0 6.59 6.59l2.2-2.2a1 1 0 0 1 1-.24c1.12.37 2.32.56 3.59.56a1 1 0 0 1 1 1V20a1 1 0 0 1-1 1C10.3 21 3 13.7 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.27.19 2.47.56 3.59a1 1 0 0 1-.24 1.01l-2.2 2.19Z"/></svg>',
+        'mobile' => '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 2h10a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Zm0 3v12h10V5H7Zm5 15a1.25 1.25 0 1 0 0-2.5A1.25 1.25 0 0 0 12 20Z"/></svg>',
+        'whatsapp' => '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12.04 2C6.5 2 2 6.4 2 11.83c0 1.74.46 3.37 1.33 4.8L2 22l5.56-1.46a10.18 10.18 0 0 0 4.48 1.03c5.53 0 10.03-4.4 10.03-9.82C22.07 6.4 17.57 2 12.04 2Zm0 17.92a8.5 8.5 0 0 1-4.33-1.18l-.31-.18-3.3.87.88-3.2-.2-.32a8.23 8.23 0 0 1-1.28-4.38c0-4.53 3.82-8.22 8.54-8.22 4.7 0 8.53 3.69 8.53 8.22s-3.83 8.39-8.53 8.39Zm4.68-6.28c-.25-.12-1.48-.72-1.71-.8-.23-.08-.4-.12-.57.12-.17.24-.65.8-.8.96-.15.16-.29.18-.54.06-.25-.12-1.05-.38-2-1.22-.74-.66-1.24-1.47-1.39-1.72-.15-.24-.02-.38.1-.5.11-.11.25-.28.38-.42.12-.14.17-.24.25-.4.08-.16.04-.3-.02-.42-.06-.12-.57-1.36-.78-1.86-.21-.5-.42-.43-.57-.44h-.49c-.17 0-.44.06-.67.3s-.88.86-.88 2.1.9 2.45 1.02 2.62c.13.16 1.77 2.8 4.38 3.81 2.61 1.01 2.61.67 3.08.63.48-.04 1.48-.6 1.69-1.18.21-.58.21-1.08.15-1.18-.06-.1-.23-.16-.48-.28Z"/></svg>',
+        'email' => '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Zm0 2v.01L12 12l8-4.99V7H4Zm16 10V9.3l-7.47 4.66a1 1 0 0 1-1.06 0L4 9.3V17h16Z"/></svg>',
+        default => '',
+    };
+};
+$normalizeReceiptLogoAssetPath = static function (string $path): string {
+    $normalized = '/' . ltrim(trim($path), '/');
+
+    if (str_starts_with($normalized, '/public/')) {
+        return substr($normalized, 8);
+    }
+
+    return $normalized;
+};
+$normalizeReceiptLogoPublicPath = static function (string $path): string {
+    $normalized = '/' . ltrim(trim($path), '/');
+
+    return str_starts_with($normalized, '/public/')
+        ? $normalized
+        : '/public' . $normalized;
+};
 $primaryBranchContact = is_array($branchBranding['contact'] ?? null) ? $branchBranding['contact'] : [];
 $primaryContactPhones = $contactPhoneLines($primaryBranchContact);
+$primaryContactLogo = trim((string) ($primaryBranchContact['logo_path'] ?? ''));
+$primaryContactLogoSrc = $primaryContactLogo !== '' ? asset(ltrim($normalizeReceiptLogoAssetPath($primaryContactLogo), '/')) : '';
+$primaryContactLogoFallbackSrc = $primaryContactLogo !== '' ? url($normalizeReceiptLogoPublicPath($primaryContactLogo)) : '';
+$primaryBranchCode = mb_strtolower(trim((string) ($branchBranding['code'] ?? '')));
+$primaryContactBranchLabel = trim((string) ($primaryBranchContact['branch_label'] ?? ''));
+$primaryContactLocationLabel = trim((string) ($primaryBranchContact['location_label'] ?? ''));
+$primaryContactPerson = trim((string) ($primaryBranchContact['contact_person'] ?? ''));
 $primaryContactEmail = trim((string) ($primaryBranchContact['email'] ?? ''));
 $primaryContactAddress = trim((string) ($primaryBranchContact['address'] ?? ''));
 $primaryContactLicense = trim((string) ($primaryBranchContact['license'] ?? ''));
@@ -173,7 +269,7 @@ $documentAudienceNote = match ($outputType) {
 };
 
 $cleanServiceDescription = static function (array $service): string {
-    $sector = trim((string) (($service['sector_from'] ?? '') . (((string) ($service['sector_to'] ?? '') !== '') ? ' - ' . (string) ($service['sector_to'] ?? '') : '')));
+    $sector = trim((string) (($service['sector_from'] ?? '') . (((string) ($service['sector_to'] ?? '') !== '') ? '/' . (string) ($service['sector_to'] ?? '') : '')));
     if ($sector !== '') {
         return $sector;
     }
@@ -211,22 +307,77 @@ $cleanServiceDescription = static function (array $service): string {
         default => 'Travel Service',
     };
 };
+$extractServiceRoute = static function (array $service): string {
+    $sectorFrom = trim((string) ($service['sector_from'] ?? ''));
+    $sectorTo = trim((string) ($service['sector_to'] ?? ''));
+    $sectorRoute = trim((string) implode('/', array_values(array_filter([$sectorFrom, $sectorTo], static fn ($value) => $value !== ''))));
+    if ($sectorRoute !== '') {
+        return $sectorRoute;
+    }
+
+    $routeCandidates = [
+        trim((string) ($service['transport_route_notes'] ?? '')),
+        trim((string) ($service['tour_destination'] ?? '')),
+        trim((string) ($service['hotel_city'] ?? '')),
+        trim((string) ($service['visa_country'] ?? '')),
+        trim((string) ($service['umrah_transport_notes'] ?? '')),
+    ];
+
+    foreach ($routeCandidates as $routeCandidate) {
+        if ($routeCandidate !== '') {
+            return $routeCandidate;
+        }
+    }
+
+    return '';
+};
+$extractServiceReference = static function (array $service): string {
+    $serviceType = mb_strtolower(trim((string) ($service['service_type'] ?? '')));
+    $referenceFields = match ($serviceType) {
+        'air ticket' => ['pnr'],
+        'umrah' => ['umrah_mofa_reference'],
+        'tour', 'tourism' => ['tour_confirmation_number'],
+        'visa' => ['visa_application_reference'],
+        'hotel' => ['hotel_confirmation_number'],
+        'transport' => ['transport_driver_detail'],
+        default => ['other_reference_number', 'pnr', 'ticket_number', 'line_reference'],
+    };
+
+    foreach ($referenceFields as $referenceField) {
+        $reference = trim((string) ($service[$referenceField] ?? ''));
+        if ($reference !== '') {
+            return $reference;
+        }
+    }
+
+    return 'N/A';
+};
+$extractServiceReferenceLabel = static function (array $service): string {
+    return match (mb_strtolower(trim((string) ($service['service_type'] ?? '')))) {
+        'air ticket' => 'PNR',
+        'umrah' => 'Umrah Ref.',
+        'tour', 'tourism' => 'Tourism Ref.',
+        'visa' => 'Visa Ref.',
+        'hotel' => 'Hotel Ref.',
+        'transport' => 'Transport Ref.',
+        default => 'Reference',
+    };
+};
 $receiptCurrency = (string) ($selectedReceipt['currency'] ?? 'PKR');
-$totalInvoiceAmount = (float) ($invoiceReceivableTotals[$receiptCurrency] ?? 0);
-$receiptCurrencyReceivedTotal = (float) ($invoiceReceivedTotals[$receiptCurrency] ?? 0);
+$receiptInvoiceCurrency = (string) (
+    array_key_first($invoiceReceivableTotals)
+    ?? array_key_first($invoiceOutstandingTotals)
+    ?? array_key_first($serviceInvoiceCandidateTotals ?? [])
+    ?? $receiptCurrency
+);
+$receiptDisplayZeroTotals = [$receiptInvoiceCurrency => 0.0];
+$totalInvoiceAmount = (float) ($invoiceReceivableTotals[$receiptInvoiceCurrency] ?? 0);
+$receiptCurrencyReceivedTotal = (float) ($invoiceReceivedTotals[$receiptInvoiceCurrency] ?? 0);
 $serviceCurrencyFallbackTotal = 0.0;
 if ($totalInvoiceAmount <= 0) {
     foreach ($services as $service) {
-        if ((string) ($service['currency'] ?? '') === $receiptCurrency) {
-            $savedFinalSale = (float) ($service['final_sale_price'] ?? 0);
-            if (abs($savedFinalSale) > 0.005) {
-                $serviceCurrencyFallbackTotal += $savedFinalSale;
-                continue;
-            }
-
-            $serviceCurrencyFallbackTotal += (float) ($service['sale_price'] ?? 0)
-                + (float) ($service['service_charge'] ?? 0)
-                - (float) ($service['discount_amount'] ?? 0);
+        if ((string) ($service['currency'] ?? '') === $receiptInvoiceCurrency) {
+            $serviceCurrencyFallbackTotal += $serviceReceivableAmount($service);
         }
     }
     $totalInvoiceAmount = $serviceCurrencyFallbackTotal;
@@ -236,7 +387,7 @@ $balanceDue = max($totalInvoiceAmount - $receiptCurrencyReceivedTotal, 0);
 $dueDateForReceipt = '';
 if ($balanceDue > 0) {
     foreach (($customerPaymentFoundation['openReceivables'] ?? []) as $openReceivableRow) {
-        if ((string) ($openReceivableRow['currency'] ?? '') === $receiptCurrency && (float) ($openReceivableRow['outstandingAmount'] ?? 0) > 0 && ! empty($openReceivableRow['nextDueDate'])) {
+        if ((string) ($openReceivableRow['currency'] ?? '') === $receiptInvoiceCurrency && (float) ($openReceivableRow['outstandingAmount'] ?? 0) > 0 && ! empty($openReceivableRow['nextDueDate'])) {
             $dueDateForReceipt = (string) $openReceivableRow['nextDueDate'];
             break;
         }
@@ -244,6 +395,7 @@ if ($balanceDue > 0) {
 }
 $receiptDebug = [
     'receiptCurrency' => $receiptCurrency,
+    'receiptInvoiceCurrency' => $receiptInvoiceCurrency,
     'invoiceReceivableTotals' => $invoiceReceivableTotals,
     'invoiceOutstandingTotals' => $invoiceOutstandingTotals,
     'invoiceReceivedTotals' => $invoiceReceivedTotals,
@@ -316,12 +468,121 @@ $nonZeroCurrencyTotals = static function (array $totals): array {
 
     return $filtered;
 };
+$statementServiceReceivableByLineCurrency = [];
+foreach ($services as $statementServiceRow) {
+    $statementServiceLine = trim((string) ($statementServiceRow['line_reference'] ?? ''));
+    $statementServiceCurrency = trim((string) ($statementServiceRow['currency'] ?? ''));
+    if ($statementServiceLine === '' || $statementServiceCurrency === '') {
+        continue;
+    }
+
+    $statementServiceReceivableByLineCurrency[$statementServiceLine . '|' . $statementServiceCurrency] =
+        round($serviceReceivableAmount($statementServiceRow), 2);
+}
+$statementInternalAdjustmentReceiptIds = [];
+$statementInternalAdjustmentReceiptLabels = [];
+foreach ($serviceEvents as $statementServiceEvent) {
+    $statementEventType = str_replace(' ', '_', mb_strtolower(trim((string) ($statementServiceEvent['event_type'] ?? $statementServiceEvent['eventType'] ?? ''))));
+    $statementEventStatus = str_replace(' ', '_', mb_strtolower(trim((string) ($statementServiceEvent['event_status'] ?? $statementServiceEvent['eventStatus'] ?? ''))));
+    if ($statementEventType !== 'cancel' || $statementEventStatus !== 'posted') {
+        continue;
+    }
+
+    $statementEventCurrency = trim((string) ($statementServiceEvent['currency'] ?? ''));
+    if ($statementEventCurrency === '') {
+        continue;
+    }
+
+    $statementEventPayload = [];
+    $statementEventPayloadJson = (string) ($statementServiceEvent['payload_json'] ?? $statementServiceEvent['payloadJson'] ?? '');
+    if ($statementEventPayloadJson !== '') {
+        $decodedStatementEventPayload = json_decode($statementEventPayloadJson, true);
+        if (is_array($decodedStatementEventPayload)) {
+            $statementEventPayload = $decodedStatementEventPayload;
+        }
+    }
+
+    $statementCustomerPenalty = round((float) (
+        $statementEventPayload['customer_penalty_amount']
+        ?? $statementEventPayload['customer_penalty']
+        ?? $statementServiceEvent['penalty_amount']
+        ?? $statementServiceEvent['penaltyAmount']
+        ?? 0
+    ), 2);
+    $statementEventLine = trim((string) ($statementServiceEvent['service_line_reference'] ?? $statementServiceEvent['serviceLineReference'] ?? ''));
+    $statementEventBaseAmount = $statementEventLine !== ''
+        ? (float) ($statementServiceReceivableByLineCurrency[$statementEventLine . '|' . $statementEventCurrency] ?? 0)
+        : 0.0;
+    if ($statementEventBaseAmount <= 0.005) {
+        $statementEventBaseAmount = (float) ($invoiceReceivableTotals[$statementEventCurrency] ?? 0);
+    }
+
+    $statementExpectedAdjustment = round(max($statementEventBaseAmount - $statementCustomerPenalty, 0), 2);
+    if ($statementExpectedAdjustment <= 0.005) {
+        continue;
+    }
+
+    $statementEventDate = trim((string) ($statementServiceEvent['event_date'] ?? $statementServiceEvent['eventDate'] ?? ''));
+    foreach (($customerPaymentFoundation['receipts'] ?? []) as $statementReceiptCandidate) {
+        $statementReceiptId = (int) ($statementReceiptCandidate['id'] ?? 0);
+        if ($statementReceiptId <= 0 || isset($statementInternalAdjustmentReceiptIds[$statementReceiptId])) {
+            continue;
+        }
+
+        $statementReceiptCurrency = trim((string) ($statementReceiptCandidate['currency'] ?? ''));
+        $statementReceiptStatus = str_replace(' ', '_', mb_strtolower(trim((string) ($statementReceiptCandidate['statusRaw'] ?? $statementReceiptCandidate['status'] ?? ''))));
+        $statementReceiptDate = trim((string) ($statementReceiptCandidate['receiptDate'] ?? ''));
+        if ($statementReceiptCurrency !== $statementEventCurrency || $statementReceiptStatus === 'void') {
+            continue;
+        }
+        if ($statementEventDate !== '' && $statementReceiptDate !== '' && strcmp($statementReceiptDate, $statementEventDate) < 0) {
+            continue;
+        }
+
+        $statementReceiptTendered = round((float) ($statementReceiptCandidate['tenderedAmount'] ?? $statementReceiptCandidate['receivedAmount'] ?? 0), 2);
+        $statementReceiptReturned = round((float) ($statementReceiptCandidate['returnedAmount'] ?? 0), 2);
+        $statementReceiptAllocated = round((float) ($statementReceiptCandidate['allocatedAmount'] ?? 0), 2);
+        if (
+            abs($statementReceiptTendered - $statementExpectedAdjustment) <= 0.005
+            && abs($statementReceiptAllocated - $statementExpectedAdjustment) <= 0.005
+            && abs($statementReceiptReturned) <= 0.005
+        ) {
+            $statementInternalAdjustmentReceiptIds[$statementReceiptId] = true;
+            $statementInternalAdjustmentReceiptLabels[$statementReceiptId] = 'Settlement Adjustment';
+            break;
+        }
+    }
+}
 $remainingCustomerBalanceSource = is_array($customerPaymentFoundation['summary']['fullCustomerOutstanding'] ?? null)
     ? $customerPaymentFoundation['summary']['fullCustomerOutstanding']
     : [];
 $remainingCustomerBalanceTotals = $nonZeroCurrencyTotals($remainingCustomerBalanceSource);
 $statementPreviousBalanceTotals = $nonZeroCurrencyTotals($customerPreviousBalanceTotals);
-$statementCustomerCreditTotals = $nonZeroCurrencyTotals($customerCreditTotals);
+$statementTenderedTotals = [];
+$statementReturnedTotals = [];
+foreach (($customerPaymentFoundation['receipts'] ?? []) as $statementReceiptRow) {
+    $statementReceiptStatusRaw = str_replace(' ', '_', mb_strtolower(trim((string) ($statementReceiptRow['statusRaw'] ?? $statementReceiptRow['status'] ?? ''))));
+    if ($statementReceiptStatusRaw === 'void') {
+        continue;
+    }
+
+    $statementReceiptCurrency = trim((string) ($statementReceiptRow['currency'] ?? ''));
+    if ($statementReceiptCurrency === '') {
+        continue;
+    }
+
+    $statementReceiptId = (int) ($statementReceiptRow['id'] ?? 0);
+    if ($statementReceiptId > 0 && isset($statementInternalAdjustmentReceiptIds[$statementReceiptId])) {
+        continue;
+    }
+
+    $statementTenderedAmount = round((float) ($statementReceiptRow['tenderedAmount'] ?? $statementReceiptRow['receivedAmount'] ?? 0), 2);
+    $statementReturnedAmount = round((float) ($statementReceiptRow['returnedAmount'] ?? 0), 2);
+    $statementTenderedTotals[$statementReceiptCurrency] = ($statementTenderedTotals[$statementReceiptCurrency] ?? 0.0) + $statementTenderedAmount;
+    $statementReturnedTotals[$statementReceiptCurrency] = ($statementReturnedTotals[$statementReceiptCurrency] ?? 0.0) + $statementReturnedAmount;
+}
+$statementTenderedTotals = $nonZeroCurrencyTotals($statementTenderedTotals);
+$statementReturnedTotals = $nonZeroCurrencyTotals($statementReturnedTotals);
 $selectedReceiptId = (int) ($selectedReceipt['id'] ?? 0);
 $selectedReceiptNo = (string) ($selectedReceipt['receiptNo'] ?? '');
 $selectedRefundPayload = [];
@@ -331,7 +592,15 @@ if ($selectedRefundEvent !== null && ! empty($selectedRefundEvent['payload_json'
         $selectedRefundPayload = $decodedPayload;
     }
 }
-$selectedRefundPaymentMethod = ucwords(str_replace('_', ' ', (string) ($selectedRefundPayload['payment_method'] ?? 'cash')));
+$selectedRefundPaymentMethodRaw = str_replace(' ', '_', mb_strtolower(trim((string) ($selectedRefundPayload['payment_method'] ?? 'cash'))));
+$selectedRefundPaymentMethod = match ($selectedRefundPaymentMethodRaw) {
+    'cash' => 'Cash',
+    'bank_transfer' => 'Bank Transfer',
+    'credit_card' => 'Credit Card',
+    'debit_card' => 'Debit Card',
+    'wallet', 'wallet_mobile', 'mobile_wallet' => 'Wallet',
+    default => ucwords(str_replace('_', ' ', $selectedRefundPaymentMethodRaw !== '' ? $selectedRefundPaymentMethodRaw : 'cash')),
+};
 $selectedRefundSourceAccount = trim((string) (($selectedRefundPayload['refund_detail']['treasury_account_snapshot']['account_name'] ?? '') !== ''
     ? $selectedRefundPayload['refund_detail']['treasury_account_snapshot']['account_name']
     : ''));
@@ -384,17 +653,17 @@ foreach ($reissueEvents as $event) {
 
 $serviceInvoiceCandidateTotals = [];
 foreach ($services as $service) {
+    $serviceStatus = str_replace(' ', '_', mb_strtolower(trim((string) ($service['status'] ?? 'open'))));
+    if ($serviceStatus === 'cancelled') {
+        continue;
+    }
+
     $currency = trim((string) ($service['currency'] ?? ''));
     if ($currency === '') {
         continue;
     }
 
-    $savedFinalSale = (float) ($service['final_sale_price'] ?? 0);
-    $serviceAmount = abs($savedFinalSale) > 0.005
-        ? $savedFinalSale
-        : (float) ($service['sale_price'] ?? 0)
-            + (float) ($service['service_charge'] ?? 0)
-            - (float) ($service['discount_amount'] ?? 0);
+    $serviceAmount = $serviceReceivableAmount($service);
 
     $serviceInvoiceCandidateTotals[$currency] = ($serviceInvoiceCandidateTotals[$currency] ?? 0.0) + $serviceAmount;
 }
@@ -421,9 +690,17 @@ foreach ($statementSameCurrencyPreviousTotals as $currency => $amount) {
     $statementTotalOutstandingTotals[(string) $currency] = (float) ($statementTotalOutstandingTotals[(string) $currency] ?? 0) + (float) $amount;
 }
 
-$totalInvoiceAmount = (float) ($invoiceReceivableTotals[$receiptCurrency] ?? 0);
-if ($totalInvoiceAmount <= 0 && isset($serviceInvoiceCandidateTotals[$receiptCurrency])) {
-    $serviceCurrencyFallbackTotal = (float) $serviceInvoiceCandidateTotals[$receiptCurrency];
+$receiptInvoiceCurrency = (string) (
+    array_key_first($invoiceReceivableTotals)
+    ?? array_key_first($invoiceOutstandingTotals)
+    ?? array_key_first($serviceInvoiceCandidateTotals)
+    ?? $receiptCurrency
+);
+$receiptDisplayZeroTotals = [$receiptInvoiceCurrency => 0.0];
+$totalInvoiceAmount = (float) ($invoiceReceivableTotals[$receiptInvoiceCurrency] ?? 0);
+$receiptCurrencyReceivedTotal = (float) ($invoiceReceivedTotals[$receiptInvoiceCurrency] ?? 0);
+if ($totalInvoiceAmount <= 0 && isset($serviceInvoiceCandidateTotals[$receiptInvoiceCurrency])) {
+    $serviceCurrencyFallbackTotal = (float) $serviceInvoiceCandidateTotals[$receiptInvoiceCurrency];
     $totalInvoiceAmount = $serviceCurrencyFallbackTotal;
 }
 
@@ -431,7 +708,7 @@ $balanceDue = max($totalInvoiceAmount - $receiptCurrencyReceivedTotal, 0);
 $dueDateForReceipt = '';
 if ($balanceDue > 0) {
     foreach (($customerPaymentFoundation['openReceivables'] ?? []) as $openReceivableRow) {
-        if ((string) ($openReceivableRow['currency'] ?? '') === $receiptCurrency && (float) ($openReceivableRow['outstandingAmount'] ?? 0) > 0 && ! empty($openReceivableRow['nextDueDate'])) {
+        if ((string) ($openReceivableRow['currency'] ?? '') === $receiptInvoiceCurrency && (float) ($openReceivableRow['outstandingAmount'] ?? 0) > 0 && ! empty($openReceivableRow['nextDueDate'])) {
             $dueDateForReceipt = (string) $openReceivableRow['nextDueDate'];
             break;
         }
@@ -444,6 +721,7 @@ $registerReceiptOriginalPayment = static function (array $receiptRow) use (&$rec
     $receiptNo = trim((string) ($receiptRow['receiptNo'] ?? $receiptRow['receipt_no'] ?? ''));
     $currency = trim((string) ($receiptRow['currency'] ?? $receiptRow['paymentCurrency'] ?? ''));
     $receivedAmount = (float) ($receiptRow['tenderedAmount'] ?? $receiptRow['tendered_amount'] ?? $receiptRow['receivedAmount'] ?? $receiptRow['received_amount'] ?? 0);
+    $receiptPurpose = trim((string) ($receiptRow['receiptPurpose'] ?? $receiptRow['receipt_purpose'] ?? 'booking_payment'));
 
     if (($receiptId <= 0 && $receiptNo === '') || $currency === '' || abs($receivedAmount) <= 0.005) {
         return;
@@ -452,6 +730,7 @@ $registerReceiptOriginalPayment = static function (array $receiptRow) use (&$rec
     $payload = [
         'currency' => $currency,
         'receivedAmount' => $receivedAmount,
+        'receiptPurpose' => $receiptPurpose !== '' ? $receiptPurpose : 'booking_payment',
     ];
 
     if ($receiptId > 0) {
@@ -484,6 +763,10 @@ $getOriginalReceiptPaymentDisplay = static function (array $historyRow) use ($re
     }
 
     if (is_array($originalPayment)) {
+        if ((string) ($originalPayment['receiptPurpose'] ?? '') === 'customer_advance') {
+            return 'Advance Applied: ' . (string) $originalPayment['currency'] . ' ' . $formatMoney((float) $originalPayment['receivedAmount']);
+        }
+
         return (string) $originalPayment['currency'] . ' ' . $formatMoney((float) $originalPayment['receivedAmount']);
     }
 
@@ -496,7 +779,11 @@ $getOriginalReceiptPaymentDisplay = static function (array $historyRow) use ($re
         ?? 0
     );
 
-    return $fallbackCurrency . ' ' . $formatMoney($fallbackAmount);
+    $fallbackDisplay = $fallbackCurrency . ' ' . $formatMoney($fallbackAmount);
+
+    return (string) ($historyRow['receiptPurpose'] ?? '') === 'customer_advance'
+        ? 'Advance Applied: ' . $fallbackDisplay
+        : $fallbackDisplay;
 };
 $receiptAllocations = array_values(array_filter(
     $customerPaymentFoundation['allocations'] ?? [],
@@ -507,6 +794,132 @@ $currentBookingReceiptAllocations = array_values(array_filter(
     $receiptAllocations,
     static fn (array $allocation): bool => (string) ($allocation['bookingReference'] ?? '') === $bookingReference
 ));
+$receiptIsPassengerSpecific = false;
+$receiptScopedLineReferences = [];
+foreach ($currentBookingReceiptAllocations as $allocation) {
+    $allocationNote = mb_strtolower(trim((string) ($allocation['allocationTrail'] ?? $allocation['allocationNote'] ?? '')));
+    if (str_contains($allocationNote, 'selected passenger due')) {
+        $receiptIsPassengerSpecific = true;
+    }
+
+    $allocationServiceLineReference = trim((string) ($allocation['serviceLineReference'] ?? ''));
+    if ($allocationServiceLineReference !== '') {
+        $receiptScopedLineReferences[$allocationServiceLineReference] = true;
+    }
+}
+$receiptScopedLineReferences = $receiptIsPassengerSpecific ? $receiptScopedLineReferences : [];
+$serviceRowsByLineReference = [];
+foreach ($services as $service) {
+    $serviceLineReference = trim((string) ($service['line_reference'] ?? ''));
+    if ($serviceLineReference !== '') {
+        $serviceRowsByLineReference[$serviceLineReference] = $service;
+    }
+}
+$receiptPassengerNames = [];
+$receiptPassengerReferences = [];
+$receiptPassengerDepartureDates = [];
+foreach ($currentBookingReceiptAllocations as $allocation) {
+    $allocationPassenger = trim((string) ($allocation['passengerName'] ?? ''));
+    if ($allocationPassenger !== '') {
+        $receiptPassengerNames[$allocationPassenger] = true;
+    }
+
+    $allocationServiceLineReference = trim((string) ($allocation['serviceLineReference'] ?? ''));
+    $allocationService = $allocationServiceLineReference !== '' ? ($serviceRowsByLineReference[$allocationServiceLineReference] ?? null) : null;
+    if (! is_array($allocationService)) {
+        continue;
+    }
+
+    $servicePassenger = trim((string) ($allocationService['passenger_name'] ?? ''));
+    if ($servicePassenger !== '') {
+        $receiptPassengerNames[$servicePassenger] = true;
+    }
+
+    $serviceReference = $extractServiceReference($allocationService);
+    if ($serviceReference !== 'N/A') {
+        $receiptPassengerReferences[$serviceReference] = true;
+    }
+
+    $serviceDepartureDate = trim((string) ($allocationService['departure_date'] ?? ''));
+    if ($serviceDepartureDate !== '') {
+        $receiptPassengerDepartureDates[$serviceDepartureDate] = true;
+    }
+}
+foreach ($services as $service) {
+    $servicePassenger = trim((string) ($service['passenger_name'] ?? ''));
+    if ($servicePassenger !== '') {
+        $receiptPassengerNames[$servicePassenger] = true;
+    }
+
+    $serviceReference = $extractServiceReference($service);
+    if ($serviceReference !== 'N/A') {
+        $receiptPassengerReferences[$serviceReference] = true;
+    }
+
+    $serviceDepartureDate = trim((string) ($service['departure_date'] ?? ''));
+    if ($serviceDepartureDate !== '') {
+        $receiptPassengerDepartureDates[$serviceDepartureDate] = true;
+    }
+}
+$receiptPassengerSummary = implode(', ', array_keys($receiptPassengerNames));
+if ($receiptPassengerSummary === '') {
+    $receiptPassengerSummary = $customerName;
+}
+$receiptReferenceSummary = implode(' / ', array_keys($receiptPassengerReferences));
+$receiptDepartureDateSummary = implode(' / ', array_keys($receiptPassengerDepartureDates));
+$receiptPassengerCount = count($receiptPassengerNames);
+$receiptPassengerCaption = $receiptPassengerCount > 1 ? 'Passengers Covered' : 'Passenger';
+$normalizeReceiptPersonName = static function (string $value): string {
+    $normalized = mb_strtolower(trim(preg_replace('/\s+/', ' ', $value)));
+
+    return $normalized;
+};
+$normalizedCustomerName = $normalizeReceiptPersonName($customerName);
+$normalizedReceiptPassengerSummary = $normalizeReceiptPersonName($receiptPassengerSummary);
+$receiptPassengerNameDirectory = [];
+foreach (array_keys($receiptPassengerNames) as $receiptPassengerName) {
+    $normalizedPassengerName = $normalizeReceiptPersonName((string) $receiptPassengerName);
+    if ($normalizedPassengerName !== '') {
+        $receiptPassengerNameDirectory[$normalizedPassengerName] = true;
+    }
+}
+$passengerOutstandingBalanceTotals = [];
+$showPassengerOutstandingBalance = false;
+if ($receiptIsPassengerSpecific && $receiptScopedLineReferences !== []) {
+    foreach (($customerPaymentFoundation['openReceivables'] ?? []) as $openReceivableRow) {
+        if (! is_array($openReceivableRow)) {
+            continue;
+        }
+
+        $serviceLineReference = trim((string) ($openReceivableRow['serviceLineReference'] ?? ''));
+        if ($serviceLineReference === '' || ! isset($receiptScopedLineReferences[$serviceLineReference])) {
+            continue;
+        }
+
+        $currency = trim((string) ($openReceivableRow['currency'] ?? ''));
+        $outstandingAmount = round((float) ($openReceivableRow['outstandingAmount'] ?? 0), 2);
+        if ($currency === '') {
+            continue;
+        }
+
+        $passengerOutstandingBalanceTotals[$currency] = ($passengerOutstandingBalanceTotals[$currency] ?? 0.0)
+            + max(0.0, $outstandingAmount);
+    }
+
+    foreach ($currentBookingReceiptAllocations as $allocation) {
+        $serviceLineReference = trim((string) ($allocation['serviceLineReference'] ?? ''));
+        if ($serviceLineReference === '' || ! isset($receiptScopedLineReferences[$serviceLineReference])) {
+            continue;
+        }
+
+        $currency = trim((string) ($allocation['receivableCurrency'] ?? $allocation['currency'] ?? ''));
+        if ($currency !== '' && ! isset($passengerOutstandingBalanceTotals[$currency])) {
+            $passengerOutstandingBalanceTotals[$currency] = 0.0;
+        }
+    }
+
+    $showPassengerOutstandingBalance = $passengerOutstandingBalanceTotals !== [];
+}
 $currentInvoicePaidByReceiptTotals = [];
 foreach ($currentBookingReceiptAllocations as $allocation) {
     $currency = (string) ($allocation['receivableCurrency'] ?? $allocation['currency'] ?? '');
@@ -517,6 +930,82 @@ foreach ($currentBookingReceiptAllocations as $allocation) {
     $currentInvoicePaidByReceiptTotals[$currency] = ($currentInvoicePaidByReceiptTotals[$currency] ?? 0.0)
         + (float) ($allocation['receivableAmountAllocated'] ?? $allocation['allocatedAmount'] ?? 0);
 }
+if (
+    $currentInvoicePaidByReceiptTotals === []
+    && $selectedReceipt !== null
+    && ! $selectedReceiptIsVoid
+) {
+    $fallbackCurrency = trim((string) ($selectedReceipt['currency'] ?? ''));
+    $fallbackAmount = (float) ($selectedReceipt['allocatedAmount'] ?? 0);
+    if (abs($fallbackAmount) <= 0.005) {
+        $fallbackAmount = (float) ($selectedReceipt['receivedAmount'] ?? 0) - (float) ($selectedReceipt['returnedAmount'] ?? $selectedReceipt['returned_amount'] ?? 0);
+    }
+    if ($fallbackCurrency !== '' && abs($fallbackAmount) > 0.005) {
+        $currentInvoicePaidByReceiptTotals[$fallbackCurrency] = round($fallbackAmount, 2);
+    }
+}
+$receiptServiceRows = [];
+$receiptSubtotalTotals = [];
+$receiptDiscountTotals = [];
+$receiptGrandTotals = [];
+foreach ($services as $serviceIndex => $service) {
+    $serviceLineReference = trim((string) ($service['line_reference'] ?? ''));
+    if (
+        $receiptIsPassengerSpecific
+        && $receiptScopedLineReferences !== []
+        && ($serviceLineReference === '' || ! isset($receiptScopedLineReferences[$serviceLineReference]))
+    ) {
+        continue;
+    }
+
+    $serviceCurrency = trim((string) ($service['currency'] ?? $receiptInvoiceCurrency ?? 'PKR'));
+    if ($serviceCurrency === '') {
+        $serviceCurrency = $receiptInvoiceCurrency !== '' ? $receiptInvoiceCurrency : 'PKR';
+    }
+
+    $servicePassenger = trim((string) ($service['passenger_name'] ?? ''));
+    if ($servicePassenger === '') {
+        $servicePassenger = $customerName !== '' ? $customerName : 'Passenger';
+    }
+
+    $serviceRoute = $extractServiceRoute($service);
+    $serviceReference = $extractServiceReference($service);
+
+    $serviceDeparture = trim((string) ($service['departure_date'] ?? ''));
+    if ($serviceDeparture === '') {
+        $serviceDeparture = trim((string) ($service['due_date'] ?? ''));
+    }
+
+    $serviceDiscountAmount = round((float) ($service['discount_amount'] ?? 0), 2);
+    $serviceLineTotal = round($serviceReceivableAmount($service), 2);
+    $serviceLineSubtotal = round($serviceLineTotal + max(0, $serviceDiscountAmount), 2);
+
+    $receiptSubtotalTotals[$serviceCurrency] = ($receiptSubtotalTotals[$serviceCurrency] ?? 0.0) + $serviceLineSubtotal;
+    if ($serviceDiscountAmount > 0.005) {
+        $receiptDiscountTotals[$serviceCurrency] = ($receiptDiscountTotals[$serviceCurrency] ?? 0.0) + $serviceDiscountAmount;
+    }
+    $receiptGrandTotals[$serviceCurrency] = ($receiptGrandTotals[$serviceCurrency] ?? 0.0) + $serviceLineTotal;
+
+    $receiptServiceRows[] = [
+        'index' => count($receiptServiceRows) + 1,
+        'service' => ucwords((string) ($service['service_type'] ?? 'service')),
+        'passenger' => $servicePassenger,
+        'route' => $serviceRoute !== '' ? $serviceRoute : 'N/A',
+        'referenceLabel' => $extractServiceReferenceLabel($service),
+        'reference' => $serviceReference,
+        'departure' => $serviceDeparture !== '' ? $serviceDeparture : 'N/A',
+        'currency' => $serviceCurrency,
+        'amount' => $serviceLineTotal,
+    ];
+}
+$receiptReferenceLabels = array_values(array_unique(array_map(
+    static fn (array $receiptServiceRow): string => (string) ($receiptServiceRow['referenceLabel'] ?? 'Reference'),
+    $receiptServiceRows
+)));
+$receiptReferenceColumnLabel = count($receiptReferenceLabels) === 1 ? $receiptReferenceLabels[0] : 'Reference';
+$receiptDiscountTotals = $nonZeroCurrencyTotals($receiptDiscountTotals);
+$receiptSubtotalTotals = $nonZeroCurrencyTotals($receiptSubtotalTotals);
+$receiptGrandTotals = $nonZeroCurrencyTotals($receiptGrandTotals);
 $previousBalancePaidByReceiptTotals = [];
 $previousBalanceAllocationRows = [];
 
@@ -562,21 +1051,113 @@ foreach ($receiptAllocations as $allocation) {
 }
 $currentInvoiceBalanceDisplay = $nonZeroCurrencyTotals($invoiceOutstandingTotals);
 $currentInvoiceAmountDisplay = $nonZeroCurrencyTotals($invoiceReceivableTotals);
+if ($receiptIsPassengerSpecific && $receiptScopedLineReferences !== []) {
+    $currentInvoiceAmountDisplay = $receiptGrandTotals !== [] ? $receiptGrandTotals : $currentInvoicePaidByReceiptTotals;
+    $currentInvoiceBalanceDisplay = $passengerOutstandingBalanceTotals;
+}
 $receiptTotalAllocated = (float) ($selectedReceipt['allocatedAmount'] ?? 0);
 $receiptUnallocatedAmount = (float) ($selectedReceipt['unallocatedAmount'] ?? 0);
 $receiptReturnedAmount = (float) ($selectedReceipt['returnedAmount'] ?? $selectedReceipt['returned_amount'] ?? 0);
 $invoicePaymentHistoryRows = array_values(array_filter(
     $customerPaymentFoundation['invoicePaymentHistory'] ?? [],
-    static function (array $allocation) use ($bookingReference): bool {
+    static function (array $allocation) use ($bookingReference, $receiptIsPassengerSpecific, $receiptScopedLineReferences): bool {
         if ((string) ($allocation['bookingReference'] ?? '') !== $bookingReference) {
             return false;
         }
 
         $receiptStatusRaw = str_replace(' ', '_', mb_strtolower(trim((string) ($allocation['receiptStatusRaw'] ?? ''))));
 
-        return $receiptStatusRaw !== 'void';
+        if ($receiptStatusRaw === 'void') {
+            return false;
+        }
+
+        if ($receiptIsPassengerSpecific && $receiptScopedLineReferences !== []) {
+            $serviceLineReference = trim((string) ($allocation['serviceLineReference'] ?? ''));
+            $allocationTrail = mb_strtolower(trim((string) ($allocation['allocationTrail'] ?? $allocation['allocationNote'] ?? '')));
+
+            return $serviceLineReference !== ''
+                && isset($receiptScopedLineReferences[$serviceLineReference])
+                && str_contains($allocationTrail, 'selected passenger due');
+        }
+
+        return true;
     }
 ));
+$statementInvoiceAllocationRows = $invoicePaymentHistoryRows !== []
+    ? $invoicePaymentHistoryRows
+    : ($customerPaymentFoundation['allocations'] ?? []);
+$statementRemainingByServiceLineCurrency = [];
+foreach (($customerPaymentFoundation['openReceivables'] ?? []) as $statementOpenReceivable) {
+    $statementOpenBookingReference = trim((string) ($statementOpenReceivable['bookingReference'] ?? $statementOpenReceivable['booking_reference'] ?? ''));
+    if ($statementOpenBookingReference !== '' && $statementOpenBookingReference !== $bookingReference) {
+        continue;
+    }
+
+    $statementOpenServiceLine = trim((string) ($statementOpenReceivable['serviceLineReference'] ?? $statementOpenReceivable['service_line_reference'] ?? ''));
+    $statementOpenCurrency = trim((string) ($statementOpenReceivable['currency'] ?? ''));
+    if ($statementOpenServiceLine === '' || $statementOpenCurrency === '') {
+        continue;
+    }
+
+    $statementOpenKey = $statementOpenServiceLine . '|' . $statementOpenCurrency;
+    $statementRemainingByServiceLineCurrency[$statementOpenKey] = ($statementRemainingByServiceLineCurrency[$statementOpenKey] ?? 0.0)
+        + max(0.0, round((float) ($statementOpenReceivable['outstandingAmount'] ?? $statementOpenReceivable['outstanding_amount'] ?? 0), 2));
+}
+$statementAdvanceAppliedTotals = [];
+$statementAdvanceReceiptRows = [];
+$statementReceiptKeys = [];
+foreach (($customerPaymentFoundation['receipts'] ?? []) as $statementReceiptRow) {
+    $statementReceiptId = (int) ($statementReceiptRow['id'] ?? 0);
+    $statementReceiptNo = trim((string) ($statementReceiptRow['receiptNo'] ?? ''));
+    if ($statementReceiptId > 0) {
+        $statementReceiptKeys['id:' . $statementReceiptId] = true;
+    }
+    if ($statementReceiptNo !== '') {
+        $statementReceiptKeys['no:' . $statementReceiptNo] = true;
+    }
+}
+foreach ($statementInvoiceAllocationRows as $statementAllocationRow) {
+    $statementReceiptPurpose = str_replace(' ', '_', mb_strtolower(trim((string) ($statementAllocationRow['receiptPurpose'] ?? 'booking_payment'))));
+    if ($statementReceiptPurpose !== 'customer_advance') {
+        continue;
+    }
+
+    $statementAllocationReceiptStatusRaw = str_replace(' ', '_', mb_strtolower(trim((string) ($statementAllocationRow['receiptStatusRaw'] ?? ''))));
+    if ($statementAllocationReceiptStatusRaw === 'void') {
+        continue;
+    }
+
+    $statementAdvanceCurrency = trim((string) ($statementAllocationRow['receivableCurrency'] ?? $statementAllocationRow['currency'] ?? ''));
+    $statementAdvanceAmount = round((float) ($statementAllocationRow['receivableAmountAllocated'] ?? $statementAllocationRow['allocatedAmount'] ?? 0), 2);
+    if ($statementAdvanceCurrency === '' || abs($statementAdvanceAmount) <= 0.005) {
+        continue;
+    }
+
+    $statementAdvanceAppliedTotals[$statementAdvanceCurrency] = ($statementAdvanceAppliedTotals[$statementAdvanceCurrency] ?? 0.0) + $statementAdvanceAmount;
+
+    $statementAdvanceReceiptId = (int) ($statementAllocationRow['receiptId'] ?? 0);
+    $statementAdvanceReceiptNo = trim((string) ($statementAllocationRow['receiptNo'] ?? ''));
+    $statementAdvanceReceiptKey = $statementAdvanceReceiptId > 0
+        ? 'id:' . $statementAdvanceReceiptId
+        : ($statementAdvanceReceiptNo !== '' ? 'no:' . $statementAdvanceReceiptNo : 'advance:' . count($statementAdvanceReceiptRows));
+
+    if (isset($statementReceiptKeys[$statementAdvanceReceiptKey])) {
+        continue;
+    }
+
+    if (!isset($statementAdvanceReceiptRows[$statementAdvanceReceiptKey])) {
+        $statementAdvanceReceiptRows[$statementAdvanceReceiptKey] = [
+            'receiptNo' => $statementAdvanceReceiptNo !== '' ? $statementAdvanceReceiptNo : 'Advance',
+            'receiptDate' => (string) ($statementAllocationRow['receiptDate'] ?? mb_substr((string) ($statementAllocationRow['allocatedAt'] ?? ''), 0, 10)),
+            'currency' => $statementAdvanceCurrency,
+            'allocatedAmount' => 0.0,
+        ];
+    }
+
+    $statementAdvanceReceiptRows[$statementAdvanceReceiptKey]['allocatedAmount'] =
+        (float) ($statementAdvanceReceiptRows[$statementAdvanceReceiptKey]['allocatedAmount'] ?? 0) + $statementAdvanceAmount;
+}
+$statementAdvanceAppliedTotals = $nonZeroCurrencyTotals($statementAdvanceAppliedTotals);
 $isSelectedReceiptHistoryRow = static function (array $historyRow) use ($selectedReceiptId, $selectedReceiptNo): bool {
     $historyReceiptId = (int) ($historyRow['receiptId'] ?? 0);
     $historyReceiptNo = trim((string) ($historyRow['receiptNo'] ?? ''));
@@ -591,6 +1172,8 @@ $isSelectedReceiptHistoryRow = static function (array $historyRow) use ($selecte
 $previousInvoicePaymentsTotals = [];
 $currentInvoicePaymentHistoryTotals = [];
 $totalPaidAgainstInvoiceTotals = [];
+$previousInvoicePaymentHasAdvance = false;
+$previousInvoicePaymentHasNonAdvance = false;
 
 foreach ($invoicePaymentHistoryRows as $historyRow) {
     $currency = (string) ($historyRow['receivableCurrency'] ?? $historyRow['currency'] ?? '');
@@ -605,10 +1188,19 @@ foreach ($invoicePaymentHistoryRows as $historyRow) {
         $currentInvoicePaymentHistoryTotals[$currency] = ($currentInvoicePaymentHistoryTotals[$currency] ?? 0.0) + $paidAmount;
     } else {
         $previousInvoicePaymentsTotals[$currency] = ($previousInvoicePaymentsTotals[$currency] ?? 0.0) + $paidAmount;
+        $receiptPurpose = str_replace(' ', '_', mb_strtolower(trim((string) ($historyRow['receiptPurpose'] ?? 'booking_payment'))));
+        if ($receiptPurpose === 'customer_advance') {
+            $previousInvoicePaymentHasAdvance = true;
+        } else {
+            $previousInvoicePaymentHasNonAdvance = true;
+        }
     }
 }
 
 $previousInvoicePaymentsDisplay = $nonZeroCurrencyTotals($previousInvoicePaymentsTotals);
+$previousInvoicePaymentsLabel = $previousInvoicePaymentHasAdvance && ! $previousInvoicePaymentHasNonAdvance
+    ? 'Advance Payment'
+    : ($previousInvoicePaymentHasAdvance ? 'Previous / Advance Payments' : 'Previous Payments');
 $currentInvoicePaymentHistoryDisplay = $nonZeroCurrencyTotals($currentInvoicePaymentHistoryTotals);
 $totalPaidAgainstInvoiceDisplay = $nonZeroCurrencyTotals($totalPaidAgainstInvoiceTotals);
 $openSupplierHistoryUrl = null;
@@ -681,9 +1273,7 @@ $usesReceiptLayout = in_array($outputType, ['customer_receipt', 'service_refund_
                         <?php
                         $serviceReference = trim((string) ($service['ticket_number'] ?? $service['line_reference'] ?? ''));
                         $servicePassenger = trim((string) ($service['passenger_name'] ?? ''));
-                        $serviceAmount = (float) ($service['sale_price'] ?? 0)
-                            + (float) ($service['service_charge'] ?? 0)
-                            - (float) ($service['discount_amount'] ?? 0);
+                        $serviceAmount = $serviceReceivableAmount($service);
                         ?>
                         <tr>
                             <td><?= e((string) ($service['line_reference'] ?? '')) ?></td>
@@ -775,12 +1365,7 @@ $usesReceiptLayout = in_array($outputType, ['customer_receipt', 'service_refund_
                         <?php
                         $summaryServiceReference = trim((string) (($service['ticket_number'] ?? '') !== '' ? $service['ticket_number'] : ($service['line_reference'] ?? '')));
                         $summaryPassenger = trim((string) ($service['passenger_name'] ?? ''));
-                        $summaryFinalSale = (float) ($service['final_sale_price'] ?? 0);
-                        $summaryServiceAmount = abs($summaryFinalSale) > 0.005
-                            ? $summaryFinalSale
-                            : (float) ($service['sale_price'] ?? 0)
-                                + (float) ($service['service_charge'] ?? 0)
-                                - (float) ($service['discount_amount'] ?? 0);
+                        $summaryServiceAmount = $serviceReceivableAmount($service);
                         ?>
                         <tr>
                             <td><?= e((string) ($service['line_reference'] ?? '')) ?></td>
@@ -883,17 +1468,58 @@ $usesReceiptLayout = in_array($outputType, ['customer_receipt', 'service_refund_
             <section class="receipt-sheet">
                 <header class="receipt-sheet__head">
                     <div class="receipt-sheet__brand-block">
-                        <div class="receipt-sheet__branch"><?= e((string) (($branchBranding['receipt_name'] ?? '') !== '' ? $branchBranding['receipt_name'] : ($branchBranding['name'] ?? 'Travel Agency Branch'))) ?></div>
-                        <div class="receipt-sheet__meta"><?= e(trim((string) (($branchBranding['city'] ?? '') . ((string) ($branchBranding['country'] ?? '') !== '' ? ', ' . (string) ($branchBranding['country'] ?? '') : '')))) ?></div>
-                        <?php if ($primaryContactLicense !== ''): ?>
-                            <div class="receipt-sheet__meta">Licence No. <?= e($primaryContactLicense) ?></div>
-                        <?php endif; ?>
-                        <?php if ($primaryContactAddress !== ''): ?>
-                            <div class="receipt-sheet__meta receipt-sheet__address"><?= e($primaryContactAddress) ?></div>
-                        <?php endif; ?>
-                        <?php if ($primaryContactServiceNote !== ''): ?>
-                            <div class="receipt-sheet__service-note"><?= e($primaryContactServiceNote) ?></div>
-                        <?php endif; ?>
+                        <div class="receipt-sheet__brand-main">
+                            <?php if ($primaryContactLogo !== ''): ?>
+                                <div class="receipt-sheet__logo-wrap">
+                                    <img
+                                        class="receipt-sheet__logo"
+                                        src="<?= e($primaryContactLogoSrc) ?>"
+                                        data-fallback-src="<?= e($primaryContactLogoFallbackSrc) ?>"
+                                        onerror="if(this.dataset.fallbackApplied!=='1' && this.dataset.fallbackSrc){this.dataset.fallbackApplied='1';this.src=this.dataset.fallbackSrc;}"
+                                        alt="<?= e((string) ($branchBranding['receipt_name'] ?? $branchBranding['name'] ?? 'Branch Logo')) ?>"
+                                    >
+                                </div>
+                            <?php endif; ?>
+                            <div class="receipt-sheet__brand-copy">
+                                <?php if ($primaryContactBranchLabel !== ''): ?>
+                                    <div class="receipt-sheet__branch-label"><?= e($primaryContactBranchLabel) ?></div>
+                                <?php endif; ?>
+                                <div class="receipt-sheet__branch"><?= e((string) (($branchBranding['receipt_name'] ?? '') !== '' ? $branchBranding['receipt_name'] : ($branchBranding['name'] ?? 'Travel Agency Branch'))) ?></div>
+                                <div class="receipt-sheet__meta"><?= e($primaryContactLocationLabel !== '' ? $primaryContactLocationLabel : trim((string) (($branchBranding['city'] ?? '') . ((string) ($branchBranding['country'] ?? '') !== '' ? ', ' . (string) ($branchBranding['country'] ?? '') : '')))) ?></div>
+                                <?php if ($primaryContactPerson !== ''): ?>
+                                    <div class="receipt-sheet__meta receipt-sheet__meta--person"><?= e($primaryContactPerson) ?></div>
+                                <?php endif; ?>
+                            </div>
+                        </div>
+                        <div class="receipt-sheet__contact-stack">
+                            <?php if ($primaryContactPhones !== []): ?>
+                                <div class="receipt-sheet__contact-inline receipt-sheet__contact-inline--primary">
+                                    <span class="receipt-sheet__contact-icon receipt-sheet__contact-icon--phone"><?= $receiptIcon((string) ($primaryContactPhones[0]['type'] ?? 'phone')) ?></span>
+                                    <span><?= e((string) ($primaryContactPhones[0]['value'] ?? '')) ?></span>
+                                </div>
+                            <?php endif; ?>
+                            <?php if (array_slice($primaryContactPhones, 1) !== []): ?>
+                                <div class="receipt-sheet__contact-grid<?= $primaryBranchCode === 'dubai' ? ' receipt-sheet__contact-grid--three-up' : '' ?>">
+                                    <?php foreach (array_slice($primaryContactPhones, 1) as $phoneLine): ?>
+                                        <div class="receipt-sheet__contact-card">
+                                            <div class="receipt-sheet__contact-card-main">
+                                                <span class="receipt-sheet__contact-card-icons">
+                                                    <span class="receipt-sheet__contact-icon receipt-sheet__contact-icon--mobile"><?= $receiptIcon((string) ($phoneLine['type'] ?? 'mobile')) ?></span>
+                                                    <?php if (! empty($phoneLine['whatsapp'])): ?>
+                                                        <span class="receipt-sheet__contact-icon receipt-sheet__contact-icon--whatsapp"><?= $receiptIcon('whatsapp') ?></span>
+                                                    <?php endif; ?>
+                                                </span>
+                                                <div class="receipt-sheet__contact-card-copy">
+                                                    <strong><?= e((string) ($phoneLine['name'] ?? $phoneLine['label'] ?? 'Contact')) ?></strong>
+                                                    <span class="receipt-sheet__contact-role"><?= e((string) ($phoneLine['role'] ?? '')) ?></span>
+                                                    <span class="receipt-sheet__contact-number"><?= e((string) ($phoneLine['value'] ?? '')) ?></span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    <?php endforeach; ?>
+                                </div>
+                            <?php endif; ?>
+                        </div>
                     </div>
                     <div class="receipt-sheet__title-wrap">
                         <div class="receipt-sheet__title">
@@ -902,19 +1528,34 @@ $usesReceiptLayout = in_array($outputType, ['customer_receipt', 'service_refund_
                                 <span style="display:inline-block;margin-left:10px;padding:4px 10px;border:1px solid #8b0000;border-radius:999px;background:#fff0f0;color:#8b0000;font-size:12px;font-weight:700;letter-spacing:0.08em;">VOID</span>
                             <?php endif; ?>
                         </div>
-                        <?php if ($primaryContactPhones !== [] || $primaryContactEmail !== ''): ?>
-                            <div class="receipt-contact-panel">
-                                <span>Customer Support</span>
-                                <?php foreach (array_slice($primaryContactPhones, 0, 5) as $phoneLine): ?>
-                                    <div class="receipt-contact-panel__row">
-                                        <strong class="receipt-contact-panel__label"><?= e($phoneLine['label']) ?></strong>
-                                        <em class="receipt-contact-panel__value"><?= e($phoneLine['value']) ?></em>
+                        <div class="receipt-sheet__subtitle">Official branch receipt generated for customer payment confirmation.</div>
+                        <?php if ($primaryContactServiceNote !== ''): ?>
+                            <div class="receipt-sheet__service-note"><?= e($primaryContactServiceNote) ?></div>
+                        <?php endif; ?>
+                        <?php if ($generatedAt !== ''): ?>
+                            <div class="receipt-contact-panel receipt-contact-panel--generated-only">
+                                <div class="receipt-contact-panel__row">
+                                    <strong class="receipt-contact-panel__label">Generated</strong>
+                                    <em class="receipt-contact-panel__value"><?= e($generatedAt) ?></em>
+                                </div>
+                            </div>
+                        <?php endif; ?>
+                        <?php if ($primaryContactAddress !== '' || $primaryContactLicense !== '' || $primaryContactEmail !== ''): ?>
+                            <div class="receipt-sheet__info-lines receipt-sheet__info-lines--right">
+                                <?php if ($primaryContactAddress !== '' || $primaryContactLicense !== ''): ?>
+                                    <div class="receipt-sheet__meta receipt-sheet__meta-row">
+                                        <?php if ($primaryContactAddress !== ''): ?>
+                                            <span class="receipt-sheet__meta-row-item receipt-sheet__address"><?= e($primaryContactAddress) ?></span>
+                                        <?php endif; ?>
+                                        <?php if ($primaryContactLicense !== ''): ?>
+                                            <span class="receipt-sheet__meta-row-item">Licence No. <?= e($primaryContactLicense) ?></span>
+                                        <?php endif; ?>
                                     </div>
-                                <?php endforeach; ?>
+                                <?php endif; ?>
                                 <?php if ($primaryContactEmail !== ''): ?>
-                                    <div class="receipt-contact-panel__row">
-                                        <strong class="receipt-contact-panel__label">Email</strong>
-                                        <em class="receipt-contact-panel__value"><?= e($primaryContactEmail) ?></em>
+                                    <div class="receipt-sheet__contact-inline receipt-sheet__contact-inline--email">
+                                        <span class="receipt-sheet__contact-icon receipt-sheet__contact-icon--email"><?= $receiptIcon('email') ?></span>
+                                        <span><?= e($primaryContactEmail) ?></span>
                                     </div>
                                 <?php endif; ?>
                             </div>
@@ -937,7 +1578,7 @@ $usesReceiptLayout = in_array($outputType, ['customer_receipt', 'service_refund_
                 <?php endif; ?>
 
                 <section class="receipt-card">
-                    <div class="receipt-card__grid">
+                    <div class="receipt-card__grid receipt-card__grid--inline">
                         <div><span>Receipt No.</span><strong><?= e((string) ($selectedReceipt['receiptNo'] ?? '')) ?></strong></div>
                         <div><span>Receipt Date</span><strong><?= e((string) ($selectedReceipt['receiptDate'] ?? '')) ?></strong></div>
                         <div><span>Booking / Invoice No.</span><strong><?= e((string) ($booking['booking_reference'] ?? '')) ?></strong></div>
@@ -946,14 +1587,61 @@ $usesReceiptLayout = in_array($outputType, ['customer_receipt', 'service_refund_
                             <div><span>Passport No.</span><strong><?= e($passportNumber) ?></strong></div>
                         <?php endif; ?>
                         <div><span>Mobile</span><strong><?= e((string) (($booking['contact_mobile'] ?? '') !== '' ? $booking['contact_mobile'] : 'N/A')) ?></strong></div>
-                        <div><span>Currency</span><strong><?= e($receiptCurrency) ?></strong></div>
                         <div><span>Payment Method</span><strong><?= e(ucwords(str_replace('_', ' ', (string) ($selectedReceipt['paymentMethod'] ?? '')))) ?></strong></div>
                         <div><span>Reference No.</span><strong><?= e($receiptReference !== '' ? $receiptReference : 'N/A') ?></strong></div>
-                        <div><span>Received Against</span><strong><?= e($receiptAgainst) ?></strong></div>
-                        <div><span>Service Summary</span><strong><?= e($serviceSummary) ?></strong></div>
                         <?php if ($receiptBankCard !== ''): ?>
                             <div><span>Bank / Card Detail</span><strong><?= e($receiptBankCard) ?></strong></div>
                         <?php endif; ?>
+                    </div>
+                </section>
+
+                <section class="receipt-card receipt-card--highlight">
+                    <table class="output-table receipt-table receipt-service-table">
+                        <thead>
+                        <tr>
+                            <th>S.No</th>
+                            <th>Service</th>
+                            <th>Passenger</th>
+                            <th>Route</th>
+                            <th><?= e($receiptReferenceColumnLabel) ?></th>
+                            <th>Departure Date</th>
+                            <th>Price</th>
+                        </tr>
+                        </thead>
+                        <tbody>
+                        <?php foreach ($receiptServiceRows as $receiptServiceRow): ?>
+                            <tr>
+                                <td><?= e((string) $receiptServiceRow['index']) ?></td>
+                                <td><?= e((string) $receiptServiceRow['service']) ?></td>
+                                <td><?= e((string) $receiptServiceRow['passenger']) ?></td>
+                                <td><?= e((string) $receiptServiceRow['route']) ?></td>
+                                <td><?= e((string) $receiptServiceRow['reference']) ?></td>
+                                <td><?= e((string) $receiptServiceRow['departure']) ?></td>
+                                <td><?= e((string) $receiptServiceRow['currency']) ?> <?= e($formatMoney((float) $receiptServiceRow['amount'])) ?></td>
+                            </tr>
+                        <?php endforeach; ?>
+                        <?php if ($receiptServiceRows === []): ?>
+                            <tr><td colspan="7">No service lines recorded for this receipt yet.</td></tr>
+                        <?php endif; ?>
+                        </tbody>
+                    </table>
+                    <div class="receipt-service-totals">
+                        <?php if ($receiptSubtotalTotals !== []): ?>
+                            <div class="receipt-service-totals__row">
+                                <span>Subtotal</span>
+                                <strong><?= e($formatCurrencyTotals($receiptSubtotalTotals)) ?></strong>
+                            </div>
+                        <?php endif; ?>
+                        <?php if ($receiptDiscountTotals !== []): ?>
+                            <div class="receipt-service-totals__row">
+                                <span>Discount</span>
+                                <strong><?= e($formatCurrencyTotals($receiptDiscountTotals)) ?></strong>
+                            </div>
+                        <?php endif; ?>
+                        <div class="receipt-service-totals__row receipt-service-totals__row--grand">
+                            <span>Total</span>
+                            <strong><?= e($formatCurrencyTotals($receiptGrandTotals !== [] ? $receiptGrandTotals : $receiptDisplayZeroTotals)) ?></strong>
+                        </div>
                     </div>
                 </section>
 
@@ -971,24 +1659,36 @@ $usesReceiptLayout = in_array($outputType, ['customer_receipt', 'service_refund_
                             </div>
                            <?php if ($previousInvoicePaymentsDisplay !== []): ?>
     <div>
-        <span>Previous Payments</span>
+        <span><?= e($previousInvoicePaymentsLabel) ?></span>
         <strong><?= e($formatCurrencyTotals($previousInvoicePaymentsDisplay)) ?></strong>
     </div>
 <?php endif; ?>
                             <div>
                                 <span>Current Invoice Payment</span>
-                                <strong><?= e($formatCurrencyTotals($currentInvoicePaidByReceiptTotals !== [] ? $currentInvoicePaidByReceiptTotals : [$receiptCurrency => 0])) ?></strong>
+                                <strong><?= e($formatCurrencyTotals($currentInvoicePaidByReceiptTotals !== [] ? $currentInvoicePaidByReceiptTotals : $receiptDisplayZeroTotals)) ?></strong>
                             </div>
                             <div>
                                 <span>Total Paid</span>
-                                <strong><?= e($formatCurrencyTotals($totalPaidAgainstInvoiceDisplay !== [] ? $totalPaidAgainstInvoiceDisplay : [$receiptCurrency => 0])) ?></strong>
+                                <strong><?= e($formatCurrencyTotals($totalPaidAgainstInvoiceDisplay !== [] ? $totalPaidAgainstInvoiceDisplay : $receiptDisplayZeroTotals)) ?></strong>
                             </div>
                         </div>
                         <div class="receipt-due-line" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-top:12px;align-items:end;">
                             <div>
-                                <span>Outstanding Balance</span>
-                                <strong><?= e($formatCurrencyTotals($currentInvoiceBalanceDisplay !== [] ? $currentInvoiceBalanceDisplay : [$receiptCurrency => 0])) ?></strong>
+                                <span>Invoice Outstanding Balance</span>
+                                <strong><?= e($formatCurrencyTotals($currentInvoiceBalanceDisplay !== [] ? $currentInvoiceBalanceDisplay : $receiptDisplayZeroTotals)) ?></strong>
                             </div>
+                            <?php if (! $receiptIsPassengerSpecific && $remainingCustomerBalanceTotals !== []): ?>
+                                <div>
+                                    <span>Customer Total Outstanding Balance</span>
+                                    <strong><?= e($formatCurrencyTotals($remainingCustomerBalanceTotals)) ?></strong>
+                                </div>
+                            <?php endif; ?>
+                            <?php if ($showPassengerOutstandingBalance): ?>
+                                <div>
+                                    <span>Passenger Outstanding Balance</span>
+                                    <strong><?= e($formatCurrencyTotals($passengerOutstandingBalanceTotals)) ?></strong>
+                                </div>
+                            <?php endif; ?>
                             <?php if ($previousBalancePaidByReceiptDisplay !== []): ?>
                                 <div>
                                     <span>Paid Against Previous Balance</span>
@@ -1090,48 +1790,6 @@ openReceivables: <?= e(json_encode($receiptDebug['openReceivables'], JSON_PRETTY
                     </table>
                 </section>
 
-                                                <section class="receipt-card">
-                    <h2 style="margin:0 0 12px;">Service Details</h2>
-                    <table class="output-table receipt-table">
-                        <thead>
-                        <tr>
-                            <th>#</th>
-                            <th>Service Ref.</th>
-                            <th>Service</th>
-                            <th>Passenger</th>
-                            <th>Currency</th>
-                            <th>Service Amount</th>
-                        </tr>
-                        </thead>
-                        <tbody>
-                        <?php if ($services === []): ?>
-                            <tr><td colspan="6">No service lines recorded for this booking yet.</td></tr>
-                        <?php endif; ?>
-                        <?php foreach ($services as $serviceIndex => $service): ?>
-                            <?php
-                            $lineReference = trim((string) ($service['line_reference'] ?? ''));
-                            $serviceCurrency = (string) ($service['currency'] ?? $receiptCurrency);
-                            $servicePassenger = trim((string) ($service['passenger_name'] ?? ''));
-                            $serviceFinalSale = (float) ($service['final_sale_price'] ?? 0);
-                            $serviceAmount = abs($serviceFinalSale) > 0.005
-                                ? $serviceFinalSale
-                                : (float) ($service['sale_price'] ?? 0)
-                                    + (float) ($service['service_charge'] ?? 0)
-                                    - (float) ($service['discount_amount'] ?? 0);
-                            ?>
-                            <tr>
-                                <td><?= e((string) ($serviceIndex + 1)) ?></td>
-                                <td><?= e($lineReference !== '' ? $lineReference : 'N/A') ?></td>
-                                <td><?= e(ucwords((string) ($service['service_type'] ?? 'Service'))) ?></td>
-                                <td><?= e($servicePassenger !== '' ? $servicePassenger : $customerName) ?></td>
-                                <td><?= e($serviceCurrency) ?></td>
-                                <td><?= e($formatMoney($serviceAmount)) ?></td>
-                            </tr>
-                        <?php endforeach; ?>
-                        </tbody>
-                    </table>
-                </section>
-
                 <?php if ($outputType === 'customer_receipt' && $reissueEvents !== []): ?>
                     <section class="receipt-card">
                         <h2 style="margin:0 0 12px;">Reissue Adjustments Added to Invoice</h2>
@@ -1181,47 +1839,6 @@ openReceivables: <?= e(json_encode($receiptDebug['openReceivables'], JSON_PRETTY
                                 <strong><?= e($formatCurrencyTotals($reissueAdjustmentTotals)) ?></strong>
                             </div>
                         <?php endif; ?>
-                    </section>
-                <?php endif; ?>
-
-                <section class="receipt-card">
-                    <h2 style="margin:0 0 12px;">Outstanding Balance</h2>
-                    <?php if ($remainingCustomerBalanceTotals === []): ?>
-                        <div class="receipt-due-line">
-                            <span>Outstanding Balance</span>
-                            <strong>0.00</strong>
-                        </div>
-                    <?php else: ?>
-                        <div class="receipt-finance-strip">
-                            <?php foreach ($remainingCustomerBalanceTotals as $currency => $amount): ?>
-                                <div>
-                                    <strong><?= e($currency) ?> <?= e($formatMoney((float) $amount)) ?></strong>
-                                </div>
-                            <?php endforeach; ?>
-                        </div>
-                    <?php endif; ?>
-                </section>
-
-                <?php if ($services !== []): ?>
-                    <section class="receipt-card">
-                        <table class="output-table receipt-table">
-                            <thead><tr><th>Service Type</th><th>Service Reference</th><th>Passenger</th><th>Sector / Description</th></tr></thead>
-                            <tbody>
-                            <?php foreach ($services as $service): ?>
-                                <?php
-                                $serviceReference = trim((string) ($service['ticket_number'] ?? $service['line_reference'] ?? ''));
-                                $passenger = trim((string) ($service['traveler_name'] ?? $service['passenger_name'] ?? ''));
-                                $description = $cleanServiceDescription($service);
-                                ?>
-                                <tr>
-                                    <td><?= e(ucwords((string) ($service['service_type'] ?? 'Service'))) ?></td>
-                                    <td><?= e($serviceReference !== '' ? $serviceReference : (string) ($service['line_reference'] ?? '')) ?></td>
-                                    <td><?= e($passenger !== '' ? $passenger : $customerName) ?></td>
-                                    <td><?= e($description) ?></td>
-                                </tr>
-                            <?php endforeach; ?>
-                            </tbody>
-                        </table>
                     </section>
                 <?php endif; ?>
 
@@ -1297,11 +1914,7 @@ openReceivables: <?= e(json_encode($receiptDebug['openReceivables'], JSON_PRETTY
                         <div><span>Refund Date</span><strong><?= e((string) ($selectedRefundEvent['event_date'] ?? '')) ?></strong></div>
                         <div><span>Customer Name</span><strong><?= e($customerName) ?></strong></div>
                         <div><span>Service Line</span><strong><?= e((string) ($selectedRefundEvent['service_line_reference'] ?? 'N/A')) ?></strong></div>
-                        <div><span>Service Status</span><strong>Cancelled</strong></div>
                         <div><span>Payment Method</span><strong><?= e($selectedRefundPaymentMethod) ?></strong></div>
-                        <?php if ($selectedRefundSourceAccount !== ''): ?>
-                            <div><span>Refund Source</span><strong><?= e($selectedRefundSourceAccount) ?></strong></div>
-                        <?php endif; ?>
                         <?php if ($selectedRefundDestinationSummary !== ''): ?>
                             <div><span>Customer Bank</span><strong><?= e($selectedRefundDestinationSummary) ?></strong></div>
                         <?php endif; ?>
@@ -1325,7 +1938,6 @@ openReceivables: <?= e(json_encode($receiptDebug['openReceivables'], JSON_PRETTY
                                 <div><span>Airline / Supplier</span><strong><?= e((string) $selectedRefundService['airline']) ?></strong></div>
                             <?php endif; ?>
                         <?php endif; ?>
-                        <div style="grid-column:1 / -1;"><span>Refund Reason</span><strong><?= e((string) ($selectedRefundEvent['reason'] ?? '')) ?></strong></div>
                     </div>
                 </section>
 
@@ -1429,24 +2041,33 @@ openReceivables: <?= e(json_encode($receiptDebug['openReceivables'], JSON_PRETTY
                 <h2>Statement Summary</h2>
                 <div class="output-summary-strip">
                     <div><span>Invoice Amount</span><strong><?= e($formatCurrencyTotals($invoiceReceivableTotals)) ?></strong></div>
-                    <div><span>Payments Received</span><strong><?= e($formatCurrencyTotals($invoiceReceivedTotals)) ?></strong></div>
+                    <?php if ($statementTenderedTotals !== []): ?>
+                        <div><span>Amount Received</span><strong><?= e($formatCurrencyTotals($statementTenderedTotals)) ?></strong></div>
+                    <?php endif; ?>
+                    <?php if ($statementAdvanceAppliedTotals !== []): ?>
+                        <div><span>Advance Applied</span><strong><?= e($formatCurrencyTotals($statementAdvanceAppliedTotals)) ?></strong></div>
+                    <?php endif; ?>
                     <?php if ($statementPreviousBalanceTotals !== []): ?>
                         <div><span>Previous Balance</span><strong><?= e($formatCurrencyTotals($statementPreviousBalanceTotals)) ?></strong></div>
                     <?php endif; ?>
-                    <div><span>Balance Due</span><strong><?= e($formatCurrencyTotals($remainingCustomerBalanceTotals !== [] ? $remainingCustomerBalanceTotals : ['PKR' => 0])) ?></strong></div>
-                    <?php if ($statementCustomerCreditTotals !== []): ?>
-                        <div><span>Customer Credit</span><strong><?= e($formatCurrencyTotals($statementCustomerCreditTotals)) ?></strong></div>
+                    <?php if ($statementReturnedTotals !== []): ?>
+                        <div><span>Returned / Refunded</span><strong><?= e($formatCurrencyTotals($statementReturnedTotals)) ?></strong></div>
+                    <?php endif; ?>
+                    <div><span>Amount Applied</span><strong><?= e($formatCurrencyTotals($invoiceReceivedTotals)) ?></strong></div>
+                    <?php if ($remainingCustomerBalanceTotals !== [] || $invoiceReceivableTotals !== []): ?>
+                        <div><span>Outstanding Balance</span><strong><?= e($formatCurrencyTotals($remainingCustomerBalanceTotals !== [] ? $remainingCustomerBalanceTotals : ['PKR' => 0])) ?></strong></div>
                     <?php endif; ?>
                 </div>
             </section>
             <section class="output-block">
                 <h2>Invoice Exposure</h2>
                 <table class="output-table">
-                    <thead><tr><th>Service Line</th><th>Service</th><th>Currency</th><th>Invoice Amount</th><th>Applied</th><th>Outstanding</th><th>Status</th><th>Due Date</th></tr></thead>
+                    <thead><tr><th>Service Line</th><th>Passenger</th><th>Service</th><th>Currency</th><th>Invoice Amount</th><th>Applied</th><th>Outstanding</th><th>Status</th><th>Due Date</th></tr></thead>
                     <tbody>
                     <?php foreach (($customerPaymentFoundation['serviceReceivables'] ?? []) as $receivable): ?>
                         <tr>
                             <td><?= e((string) ($receivable['serviceLineReference'] ?? '')) ?></td>
+                            <td><?= e((string) (($receivable['passengerName'] ?? '') !== '' ? $receivable['passengerName'] : ($booking['lead_traveler_name'] ?? 'Passenger'))) ?></td>
                             <td><?= e(ucwords((string) ($receivable['serviceType'] ?? 'Service'))) ?></td>
                             <td><?= e((string) ($receivable['currency'] ?? '')) ?></td>
                             <td><?= e($formatMoney((float) ($receivable['dueAmount'] ?? 0))) ?></td>
@@ -1456,28 +2077,52 @@ openReceivables: <?= e(json_encode($receiptDebug['openReceivables'], JSON_PRETTY
                             <td><?= e((string) ($receivable['nextDueDate'] ?? '')) ?></td>
                         </tr>
                     <?php endforeach; ?>
-                    <?php if (($customerPaymentFoundation['serviceReceivables'] ?? []) === []): ?><tr><td colspan="8">No receivable entries are available for this booking yet.</td></tr><?php endif; ?>
+                    <?php if (($customerPaymentFoundation['serviceReceivables'] ?? []) === []): ?><tr><td colspan="9">No receivable entries are available for this booking yet.</td></tr><?php endif; ?>
                     </tbody>
                 </table>
             </section>
             <section class="output-block">
                 <h2>Receipt History</h2>
                 <table class="output-table">
-                    <thead><tr><th>Receipt</th><th>Date</th><th>Curr.</th><th>Received</th><th>Allocated</th><th>Unallocated</th><th>Method</th><th>Status</th></tr></thead>
+                    <thead><tr><th>Receipt</th><th>Date</th><th>Curr.</th><th>Amount Received</th><th>Returned / Refunded</th><th>Applied</th><th>Method</th><th>Status</th></tr></thead>
                     <tbody>
-                    <?php if (($customerPaymentFoundation['receipts'] ?? []) === []): ?>
+                    <?php if (($customerPaymentFoundation['receipts'] ?? []) === [] && $statementAdvanceReceiptRows === []): ?>
                         <tr><td colspan="8">No receipts recorded against this booking yet.</td></tr>
                     <?php endif; ?>
                     <?php foreach (($customerPaymentFoundation['receipts'] ?? []) as $receipt): ?>
+                        <?php
+                        $statementReceiptId = (int) ($receipt['id'] ?? 0);
+                        $statementReceiptIsInternalAdjustment = $statementReceiptId > 0 && isset($statementInternalAdjustmentReceiptIds[$statementReceiptId]);
+                        $statementReceiptTendered = (float) ($receipt['tenderedAmount'] ?? $receipt['receivedAmount'] ?? 0);
+                        $statementReceiptReturned = (float) ($receipt['returnedAmount'] ?? 0);
+                        $statementReceiptMethod = $statementReceiptIsInternalAdjustment
+                            ? (string) ($statementInternalAdjustmentReceiptLabels[$statementReceiptId] ?? 'Settlement Adjustment')
+                            : ucwords(str_replace('_', ' ', (string) ($receipt['paymentMethod'] ?? '')));
+                        $statementReceiptStatus = $statementReceiptIsInternalAdjustment
+                            ? 'Internal Adjustment'
+                            : $formatStatusLabel((string) ($receipt['statusRaw'] ?? $receipt['status'] ?? ''));
+                        ?>
                         <tr>
                             <td><?= e((string) ($receipt['receiptNo'] ?? '')) ?></td>
                             <td><?= e((string) ($receipt['receiptDate'] ?? '')) ?></td>
                             <td><?= e((string) ($receipt['currency'] ?? '')) ?></td>
-                            <td><?= e($formatMoney((float) ($receipt['receivedAmount'] ?? 0))) ?></td>
+                            <td><?= e($formatMoney($statementReceiptIsInternalAdjustment ? 0.0 : $statementReceiptTendered)) ?></td>
+                            <td><?= e($formatMoney($statementReceiptReturned)) ?></td>
                             <td><?= e($formatMoney((float) ($receipt['allocatedAmount'] ?? 0))) ?></td>
-                            <td><?= e($formatMoney((float) ($receipt['unallocatedAmount'] ?? 0))) ?></td>
-                            <td><?= e(ucwords(str_replace('_', ' ', (string) ($receipt['paymentMethod'] ?? '')))) ?></td>
-                            <td><?= e($formatStatusLabel((string) ($receipt['statusRaw'] ?? $receipt['status'] ?? ''))) ?></td>
+                            <td><?= e($statementReceiptMethod) ?></td>
+                            <td><?= e($statementReceiptStatus) ?></td>
+                        </tr>
+                    <?php endforeach; ?>
+                    <?php foreach ($statementAdvanceReceiptRows as $advanceReceiptRow): ?>
+                        <tr>
+                            <td><?= e((string) ($advanceReceiptRow['receiptNo'] ?? 'Advance')) ?></td>
+                            <td><?= e((string) ($advanceReceiptRow['receiptDate'] ?? '')) ?></td>
+                            <td><?= e((string) ($advanceReceiptRow['currency'] ?? '')) ?></td>
+                            <td><?= e($formatMoney(0)) ?></td>
+                            <td><?= e($formatMoney(0)) ?></td>
+                            <td><?= e($formatMoney((float) ($advanceReceiptRow['allocatedAmount'] ?? 0))) ?></td>
+                            <td>Customer Advance</td>
+                            <td>Advance Applied</td>
                         </tr>
                     <?php endforeach; ?>
                     </tbody>
@@ -1488,26 +2133,31 @@ openReceivables: <?= e(json_encode($receiptDebug['openReceivables'], JSON_PRETTY
                 <table class="output-table">
                     <thead><tr><th>Receipt</th><th>Allocated At</th><th>Allocation Type</th><th>Booking / Invoice No.</th><th>Service Line</th><th>Service Type</th><th>Passenger</th><th>Currency</th><th>Allocated</th><th>Remaining After This Allocation</th></tr></thead>
                     <tbody>
-                    <?php if (($customerPaymentFoundation['allocations'] ?? []) === []): ?>
+                    <?php if ($statementInvoiceAllocationRows === []): ?>
                         <tr><td colspan="10">No receipt allocation rows are available for this booking yet.</td></tr>
                     <?php endif; ?>
-                    <?php foreach (($customerPaymentFoundation['allocations'] ?? []) as $allocation): ?>
+                    <?php foreach ($statementInvoiceAllocationRows as $allocation): ?>
                         <?php
                         $allocationCurrency = (string) ($allocation['receivableCurrency'] ?? $allocation['currency'] ?? 'PKR');
                         $allocationPassenger = trim((string) ($allocation['passengerName'] ?? ''));
                         $allocationReceiptStatusRaw = str_replace(' ', '_', mb_strtolower(trim((string) ($allocation['receiptStatusRaw'] ?? ''))));
+                        $allocationServiceLineReference = trim((string) ($allocation['serviceLineReference'] ?? $allocation['service_line_reference'] ?? ''));
+                        $allocationCurrentRemainingKey = $allocationServiceLineReference . '|' . $allocationCurrency;
+                        $allocationCurrentRemaining = $allocationServiceLineReference !== ''
+                            ? (float) ($statementRemainingByServiceLineCurrency[$allocationCurrentRemainingKey] ?? 0.0)
+                            : (float) ($allocation['remainingAfterAllocation'] ?? $allocation['remaining_after_allocation'] ?? 0);
                         ?>
                         <tr>
                             <td><?= e((string) ($allocation['receiptNo'] ?? '')) ?></td>
                             <td><?= e((string) ($allocation['allocatedAt'] ?? '')) ?></td>
                             <td><?= e((string) ($allocation['allocationType'] ?? 'Allocated')) ?></td>
                             <td><?= e((string) ($allocation['bookingReference'] ?? 'N/A')) ?></td>
-                            <td><?= e((string) (($allocation['serviceLineReference'] ?? '') !== '' ? $allocation['serviceLineReference'] : 'N/A')) ?></td>
+                            <td><?= e($allocationServiceLineReference !== '' ? $allocationServiceLineReference : 'N/A') ?></td>
                             <td><?= e((string) ($allocation['serviceType'] ?? 'Service')) ?></td>
                             <td><?= e($allocationPassenger !== '' ? $allocationPassenger : $customerName) ?></td>
                             <td><?= e($allocationCurrency) ?></td>
                             <td><?= e($allocationCurrency) ?> <?= e($formatMoney((float) ($allocation['receivableAmountAllocated'] ?? $allocation['allocatedAmount'] ?? 0))) ?></td>
-                            <td><?php if ($allocationReceiptStatusRaw === 'void'): ?>VOIDED<?php else: ?><?= e($allocationCurrency) ?> <?= e($formatMoney((float) ($allocation['remainingAfterAllocation'] ?? 0))) ?><?php endif; ?></td>
+                            <td><?php if ($allocationReceiptStatusRaw === 'void'): ?>VOIDED<?php else: ?><?= e($allocationCurrency) ?> <?= e($formatMoney($allocationCurrentRemaining)) ?><?php endif; ?></td>
                         </tr>
                     <?php endforeach; ?>
                     </tbody>
@@ -1571,7 +2221,7 @@ openReceivables: <?= e(json_encode($receiptDebug['openReceivables'], JSON_PRETTY
                             <td><?php $window = trim((string) (($service['departure_date'] ?? $booking['departure_date'] ?? '') . (((string) ($service['return_date'] ?? $booking['return_date'] ?? '') !== '') ? ' to ' . (string) ($service['return_date'] ?? $booking['return_date'] ?? '') : ''))); echo e($window !== '' ? $window : 'As per booking file'); ?></td>
                             <td><?= e((string) (($service['ticket_number'] ?? '') !== '' ? $service['ticket_number'] : ($service['line_reference'] ?? 'N/A'))) ?></td>
                             <td><?= e((string) ($service['currency'] ?? 'PKR')) ?></td>
-                            <td><?= e($formatMoney((float) (($service['sale_price'] ?? 0) + ($service['service_charge'] ?? 0) - ($service['discount_amount'] ?? 0)))) ?></td>
+                            <td><?= e($formatMoney($serviceReceivableAmount($service))) ?></td>
                         </tr>
                     <?php endforeach; ?>
                     <?php if ($services === []): ?><tr><td colspan="7">No confirmed service lines are available for this booking yet.</td></tr><?php endif; ?>

@@ -112,8 +112,8 @@ final class BookingReminderRepository extends BaseRepository
                  status = :status,
                  priority = :priority,
                  updated_by_user_id = :updated_by_user_id,
-                 completed_at = CASE WHEN :completed_status = "completed" THEN COALESCE(completed_at, NOW()) ELSE NULL END,
-                 dismissed_at = CASE WHEN :dismissed_status = "dismissed" THEN COALESCE(dismissed_at, NOW()) ELSE NULL END
+                 completed_at = CASE WHEN :mark_completed = 1 THEN COALESCE(completed_at, NOW()) ELSE NULL END,
+                 dismissed_at = CASE WHEN :mark_dismissed = 1 THEN COALESCE(dismissed_at, NOW()) ELSE NULL END
              WHERE id = :id'
         );
         $statement->execute([
@@ -130,8 +130,8 @@ final class BookingReminderRepository extends BaseRepository
             'channel' => $data['channel'] ?? null,
             'owner_label' => $data['owner_label'] ?? null,
             'status' => $data['status'],
-            'completed_status' => $data['status'],
-            'dismissed_status' => $data['status'],
+            'mark_completed' => strtolower((string) $data['status']) === 'completed' ? 1 : 0,
+            'mark_dismissed' => strtolower((string) $data['status']) === 'dismissed' ? 1 : 0,
             'priority' => $data['priority'] ?? 'normal',
             'updated_by_user_id' => $data['actor_user_id'] ?? null,
         ]);
@@ -147,16 +147,16 @@ final class BookingReminderRepository extends BaseRepository
         $statement = $this->db->prepare(
             'UPDATE booking_reminders
              SET status = :status,
-                 completed_at = CASE WHEN :completed_status = "completed" THEN NOW() ELSE NULL END,
-                 dismissed_at = CASE WHEN :dismissed_status = "dismissed" THEN NOW() ELSE NULL END,
+                 completed_at = CASE WHEN :mark_completed = 1 THEN NOW() ELSE NULL END,
+                 dismissed_at = CASE WHEN :mark_dismissed = 1 THEN NOW() ELSE NULL END,
                  updated_by_user_id = :updated_by_user_id
              WHERE id = :id'
         );
         $statement->execute([
             'id' => $reminderId,
             'status' => $status,
-            'completed_status' => $status,
-            'dismissed_status' => $status,
+            'mark_completed' => strtolower($status) === 'completed' ? 1 : 0,
+            'mark_dismissed' => strtolower($status) === 'dismissed' ? 1 : 0,
             'updated_by_user_id' => $actorUserId,
         ]);
 
@@ -167,8 +167,8 @@ final class BookingReminderRepository extends BaseRepository
         $siblingStatement = $this->db->prepare(
             'UPDATE booking_reminders
              SET status = :status,
-                 completed_at = CASE WHEN :completed_status = "completed" THEN NOW() ELSE NULL END,
-                 dismissed_at = CASE WHEN :dismissed_status = "dismissed" THEN NOW() ELSE NULL END,
+                 completed_at = CASE WHEN :mark_completed = 1 THEN NOW() ELSE NULL END,
+                 dismissed_at = CASE WHEN :mark_dismissed = 1 THEN NOW() ELSE NULL END,
                  updated_by_user_id = :updated_by_user_id
              WHERE id <> :id
                AND system_generated = 1
@@ -184,8 +184,8 @@ final class BookingReminderRepository extends BaseRepository
         $siblingStatement->execute([
             'id' => $reminderId,
             'status' => $status,
-            'completed_status' => $status,
-            'dismissed_status' => $status,
+            'mark_completed' => strtolower($status) === 'completed' ? 1 : 0,
+            'mark_dismissed' => strtolower($status) === 'dismissed' ? 1 : 0,
             'updated_by_user_id' => $actorUserId,
             'booking_id' => (int) ($reminder['booking_id'] ?? 0),
             'reminder_type' => (string) ($reminder['reminder_type'] ?? ''),
@@ -225,8 +225,8 @@ final class BookingReminderRepository extends BaseRepository
                  status = :status,
                  priority = :priority,
                  updated_by_user_id = :updated_by_user_id,
-                 completed_at = CASE WHEN :completed_status = "completed" THEN COALESCE(completed_at, NOW()) ELSE NULL END,
-                 dismissed_at = CASE WHEN :dismissed_status = "dismissed" THEN COALESCE(dismissed_at, NOW()) ELSE NULL END
+                 completed_at = CASE WHEN :mark_completed = 1 THEN COALESCE(completed_at, NOW()) ELSE NULL END,
+                 dismissed_at = CASE WHEN :mark_dismissed = 1 THEN COALESCE(dismissed_at, NOW()) ELSE NULL END
              WHERE id = :id'
         );
         $statement->execute([
@@ -243,8 +243,8 @@ final class BookingReminderRepository extends BaseRepository
             'channel' => $data['channel'] ?? null,
             'owner_label' => $data['owner_label'] ?? null,
             'status' => $nextStatus,
-            'completed_status' => $nextStatus,
-            'dismissed_status' => $nextStatus,
+            'mark_completed' => strtolower($nextStatus) === 'completed' ? 1 : 0,
+            'mark_dismissed' => strtolower($nextStatus) === 'dismissed' ? 1 : 0,
             'priority' => $data['priority'] ?? 'normal',
             'updated_by_user_id' => $data['actor_user_id'] ?? null,
         ]);
@@ -277,7 +277,7 @@ final class BookingReminderRepository extends BaseRepository
         $statement = $this->db->prepare(
             'SELECT *
              FROM booking_reminders
-             WHERE reminder_key = :reminder_key
+             WHERE reminder_key COLLATE utf8mb4_unicode_ci = CAST(:reminder_key AS CHAR CHARACTER SET utf8mb4) COLLATE utf8mb4_unicode_ci
              LIMIT 1'
         );
         $statement->execute(['reminder_key' => $reminderKey]);
@@ -325,7 +325,9 @@ final class BookingReminderRepository extends BaseRepository
         $statement = $this->db->prepare(
             'SELECT cr.id
              FROM customer_receipts cr
-             INNER JOIN bookings b ON b.booking_reference = cr.booking_reference
+             INNER JOIN bookings b
+                ON b.booking_reference COLLATE utf8mb4_unicode_ci
+                 = cr.booking_reference COLLATE utf8mb4_unicode_ci
              WHERE b.id = :booking_id
                AND cr.id = :receipt_id
              LIMIT 1'
@@ -343,7 +345,9 @@ final class BookingReminderRepository extends BaseRepository
         $statement = $this->db->prepare(
             'SELECT sp.id
              FROM supplier_payments sp
-             INNER JOIN bookings b ON b.booking_reference = sp.booking_reference
+             INNER JOIN bookings b
+                ON b.booking_reference COLLATE utf8mb4_unicode_ci
+                 = sp.booking_reference COLLATE utf8mb4_unicode_ci
              WHERE b.id = :booking_id
                AND sp.id = :payment_id
              LIMIT 1'
@@ -361,7 +365,9 @@ final class BookingReminderRepository extends BaseRepository
         $statement = $this->db->prepare(
             'SELECT so.id
              FROM supplier_obligations so
-             INNER JOIN bookings b ON b.booking_reference = so.booking_reference
+             INNER JOIN bookings b
+                ON b.booking_reference COLLATE utf8mb4_unicode_ci
+                 = so.booking_reference COLLATE utf8mb4_unicode_ci
              WHERE b.id = :booking_id
                AND so.id = :obligation_id
              LIMIT 1'

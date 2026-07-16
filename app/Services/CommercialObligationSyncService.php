@@ -38,6 +38,8 @@ final class CommercialObligationSyncService extends Service
 
         $receivableAmount = $this->receivableAmount($service);
         $payableAmount = $this->payableAmount($service);
+        $invoiceCurrency = (string) ($service['currency'] ?? 'PKR');
+        $costCurrency = (string) ($service['cost_currency'] ?? $invoiceCurrency);
         $this->supplierAdvanceTraceLog('syncForServiceId', 'commercial_sync_entry', [
             'trace_id' => $traceId,
             'booking_id' => (int) ($service['booking_id'] ?? 0),
@@ -45,7 +47,8 @@ final class CommercialObligationSyncService extends Service
             'supplier_name' => (string) ($service['supplier_name_snapshot'] ?? $service['supplier_name'] ?? ''),
             'supplier_id' => ! empty($service['supplier_id']) ? (int) $service['supplier_id'] : null,
             'branch_id' => (int) ($service['branch_id'] ?? 0),
-            'currency' => (string) ($service['currency'] ?? ''),
+            'currency' => $costCurrency,
+            'invoice_currency' => $invoiceCurrency,
             'purchase_cost' => $payableAmount,
             'mkt_fare' => round((float) ($service['sale_price'] ?? 0), 2),
             'service_type' => (string) ($service['service_type'] ?? ''),
@@ -60,7 +63,7 @@ final class CommercialObligationSyncService extends Service
             'booking_reference' => (string) $booking['booking_reference'],
             'service_line_reference' => (string) $service['line_reference'],
             'due_group' => 'service_sale',
-            'currency' => (string) $service['currency'],
+            'currency' => $invoiceCurrency,
             'due_amount' => (int) ($service['is_active'] ?? 1) === 1 ? $receivableAmount : 0,
             'due_date' => $service['due_date'] ?? null,
             'status' => 'open',
@@ -76,7 +79,8 @@ final class CommercialObligationSyncService extends Service
             'supplier_name' => (string) ($service['supplier_name_snapshot'] ?? $service['supplier_name'] ?? ''),
             'supplier_id' => ! empty($service['supplier_id']) ? (int) $service['supplier_id'] : null,
             'branch_id' => (int) ($service['branch_id'] ?? 0),
-            'currency' => (string) ($service['currency'] ?? ''),
+            'currency' => $costCurrency,
+            'invoice_currency' => $invoiceCurrency,
             'purchase_cost' => $payableAmount,
             'booking_reference' => (string) ($booking['booking_reference'] ?? ''),
             'service_line_reference' => (string) ($service['line_reference'] ?? ''),
@@ -88,7 +92,7 @@ final class CommercialObligationSyncService extends Service
             'booking_reference' => (string) $booking['booking_reference'],
             'service_line_reference' => (string) $service['line_reference'],
             'obligation_group' => 'service_cost',
-            'currency' => (string) $service['currency'],
+            'currency' => $costCurrency,
             'gross_amount' => (int) ($service['is_active'] ?? 1) === 1 ? $payableAmount : 0,
             'due_date' => $service['due_date'] ?? null,
             'remarks' => $this->financialRemarks('Supplier payable synced from service line', $service),
@@ -104,7 +108,8 @@ final class CommercialObligationSyncService extends Service
             'supplier_name' => (string) ($service['supplier_name_snapshot'] ?? $service['supplier_name'] ?? ''),
             'supplier_id' => ! empty($service['supplier_id']) ? (int) $service['supplier_id'] : null,
             'branch_id' => (int) ($service['branch_id'] ?? 0),
-            'currency' => (string) ($service['currency'] ?? ''),
+            'currency' => $costCurrency,
+            'invoice_currency' => $invoiceCurrency,
             'purchase_cost' => $payableAmount,
             'obligation_id' => $obligationId > 0 ? $obligationId : null,
             'action' => $obligationAction !== '' ? $obligationAction : gettype($obligationSync),
@@ -126,7 +131,7 @@ final class CommercialObligationSyncService extends Service
                     'customer_receivable_item_id' => $receivableSync['record']['id'] ?? null,
                     'gross_amount' => $delta,
                     'entry_date' => $entryDate,
-                    'currency' => (string) $service['currency'],
+                    'currency' => $invoiceCurrency,
                     'actor_user_id' => $actorUserId,
                 ]);
             } elseif ($delta !== 0.0) {
@@ -137,7 +142,7 @@ final class CommercialObligationSyncService extends Service
                     'customer_receivable_item_id' => $receivableSync['record']['id'] ?? null,
                     'adjustment_amount' => $delta,
                     'entry_date' => $entryDate,
-                    'currency' => (string) $service['currency'],
+                    'currency' => $invoiceCurrency,
                     'actor_user_id' => $actorUserId,
                 ]);
             }
@@ -153,7 +158,7 @@ final class CommercialObligationSyncService extends Service
                     'supplier_obligation_id' => $obligationSync['record']['id'] ?? null,
                     'gross_amount' => $delta,
                     'entry_date' => $entryDate,
-                    'currency' => (string) $service['currency'],
+                    'currency' => $costCurrency,
                     'actor_user_id' => $actorUserId,
                 ]);
             } elseif ($delta !== 0.0) {
@@ -164,7 +169,7 @@ final class CommercialObligationSyncService extends Service
                     'supplier_obligation_id' => $obligationSync['record']['id'] ?? null,
                     'adjustment_amount' => $delta,
                     'entry_date' => $entryDate,
-                    'currency' => (string) $service['currency'],
+                    'currency' => $costCurrency,
                     'actor_user_id' => $actorUserId,
                 ]);
             }
@@ -172,7 +177,7 @@ final class CommercialObligationSyncService extends Service
 
         $supplierId = ! empty($service['supplier_id']) ? (int) $service['supplier_id'] : 0;
         $branchId = (int) ($service['branch_id'] ?? 0);
-        $currency = (string) ($service['currency'] ?? '');
+        $currency = $costCurrency;
         $autoAdvanceApplication = null;
         if ($obligationId > 0) {
             $this->supplierAdvanceTraceLog('syncForServiceId', 'auto_apply_start', [
@@ -182,7 +187,8 @@ final class CommercialObligationSyncService extends Service
                 'supplier_name' => (string) ($service['supplier_name_snapshot'] ?? $service['supplier_name'] ?? ''),
                 'supplier_id' => $supplierId > 0 ? $supplierId : null,
                 'branch_id' => $branchId > 0 ? $branchId : null,
-                'currency' => (string) ($service['currency'] ?? ''),
+                'currency' => $costCurrency,
+                'invoice_currency' => $invoiceCurrency,
                 'purchase_cost' => $payableAmount,
                 'obligation_id' => $obligationId,
                 'action' => 'calling_auto_apply',
@@ -206,7 +212,7 @@ final class CommercialObligationSyncService extends Service
                         'supplier_obligation_id' => $obligationId,
                         'amount' => $appliedAmountDelta,
                         'entry_date' => $entryDate,
-                        'currency' => (string) ($updatedObligation['currency'] ?? $service['currency'] ?? ''),
+                        'currency' => (string) ($updatedObligation['currency'] ?? $costCurrency),
                         'actor_user_id' => $actorUserId,
                     ]);
                 } else {
@@ -218,7 +224,7 @@ final class CommercialObligationSyncService extends Service
                         'supplier_obligation_id' => $obligationId,
                         'adjustment_amount' => $appliedAmountDelta,
                         'entry_date' => $entryDate,
-                        'currency' => (string) ($updatedObligation['currency'] ?? $service['currency'] ?? ''),
+                        'currency' => (string) ($updatedObligation['currency'] ?? $costCurrency),
                         'actor_user_id' => $actorUserId,
                     ]);
                 }
@@ -231,7 +237,7 @@ final class CommercialObligationSyncService extends Service
                     'supplier_name' => (string) ($service['supplier_name_snapshot'] ?? $service['supplier_name'] ?? ''),
                     'supplier_id' => $supplierId,
                     'branch_id' => $branchId,
-                    'currency' => (string) ($updatedObligation['currency'] ?? $service['currency'] ?? ''),
+                    'currency' => (string) ($updatedObligation['currency'] ?? $costCurrency),
                     'purchase_cost' => round((float) ($updatedObligation['net_payable_amount'] ?? 0), 2),
                     'obligation_id' => $obligationId,
                     'action' => 'advance_reconciled',

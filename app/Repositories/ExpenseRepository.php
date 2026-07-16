@@ -6,6 +6,16 @@ namespace App\Repositories;
 
 final class ExpenseRepository extends BaseRepository
 {
+    public function hasTreasuryAccountLink(): bool
+    {
+        return $this->columnExists('business_expenses', 'treasury_account_id');
+    }
+
+    public function hasJournalEntryLink(): bool
+    {
+        return $this->columnExists('business_expenses', 'journal_entry_id');
+    }
+
     public function attachmentsTableExists(): bool
     {
         return $this->tableExists('expense_attachments');
@@ -122,6 +132,9 @@ final class ExpenseRepository extends BaseRepository
             return [];
         }
 
+        $hasTreasuryAccountLink = $this->hasTreasuryAccountLink();
+        $hasJournalEntryLink = $this->hasJournalEntryLink();
+
         $attachmentJoin = '';
         $attachmentSelect = 'NULL AS attachment_id, NULL AS attachment_file_name, NULL AS attachment_mime_type,';
         if ($this->attachmentsTableExists()) {
@@ -130,6 +143,16 @@ final class ExpenseRepository extends BaseRepository
                 ON ea.business_expense_id = be.id
                AND ea.status = 'active'";
         }
+
+        $treasurySelect = $hasTreasuryAccountLink
+            ? 'be.treasury_account_id, ta.account_name AS treasury_account_name, ta.account_code AS treasury_account_code,'
+            : 'NULL AS treasury_account_id, NULL AS treasury_account_name, NULL AS treasury_account_code,';
+        $treasuryJoin = $hasTreasuryAccountLink
+            ? ' LEFT JOIN treasury_accounts ta ON ta.id = be.treasury_account_id'
+            : '';
+        $journalSelect = $hasJournalEntryLink
+            ? 'be.journal_entry_id,'
+            : 'NULL AS journal_entry_id,';
 
         $placeholders = implode(', ', array_fill(0, count($accessibleBranchIds), '?'));
         $conditions = ["be.branch_id IN ({$placeholders})"];
@@ -178,6 +201,8 @@ final class ExpenseRepository extends BaseRepository
                 be.amount,
                 be.currency,
                 be.payment_method,
+                " . $treasurySelect . "
+                " . $journalSelect . "
                 COALESCE(pm.name, REPLACE(be.payment_method, '_', ' ')) AS payment_method_label,
                 be.paid_to_name,
                 be.reference_number,
@@ -193,6 +218,7 @@ final class ExpenseRepository extends BaseRepository
              INNER JOIN expense_categories ec ON ec.id = be.expense_category_id
              LEFT JOIN payment_methods pm ON pm.code = be.payment_method
              LEFT JOIN users u ON u.id = be.entered_by_user_id
+             " . $treasuryJoin . "
              " . $attachmentJoin . "
              WHERE " . implode(' AND ', $conditions) . "
              ORDER BY be.expense_date DESC, be.id DESC"
@@ -208,6 +234,9 @@ final class ExpenseRepository extends BaseRepository
             return null;
         }
 
+        $hasTreasuryAccountLink = $this->hasTreasuryAccountLink();
+        $hasJournalEntryLink = $this->hasJournalEntryLink();
+
         $attachmentJoin = '';
         $attachmentSelect = 'NULL AS attachment_id, NULL AS attachment_file_name, NULL AS attachment_mime_type,';
         if ($this->attachmentsTableExists()) {
@@ -217,6 +246,16 @@ final class ExpenseRepository extends BaseRepository
                AND ea.status = 'active'";
         }
 
+        $treasurySelect = $hasTreasuryAccountLink
+            ? 'be.treasury_account_id, ta.account_name AS treasury_account_name, ta.account_code AS treasury_account_code,'
+            : 'NULL AS treasury_account_id, NULL AS treasury_account_name, NULL AS treasury_account_code,';
+        $treasuryJoin = $hasTreasuryAccountLink
+            ? ' LEFT JOIN treasury_accounts ta ON ta.id = be.treasury_account_id'
+            : '';
+        $journalSelect = $hasJournalEntryLink
+            ? 'be.journal_entry_id,'
+            : 'NULL AS journal_entry_id,';
+
         $placeholders = implode(', ', array_fill(0, count($accessibleBranchIds), '?'));
         $statement = $this->db->prepare(
             "SELECT
@@ -224,10 +263,13 @@ final class ExpenseRepository extends BaseRepository
                 be.expense_date,
                 be.branch_id,
                 be.expense_category_id,
+                ec.name AS category_name,
                 be.title,
                 be.amount,
                 be.currency,
                 be.payment_method,
+                " . $treasurySelect . "
+                " . $journalSelect . "
                 be.paid_to_name,
                 be.reference_number,
                 be.notes,
@@ -239,7 +281,9 @@ final class ExpenseRepository extends BaseRepository
                 be.created_at,
                 be.updated_at
              FROM business_expenses be
+             INNER JOIN expense_categories ec ON ec.id = be.expense_category_id
              LEFT JOIN users u ON u.id = be.entered_by_user_id
+             " . $treasuryJoin . "
              " . $attachmentJoin . "
              WHERE be.id = ?
                AND be.branch_id IN ({$placeholders})
@@ -268,6 +312,9 @@ final class ExpenseRepository extends BaseRepository
             'expense_status' => $payload['expense_status'],
             'updated_by_user_id' => $payload['actor_user_id'],
         ];
+        if ($this->hasTreasuryAccountLink()) {
+            $data['treasury_account_id'] = $payload['treasury_account_id'] ?? null;
+        }
 
         if ($id > 0) {
             $data['id'] = $id;
@@ -280,6 +327,7 @@ final class ExpenseRepository extends BaseRepository
                      amount = :amount,
                      currency = :currency,
                      payment_method = :payment_method,
+                     ' . ($this->hasTreasuryAccountLink() ? 'treasury_account_id = :treasury_account_id,' : '') . '
                      paid_to_name = :paid_to_name,
                      reference_number = :reference_number,
                      notes = :notes,
@@ -293,18 +341,57 @@ final class ExpenseRepository extends BaseRepository
         }
 
         $data['entered_by_user_id'] = $payload['actor_user_id'];
+        $columns = [
+            'expense_date', 'branch_id', 'expense_category_id', 'title', 'amount', 'currency', 'payment_method',
+        ];
+        $placeholders = [
+            ':expense_date', ':branch_id', ':expense_category_id', ':title', ':amount', ':currency', ':payment_method',
+        ];
+        if ($this->hasTreasuryAccountLink()) {
+            $columns[] = 'treasury_account_id';
+            $placeholders[] = ':treasury_account_id';
+        }
+        array_push($columns, 'paid_to_name', 'reference_number', 'notes', 'expense_status', 'entered_by_user_id', 'updated_by_user_id');
+        array_push($placeholders, ':paid_to_name', ':reference_number', ':notes', ':expense_status', ':entered_by_user_id', ':updated_by_user_id');
         $statement = $this->db->prepare(
-            'INSERT INTO business_expenses (
-                expense_date, branch_id, expense_category_id, title, amount, currency, payment_method,
-                paid_to_name, reference_number, notes, expense_status, entered_by_user_id, updated_by_user_id
-             ) VALUES (
-                :expense_date, :branch_id, :expense_category_id, :title, :amount, :currency, :payment_method,
-                :paid_to_name, :reference_number, :notes, :expense_status, :entered_by_user_id, :updated_by_user_id
-             )'
+            sprintf(
+                'INSERT INTO business_expenses (%s) VALUES (%s)',
+                implode(', ', $columns),
+                implode(', ', $placeholders)
+            )
         );
         $statement->execute($data);
 
         return (int) $this->db->lastInsertId();
+    }
+
+    public function updatePostingLinks(int $expenseId, ?int $treasuryAccountId, ?int $journalEntryId): void
+    {
+        if (! $this->hasTreasuryAccountLink() && ! $this->hasJournalEntryLink()) {
+            return;
+        }
+
+        $assignments = [];
+        $params = ['id' => $expenseId];
+        if ($this->hasTreasuryAccountLink()) {
+            $assignments[] = 'treasury_account_id = :treasury_account_id';
+            $params['treasury_account_id'] = $treasuryAccountId;
+        }
+        if ($this->hasJournalEntryLink()) {
+            $assignments[] = 'journal_entry_id = :journal_entry_id';
+            $params['journal_entry_id'] = $journalEntryId;
+        }
+
+        if ($assignments === []) {
+            return;
+        }
+
+        $statement = $this->db->prepare(
+            'UPDATE business_expenses
+             SET ' . implode(', ', $assignments) . '
+             WHERE id = :id'
+        );
+        $statement->execute($params);
     }
 
     public function deleteExpense(int $id, array $accessibleBranchIds): void

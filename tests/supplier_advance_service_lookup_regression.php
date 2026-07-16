@@ -2,12 +2,14 @@
 
 declare(strict_types=1);
 
-define('BASE_PATH', dirname(__DIR__));
+defined('BASE_PATH') || define('BASE_PATH', dirname(__DIR__));
 
-require BASE_PATH . '/app/Helpers/functions.php';
-require BASE_PATH . '/app/Core/bootstrap.php';
+require_once BASE_PATH . '/app/Helpers/functions.php';
+require_once BASE_PATH . '/app/Core/bootstrap.php';
 
-$app = \App\Core\App::bootstrap(BASE_PATH);
+$app = (isset($app) && $app instanceof \App\Core\App)
+    ? $app
+    : \App\Core\App::bootstrap(BASE_PATH);
 /** @var PDO $db */
 $db = $app->get('db');
 $repository = new \App\Repositories\SupplierRepository($app);
@@ -27,7 +29,7 @@ echo 'Started: ' . date(DATE_ATOM) . PHP_EOL . PHP_EOL;
 $branchRows = $db->query('SELECT id, name FROM branches ORDER BY id ASC LIMIT 2')->fetchAll() ?: [];
 if (count($branchRows) < 2) {
     $check('Two branches are available for cross-branch supplier lookup test', false);
-    exit(1);
+    return 1;
 }
 
 $firstBranchId = (int) $branchRows[0]['id'];
@@ -105,7 +107,8 @@ if ($failures !== []) {
         echo ' - ' . $failure . PHP_EOL;
     }
 
-    exit(1);
+    return 1;
 }
 
 echo PHP_EOL . 'Supplier advance service lookup regression passed.' . PHP_EOL;
+return 0;

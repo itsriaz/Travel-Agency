@@ -88,7 +88,8 @@ $totalOutstanding = array_sum(array_map(static fn (array $row): float => (float)
                     <th>Booking</th>
                     <th>Booking Date</th>
                     <th>Due Date</th>
-                    <th>Svc Line</th>
+                    <th>Passenger</th>
+                    <th>Route</th>
                     <th>Currency</th>
                     <th>Gross</th>
                     <th>Advance</th>
@@ -103,7 +104,8 @@ $totalOutstanding = array_sum(array_map(static fn (array $row): float => (float)
                         <td><a class="report-booking-link" href="<?= e(url('/workspace?booking_reference=' . rawurlencode((string) ($obligation['booking_reference'] ?? '')) . '#dock-panel-suppliers')) ?>"><?= e((string) ($obligation['booking_reference'] ?? '')) ?></a></td>
                         <td><?= e((string) ($obligation['booking_date'] ?? '')) ?></td>
                         <td><?= e((string) ($obligation['due_date'] ?? '')) ?></td>
-                        <td><?= e((string) ($obligation['service_line_reference'] ?? '')) ?></td>
+                        <td><?= e((string) ($obligation['passenger_name'] ?? 'Passenger')) ?></td>
+                        <td><?= e((string) ($obligation['route'] ?? 'N/A')) ?></td>
                         <td><?= e((string) ($obligation['currency'] ?? '')) ?></td>
                         <td><?= e($formatMoney((float) ($obligation['gross_amount'] ?? 0))) ?></td>
                         <td><?= e($formatMoney((float) ($obligation['advance_applied_amount'] ?? 0))) ?></td>
@@ -111,7 +113,7 @@ $totalOutstanding = array_sum(array_map(static fn (array $row): float => (float)
                     </tr>
                 <?php endforeach; ?>
                 <?php if ($openObligations === []): ?>
-                    <tr><td colspan="9" class="empty-cell">No open payable exists for this supplier, branch, and currency.</td></tr>
+                    <tr><td colspan="10" class="empty-cell">No open payable exists for this supplier, branch, and currency.</td></tr>
                 <?php endif; ?>
                 </tbody>
             </table>
@@ -268,8 +270,6 @@ $totalOutstanding = array_sum(array_map(static fn (array $row): float => (float)
                 message = 'Please select at least one supplier payable.';
             } else if (amount <= 0) {
                 message = 'Enter a valid supplier payment amount.';
-            } else if (amount > total + 0.005) {
-                message = 'Payment exceeds selected supplier payable. Reduce the amount or use Prepaid Supplier Payment.';
             } else if (['cash', 'bank_transfer'].includes(String(methodField?.value || '')) && String(sourceField?.value || '') === '') {
                 message = 'Please select the source cash or bank account.';
             }

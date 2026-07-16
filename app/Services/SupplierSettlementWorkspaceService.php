@@ -152,8 +152,12 @@ final class SupplierSettlementWorkspaceService extends Service
                     $obligations
                 )), 2);
 
-                if ($paidAmount > $selectedOutstandingTotal) {
-                    throw new RuntimeException('Payment exceeds selected supplier payable. Reduce the amount or use Prepaid Supplier Payment.');
+                $selectedSupplierIds = array_values(array_filter(array_unique(array_map(
+                    static fn (array $row): int => (int) ($row['supplier_id'] ?? 0),
+                    $obligations
+                ))));
+                if ($paidAmount > $selectedOutstandingTotal + 0.005 && count($selectedSupplierIds) !== 1) {
+                    throw new RuntimeException('Supplier overpayment can only be recorded when one supplier is selected. Split the payment or use Prepaid Supplier Payment for the intended supplier.');
                 }
 
                 $paymentPayload = [
@@ -204,9 +208,7 @@ final class SupplierSettlementWorkspaceService extends Service
                     $allocatedAmount = round($allocatedAmount + $allocationAmount, 2);
                 }
 
-                if ($remainingAmount > 0) {
-                    throw new RuntimeException('Selected supplier payable changed before allocation could complete. Please review and try again.');
-                }
+                $unallocatedAmount = round(max($remainingAmount, 0), 2);
 
                 $allocationsBySupplier = [];
                 foreach ($allocationPlans as $plan) {
@@ -231,13 +233,18 @@ final class SupplierSettlementWorkspaceService extends Service
                         continue;
                     }
 
+                    $paymentAmount = $supplierAllocatedAmount;
+                    if ($unallocatedAmount > 0.005 && count($allocationsBySupplier) === 1) {
+                        $paymentAmount = round($paymentAmount + $unallocatedAmount, 2);
+                    }
+
                     $paymentNo = $repository->nextSupplierPaymentNumber();
                     $paymentId = $repository->createSupplierPayment(array_merge($paymentPayload, [
                         'supplier_id' => $supplierId,
                         'branch_id' => (int) $booking['branch_id'],
                         'booking_reference' => (string) $booking['booking_reference'],
                         'payment_no' => $paymentNo,
-                        'paid_amount' => $supplierAllocatedAmount,
+                        'paid_amount' => $paymentAmount,
                         'actor_user_id' => $actorUserId,
                     ]));
 
@@ -246,7 +253,7 @@ final class SupplierSettlementWorkspaceService extends Service
                         'booking_reference' => (string) $booking['booking_reference'],
                         'payment_no' => $paymentNo,
                         'supplier_payment_id' => $paymentId,
-                        'paid_amount' => $supplierAllocatedAmount,
+                        'paid_amount' => $paymentAmount,
                         'charges_amount' => 0,
                         'payment_method' => $paymentPayload['payment_method'],
                         'treasury_account_id' => $paymentPayload['treasury_account_id'],
@@ -290,6 +297,7 @@ final class SupplierSettlementWorkspaceService extends Service
                     'payment_count' => $paymentCount,
                     'allocation_count' => $allocationCount,
                     'allocated_amount' => $allocatedAmount,
+                    'unallocated_amount' => $unallocatedAmount,
                     'currency' => $selectedCurrency,
                 ];
             })();
@@ -363,10 +371,6 @@ final class SupplierSettlementWorkspaceService extends Service
                 static fn (array $row): float => (float) ($row['net_payable_amount'] ?? 0),
                 $obligations
             )), 2);
-            if ($paidAmount > $selectedOutstandingTotal) {
-                throw new RuntimeException('Payment exceeds selected supplier payable. Reduce the amount or use Prepaid Supplier Payment.');
-            }
-
             $paymentNo = $repository->nextSupplierPaymentNumber();
             $paymentId = $repository->createSupplierPayment(array_merge($paymentPayload, [
                 'supplier_id' => $supplierId,
@@ -442,8 +446,30 @@ final class SupplierSettlementWorkspaceService extends Service
                 $allocationCount++;
             }
 
-            if ($remainingAmount > 0.005) {
-                throw new RuntimeException('Selected supplier payable changed before allocation could complete. Please review and try again.');
+            $unallocatedAmount = round(max($remainingAmount, 0), 2);
+            $convertedAdvanceId = null;
+            $convertedAdvanceAmount = 0.0;
+            if ($unallocatedAmount > 0.005) {
+                $convertedAdvanceAmount = $unallocatedAmount;
+                $convertedAdvanceId = $repository->registerAdvance([
+                    'supplier_id' => $supplierId,
+                    'branch_id' => $branchId,
+                    'currency' => $currency,
+                    'deposit_amount' => $convertedAdvanceAmount,
+                    'available_amount' => $convertedAdvanceAmount,
+                    'reference_no' => $paymentNo,
+                    'remarks' => 'Extra supplier payment converted to supplier advance.',
+                    'received_at' => $paymentPayload['payment_date'],
+                    'actor_user_id' => $actorUserId,
+                    'source_supplier_payment_id' => $paymentId,
+                ]);
+                $repository->convertSupplierPaymentExcessToAdvance(
+                    $paymentId,
+                    $convertedAdvanceId,
+                    $convertedAdvanceAmount,
+                    $actorUserId
+                );
+                $unallocatedAmount = 0.0;
             }
 
             if ($startedTransaction && $db->inTransaction()) {
@@ -457,6 +483,9 @@ final class SupplierSettlementWorkspaceService extends Service
                 'supplier_name' => (string) ($supplier['name'] ?? 'Supplier'),
                 'currency' => $currency,
                 'allocated_amount' => $allocatedAmount,
+                'unallocated_amount' => $unallocatedAmount,
+                'advance_amount' => $convertedAdvanceAmount,
+                'advance_id' => $convertedAdvanceId,
                 'allocation_count' => $allocationCount,
                 'booking_count' => count(array_filter(array_keys($affectedBookingReferences))),
             ];

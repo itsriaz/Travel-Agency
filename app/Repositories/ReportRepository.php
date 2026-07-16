@@ -207,6 +207,213 @@ final class ReportRepository extends BaseRepository
 
         return $rows;
     }
+
+    public function cashBankLedger(array $branchIds, ?string $dateFrom, ?string $dateTo, string $currency = '', string $sourceType = 'all'): array
+    {
+        [$branchClause, $params] = $this->branchScope($branchIds);
+        $dateSql = $this->bookingDateWindow('ledger_rows.entry_date', $dateFrom, $dateTo, $params, 'cash_bank_');
+
+        $currencySql = '';
+        if (trim($currency) !== '') {
+            $currencySql = ' AND ledger_rows.currency = :cash_bank_currency';
+            $params['cash_bank_currency'] = strtoupper(trim($currency));
+        }
+
+        $sourceSql = '';
+        $sourceType = strtolower(trim($sourceType));
+        if ($sourceType !== '' && $sourceType !== 'all') {
+            $sourceSql = match ($sourceType) {
+                'customer' => ' AND ledger_rows.source_type IN ("customer_receipt_recorded", "customer_receipt_void_reversal")',
+                'supplier' => ' AND ledger_rows.source_type IN ("supplier_payment_recorded", "supplier_payment_void_reversal")',
+                'expense' => ' AND ledger_rows.source_type IN ("business_expense_recorded", "business_expense_corrected_reversal")',
+                'direct' => ' AND ledger_rows.source_type IN ("direct_treasury_entry_posted", "direct_treasury_entry_void_reversal")',
+                'transfer' => ' AND ledger_rows.source_type IN ("treasury_transfer_posted", "treasury_transfer_void_reversal")',
+                default => '',
+            };
+        }
+
+        $treasuryCounterpartySql = $this->columnExists('treasury_transactions', 'counterparty_name')
+            ? 'NULLIF(tt.counterparty_name, ""), '
+            : '';
+
+        return $this->fetchRows(
+            'SELECT
+                ledger_rows.treasury_account_id,
+                ledger_rows.branch_id,
+                ledger_rows.branch_name,
+                ledger_rows.booking_id,
+                ledger_rows.booking_reference,
+                ledger_rows.entry_date,
+                ledger_rows.currency,
+                ledger_rows.account_group,
+                ledger_rows.account_name,
+                ledger_rows.source_type,
+                ledger_rows.party_name,
+                ledger_rows.reference,
+                ledger_rows.description,
+                ledger_rows.debit_amount,
+                ledger_rows.credit_amount
+             FROM (
+                SELECT
+                    cr.treasury_account_id,
+                    je.branch_id,
+                    CONVERT(br.name USING utf8mb4) COLLATE utf8mb4_unicode_ci AS branch_name,
+                    b.id AS booking_id,
+                    CONVERT(cr.booking_reference USING utf8mb4) COLLATE utf8mb4_unicode_ci AS booking_reference,
+                    je.entry_date,
+                    CONVERT(je.currency USING utf8mb4) COLLATE utf8mb4_unicode_ci AS currency,
+                    (CASE
+                        WHEN ta.account_type = "cash" THEN "Cash"
+                        WHEN ta.account_type = "bank" THEN "Bank"
+                        WHEN ta.account_type = "wallet" THEN "Wallet / Mobile"
+                        WHEN ta.account_type = "bank_clearing" THEN "Bank / Clearing"
+                        WHEN ta.account_type = "card_clearing" THEN "Card / Clearing"
+                        ELSE "Cash / Bank"
+                    END) COLLATE utf8mb4_unicode_ci AS account_group,
+                    CONVERT(ta.account_name USING utf8mb4) COLLATE utf8mb4_unicode_ci AS account_name,
+                    CONVERT(je.source_type USING utf8mb4) COLLATE utf8mb4_unicode_ci AS source_type,
+                    CONVERT(COALESCE(NULLIF(bp.lead_traveler_name, ""), NULLIF(t.full_name, ""), cr.booking_reference, "Customer") USING utf8mb4) COLLATE utf8mb4_unicode_ci AS party_name,
+                    CONVERT(COALESCE(cr.receipt_no, je.source_reference, je.booking_reference, CAST(je.id AS CHAR)) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS reference,
+                    CONVERT(COALESCE(jel.line_description, je.narration, "") USING utf8mb4) COLLATE utf8mb4_unicode_ci AS description,
+                    ROUND(COALESCE(jel.debit_amount, 0), 2) AS debit_amount,
+                    ROUND(COALESCE(jel.credit_amount, 0), 2) AS credit_amount,
+                    jel.id AS line_id
+                 FROM journal_entries je
+                 INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+                 INNER JOIN branches br ON br.id = je.branch_id
+                 INNER JOIN customer_receipts cr ON cr.id = jel.customer_receipt_id
+                 INNER JOIN treasury_accounts ta ON ta.id = cr.treasury_account_id
+                 LEFT JOIN bookings b ON b.booking_reference = cr.booking_reference
+                 LEFT JOIN booking_parties bp ON bp.booking_id = b.id
+                 LEFT JOIN travelers t ON t.id = b.lead_traveler_id
+                 WHERE cr.treasury_account_id IS NOT NULL
+                   AND jel.account_id = ta.linked_account_id
+
+                 UNION ALL
+
+                SELECT
+                    sp.treasury_account_id,
+                    je.branch_id,
+                    CONVERT(br.name USING utf8mb4) COLLATE utf8mb4_unicode_ci AS branch_name,
+                    b.id AS booking_id,
+                    CONVERT(sp.booking_reference USING utf8mb4) COLLATE utf8mb4_unicode_ci AS booking_reference,
+                    je.entry_date,
+                    CONVERT(je.currency USING utf8mb4) COLLATE utf8mb4_unicode_ci AS currency,
+                    (CASE
+                        WHEN ta.account_type = "cash" THEN "Cash"
+                        WHEN ta.account_type = "bank" THEN "Bank"
+                        WHEN ta.account_type = "wallet" THEN "Wallet / Mobile"
+                        WHEN ta.account_type = "bank_clearing" THEN "Bank / Clearing"
+                        WHEN ta.account_type = "card_clearing" THEN "Card / Clearing"
+                        ELSE "Cash / Bank"
+                    END) COLLATE utf8mb4_unicode_ci AS account_group,
+                    CONVERT(ta.account_name USING utf8mb4) COLLATE utf8mb4_unicode_ci AS account_name,
+                    CONVERT(je.source_type USING utf8mb4) COLLATE utf8mb4_unicode_ci AS source_type,
+                    CONVERT(COALESCE(NULLIF(s.name, ""), sp.payment_no, "Supplier") USING utf8mb4) COLLATE utf8mb4_unicode_ci AS party_name,
+                    CONVERT(COALESCE(sp.payment_no, je.source_reference, je.booking_reference, CAST(je.id AS CHAR)) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS reference,
+                    CONVERT(COALESCE(jel.line_description, je.narration, "") USING utf8mb4) COLLATE utf8mb4_unicode_ci AS description,
+                    ROUND(COALESCE(jel.debit_amount, 0), 2) AS debit_amount,
+                    ROUND(COALESCE(jel.credit_amount, 0), 2) AS credit_amount,
+                    jel.id AS line_id
+                 FROM journal_entries je
+                 INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+                 INNER JOIN branches br ON br.id = je.branch_id
+                 INNER JOIN supplier_payments sp ON sp.id = jel.supplier_payment_id
+                 INNER JOIN treasury_accounts ta ON ta.id = sp.treasury_account_id
+                 LEFT JOIN bookings b ON b.booking_reference = sp.booking_reference
+                 LEFT JOIN suppliers s ON s.id = sp.supplier_id
+                 WHERE sp.treasury_account_id IS NOT NULL
+                   AND jel.account_id = ta.linked_account_id
+
+                 UNION ALL
+
+                SELECT
+                    be.treasury_account_id,
+                    je.branch_id,
+                    CONVERT(br.name USING utf8mb4) COLLATE utf8mb4_unicode_ci AS branch_name,
+                    NULL AS booking_id,
+                    CONVERT(COALESCE(je.booking_reference, "") USING utf8mb4) COLLATE utf8mb4_unicode_ci AS booking_reference,
+                    je.entry_date,
+                    CONVERT(je.currency USING utf8mb4) COLLATE utf8mb4_unicode_ci AS currency,
+                    (CASE
+                        WHEN ta.account_type = "cash" THEN "Cash"
+                        WHEN ta.account_type = "bank" THEN "Bank"
+                        WHEN ta.account_type = "wallet" THEN "Wallet / Mobile"
+                        WHEN ta.account_type = "bank_clearing" THEN "Bank / Clearing"
+                        WHEN ta.account_type = "card_clearing" THEN "Card / Clearing"
+                        ELSE "Cash / Bank"
+                    END) COLLATE utf8mb4_unicode_ci AS account_group,
+                    CONVERT(ta.account_name USING utf8mb4) COLLATE utf8mb4_unicode_ci AS account_name,
+                    CONVERT(je.source_type USING utf8mb4) COLLATE utf8mb4_unicode_ci AS source_type,
+                    CONVERT(COALESCE(NULLIF(be.paid_to_name, ""), NULLIF(ec.name, ""), "Expense") USING utf8mb4) COLLATE utf8mb4_unicode_ci AS party_name,
+                    CONVERT(COALESCE(be.reference_number, je.source_reference, CAST(be.id AS CHAR)) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS reference,
+                    CONVERT(COALESCE(jel.line_description, be.title, je.narration, "") USING utf8mb4) COLLATE utf8mb4_unicode_ci AS description,
+                    ROUND(COALESCE(jel.debit_amount, 0), 2) AS debit_amount,
+                    ROUND(COALESCE(jel.credit_amount, 0), 2) AS credit_amount,
+                    jel.id AS line_id
+                 FROM journal_entries je
+                 INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+                 INNER JOIN branches br ON br.id = je.branch_id
+                 INNER JOIN business_expenses be ON be.journal_entry_id = je.id
+                 INNER JOIN expense_categories ec ON ec.id = be.expense_category_id
+                 INNER JOIN treasury_accounts ta ON ta.id = be.treasury_account_id
+                 WHERE be.treasury_account_id IS NOT NULL
+                   AND jel.account_id = ta.linked_account_id
+
+                 UNION ALL
+
+                SELECT
+                    ta.id AS treasury_account_id,
+                    je.branch_id,
+                    CONVERT(br.name USING utf8mb4) COLLATE utf8mb4_unicode_ci AS branch_name,
+                    NULL AS booking_id,
+                    CONVERT(COALESCE(je.booking_reference, "") USING utf8mb4) COLLATE utf8mb4_unicode_ci AS booking_reference,
+                    je.entry_date,
+                    CONVERT(je.currency USING utf8mb4) COLLATE utf8mb4_unicode_ci AS currency,
+                    (CASE
+                        WHEN ta.account_type = "cash" THEN "Cash"
+                        WHEN ta.account_type = "bank" THEN "Bank"
+                        WHEN ta.account_type = "wallet" THEN "Wallet / Mobile"
+                        WHEN ta.account_type = "bank_clearing" THEN "Bank / Clearing"
+                        WHEN ta.account_type = "card_clearing" THEN "Card / Clearing"
+                        ELSE "Cash / Bank"
+                    END) COLLATE utf8mb4_unicode_ci AS account_group,
+                    CONVERT(ta.account_name USING utf8mb4) COLLATE utf8mb4_unicode_ci AS account_name,
+                    CONVERT(je.source_type USING utf8mb4) COLLATE utf8mb4_unicode_ci AS source_type,
+                    CONVERT(COALESCE(' . $treasuryCounterpartySql . 'NULLIF(tt.narration, ""), NULLIF(je.narration, ""), "Direct / Transfer") USING utf8mb4) COLLATE utf8mb4_unicode_ci AS party_name,
+                    CONVERT(COALESCE(tt.reference_no, je.source_reference, CAST(je.id AS CHAR)) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS reference,
+                    CONVERT(COALESCE(jel.line_description, tt.narration, je.narration, "") USING utf8mb4) COLLATE utf8mb4_unicode_ci AS description,
+                    ROUND(COALESCE(jel.debit_amount, 0), 2) AS debit_amount,
+                    ROUND(COALESCE(jel.credit_amount, 0), 2) AS credit_amount,
+                    jel.id AS line_id
+                 FROM journal_entries je
+                 INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+                 INNER JOIN branches br ON br.id = je.branch_id
+                 INNER JOIN treasury_accounts ta
+                    ON ta.linked_account_id = jel.account_id
+                   AND ta.branch_id = je.branch_id
+                   AND ta.currency = je.currency
+                   AND ta.is_active = 1
+                 LEFT JOIN treasury_transactions tt ON tt.journal_entry_id = je.id
+                 LEFT JOIN customer_receipts cr ON cr.id = jel.customer_receipt_id
+                 LEFT JOIN supplier_payments sp ON sp.id = jel.supplier_payment_id
+                 LEFT JOIN business_expenses be ON be.journal_entry_id = je.id
+                 WHERE cr.id IS NULL
+                   AND sp.id IS NULL
+                   AND be.id IS NULL
+             ) AS ledger_rows
+             WHERE ledger_rows.branch_id ' . $branchClause . $dateSql . $currencySql . $sourceSql . '
+             ORDER BY
+                ledger_rows.branch_name ASC,
+                ledger_rows.account_group ASC,
+                ledger_rows.account_name ASC,
+                ledger_rows.currency ASC,
+                ledger_rows.entry_date ASC,
+                ledger_rows.line_id ASC',
+            $params
+        );
+    }
+
     public function cashFlow(array $branchIds, ?string $dateFrom, ?string $dateTo): array
     {
         [$clause, $params] = $this->branchScope($branchIds);
@@ -1106,6 +1313,7 @@ final class ReportRepository extends BaseRepository
                 ) AS document_no,
                 COALESCE(
                     bp.lead_traveler_name,
+                    bp.contact_mobile,
                     bp.party_label,
                     s.name,
                     advance_supplier.name,
@@ -1387,6 +1595,51 @@ final class ReportRepository extends BaseRepository
         );
     }
 
+    public function expenseRegister(array $branchIds, ?string $dateFrom, ?string $dateTo, string $currency = '', int $expenseCategoryId = 0): array
+    {
+        [$clause, $params] = $this->branchScope($branchIds);
+        $dateParams = $params;
+        $expenseWindow = $this->bookingDateWindow('be.expense_date', $dateFrom, $dateTo, $dateParams);
+        $categoryClause = '';
+        if ($expenseCategoryId > 0) {
+            $categoryClause = ' AND be.expense_category_id = :expense_category_id';
+            $dateParams['expense_category_id'] = $expenseCategoryId;
+        }
+
+        $currencyClause = '';
+        if (trim($currency) !== '') {
+            $currencyClause = ' AND be.currency = :expense_currency';
+            $dateParams['expense_currency'] = strtoupper(trim($currency));
+        }
+
+        return $this->fetchRows(
+            'SELECT
+                be.id,
+                be.expense_date,
+                be.branch_id,
+                br.name AS branch_name,
+                ec.name AS category_name,
+                be.title,
+                be.amount,
+                be.currency,
+                COALESCE(pm.name, REPLACE(be.payment_method, "_", " ")) AS payment_method_label,
+                be.paid_to_name,
+                be.reference_number,
+                be.notes,
+                be.expense_status,
+                COALESCE(u.name, u.username, u.email, "User") AS entered_by_name
+             FROM business_expenses be
+             INNER JOIN branches br ON br.id = be.branch_id
+             INNER JOIN expense_categories ec ON ec.id = be.expense_category_id
+             LEFT JOIN payment_methods pm ON pm.code = be.payment_method
+             LEFT JOIN users u ON u.id = be.entered_by_user_id
+             WHERE be.branch_id ' . $clause . '
+               AND be.expense_status IN ("active", "posted")' . $expenseWindow . $currencyClause . $categoryClause . '
+             ORDER BY be.expense_date DESC, be.id DESC',
+            $dateParams
+        );
+    }
+
     public function accountingIntegrityChecks(array $branchIds): array
     {
         [$clause, $params] = $this->branchScope($branchIds);
@@ -1525,6 +1778,10 @@ final class ReportRepository extends BaseRepository
             $params
         ));
 
+        $supplierPaymentConvertedAdvanceValue = $this->columnExists('supplier_payments', 'converted_advance_amount')
+            ? 'sp.converted_advance_amount'
+            : '0';
+
         $rows = array_merge($rows, $this->fetchRows(
             'SELECT
                 "warning" AS severity,
@@ -1534,14 +1791,14 @@ final class ReportRepository extends BaseRepository
                 sp.payment_no AS document_reference,
                 sp.currency,
                 sp.paid_amount AS expected_amount,
-                sp.allocated_amount + sp.unallocated_amount AS actual_amount,
-                (sp.paid_amount - (sp.allocated_amount + sp.unallocated_amount)) AS difference_amount,
-                "Supplier payment allocated plus unallocated does not equal paid amount." AS detail_note
+                sp.allocated_amount + sp.unallocated_amount + ' . $supplierPaymentConvertedAdvanceValue . ' AS actual_amount,
+                (sp.paid_amount - (sp.allocated_amount + sp.unallocated_amount + ' . $supplierPaymentConvertedAdvanceValue . ')) AS difference_amount,
+                "Supplier payment allocated plus unallocated plus converted advance does not equal paid amount." AS detail_note
              FROM supplier_payments sp
              INNER JOIN branches br ON br.id = sp.branch_id
              WHERE sp.branch_id ' . $clause . '
                AND sp.status <> "void"
-               AND ABS(sp.paid_amount - (sp.allocated_amount + sp.unallocated_amount)) > 0.005',
+               AND ABS(sp.paid_amount - (sp.allocated_amount + sp.unallocated_amount + ' . $supplierPaymentConvertedAdvanceValue . ')) > 0.005',
             $params
         ));
 
@@ -1567,17 +1824,46 @@ final class ReportRepository extends BaseRepository
         return $rows;
     }
 
-    public function receivableAging(array $branchIds, string $asOfDate): array
+    public function receivableAging(
+        array $branchIds,
+        string $asOfDate,
+        ?string $dateFrom = null,
+        ?string $dateTo = null,
+        int $businessSourceId = 0,
+        string $customerName = '',
+        string $bookingReference = ''
+    ): array
     {
         [$clause, $params] = $this->branchScope($branchIds);
+        $dateSql = $this->bookingDateWindow('b.booking_date', $dateFrom, $dateTo, $params, 'aging_');
+        $filters = [
+            'cri.outstanding_amount > 0',
+            'cri.status IN ("open", "partially_paid")',
+            'b.branch_id ' . $clause,
+        ];
+        if ($businessSourceId > 0) {
+            $filters[] = 'b.business_source_id = :business_source_id';
+            $params['business_source_id'] = $businessSourceId;
+        }
+        if ($customerName !== '') {
+            $filters[] = 'COALESCE(NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Booking Party") COLLATE utf8mb4_unicode_ci = :customer_name';
+            $params['customer_name'] = $customerName;
+        }
+        if ($bookingReference !== '') {
+            $filters[] = 'cri.booking_reference LIKE :booking_reference';
+            $params['booking_reference'] = '%' . $bookingReference . '%';
+        }
         $sql = 'SELECT
                     b.id AS booking_id,
                     b.branch_id,
                     br.name AS branch_name,
                     b.booking_date,
                     cri.booking_reference,
-                    bp.lead_traveler_name,
+                    COALESCE(NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Booking Party") AS lead_traveler_name,
+                    COALESCE(NULLIF(bp.contact_mobile, ""), NULLIF(t_lead.mobile, ""), "") AS contact_mobile,
                     cri.service_line_reference,
+                    COALESCE(NULLIF(t_service.full_name, ""), NULLIF(bs.passenger_name_snapshot, ""), NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Passenger") AS passenger_name,
+                    COALESCE(NULLIF(CONCAT_WS("/", NULLIF(sat.sector_from, ""), NULLIF(sat.sector_to, "")), ""), "") AS route,
                     cri.currency,
                     cri.due_amount,
                     cri.allocated_amount,
@@ -1588,9 +1874,11 @@ final class ReportRepository extends BaseRepository
                 INNER JOIN bookings b ON b.booking_reference = cri.booking_reference
                 INNER JOIN branches br ON br.id = b.branch_id
                 LEFT JOIN booking_parties bp ON bp.booking_id = b.id
-                WHERE cri.outstanding_amount > 0
-                  AND cri.status IN ("open", "partially_paid")
-                  AND b.branch_id ' . $clause . '
+                LEFT JOIN travelers t_lead ON t_lead.id = b.lead_traveler_id
+                LEFT JOIN booking_services bs ON bs.booking_id = b.id AND bs.line_reference = cri.service_line_reference
+                LEFT JOIN travelers t_service ON t_service.id = bs.traveler_id
+                LEFT JOIN service_air_ticket sat ON sat.booking_service_id = bs.id
+                WHERE ' . implode(' AND ', $filters) . $dateSql . '
                 ORDER BY
                     CASE
                         WHEN overdue_days > 90 THEN 1
@@ -1612,9 +1900,21 @@ final class ReportRepository extends BaseRepository
         return $statement->fetchAll() ?: [];
     }
 
-    public function payableAging(array $branchIds, string $asOfDate): array
+    public function payableAging(
+        array $branchIds,
+        string $asOfDate,
+        ?string $dateFrom = null,
+        ?string $dateTo = null,
+        string $bookingReference = ''
+    ): array
     {
         [$clause, $params] = $this->branchScope($branchIds);
+        $dateSql = $this->bookingDateWindow('b.booking_date', $dateFrom, $dateTo, $params, 'aging_');
+        $bookingReferenceSql = '';
+        if ($bookingReference !== '') {
+            $bookingReferenceSql = ' AND so.booking_reference LIKE :booking_reference';
+            $params['booking_reference'] = '%' . $bookingReference . '%';
+        }
         $sql = 'SELECT
                     b.id AS booking_id,
                     b.branch_id,
@@ -1635,7 +1935,7 @@ final class ReportRepository extends BaseRepository
                 INNER JOIN suppliers s ON s.id = so.supplier_id
                 WHERE so.net_payable_amount > 0
                   AND so.status IN ("open", "partially_covered")
-                  AND b.branch_id ' . $clause . '
+                  AND b.branch_id ' . $clause . $bookingReferenceSql . $dateSql . '
                 ORDER BY
                     CASE
                         WHEN overdue_days > 90 THEN 0
@@ -1881,30 +2181,688 @@ final class ReportRepository extends BaseRepository
         ];
     }
 
-    public function customerOutstanding(array $branchIds): array
+    public function customerOutstanding(
+        array $branchIds,
+        ?string $dateFrom = null,
+        ?string $dateTo = null,
+        string $currency = '',
+        int $businessSourceId = 0,
+        string $customerName = ''
+    ): array
     {
         [$clause, $params] = $this->branchScope($branchIds);
+        $filters = [
+            'cri.outstanding_amount > 0',
+            'b.branch_id ' . $clause,
+        ];
+        if ($dateFrom !== null) {
+            $filters[] = 'b.booking_date >= :date_from';
+            $params['date_from'] = $dateFrom;
+        }
+        if ($dateTo !== null) {
+            $filters[] = 'b.booking_date <= :date_to';
+            $params['date_to'] = $dateTo;
+        }
+        if ($currency !== '') {
+            $filters[] = 'cri.currency = :currency';
+            $params['currency'] = $currency;
+        }
+        if ($businessSourceId > 0) {
+            $filters[] = 'b.business_source_id = :business_source_id';
+            $params['business_source_id'] = $businessSourceId;
+        }
+        if ($customerName !== '') {
+            $filters[] = 'COALESCE(NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Booking Party") COLLATE utf8mb4_unicode_ci = :customer_name';
+            $params['customer_name'] = $customerName;
+        }
+
+        $customerReceiptPurposeFilter = $this->columnExists('customer_receipts', 'receipt_purpose')
+            ? 'AND COALESCE(cr.receipt_purpose, "booking_payment") <> "customer_advance"'
+            : '';
+
         $sql = 'SELECT
+                    cri.id AS receivable_id,
+                    b.id AS booking_id,
+                    b.lead_traveler_id,
                     b.branch_id,
                     br.name AS branch_name,
+                    COALESCE(bs_src.name, "Unassigned Account") AS business_source_name,
                     b.booking_reference,
                     b.booking_date,
-                    bp.lead_traveler_name,
-                    bp.contact_mobile,
+                    COALESCE(cri.due_date, b.due_date) AS due_date,
+                    cri.service_line_reference,
+                    COALESCE(NULLIF(bs.service_type, ""), "Service") AS service_type,
+                    COALESCE(NULLIF(t_service.full_name, ""), NULLIF(bs.passenger_name_snapshot, ""), NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Passenger") AS passenger_name,
+                    COALESCE(NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Booking Party") AS lead_traveler_name,
+                    COALESCE(NULLIF(bp.contact_mobile, ""), NULLIF(t_lead.mobile, ""), "") AS contact_mobile,
+                    COALESCE(NULLIF(sat.ticket_number, ""), NULLIF(so.reference_number, ""), NULLIF(sh.confirmation_number, ""), NULLIF(sto.confirmation_number, ""), NULLIF(sv.application_reference, ""), cri.service_line_reference) AS ticket_reference,
+                    COALESCE(NULLIF(sat.pnr, ""), "") AS pnr,
+                    COALESCE(NULLIF(CONCAT_WS("/", NULLIF(sat.sector_from, ""), NULLIF(sat.sector_to, "")), ""), "") AS route,
+                    COALESCE(sat.departure_date, su.departure_date, sh.check_in_date, st.pickup_date, sto.start_date, so.service_date) AS travel_date,
+                    COALESCE(
+                        NULLIF(bs.remarks, ""),
+                        NULLIF(sat.ticket_remarks, ""),
+                        NULLIF(sv.remarks, ""),
+                        NULLIF(su.remarks, ""),
+                        NULLIF(sh.remarks, ""),
+                        NULLIF(st.route_notes, ""),
+                        NULLIF(sto.remarks, ""),
+                        NULLIF(so.remarks, ""),
+                        CONCAT(UCASE(LEFT(COALESCE(bs.service_type, "service"), 1)), SUBSTRING(COALESCE(bs.service_type, "service"), 2), " Service")
+                    ) AS description,
                     cri.currency,
-                    SUM(cri.due_amount) AS total_due,
-                    SUM(cri.allocated_amount) AS total_allocated,
-                    SUM(cri.outstanding_amount) AS total_outstanding
+                    COALESCE(NULLIF(bs.final_sale_price, 0), cri.due_amount) AS original_invoice_amount,
+                    cri.due_amount AS total_due,
+                    cri.allocated_amount AS total_allocated,
+                    cri.outstanding_amount AS total_outstanding,
+                    COALESCE(receipt_summary.customer_received_amount, 0) AS account_customer_received_amount,
+                    COALESCE(receipt_summary.customer_received_date, b.booking_date) AS account_customer_received_date,
+                    COALESCE(supplier_payment_summary.supplier_paid_amount, 0) AS account_supplier_paid_amount,
+                    COALESCE(supplier_payment_summary.supplier_paid_date, b.booking_date) AS account_supplier_paid_date,
+                    COALESCE(refund_summary.customer_paid_amount, 0) AS refund_customer_paid_amount,
+                    COALESCE(refund_summary.customer_penalty_amount, 0) AS refund_customer_penalty_amount,
+                    COALESCE(refund_summary.customer_refund_expected, 0) AS refund_customer_refund_expected,
+                    COALESCE(refund_summary.customer_refund_posted, 0) AS refund_customer_refund_posted,
+                    COALESCE(refund_summary.supplier_penalty_amount, 0) AS refund_supplier_penalty_amount,
+                    COALESCE(refund_summary.supplier_refund_expected, 0) AS refund_supplier_refund_expected,
+                    COALESCE(refund_summary.supplier_refund_received, 0) AS refund_supplier_refund_received,
+                    COALESCE(refund_summary.refund_event_date, b.booking_date) AS refund_event_date,
+                    COALESCE(refund_summary.refund_event_count, 0) AS refund_event_count
                 FROM customer_receivable_items cri
                 INNER JOIN bookings b ON b.booking_reference = cri.booking_reference
                 INNER JOIN branches br ON br.id = b.branch_id
+                LEFT JOIN business_sources bs_src ON bs_src.id = b.business_source_id
                 LEFT JOIN booking_parties bp ON bp.booking_id = b.id
-                WHERE cri.outstanding_amount > 0
-                  AND b.branch_id ' . $clause . '
-                GROUP BY
-                    b.branch_id, br.name, b.booking_reference, b.booking_date,
-                    bp.lead_traveler_name, bp.contact_mobile, cri.currency
-                ORDER BY br.name ASC, b.booking_date DESC, b.booking_reference ASC';
+                LEFT JOIN travelers t_lead ON t_lead.id = b.lead_traveler_id
+                LEFT JOIN booking_services bs ON bs.booking_id = b.id AND bs.line_reference = cri.service_line_reference
+                LEFT JOIN travelers t_service ON t_service.id = bs.traveler_id
+                LEFT JOIN service_air_ticket sat ON sat.booking_service_id = bs.id
+                LEFT JOIN service_visa sv ON sv.booking_service_id = bs.id
+                LEFT JOIN service_umrah su ON su.booking_service_id = bs.id
+                LEFT JOIN service_hotel sh ON sh.booking_service_id = bs.id
+                LEFT JOIN service_transport st ON st.booking_service_id = bs.id
+                LEFT JOIN service_tour sto ON sto.booking_service_id = bs.id
+                LEFT JOIN service_other so ON so.booking_service_id = bs.id
+                LEFT JOIN (
+                    SELECT
+                        cr.booking_reference,
+                        cr.currency,
+                        ROUND(SUM(cr.received_amount), 2) AS customer_received_amount,
+                        MAX(cr.receipt_date) AS customer_received_date
+                    FROM customer_receipts cr
+                    WHERE cr.status <> "void"
+                      ' . $customerReceiptPurposeFilter . '
+                    GROUP BY cr.booking_reference, cr.currency
+                ) receipt_summary
+                    ON receipt_summary.booking_reference = cri.booking_reference
+                   AND receipt_summary.currency = cri.currency
+                LEFT JOIN (
+                    SELECT
+                        so.booking_reference,
+                        so.service_line_reference,
+                        so.currency,
+                        ROUND(SUM(spa.allocated_amount), 2) AS supplier_paid_amount,
+                        MAX(sp.payment_date) AS supplier_paid_date
+                    FROM supplier_payment_allocations spa
+                    INNER JOIN supplier_payments sp ON sp.id = spa.supplier_payment_id
+                    INNER JOIN supplier_obligations so ON so.id = spa.supplier_obligation_id
+                    WHERE sp.status <> "void"
+                      AND spa.allocated_amount > 0.005
+                    GROUP BY so.booking_reference, so.service_line_reference, so.currency
+                ) supplier_payment_summary
+                    ON supplier_payment_summary.booking_reference = cri.booking_reference
+                   AND supplier_payment_summary.service_line_reference = cri.service_line_reference
+                   AND supplier_payment_summary.currency = cri.currency
+                LEFT JOIN (
+                    SELECT
+                        bse.booking_id,
+                        bse.booking_service_id,
+                        bse.currency,
+                        COUNT(*) AS refund_event_count,
+                        MAX(bse.event_date) AS refund_event_date,
+                        SUM(CASE
+                            WHEN bse.event_type = "cancel" THEN COALESCE(
+                                CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.customer_refund_basis")), "") AS DECIMAL(18,2)),
+                                CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.released_customer_credit")), "") AS DECIMAL(18,2)) + COALESCE(
+                                    CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.customer_penalty_amount")), "") AS DECIMAL(18,2)),
+                                    bse.penalty_amount,
+                                    0
+                                ),
+                                bse.customer_credit_amount + COALESCE(
+                                    CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.customer_penalty_amount")), "") AS DECIMAL(18,2)),
+                                    bse.penalty_amount,
+                                    0
+                                ),
+                                0
+                            )
+                            ELSE 0
+                        END) AS customer_paid_amount,
+                        SUM(CASE
+                            WHEN bse.event_type = "cancel" THEN COALESCE(
+                                CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.customer_penalty_amount")), "") AS DECIMAL(18,2)),
+                                bse.penalty_amount,
+                                0
+                            )
+                            ELSE 0
+                        END) AS customer_penalty_amount,
+                        SUM(CASE
+                            WHEN bse.event_type = "cancel" THEN GREATEST(
+                                COALESCE(
+                                    CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_amount")), "") AS DECIMAL(18,2)),
+                                    CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_credit")), "") AS DECIMAL(18,2)),
+                                    0
+                                ) - COALESCE(
+                                    CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.customer_penalty_amount")), "") AS DECIMAL(18,2)),
+                                    bse.penalty_amount,
+                                    0
+                                ),
+                                0
+                            )
+                            ELSE 0
+                        END) AS customer_refund_expected,
+                        SUM(CASE
+                            WHEN bse.event_type = "refund" THEN COALESCE(bse.customer_refund_amount, 0)
+                            ELSE 0
+                        END) AS customer_refund_posted,
+                        SUM(CASE
+                            WHEN bse.event_type = "cancel" THEN COALESCE(
+                                CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.supplier_penalty_amount")), "") AS DECIMAL(18,2)),
+                                0
+                            )
+                            ELSE 0
+                        END) AS supplier_penalty_amount,
+                        SUM(CASE
+                            WHEN bse.event_type = "cancel" THEN COALESCE(
+                                CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_amount")), "") AS DECIMAL(18,2)),
+                                CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_credit")), "") AS DECIMAL(18,2)),
+                                bse.supplier_credit_amount,
+                                0
+                            )
+                            ELSE 0
+                        END) AS supplier_refund_expected,
+                        SUM(CASE
+                            WHEN bse.event_type = "refund" THEN COALESCE(bse.supplier_refund_amount, 0)
+                            ELSE 0
+                        END) AS supplier_refund_received
+                    FROM booking_service_events bse
+                    WHERE bse.event_status = "posted"
+                      AND bse.event_type IN ("cancel", "refund")
+                    GROUP BY bse.booking_id, bse.booking_service_id, bse.currency
+                ) refund_summary
+                    ON refund_summary.booking_id = b.id
+                   AND refund_summary.booking_service_id = bs.id
+                   AND refund_summary.currency = cri.currency
+                WHERE ' . implode(' AND ', $filters) . '
+                ORDER BY b.booking_date DESC, b.id DESC, cri.id DESC, bs_src.name ASC, br.name ASC, lead_traveler_name ASC';
+
+        return $this->fetchRows($sql, $params);
+    }
+
+    public function customerLedger(
+        array $branchIds,
+        ?string $dateFrom = null,
+        ?string $dateTo = null,
+        string $currency = '',
+        int $businessSourceId = 0,
+        string $customerName = '',
+        string $bookingReference = ''
+    ): array
+    {
+        [$clause, $params] = $this->branchScope($branchIds);
+        $filters = [
+            'b.branch_id ' . $clause,
+        ];
+        if ($dateFrom !== null) {
+            $filters[] = 'b.booking_date >= :date_from';
+            $params['date_from'] = $dateFrom;
+        }
+        if ($dateTo !== null) {
+            $filters[] = 'b.booking_date <= :date_to';
+            $params['date_to'] = $dateTo;
+        }
+        if ($currency !== '') {
+            $filters[] = 'cri.currency = :currency';
+            $params['currency'] = $currency;
+        }
+        if ($businessSourceId > 0) {
+            $filters[] = 'b.business_source_id = :business_source_id';
+            $params['business_source_id'] = $businessSourceId;
+        }
+        if ($customerName !== '') {
+            $filters[] = 'COALESCE(NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Booking Party") COLLATE utf8mb4_unicode_ci = :customer_name';
+            $params['customer_name'] = $customerName;
+        }
+        if ($bookingReference !== '') {
+            $filters[] = 'b.booking_reference LIKE :booking_reference';
+            $params['booking_reference'] = '%' . $bookingReference . '%';
+        }
+
+        $customerReceiptPurposeFilter = $this->columnExists('customer_receipts', 'receipt_purpose')
+            ? 'AND COALESCE(cr.receipt_purpose, "booking_payment") <> "customer_advance"'
+            : '';
+
+        $sql = 'SELECT
+                    cri.id AS receivable_id,
+                    b.id AS booking_id,
+                    b.lead_traveler_id,
+                    b.branch_id,
+                    br.name AS branch_name,
+                    COALESCE(bs_src.name, "Unassigned Account") AS business_source_name,
+                    b.booking_reference,
+                    b.booking_date,
+                    COALESCE(cri.due_date, b.due_date) AS due_date,
+                    cri.service_line_reference,
+                    COALESCE(NULLIF(bs.service_type, ""), "Service") AS service_type,
+                    COALESCE(NULLIF(t_service.full_name, ""), NULLIF(bs.passenger_name_snapshot, ""), NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Passenger") AS passenger_name,
+                    COALESCE(NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Booking Party") AS lead_traveler_name,
+                    COALESCE(NULLIF(bp.contact_mobile, ""), NULLIF(t_lead.mobile, ""), "") AS contact_mobile,
+                    COALESCE(NULLIF(sat.ticket_number, ""), NULLIF(so.reference_number, ""), NULLIF(sh.confirmation_number, ""), NULLIF(sto.confirmation_number, ""), NULLIF(sv.application_reference, ""), cri.service_line_reference) AS ticket_reference,
+                    COALESCE(NULLIF(sat.pnr, ""), "") AS pnr,
+                    COALESCE(NULLIF(CONCAT_WS("/", NULLIF(sat.sector_from, ""), NULLIF(sat.sector_to, "")), ""), "") AS route,
+                    COALESCE(sat.departure_date, su.departure_date, sh.check_in_date, st.pickup_date, sto.start_date, so.service_date) AS travel_date,
+                    COALESCE(
+                        NULLIF(bs.remarks, ""),
+                        NULLIF(sat.ticket_remarks, ""),
+                        NULLIF(sv.remarks, ""),
+                        NULLIF(su.remarks, ""),
+                        NULLIF(sh.remarks, ""),
+                        NULLIF(st.route_notes, ""),
+                        NULLIF(sto.remarks, ""),
+                        NULLIF(so.remarks, ""),
+                        CONCAT(UCASE(LEFT(COALESCE(bs.service_type, "service"), 1)), SUBSTRING(COALESCE(bs.service_type, "service"), 2), " Service")
+                    ) AS description,
+                    cri.currency,
+                    COALESCE(NULLIF(bs.final_sale_price, 0), cri.due_amount) AS original_invoice_amount,
+                    cri.due_amount AS total_due,
+                    cri.allocated_amount AS total_allocated,
+                    cri.outstanding_amount AS total_outstanding,
+                    COALESCE(receipt_summary.customer_received_amount, 0) AS account_customer_received_amount,
+                    COALESCE(receipt_summary.customer_received_date, b.booking_date) AS account_customer_received_date,
+                    COALESCE(supplier_payment_summary.supplier_paid_amount, 0) AS account_supplier_paid_amount,
+                    COALESCE(supplier_payment_summary.supplier_paid_date, b.booking_date) AS account_supplier_paid_date,
+                    COALESCE(refund_summary.customer_paid_amount, 0) AS refund_customer_paid_amount,
+                    COALESCE(refund_summary.customer_penalty_amount, 0) AS refund_customer_penalty_amount,
+                    COALESCE(refund_summary.customer_refund_expected, 0) AS refund_customer_refund_expected,
+                    COALESCE(refund_summary.customer_refund_posted, 0) AS refund_customer_refund_posted,
+                    COALESCE(refund_summary.supplier_penalty_amount, 0) AS refund_supplier_penalty_amount,
+                    COALESCE(refund_summary.supplier_refund_expected, 0) AS refund_supplier_refund_expected,
+                    COALESCE(refund_summary.supplier_refund_received, 0) AS refund_supplier_refund_received,
+                    COALESCE(refund_summary.refund_event_date, b.booking_date) AS refund_event_date,
+                    COALESCE(refund_summary.refund_event_count, 0) AS refund_event_count
+                FROM customer_receivable_items cri
+                INNER JOIN bookings b ON b.booking_reference = cri.booking_reference
+                INNER JOIN branches br ON br.id = b.branch_id
+                LEFT JOIN business_sources bs_src ON bs_src.id = b.business_source_id
+                LEFT JOIN booking_parties bp ON bp.booking_id = b.id
+                LEFT JOIN travelers t_lead ON t_lead.id = b.lead_traveler_id
+                LEFT JOIN booking_services bs ON bs.booking_id = b.id AND bs.line_reference = cri.service_line_reference
+                LEFT JOIN travelers t_service ON t_service.id = bs.traveler_id
+                LEFT JOIN service_air_ticket sat ON sat.booking_service_id = bs.id
+                LEFT JOIN service_visa sv ON sv.booking_service_id = bs.id
+                LEFT JOIN service_umrah su ON su.booking_service_id = bs.id
+                LEFT JOIN service_hotel sh ON sh.booking_service_id = bs.id
+                LEFT JOIN service_transport st ON st.booking_service_id = bs.id
+                LEFT JOIN service_tour sto ON sto.booking_service_id = bs.id
+                LEFT JOIN service_other so ON so.booking_service_id = bs.id
+                LEFT JOIN (
+                    SELECT
+                        cr.booking_reference,
+                        cr.currency,
+                        ROUND(SUM(cr.received_amount), 2) AS customer_received_amount,
+                        MAX(cr.receipt_date) AS customer_received_date
+                    FROM customer_receipts cr
+                    WHERE cr.status <> "void"
+                      ' . $customerReceiptPurposeFilter . '
+                    GROUP BY cr.booking_reference, cr.currency
+                ) receipt_summary
+                    ON receipt_summary.booking_reference = cri.booking_reference
+                   AND receipt_summary.currency = cri.currency
+                LEFT JOIN (
+                    SELECT
+                        so.booking_reference,
+                        so.service_line_reference,
+                        so.currency,
+                        ROUND(SUM(spa.allocated_amount), 2) AS supplier_paid_amount,
+                        MAX(sp.payment_date) AS supplier_paid_date
+                    FROM supplier_payment_allocations spa
+                    INNER JOIN supplier_payments sp ON sp.id = spa.supplier_payment_id
+                    INNER JOIN supplier_obligations so ON so.id = spa.supplier_obligation_id
+                    WHERE sp.status <> "void"
+                      AND spa.allocated_amount > 0.005
+                    GROUP BY so.booking_reference, so.service_line_reference, so.currency
+                ) supplier_payment_summary
+                    ON supplier_payment_summary.booking_reference = cri.booking_reference
+                   AND supplier_payment_summary.service_line_reference = cri.service_line_reference
+                   AND supplier_payment_summary.currency = cri.currency
+                LEFT JOIN (
+                    SELECT
+                        bse.booking_id,
+                        bse.booking_service_id,
+                        bse.currency,
+                        COUNT(*) AS refund_event_count,
+                        MAX(bse.event_date) AS refund_event_date,
+                        SUM(CASE
+                            WHEN bse.event_type = "cancel" THEN COALESCE(
+                                CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.customer_refund_basis")), "") AS DECIMAL(18,2)),
+                                CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.released_customer_credit")), "") AS DECIMAL(18,2)) + COALESCE(
+                                    CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.customer_penalty_amount")), "") AS DECIMAL(18,2)),
+                                    bse.penalty_amount,
+                                    0
+                                ),
+                                bse.customer_credit_amount + COALESCE(
+                                    CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.customer_penalty_amount")), "") AS DECIMAL(18,2)),
+                                    bse.penalty_amount,
+                                    0
+                                ),
+                                0
+                            )
+                            ELSE 0
+                        END) AS customer_paid_amount,
+                        SUM(CASE
+                            WHEN bse.event_type = "cancel" THEN COALESCE(
+                                CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.customer_penalty_amount")), "") AS DECIMAL(18,2)),
+                                bse.penalty_amount,
+                                0
+                            )
+                            ELSE 0
+                        END) AS customer_penalty_amount,
+                        SUM(CASE
+                            WHEN bse.event_type = "cancel" THEN GREATEST(
+                                COALESCE(
+                                    CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_amount")), "") AS DECIMAL(18,2)),
+                                    CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_credit")), "") AS DECIMAL(18,2)),
+                                    0
+                                ) - COALESCE(
+                                    CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.customer_penalty_amount")), "") AS DECIMAL(18,2)),
+                                    bse.penalty_amount,
+                                    0
+                                ),
+                                0
+                            )
+                            ELSE 0
+                        END) AS customer_refund_expected,
+                        SUM(CASE
+                            WHEN bse.event_type = "refund" THEN COALESCE(bse.customer_refund_amount, 0)
+                            ELSE 0
+                        END) AS customer_refund_posted,
+                        SUM(CASE
+                            WHEN bse.event_type = "cancel" THEN COALESCE(
+                                CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.supplier_penalty_amount")), "") AS DECIMAL(18,2)),
+                                0
+                            )
+                            ELSE 0
+                        END) AS supplier_penalty_amount,
+                        SUM(CASE
+                            WHEN bse.event_type = "cancel" THEN COALESCE(
+                                CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_amount")), "") AS DECIMAL(18,2)),
+                                CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_credit")), "") AS DECIMAL(18,2)),
+                                bse.supplier_credit_amount,
+                                0
+                            )
+                            ELSE 0
+                        END) AS supplier_refund_expected,
+                        SUM(CASE
+                            WHEN bse.event_type = "refund" THEN COALESCE(bse.supplier_refund_amount, 0)
+                            ELSE 0
+                        END) AS supplier_refund_received
+                    FROM booking_service_events bse
+                    WHERE bse.event_status = "posted"
+                      AND bse.event_type IN ("cancel", "refund")
+                    GROUP BY bse.booking_id, bse.booking_service_id, bse.currency
+                ) refund_summary
+                    ON refund_summary.booking_id = b.id
+                   AND refund_summary.booking_service_id = bs.id
+                   AND refund_summary.currency = cri.currency
+                WHERE ' . implode(' AND ', $filters) . '
+                ORDER BY b.booking_date DESC,
+                         b.id DESC,
+                         cri.id DESC,
+                         bs_src.name ASC,
+                         br.name ASC,
+                         lead_traveler_name ASC';
+
+        return $this->fetchRows($sql, $params);
+    }
+
+    public function customerLedgerCustomers(array $branchIds, int $businessSourceId = 0): array
+    {
+        [$clause, $params] = $this->branchScope($branchIds);
+        $filters = [
+            'b.branch_id ' . $clause,
+        ];
+
+        if ($businessSourceId > 0) {
+            $filters[] = 'b.business_source_id = :business_source_id';
+            $params['business_source_id'] = $businessSourceId;
+        }
+
+        $sql = 'SELECT DISTINCT
+                    COALESCE(NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Booking Party") AS customer_name
+                FROM bookings b
+                LEFT JOIN booking_parties bp ON bp.booking_id = b.id
+                LEFT JOIN travelers t_lead ON t_lead.id = b.lead_traveler_id
+                WHERE ' . implode(' AND ', $filters) . '
+                ORDER BY customer_name ASC';
+
+        return $this->fetchRows($sql, $params);
+    }
+
+    public function customerAdvanceCustomers(array $branchIds): array
+    {
+        [$clause, $params] = $this->branchScope($branchIds);
+        $refundUnion = '';
+
+        if ($this->tableExists('customer_advance_refunds')) {
+            [$refundClause, $refundParams] = $this->branchScope($branchIds, 'advance_refund_branch_');
+            $params = array_merge($params, $refundParams);
+            $refundUnion = '
+                UNION
+                SELECT DISTINCT COALESCE(NULLIF(t.full_name, ""), "Customer") AS customer_name
+                FROM customer_advance_refunds car
+                INNER JOIN customer_receipts cr ON cr.id = car.customer_receipt_id AND cr.status <> "void"
+                LEFT JOIN travelers t ON t.id = car.traveler_id
+                WHERE car.branch_id ' . $refundClause;
+        }
+
+        return $this->fetchRows(
+            'SELECT DISTINCT customer_name
+             FROM (
+                SELECT DISTINCT COALESCE(NULLIF(t.full_name, ""), "Customer") AS customer_name
+                FROM customer_receipts cr
+                LEFT JOIN travelers t ON t.id = cr.traveler_id
+                WHERE cr.branch_id ' . $clause . '
+                  AND cr.status <> "void"
+                  AND cr.receipt_purpose = "customer_advance"'
+                . $refundUnion . '
+             ) advance_customers
+             WHERE customer_name <> ""
+             ORDER BY customer_name ASC',
+            $params
+        );
+    }
+
+    public function customerAdvanceLedger(
+        array $branchIds,
+        ?string $dateFrom,
+        ?string $dateTo,
+        string $currency = '',
+        string $customerName = ''
+    ): array {
+        if (! $this->columnExists('customer_receipts', 'traveler_id')
+            || ! $this->columnExists('customer_receipts', 'receipt_purpose')
+        ) {
+            return [];
+        }
+
+        [$clause, $params] = $this->branchScope($branchIds);
+        $dateSql = $this->bookingDateWindow('advance_rows.entry_date', $dateFrom, $dateTo, $params, 'advance_');
+        $currencySql = '';
+        if (trim($currency) !== '') {
+            $currencySql = ' AND advance_rows.currency = :advance_currency';
+            $params['advance_currency'] = strtoupper(trim($currency));
+        }
+
+        $customerSql = '';
+        if (trim($customerName) !== '') {
+            $customerSql = ' AND LOWER(advance_rows.customer_name) = LOWER(:advance_customer_name)';
+            $params['advance_customer_name'] = trim($customerName);
+        }
+
+        $paymentAmountExpression = $this->columnExists('customer_receipt_allocations', 'payment_amount_consumed')
+            ? 'COALESCE(cra.payment_amount_consumed, cra.allocated_amount)'
+            : 'cra.allocated_amount';
+
+        $refundSelect = 'SELECT
+                    NULL AS row_id,
+                    0 AS receipt_id,
+                    NULL AS allocation_id,
+                    id AS branch_id,
+                    0 AS traveler_id,
+                    "1900-01-01" AS entry_date,
+                    "Customer" AS customer_name,
+                    "PKR" AS currency,
+                    "Customer Advance Returned" AS entry_type,
+                    "" AS reference,
+                    "" AS raw_reference_number,
+                    "" AS payment_method,
+                    NULL AS treasury_account_id,
+                    "" AS treasury_account_name,
+                    "" AS booking_reference,
+                    0 AS booking_id,
+                    "" AS remarks,
+                    "" AS raw_remarks,
+                    0 AS received_amount,
+                    0 AS applied_amount,
+                    0 AS returned_amount,
+                    40 AS sort_order
+                 FROM branches
+                 WHERE 1 = 0';
+
+        if ($this->tableExists('customer_advance_refunds')) {
+            $refundSelect = 'SELECT
+                    car.id AS row_id,
+                    car.customer_receipt_id AS receipt_id,
+                    NULL AS allocation_id,
+                    car.branch_id,
+                    car.traveler_id,
+                    car.refund_date AS entry_date,
+                    COALESCE(NULLIF(t.full_name, ""), "Customer") AS customer_name,
+                    car.currency,
+                    "Customer Advance Returned" AS entry_type,
+                    COALESCE(NULLIF(car.reference_number, ""), cr.receipt_no, "") AS reference,
+                    COALESCE(car.reference_number, "") AS raw_reference_number,
+                    car.payment_method,
+                    car.treasury_account_id,
+                    COALESCE(NULLIF(ta.account_name, ""), "") AS treasury_account_name,
+                    "" AS booking_reference,
+                    0 AS booking_id,
+                    COALESCE(NULLIF(car.reason, ""), NULLIF(car.remarks, ""), "") AS remarks,
+                    COALESCE(car.remarks, "") AS raw_remarks,
+                    0 AS received_amount,
+                    0 AS applied_amount,
+                    car.amount AS returned_amount,
+                    30 AS sort_order
+                 FROM customer_advance_refunds car
+                 INNER JOIN customer_receipts cr ON cr.id = car.customer_receipt_id AND cr.status <> "void"
+                 LEFT JOIN travelers t ON t.id = car.traveler_id
+                 LEFT JOIN treasury_accounts ta ON ta.id = car.treasury_account_id';
+        }
+
+        $sql = 'SELECT
+                    advance_rows.row_id,
+                    advance_rows.receipt_id,
+                    advance_rows.allocation_id,
+                    advance_rows.branch_id,
+                    advance_rows.traveler_id,
+                    br.name AS branch_name,
+                    advance_rows.entry_date,
+                    advance_rows.customer_name,
+                    advance_rows.currency,
+                    advance_rows.entry_type,
+                    advance_rows.reference,
+                    advance_rows.raw_reference_number,
+                    advance_rows.payment_method,
+                    advance_rows.treasury_account_id,
+                    advance_rows.treasury_account_name,
+                    advance_rows.booking_reference,
+                    advance_rows.booking_id,
+                    advance_rows.remarks,
+                    advance_rows.raw_remarks,
+                    ROUND(advance_rows.received_amount, 2) AS received_amount,
+                    ROUND(advance_rows.applied_amount, 2) AS applied_amount,
+                    ROUND(advance_rows.returned_amount, 2) AS returned_amount,
+                    advance_rows.sort_order
+                FROM (
+                    SELECT
+                        cr.id AS row_id,
+                        cr.id AS receipt_id,
+                        NULL AS allocation_id,
+                        cr.branch_id,
+                        cr.traveler_id,
+                        cr.receipt_date AS entry_date,
+                        COALESCE(NULLIF(t.full_name, ""), "Customer") AS customer_name,
+                        cr.currency,
+                        "Customer Advance Received" AS entry_type,
+                        cr.receipt_no AS reference,
+                        COALESCE(cr.reference_number, "") AS raw_reference_number,
+                        cr.payment_method,
+                        cr.treasury_account_id,
+                        COALESCE(NULLIF(ta.account_name, ""), "") AS treasury_account_name,
+                        "" AS booking_reference,
+                        0 AS booking_id,
+                        COALESCE(NULLIF(cr.reference_number, ""), NULLIF(cr.remarks, ""), "") AS remarks,
+                        COALESCE(cr.remarks, "") AS raw_remarks,
+                        cr.received_amount AS received_amount,
+                        0 AS applied_amount,
+                        0 AS returned_amount,
+                        10 AS sort_order
+                    FROM customer_receipts cr
+                    LEFT JOIN travelers t ON t.id = cr.traveler_id
+                    LEFT JOIN treasury_accounts ta ON ta.id = cr.treasury_account_id
+                    WHERE cr.status <> "void"
+                      AND cr.receipt_purpose = "customer_advance"
+
+                    UNION ALL
+
+                    SELECT
+                        cra.id AS row_id,
+                        cr.id AS receipt_id,
+                        cra.id AS allocation_id,
+                        cr.branch_id,
+                        cr.traveler_id,
+                        COALESCE(cri.due_date, cr.receipt_date) AS entry_date,
+                        COALESCE(NULLIF(t.full_name, ""), "Customer") AS customer_name,
+                        cr.currency,
+                        "Advance Applied to Invoice" AS entry_type,
+                        cr.receipt_no AS reference,
+                        COALESCE(cr.reference_number, "") AS raw_reference_number,
+                        cr.payment_method,
+                        cr.treasury_account_id,
+                        COALESCE(NULLIF(ta.account_name, ""), "") AS treasury_account_name,
+                        COALESCE(NULLIF(cri.booking_reference, ""), "") AS booking_reference,
+                        COALESCE(b.id, 0) AS booking_id,
+                        COALESCE(NULLIF(cri.remarks, ""), "Applied to customer invoice") AS remarks,
+                        COALESCE(cr.remarks, "") AS raw_remarks,
+                        0 AS received_amount,
+                        ' . $paymentAmountExpression . ' AS applied_amount,
+                        0 AS returned_amount,
+                        20 AS sort_order
+                    FROM customer_receipt_allocations cra
+                    INNER JOIN customer_receipts cr ON cr.id = cra.customer_receipt_id
+                    INNER JOIN customer_receivable_items cri ON cri.id = cra.customer_receivable_item_id
+                    LEFT JOIN bookings b ON b.booking_reference = cri.booking_reference
+                    LEFT JOIN travelers t ON t.id = cr.traveler_id
+                    LEFT JOIN treasury_accounts ta ON ta.id = cr.treasury_account_id
+                    WHERE cr.status <> "void"
+                      AND cr.receipt_purpose = "customer_advance"
+
+                    UNION ALL
+
+                    ' . $refundSelect . '
+                ) advance_rows
+                INNER JOIN branches br ON br.id = advance_rows.branch_id
+                WHERE advance_rows.branch_id ' . $clause . $dateSql . $currencySql . $customerSql . '
+                ORDER BY advance_rows.entry_date DESC, advance_rows.sort_order ASC, advance_rows.row_id DESC';
 
         return $this->fetchRows($sql, $params);
     }
@@ -2049,9 +3007,15 @@ final class ReportRepository extends BaseRepository
         return $this->fetchRows($sql, $params);
     }
 
-    public function supplierOutstanding(array $branchIds): array
+    public function supplierOutstanding(array $branchIds, ?string $dateFrom = null, ?string $dateTo = null, int $supplierId = 0): array
     {
         [$clause, $params] = $this->branchScope($branchIds);
+        $dateSql = $this->bookingDateWindow('b.booking_date', $dateFrom, $dateTo, $params, 'supplier_outstanding_');
+        $supplierSql = '';
+        if ($supplierId > 0) {
+            $supplierSql = ' AND so.supplier_id = :supplier_outstanding_supplier_id';
+            $params['supplier_outstanding_supplier_id'] = $supplierId;
+        }
         $sql = 'SELECT
                     b.branch_id,
                     br.name AS branch_name,
@@ -2068,13 +3032,776 @@ final class ReportRepository extends BaseRepository
                 INNER JOIN branches br ON br.id = b.branch_id
                 INNER JOIN suppliers s ON s.id = so.supplier_id
                 WHERE so.net_payable_amount > 0
-                  AND b.branch_id ' . $clause . '
+                  AND b.branch_id ' . $clause . $dateSql . $supplierSql . '
                 GROUP BY
                     b.branch_id, br.name, so.booking_reference, b.booking_date,
                     s.name, s.supplier_mode, so.currency
                 ORDER BY br.name ASC, s.name ASC, b.booking_reference ASC';
 
         return $this->fetchRows($sql, $params);
+    }
+
+    public function supplierReceivable(array $branchIds, ?string $dateFrom, ?string $dateTo, string $airline = '', int $supplierId = 0): array
+    {
+        [$clause, $params] = $this->branchScope($branchIds);
+        $dateSql = $this->bookingDateWindow('event_totals.event_date', $dateFrom, $dateTo, $params);
+        $airlineSql = '';
+        $airline = trim($airline);
+        if ($airline !== '') {
+            $airlineSql = ' AND COALESCE(sat.airline, "") LIKE :supplier_receivable_airline';
+            $params['supplier_receivable_airline'] = '%' . $airline . '%';
+        }
+        $supplierSql = '';
+        if ($supplierId > 0) {
+            $supplierSql = ' AND bs.supplier_id = :supplier_receivable_supplier_id';
+            $params['supplier_receivable_supplier_id'] = $supplierId;
+        }
+
+        $sql = 'SELECT
+                    b.branch_id,
+                    br.name AS branch_name,
+                    b.id AS booking_id,
+                    b.booking_reference,
+                    event_totals.event_date,
+                    event_totals.currency,
+                    event_totals.service_line_reference,
+                    event_totals.supplier_credit_amount,
+                    event_totals.supplier_refund_received,
+                    event_totals.supplier_receivable_balance,
+                    event_totals.reason,
+                    COALESCE(s.name, bs.supplier_name_snapshot, "Supplier pending") AS supplier_name,
+                    COALESCE(NULLIF(t.full_name, ""), NULLIF(bs.passenger_name_snapshot, ""), "Passenger") AS passenger_name,
+                    COALESCE(NULLIF(CONCAT_WS("/", NULLIF(sat.sector_from, ""), NULLIF(sat.sector_to, "")), ""), "N/A") AS route,
+                    COALESCE(NULLIF(sat.pnr, ""), "N/A") AS pnr,
+                    COALESCE(NULLIF(sat.ticket_number, ""), event_totals.service_line_reference) AS ticket_number
+                FROM (
+                    SELECT
+                        bse.booking_id,
+                        bse.booking_service_id,
+                        bse.service_line_reference,
+                        bse.currency,
+                        MAX(bse.event_date) AS event_date,
+                        SUM(CASE WHEN bse.event_type = "cancel" THEN COALESCE(bse.supplier_credit_amount, 0) ELSE 0 END) AS supplier_credit_amount,
+                        SUM(CASE WHEN bse.event_type = "refund" THEN COALESCE(bse.supplier_refund_amount, 0) ELSE 0 END) AS supplier_refund_received,
+                        SUM(CASE WHEN bse.event_type = "cancel" THEN COALESCE(bse.supplier_credit_amount, 0) ELSE 0 END)
+                            - SUM(CASE WHEN bse.event_type = "refund" THEN COALESCE(bse.supplier_refund_amount, 0) ELSE 0 END) AS supplier_receivable_balance,
+                        MAX(COALESCE(NULLIF(bse.reason, ""), NULLIF(bse.notes, ""))) AS reason
+                    FROM booking_service_events bse
+                    WHERE bse.event_status = "posted"
+                      AND bse.event_type IN ("cancel", "refund")
+                    GROUP BY bse.booking_id, bse.booking_service_id, bse.service_line_reference, bse.currency
+                ) AS event_totals
+                INNER JOIN bookings b ON b.id = event_totals.booking_id
+                INNER JOIN branches br ON br.id = b.branch_id
+                INNER JOIN booking_services bs ON bs.id = event_totals.booking_service_id
+                LEFT JOIN service_air_ticket sat ON sat.booking_service_id = bs.id
+                LEFT JOIN suppliers s ON s.id = bs.supplier_id
+                LEFT JOIN travelers t ON t.id = bs.traveler_id
+                WHERE event_totals.supplier_receivable_balance > 0.005
+                  AND b.branch_id ' . $clause . $dateSql . $airlineSql . $supplierSql . '
+                ORDER BY br.name ASC, supplier_name ASC, event_totals.event_date ASC, b.booking_reference ASC, event_totals.service_line_reference ASC';
+
+        return $this->fetchRows($sql, $params);
+    }
+
+    public function payableRefunds(array $branchIds, ?string $dateFrom, ?string $dateTo, int $supplierId = 0, string $bookingReference = ''): array
+    {
+        [$clause, $params] = $this->branchScope($branchIds);
+        $dateSql = $this->bookingDateWindow('refund_totals.event_date', $dateFrom, $dateTo, $params, 'payable_refund_');
+        $supplierSql = '';
+        if ($supplierId > 0) {
+            $supplierSql = ' AND bs.supplier_id = :payable_refund_supplier_id';
+            $params['payable_refund_supplier_id'] = $supplierId;
+        }
+        $bookingReferenceSql = '';
+        $bookingReference = trim($bookingReference);
+        if ($bookingReference !== '') {
+            $bookingReferenceSql = ' AND b.booking_reference LIKE :payable_refund_booking_reference';
+            $params['payable_refund_booking_reference'] = '%' . $bookingReference . '%';
+        }
+
+        $sql = 'SELECT *
+                FROM (
+                    SELECT
+                        b.branch_id,
+                        br.name AS branch_name,
+                        b.id AS booking_id,
+                        b.booking_reference,
+                        refund_totals.event_date,
+                        refund_totals.currency,
+                        refund_totals.customer_paid_amount,
+                        refund_totals.customer_penalty_amount,
+                        refund_totals.customer_refund_expected,
+                        refund_totals.customer_refund_posted,
+                        ROUND(GREATEST(
+                            (
+                                CASE
+                                    WHEN refund_totals.customer_refund_expected > 0.005 THEN refund_totals.customer_refund_expected
+                                    ELSE GREATEST(refund_totals.supplier_refund_received - refund_totals.customer_penalty_amount, 0)
+                                END
+                            ) - refund_totals.customer_refund_posted,
+                            0
+                        ), 2) AS customer_refund_payable,
+                        refund_totals.supplier_penalty_amount,
+                        refund_totals.supplier_refund_expected,
+                        refund_totals.supplier_refund_received,
+                        ROUND(GREATEST(
+                            (
+                                CASE
+                                    WHEN refund_totals.supplier_refund_expected > 0.005 THEN refund_totals.supplier_refund_expected
+                                    ELSE refund_totals.supplier_refund_received
+                                END
+                            ) - refund_totals.supplier_refund_received,
+                            0
+                        ), 2) AS supplier_refund_receivable,
+                        refund_totals.reason,
+                        COALESCE(NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Customer") AS customer_name,
+                        COALESCE(NULLIF(t_service.full_name, ""), NULLIF(bs.passenger_name_snapshot, ""), NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Passenger") AS passenger_name,
+                        COALESCE(NULLIF(s.name, ""), NULLIF(bs.supplier_name_snapshot, ""), "Supplier pending") AS supplier_name
+                    FROM (
+                        SELECT
+                            bse.booking_id,
+                            bse.booking_service_id,
+                            bse.service_line_reference,
+                            bse.currency,
+                            MAX(bse.event_date) AS event_date,
+                            SUM(CASE
+                                WHEN bse.event_type = "cancel" THEN COALESCE(
+                                    CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.customer_refund_basis")), "") AS DECIMAL(18,2)),
+                                    0
+                                )
+                                ELSE 0
+                            END) AS customer_paid_amount,
+                            SUM(CASE
+                                WHEN bse.event_type = "cancel" THEN COALESCE(
+                                    CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.customer_penalty_amount")), "") AS DECIMAL(18,2)),
+                                    bse.penalty_amount,
+                                    0
+                                )
+                                ELSE 0
+                            END) AS customer_penalty_amount,
+                            SUM(CASE
+                                WHEN bse.event_type = "cancel" THEN GREATEST(
+                                    COALESCE(
+                                        CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_amount")), "") AS DECIMAL(18,2)),
+                                        CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_credit")), "") AS DECIMAL(18,2)),
+                                        0
+                                    ) - COALESCE(
+                                        CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.customer_penalty_amount")), "") AS DECIMAL(18,2)),
+                                        bse.penalty_amount,
+                                        0
+                                    ),
+                                    0
+                                )
+                                ELSE 0
+                            END) AS customer_refund_expected,
+                            SUM(CASE
+                                WHEN bse.event_type = "refund" THEN COALESCE(bse.customer_refund_amount, 0)
+                                ELSE 0
+                            END) AS customer_refund_posted,
+                            SUM(CASE
+                                WHEN bse.event_type = "cancel" THEN COALESCE(
+                                    CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.supplier_penalty_amount")), "") AS DECIMAL(18,2)),
+                                    0
+                                )
+                                ELSE 0
+                            END) AS supplier_penalty_amount,
+                            SUM(CASE
+                                WHEN bse.event_type = "cancel" THEN COALESCE(
+                                    CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_amount")), "") AS DECIMAL(18,2)),
+                                    CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_credit")), "") AS DECIMAL(18,2)),
+                                    bse.supplier_credit_amount,
+                                    0
+                                )
+                                ELSE 0
+                            END) AS supplier_refund_expected,
+                            SUM(CASE
+                                WHEN bse.event_type = "refund" THEN COALESCE(bse.supplier_refund_amount, 0)
+                                ELSE 0
+                            END) AS supplier_refund_received,
+                            MAX(COALESCE(NULLIF(bse.reason, ""), NULLIF(bse.notes, ""))) AS reason
+                        FROM booking_service_events bse
+                        WHERE bse.event_status = "posted"
+                          AND bse.event_type IN ("cancel", "refund")
+                        GROUP BY bse.booking_id, bse.booking_service_id, bse.service_line_reference, bse.currency
+                    ) AS refund_totals
+                    INNER JOIN bookings b ON b.id = refund_totals.booking_id
+                    INNER JOIN branches br ON br.id = b.branch_id
+                    INNER JOIN booking_services bs ON bs.id = refund_totals.booking_service_id
+                    LEFT JOIN booking_parties bp ON bp.booking_id = b.id
+                    LEFT JOIN travelers t_lead ON t_lead.id = b.lead_traveler_id
+                    LEFT JOIN travelers t_service ON t_service.id = bs.traveler_id
+                    LEFT JOIN suppliers s ON s.id = bs.supplier_id
+                    WHERE b.branch_id ' . $clause . $dateSql . $supplierSql . $bookingReferenceSql . '
+                ) AS payable_refunds
+                WHERE payable_refunds.customer_refund_payable > 0.005
+                   OR payable_refunds.supplier_refund_receivable > 0.005
+                ORDER BY payable_refunds.event_date DESC, payable_refunds.booking_reference DESC, payable_refunds.passenger_name ASC';
+
+        return $this->fetchRows($sql, $params);
+    }
+
+    public function supplierLedger(
+        array $branchIds,
+        ?string $dateFrom,
+        ?string $dateTo,
+        string $currency = '',
+        string $airline = '',
+        int $supplierId = 0,
+        int $businessSourceId = 0,
+        string $bookingReference = ''
+    ): array
+    {
+        [$clause, $params] = $this->branchScope($branchIds);
+        $dateSql = $this->bookingDateWindow('ledger_rows.ledger_date', $dateFrom, $dateTo, $params, 'ledger_');
+        $currencySql = '';
+        $currency = strtoupper(trim($currency));
+        if ($currency !== '') {
+            $currencySql = ' AND ledger_rows.currency = :ledger_currency';
+            $params['ledger_currency'] = $currency;
+        }
+
+        $airlineSql = '';
+        $airline = trim($airline);
+        if ($airline !== '') {
+            $airlineSql = ' AND COALESCE(ledger_rows.airline, "") LIKE :ledger_airline';
+            $params['ledger_airline'] = '%' . $airline . '%';
+        }
+        $supplierSql = '';
+        if ($supplierId > 0) {
+            $supplierSql = ' AND ledger_rows.supplier_id = :ledger_supplier_id';
+            $params['ledger_supplier_id'] = $supplierId;
+        }
+        $accountSql = '';
+        if ($businessSourceId > 0) {
+            $accountSql = ' AND ledger_rows.business_source_id = :ledger_business_source_id';
+            $params['ledger_business_source_id'] = $businessSourceId;
+        }
+        $bookingReferenceSql = '';
+        $bookingReference = trim($bookingReference);
+        if ($bookingReference !== '') {
+            $bookingReferenceSql = ' AND ledger_rows.booking_reference COLLATE utf8mb4_unicode_ci LIKE :ledger_booking_reference';
+            $params['ledger_booking_reference'] = '%' . $bookingReference . '%';
+        }
+
+        $serviceContextSql = '
+            INNER JOIN bookings b ON b.booking_reference = so.booking_reference
+            INNER JOIN branches br ON br.id = b.branch_id
+            INNER JOIN suppliers s ON s.id = so.supplier_id
+            LEFT JOIN business_sources bs_src ON bs_src.id = b.business_source_id
+            LEFT JOIN booking_services bs
+                ON bs.booking_id = b.id
+               AND bs.line_reference = so.service_line_reference
+            LEFT JOIN service_air_ticket sat ON sat.booking_service_id = bs.id
+            LEFT JOIN travelers t ON t.id = bs.traveler_id';
+
+        $baseSelect = '
+                    b.branch_id,
+                    br.name AS branch_name,
+                    b.id AS booking_id,
+                    b.booking_reference,
+                    so.service_line_reference,
+                    so.currency,
+                    COALESCE(b.business_source_id, 0) AS business_source_id,
+                    COALESCE(bs_src.name, "Unassigned Account") AS business_source_name,
+                    s.id AS supplier_id,
+                    s.name AS supplier_name,
+                    COALESCE(NULLIF(t.full_name, ""), NULLIF(bs.passenger_name_snapshot, ""), "Passenger") AS passenger_name,
+                    COALESCE(NULLIF(CONCAT_WS("/", NULLIF(sat.sector_from, ""), NULLIF(sat.sector_to, "")), ""), "N/A") AS route,
+                    COALESCE(NULLIF(sat.airline, ""), "N/A") AS airline,
+                    NULL AS supplier_payment_id';
+
+        $convertedAdvanceSql = '';
+        if ($this->columnExists('supplier_payments', 'converted_advance_amount')) {
+            $convertedAdvanceSql = '
+
+                    UNION ALL
+
+                    SELECT
+                        sp.branch_id,
+                        br.name AS branch_name,
+                        COALESCE(b.id, 0) AS booking_id,
+                        CASE
+                            WHEN UPPER(COALESCE(sp.booking_reference, "")) = "GLOBAL"
+                                THEN COALESCE(NULLIF(sp.payment_no, ""), "Global Supplier Payment")
+                            ELSE COALESCE(NULLIF(sp.booking_reference, ""), NULLIF(sp.payment_no, ""), "Global Supplier Payment")
+                        END AS booking_reference,
+                        "" AS service_line_reference,
+                        sp.currency,
+                        COALESCE(b.business_source_id, 0) AS business_source_id,
+                        COALESCE(bs_src.name, "Unassigned Account") AS business_source_name,
+                        s.id AS supplier_id,
+                        s.name AS supplier_name,
+                        "N/A" AS passenger_name,
+                        "N/A" AS route,
+                        "N/A" AS airline,
+                        sp.id AS supplier_payment_id,
+                        sp.payment_date AS ledger_date,
+                        sp.converted_advance_amount AS debit_amount,
+                        0.00 AS credit_amount,
+                        "Supplier Advance / Overpayment" AS entry_type,
+                        25 AS sort_order,
+                        CAST(sp.id AS CHAR) AS sort_reference
+                    FROM supplier_payments sp
+                    INNER JOIN suppliers s ON s.id = sp.supplier_id
+                    INNER JOIN branches br ON br.id = sp.branch_id
+                    LEFT JOIN bookings b ON b.booking_reference = sp.booking_reference
+                    LEFT JOIN business_sources bs_src ON bs_src.id = b.business_source_id
+                    WHERE sp.status <> "void"
+                      AND sp.converted_advance_amount > 0.005';
+        }
+
+        $supplierPenaltyExpression = 'COALESCE(CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.supplier_penalty_amount")), "") AS DECIMAL(18,2)), 0.00)';
+        $supplierCostBasisExpression = 'COALESCE(
+            CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.supplier_cost_basis")), "") AS DECIMAL(18,2)),
+            CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.prior_supplier_obligation_gross_amount")), "") AS DECIMAL(18,2)),
+            ' . $supplierPenaltyExpression . ' + COALESCE(CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_amount")), "") AS DECIMAL(18,2)), 0.00),
+            0.00
+        )';
+        $latestCancellationSql = 'bse.id = (
+            SELECT MAX(bse_latest.id)
+            FROM booking_service_events bse_latest
+            WHERE bse_latest.booking_id = bse.booking_id
+              AND bse_latest.booking_service_id = bse.booking_service_id
+              AND bse_latest.currency = bse.currency
+              AND bse_latest.event_type = "cancel"
+              AND bse_latest.event_status = "posted"
+        )';
+
+        $sql = 'SELECT
+                    ledger_rows.branch_id,
+                    ledger_rows.branch_name,
+                    ledger_rows.booking_id,
+                    ledger_rows.booking_reference,
+                    ledger_rows.ledger_date,
+                    ledger_rows.service_line_reference,
+                    ledger_rows.currency,
+                    ledger_rows.business_source_id,
+                    ledger_rows.business_source_name,
+                    ledger_rows.supplier_id,
+                    ledger_rows.supplier_name,
+                    ledger_rows.passenger_name,
+                    ledger_rows.route,
+                    ledger_rows.airline,
+                    ledger_rows.supplier_payment_id,
+                    ledger_rows.debit_amount,
+                    ledger_rows.credit_amount,
+                    ledger_rows.entry_type
+                FROM (
+                    SELECT
+                        b.branch_id,
+                        br.name AS branch_name,
+                        b.id AS booking_id,
+                        b.booking_reference,
+                        COALESCE(NULLIF(jel.service_line_reference, ""), so.service_line_reference) AS service_line_reference,
+                        je.currency,
+                        COALESCE(b.business_source_id, 0) AS business_source_id,
+                        COALESCE(bs_src.name, "Unassigned Account") AS business_source_name,
+                        s.id AS supplier_id,
+                        s.name AS supplier_name,
+                        COALESCE(NULLIF(t.full_name, ""), NULLIF(bs.passenger_name_snapshot, ""), "Passenger") AS passenger_name,
+                        COALESCE(NULLIF(CONCAT_WS("/", NULLIF(sat.sector_from, ""), NULLIF(sat.sector_to, "")), ""), "N/A") AS route,
+                        COALESCE(NULLIF(sat.airline, ""), "N/A") AS airline,
+                        jel.supplier_payment_id,
+                        je.entry_date AS ledger_date,
+                        jel.debit_amount,
+                        jel.credit_amount,
+                        CASE je.source_type
+                            WHEN "supplier_payable_created" THEN "Payable Created"
+                            WHEN "supplier_payable_adjusted" THEN "Payable Adjustment"
+                            WHEN "supplier_payment_allocated" THEN "Supplier Payment"
+                            WHEN "supplier_advance_applied" THEN "Advance Applied"
+                            WHEN "supplier_advance_adjusted" THEN "Advance Adjustment"
+                            WHEN "customer_direct_supplier_payment" THEN "Customer Paid Supplier"
+                            WHEN "supplier_payment_void_reversed" THEN "Supplier Payment Reversed"
+                            ELSE "Supplier Account Entry"
+                        END AS entry_type,
+                        CASE je.source_type
+                            WHEN "supplier_payable_created" THEN 10
+                            WHEN "supplier_payable_adjusted" THEN 15
+                            WHEN "supplier_payment_allocated" THEN 20
+                            WHEN "customer_direct_supplier_payment" THEN 20
+                            WHEN "supplier_payment_void_reversed" THEN 25
+                            WHEN "supplier_advance_applied" THEN 30
+                            WHEN "supplier_advance_adjusted" THEN 35
+                            ELSE 39
+                        END AS sort_order,
+                        CONCAT(LPAD(je.id, 12, "0"), "-", LPAD(jel.id, 12, "0")) AS sort_reference
+                    FROM journal_entries je
+                    INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+                    INNER JOIN chart_of_accounts coa ON coa.id = jel.account_id AND coa.code = "AP_CONTROL"
+                    INNER JOIN supplier_obligations so ON so.id = jel.supplier_obligation_id
+                    ' . $serviceContextSql . '
+                    WHERE je.source_type IN (
+                        "supplier_payable_created",
+                        "supplier_payable_adjusted",
+                        "supplier_payment_allocated",
+                        "supplier_advance_applied",
+                        "supplier_advance_adjusted",
+                        "customer_direct_supplier_payment",
+                        "supplier_payment_void_reversed"
+                    )
+                      AND (jel.debit_amount > 0.005 OR jel.credit_amount > 0.005)
+                      AND NOT (
+                          je.source_type = "supplier_payable_adjusted"
+                          AND je.narration LIKE "Cancellation supplier penalty adjustment%"
+                      )
+
+                    ' . $convertedAdvanceSql . '
+
+                    UNION ALL
+
+                    SELECT
+                        b.branch_id,
+                        br.name AS branch_name,
+                        b.id AS booking_id,
+                        b.booking_reference,
+                        bse.service_line_reference,
+                        bse.currency,
+                        COALESCE(b.business_source_id, 0) AS business_source_id,
+                        COALESCE(bs_src.name, "Unassigned Account") AS business_source_name,
+                        COALESCE(s.id, 0) AS supplier_id,
+                        COALESCE(s.name, bs.supplier_name_snapshot, "Supplier pending") AS supplier_name,
+                        COALESCE(NULLIF(t.full_name, ""), NULLIF(bs.passenger_name_snapshot, ""), "Passenger") AS passenger_name,
+                        COALESCE(NULLIF(CONCAT_WS("/", NULLIF(sat.sector_from, ""), NULLIF(sat.sector_to, "")), ""), "N/A") AS route,
+                        COALESCE(NULLIF(sat.airline, ""), "N/A") AS airline,
+                        NULL AS supplier_payment_id,
+                        bse.event_date AS ledger_date,
+                        ' . $supplierCostBasisExpression . ' AS debit_amount,
+                        0.00 AS credit_amount,
+                        "Payable Reversed on Cancellation" AS entry_type,
+                        40 AS sort_order,
+                        CAST(bse.id AS CHAR) AS sort_reference
+                    FROM booking_service_events bse
+                    INNER JOIN bookings b ON b.id = bse.booking_id
+                    INNER JOIN branches br ON br.id = b.branch_id
+                    INNER JOIN booking_services bs ON bs.id = bse.booking_service_id
+                    LEFT JOIN business_sources bs_src ON bs_src.id = b.business_source_id
+                    LEFT JOIN service_air_ticket sat ON sat.booking_service_id = bs.id
+                    LEFT JOIN suppliers s ON s.id = bs.supplier_id
+                    LEFT JOIN travelers t ON t.id = bs.traveler_id
+                    WHERE bse.event_status = "posted"
+                      AND bse.event_type = "cancel"
+                      AND ' . $latestCancellationSql . '
+                      AND ' . $supplierCostBasisExpression . ' > 0.005
+
+                    UNION ALL
+
+                    SELECT
+                        b.branch_id,
+                        br.name AS branch_name,
+                        b.id AS booking_id,
+                        b.booking_reference,
+                        bse.service_line_reference,
+                        bse.currency,
+                        COALESCE(b.business_source_id, 0) AS business_source_id,
+                        COALESCE(bs_src.name, "Unassigned Account") AS business_source_name,
+                        COALESCE(s.id, 0) AS supplier_id,
+                        COALESCE(s.name, bs.supplier_name_snapshot, "Supplier pending") AS supplier_name,
+                        COALESCE(NULLIF(t.full_name, ""), NULLIF(bs.passenger_name_snapshot, ""), "Passenger") AS passenger_name,
+                        COALESCE(NULLIF(CONCAT_WS("/", NULLIF(sat.sector_from, ""), NULLIF(sat.sector_to, "")), ""), "N/A") AS route,
+                        COALESCE(NULLIF(sat.airline, ""), "N/A") AS airline,
+                        NULL AS supplier_payment_id,
+                        bse.event_date AS ledger_date,
+                        0.00 AS debit_amount,
+                        ' . $supplierPenaltyExpression . ' AS credit_amount,
+                        "Supplier Penalty Retained" AS entry_type,
+                        45 AS sort_order,
+                        CAST(bse.id AS CHAR) AS sort_reference
+                    FROM booking_service_events bse
+                    INNER JOIN bookings b ON b.id = bse.booking_id
+                    INNER JOIN branches br ON br.id = b.branch_id
+                    INNER JOIN booking_services bs ON bs.id = bse.booking_service_id
+                    LEFT JOIN business_sources bs_src ON bs_src.id = b.business_source_id
+                    LEFT JOIN service_air_ticket sat ON sat.booking_service_id = bs.id
+                    LEFT JOIN suppliers s ON s.id = bs.supplier_id
+                    LEFT JOIN travelers t ON t.id = bs.traveler_id
+                    WHERE bse.event_status = "posted"
+                      AND bse.event_type = "cancel"
+                      AND ' . $latestCancellationSql . '
+                      AND ' . $supplierPenaltyExpression . ' > 0.005
+
+                    UNION ALL
+
+                    SELECT
+                        b.branch_id,
+                        br.name AS branch_name,
+                        b.id AS booking_id,
+                        b.booking_reference,
+                        bse.service_line_reference,
+                        bse.currency,
+                        COALESCE(b.business_source_id, 0) AS business_source_id,
+                        COALESCE(bs_src.name, "Unassigned Account") AS business_source_name,
+                        COALESCE(s.id, 0) AS supplier_id,
+                        COALESCE(s.name, bs.supplier_name_snapshot, "Supplier pending") AS supplier_name,
+                        COALESCE(NULLIF(t.full_name, ""), NULLIF(bs.passenger_name_snapshot, ""), "Passenger") AS passenger_name,
+                        COALESCE(NULLIF(CONCAT_WS("/", NULLIF(sat.sector_from, ""), NULLIF(sat.sector_to, "")), ""), "N/A") AS route,
+                        COALESCE(NULLIF(sat.airline, ""), "N/A") AS airline,
+                        NULL AS supplier_payment_id,
+                        bse.event_date AS ledger_date,
+                        0.00 AS debit_amount,
+                        bse.supplier_refund_amount AS credit_amount,
+                        "Supplier Refund Received" AS entry_type,
+                        50 AS sort_order,
+                        CAST(bse.id AS CHAR) AS sort_reference
+                    FROM booking_service_events bse
+                    INNER JOIN bookings b ON b.id = bse.booking_id
+                    INNER JOIN branches br ON br.id = b.branch_id
+                    INNER JOIN booking_services bs ON bs.id = bse.booking_service_id
+                    LEFT JOIN business_sources bs_src ON bs_src.id = b.business_source_id
+                    LEFT JOIN service_air_ticket sat ON sat.booking_service_id = bs.id
+                    LEFT JOIN suppliers s ON s.id = bs.supplier_id
+                    LEFT JOIN travelers t ON t.id = bs.traveler_id
+                    WHERE bse.event_status = "posted"
+                      AND bse.event_type = "refund"
+                      AND bse.supplier_refund_amount > 0.005
+                ) AS ledger_rows
+                WHERE ledger_rows.branch_id ' . $clause . $dateSql . $currencySql . $airlineSql . $supplierSql . $accountSql . $bookingReferenceSql . '
+                ORDER BY ledger_rows.supplier_name ASC,
+                         ledger_rows.currency ASC,
+                         ledger_rows.ledger_date ASC,
+                         ledger_rows.booking_reference ASC,
+                         ledger_rows.service_line_reference ASC,
+                         ledger_rows.sort_order ASC,
+                         ledger_rows.sort_reference ASC';
+
+        return $this->fetchRows($sql, $params);
+    }
+
+    public function bookingVoucherLedger(
+        array $branchIds,
+        ?string $dateFrom,
+        ?string $dateTo,
+        string $currency = '',
+        int $businessSourceId = 0,
+        string $customerName = '',
+        int $supplierId = 0,
+        string $bookingReference = ''
+    ): array {
+        [$clause, $params] = $this->branchScope($branchIds);
+        $dateSql = $this->bookingDateWindow('voucher_rows.ledger_date', $dateFrom, $dateTo, $params, 'voucher_');
+        $currencySql = '';
+        $currency = strtoupper(trim($currency));
+        if ($currency !== '') {
+            $currencySql = ' AND voucher_rows.currency = :voucher_currency';
+            $params['voucher_currency'] = $currency;
+        }
+
+        $accountSql = '';
+        if ($businessSourceId > 0) {
+            $accountSql = ' AND voucher_rows.business_source_id = :voucher_business_source_id';
+            $params['voucher_business_source_id'] = $businessSourceId;
+        }
+
+        $customerSql = '';
+        $customerName = trim($customerName);
+        if ($customerName !== '') {
+            $customerSql = ' AND voucher_rows.customer_name COLLATE utf8mb4_unicode_ci = :voucher_customer_name';
+            $params['voucher_customer_name'] = $customerName;
+        }
+
+        $supplierSql = '';
+        if ($supplierId > 0) {
+            $supplierSql = ' AND voucher_rows.supplier_id = :voucher_supplier_id';
+            $params['voucher_supplier_id'] = $supplierId;
+        }
+
+        $bookingReferenceSql = '';
+        $bookingReference = trim($bookingReference);
+        if ($bookingReference !== '') {
+            $bookingReferenceSql = ' AND voucher_rows.booking_reference LIKE :voucher_booking_reference';
+            $params['voucher_booking_reference'] = '%' . $bookingReference . '%';
+        }
+
+        $sql = 'SELECT
+                    voucher_rows.branch_id,
+                    voucher_rows.branch_name,
+                    voucher_rows.booking_id,
+                    voucher_rows.booking_reference,
+                    voucher_rows.ledger_date,
+                    voucher_rows.party_name,
+                    voucher_rows.entry_type,
+                    voucher_rows.passenger_name,
+                    voucher_rows.currency,
+                    voucher_rows.debit_amount,
+                    voucher_rows.credit_amount
+                FROM (
+                    SELECT
+                        je.branch_id,
+                        br.name AS branch_name,
+                        COALESCE(b.id, 0) AS booking_id,
+                        COALESCE(b.booking_reference, je.booking_reference, je.source_reference, "") AS booking_reference,
+                        COALESCE(b.business_source_id, 0) AS business_source_id,
+                        COALESCE(NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Booking Party") AS customer_name,
+                        COALESCE(NULLIF(t_service.full_name, ""), NULLIF(bs.passenger_name_snapshot, ""), NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Passenger") AS passenger_name,
+                        COALESCE(s.id, sp_s.id, so_s.id, 0) AS supplier_id,
+                        COALESCE(NULLIF(s.name, ""), NULLIF(sp_s.name, ""), NULLIF(so_s.name, ""), NULLIF(bs.supplier_name_snapshot, ""), "Supplier pending") AS supplier_name,
+                        je.entry_date AS ledger_date,
+                        je.currency,
+                        CASE
+                            WHEN coa.code IN ("AP_CONTROL", "SUPPLIER_ADVANCES") THEN COALESCE(NULLIF(s.name, ""), NULLIF(sp_s.name, ""), NULLIF(so_s.name, ""), NULLIF(bs.supplier_name_snapshot, ""), "Supplier pending")
+                            ELSE COALESCE(NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Booking Party")
+                        END AS party_name,
+                        CASE
+                            WHEN je.source_type = "service_receivable_created" AND coa.code = "AR_CONTROL" THEN "Customer Invoice"
+                            WHEN je.source_type = "service_receivable_adjusted" AND coa.code = "AR_CONTROL" THEN "Customer Invoice Adjustment"
+                            WHEN je.source_type = "supplier_payable_created" AND coa.code = "AP_CONTROL" THEN "Supplier Payable"
+                            WHEN je.source_type = "supplier_payable_adjusted" AND coa.code = "AP_CONTROL" THEN "Supplier Payable Adjustment"
+                            WHEN je.source_type = "customer_receipt_recorded" AND coa.code = "CUSTOMER_CREDIT" THEN "Customer Receipt Credit"
+                            WHEN je.source_type = "customer_receipt_allocated" AND coa.code = "CUSTOMER_CREDIT" THEN "Customer Credit Applied"
+                            WHEN je.source_type = "customer_receipt_allocated" AND coa.code = "AR_CONTROL" THEN "Customer Payment Applied"
+                            WHEN je.source_type = "customer_direct_supplier_payment" THEN "Customer Paid Supplier"
+                            WHEN je.source_type = "customer_receipt_allocation_released" AND coa.code = "AR_CONTROL" THEN "Customer Receivable Restored"
+                            WHEN je.source_type = "customer_receipt_allocation_released" AND coa.code = "CUSTOMER_CREDIT" THEN "Customer Refund Credit"
+                            WHEN je.source_type = "customer_advance_refunded" AND coa.code = "CUSTOMER_CREDIT" THEN "Customer Advance Returned"
+                            WHEN je.source_type = "supplier_payment_recorded" AND coa.code = "SUPPLIER_ADVANCES" THEN "Supplier Payment Credit"
+                            WHEN je.source_type = "supplier_payment_allocated" AND coa.code = "SUPPLIER_ADVANCES" THEN "Supplier Credit Applied"
+                            WHEN je.source_type = "supplier_payment_allocated" AND coa.code = "AP_CONTROL" THEN "Supplier Payment Applied"
+                            WHEN je.source_type = "supplier_settlement_released" AND coa.code = "SUPPLIER_ADVANCES" THEN "Supplier Refund Receivable"
+                            WHEN je.source_type = "supplier_settlement_released" AND coa.code = "AP_CONTROL" THEN "Supplier Payable Restored"
+                            WHEN je.source_type = "service_refund_posted" AND coa.code = "CUSTOMER_CREDIT" THEN "Customer Refund Paid"
+                            WHEN je.source_type = "service_refund_posted" AND coa.code = "SUPPLIER_ADVANCES" THEN "Supplier Refund Received"
+                            WHEN je.source_type IN ("service_refund_reversed", "service_refund_component_reversed") THEN "Refund Correction"
+                            WHEN je.source_type IN ("supplier_payment_void_reversed", "customer_receipt_void_reversed", "journal_reversal", "service_cancellation_financials_reversed") THEN "Reversal"
+                            ELSE COALESCE(NULLIF(jel.line_description, ""), NULLIF(je.narration, ""), "Journal Entry")
+                        END AS entry_type,
+                        ROUND(COALESCE(jel.debit_amount, 0), 2) AS debit_amount,
+                        ROUND(COALESCE(jel.credit_amount, 0), 2) AS credit_amount,
+                        CASE
+                            WHEN je.source_type LIKE "%_reversed" OR je.source_type LIKE "%reversal%" THEN 90
+                            WHEN je.source_type IN ("service_receivable_created", "service_receivable_adjusted") THEN 10
+                            WHEN je.source_type IN ("supplier_payable_created", "supplier_payable_adjusted") THEN 20
+                            WHEN je.source_type LIKE "customer_receipt%" THEN 30
+                            WHEN je.source_type LIKE "supplier_payment%" THEN 40
+                            WHEN je.source_type IN ("customer_receipt_allocation_released", "supplier_settlement_released") THEN 50
+                            WHEN je.source_type = "service_refund_posted" THEN 60
+                            ELSE 80
+                        END AS sort_order,
+                        CAST(jel.id AS CHAR) AS sort_reference
+                    FROM journal_entries je
+                    INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+                    INNER JOIN chart_of_accounts coa ON coa.id = jel.account_id
+                    INNER JOIN branches br ON br.id = je.branch_id
+                    LEFT JOIN bookings b ON b.booking_reference = je.booking_reference
+                    LEFT JOIN booking_parties bp ON bp.booking_id = b.id
+                    LEFT JOIN travelers t_lead ON t_lead.id = b.lead_traveler_id
+                    LEFT JOIN booking_services bs
+                        ON bs.booking_id = b.id
+                       AND bs.line_reference = jel.service_line_reference
+                    LEFT JOIN travelers t_service ON t_service.id = bs.traveler_id
+                    LEFT JOIN supplier_obligations so ON so.id = jel.supplier_obligation_id
+                    LEFT JOIN suppliers so_s ON so_s.id = so.supplier_id
+                    LEFT JOIN supplier_payments sp ON sp.id = jel.supplier_payment_id
+                    LEFT JOIN suppliers sp_s ON sp_s.id = sp.supplier_id
+                    LEFT JOIN suppliers s ON s.id = bs.supplier_id
+                    WHERE coa.code IN ("AR_CONTROL", "AP_CONTROL", "CUSTOMER_CREDIT", "SUPPLIER_ADVANCES")
+                      AND (ROUND(COALESCE(jel.debit_amount, 0), 2) > 0 OR ROUND(COALESCE(jel.credit_amount, 0), 2) > 0)
+                ) AS voucher_rows
+                WHERE voucher_rows.branch_id ' . $clause . $dateSql . $currencySql . $accountSql . $customerSql . $supplierSql . $bookingReferenceSql . '
+                ORDER BY voucher_rows.ledger_date DESC,
+                         voucher_rows.booking_reference DESC,
+                         voucher_rows.currency ASC,
+                         voucher_rows.sort_order ASC,
+                         voucher_rows.sort_reference ASC';
+
+        return $this->fetchRows($sql, $params);
+    }
+
+    public function actualMoneyVoucherLedger(
+        array $branchIds,
+        ?string $dateFrom,
+        ?string $dateTo,
+        string $currency = '',
+        string $customerName = '',
+        int $supplierId = 0,
+        string $bookingReference = ''
+    ): array {
+        $rows = $this->cashBankLedger($branchIds, $dateFrom, $dateTo, $currency, 'all');
+        $customerName = strtolower(trim($customerName));
+        $supplierName = $supplierId > 0 ? strtolower($this->supplierNameById($supplierId)) : '';
+        $bookingReference = strtolower(trim($bookingReference));
+
+        $voucherRows = [];
+        foreach ($rows as $row) {
+            $partyName = trim((string) ($row['party_name'] ?? ''));
+            $partyNameLower = strtolower($partyName);
+            $sourceType = strtolower(trim((string) ($row['source_type'] ?? '')));
+
+            if ($customerName !== '' && $partyNameLower !== $customerName) {
+                continue;
+            }
+
+            if ($supplierName !== '') {
+                $isSupplierRow = str_starts_with($sourceType, 'supplier_payment')
+                    || str_contains($sourceType, 'supplier_refund');
+                if (! $isSupplierRow || $partyNameLower !== $supplierName) {
+                    continue;
+                }
+            }
+
+            $rowBookingReference = strtolower(trim((string) (($row['reference'] ?? '') !== '' ? $row['reference'] : '')));
+            if ($bookingReference !== '' && ! str_contains($rowBookingReference, $bookingReference)) {
+                continue;
+            }
+
+            $voucherRows[] = [
+                'branch_id' => (int) ($row['branch_id'] ?? 0),
+                'branch_name' => (string) ($row['branch_name'] ?? ''),
+                'booking_id' => (int) ($row['booking_id'] ?? 0),
+                'booking_reference' => (string) (($row['reference'] ?? '') !== '' ? $row['reference'] : 'N/A'),
+                'booking_reference_href' => (int) ($row['booking_id'] ?? 0) > 0
+                    ? url('/workspace?booking_id=' . (int) ($row['booking_id'] ?? 0))
+                    : '',
+                'ledger_date' => (string) (($row['entry_date'] ?? '') !== '' ? $row['entry_date'] : 'N/A'),
+                'party_name' => $partyName !== '' ? $partyName : 'N/A',
+                'entry_type' => $this->actualMoneyVoucherEntryType($sourceType),
+                'passenger_name' => (string) (($row['description'] ?? '') !== '' ? $row['description'] : 'N/A'),
+                'currency' => (string) (($row['currency'] ?? '') !== '' ? $row['currency'] : 'PKR'),
+                'debit_amount' => round((float) ($row['debit_amount'] ?? 0), 2),
+                'credit_amount' => round((float) ($row['credit_amount'] ?? 0), 2),
+            ];
+        }
+
+        usort($voucherRows, static function (array $left, array $right): int {
+            return [
+                (string) ($right['ledger_date'] ?? ''),
+                (string) ($right['booking_reference'] ?? ''),
+                (string) ($right['entry_type'] ?? ''),
+            ] <=> [
+                (string) ($left['ledger_date'] ?? ''),
+                (string) ($left['booking_reference'] ?? ''),
+                (string) ($left['entry_type'] ?? ''),
+            ];
+        });
+
+        return $voucherRows;
+    }
+
+    private function actualMoneyVoucherEntryType(string $sourceType): string
+    {
+        return match ($sourceType) {
+            'customer_receipt_recorded' => 'Customer Receipt',
+            'customer_receipt_void_reversal' => 'Customer Receipt Reversal',
+            'supplier_payment_recorded' => 'Supplier Payment',
+            'supplier_payment_void_reversal' => 'Supplier Payment Reversal',
+            'business_expense_recorded' => 'Expense Payment',
+            'business_expense_corrected_reversal' => 'Expense Reversal',
+            'direct_treasury_entry_posted' => 'Direct Cash / Bank Entry',
+            'direct_treasury_entry_void_reversal' => 'Direct Entry Reversal',
+            'treasury_transfer_posted' => 'Treasury Transfer',
+            'treasury_transfer_void_reversal' => 'Treasury Transfer Reversal',
+            default => ucwords(str_replace('_', ' ', $sourceType !== '' ? $sourceType : 'Money Movement')),
+        };
+    }
+
+    private function supplierNameById(int $supplierId): string
+    {
+        $rows = $this->fetchRows(
+            'SELECT name FROM suppliers WHERE id = :supplier_id LIMIT 1',
+            ['supplier_id' => $supplierId]
+        );
+
+        return trim((string) ($rows[0]['name'] ?? ''));
     }
 
     public function airlineSalesRegister(array $branchIds, ?string $dateFrom, ?string $dateTo): array
@@ -2119,11 +3846,50 @@ final class ReportRepository extends BaseRepository
         return $this->fetchRows($sql, $params);
     }
 
+    public function customerDepartureRegister(array $branchIds, ?string $dateFrom, ?string $dateTo): array
+    {
+        [$clause, $params] = $this->branchScope($branchIds);
+        $tomorrow = (new \DateTimeImmutable('tomorrow'))->format('Y-m-d');
+        $effectiveDateFrom = $dateFrom;
+        if ($effectiveDateFrom === null || trim($effectiveDateFrom) === '' || trim($effectiveDateFrom) < $tomorrow) {
+            $effectiveDateFrom = $tomorrow;
+        }
+        $dateSql = $this->ticketDateWindow($effectiveDateFrom, $dateTo, $params);
+        $sql = 'SELECT
+                    b.id AS booking_id,
+                    b.branch_id,
+                    br.name AS branch_name,
+                    b.booking_reference,
+                    bp.lead_traveler_name,
+                    bp.contact_mobile,
+                    bs.line_reference,
+                    COALESCE(t.full_name, bs.passenger_name_snapshot) AS passenger_name,
+                    sat.airline,
+                    sat.pnr,
+                    sat.ticket_number,
+                    sat.sector_from,
+                    sat.sector_to,
+                    sat.departure_date
+                FROM booking_services bs
+                INNER JOIN service_air_ticket sat ON sat.booking_service_id = bs.id
+                INNER JOIN bookings b ON b.id = bs.booking_id
+                INNER JOIN branches br ON br.id = b.branch_id
+                LEFT JOIN booking_parties bp ON bp.booking_id = b.id
+                LEFT JOIN travelers t ON t.id = bs.traveler_id
+                WHERE b.branch_id ' . $clause . '
+                  AND bs.is_active = 1'
+                . $dateSql .
+                ' ORDER BY COALESCE(sat.departure_date, b.booking_date) ASC, br.name ASC, b.booking_reference ASC, bs.line_reference ASC';
+
+        return $this->fetchRows($sql, $params);
+    }
+
     public function airlinePayableReport(array $branchIds, ?string $dateFrom, ?string $dateTo): array
     {
         [$clause, $params] = $this->branchScope($branchIds);
         $dateSql = $this->ticketDateWindow($dateFrom, $dateTo, $params);
-                $sql = 'SELECT
+        $sql = 'SELECT
+                    b.id AS booking_id,
                     b.branch_id,
                     br.name AS branch_name,
                     b.booking_reference,
@@ -2131,6 +3897,8 @@ final class ReportRepository extends BaseRepository
                     bs.currency,
                     sat.airline,
                     COALESCE(s.name, bs.supplier_name_snapshot, "Supplier pending") AS supplier_name,
+                    COALESCE(NULLIF(t.full_name, ""), NULLIF(bs.passenger_name_snapshot, ""), "Passenger") AS passenger_name,
+                    COALESCE(NULLIF(CONCAT_WS("/", NULLIF(sat.sector_from, ""), NULLIF(sat.sector_to, "")), ""), "N/A") AS route,
                     sat.ticket_number,
                     sat.departure_date,
                     so.gross_amount,
@@ -2143,6 +3911,7 @@ final class ReportRepository extends BaseRepository
                 INNER JOIN bookings b ON b.id = bs.booking_id
                 INNER JOIN branches br ON br.id = b.branch_id
                 LEFT JOIN suppliers s ON s.id = bs.supplier_id
+                LEFT JOIN travelers t ON t.id = bs.traveler_id
                 LEFT JOIN supplier_obligations so
                     ON so.booking_reference = b.booking_reference
                    AND so.service_line_reference = bs.line_reference
@@ -2161,6 +3930,7 @@ final class ReportRepository extends BaseRepository
         $sql = 'SELECT
                     b.branch_id,
                     br.name AS branch_name,
+                    b.id AS booking_id,
                     b.booking_reference,
                     bs.line_reference,
                     bs.currency,
@@ -2185,7 +3955,7 @@ final class ReportRepository extends BaseRepository
         return $this->fetchRows($sql, $params);
     }
 
-    public function issueReissueRefundRegister(array $branchIds, ?string $dateFrom, ?string $dateTo): array
+    public function issueReissueRefundRegister(array $branchIds, ?string $dateFrom, ?string $dateTo, string $transactionType = 'all', string $bookingReference = ''): array
     {
         $params = [];
         $eventBranchPlaceholders = [];
@@ -2214,42 +3984,67 @@ final class ReportRepository extends BaseRepository
             $params['fallback_date_to'] = $dateTo;
         }
 
-        $sql = 'SELECT
+        $eventBookingSql = '';
+        $fallbackBookingSql = '';
+        $bookingReference = trim($bookingReference);
+        if ($bookingReference !== '') {
+            $eventBookingSql = ' AND b.booking_reference LIKE :ticket_register_event_booking_reference';
+            $fallbackBookingSql = ' AND b.booking_reference LIKE :ticket_register_fallback_booking_reference';
+            $params['ticket_register_event_booking_reference'] = '%' . $bookingReference . '%';
+            $params['ticket_register_fallback_booking_reference'] = '%' . $bookingReference . '%';
+        }
+
+        $unionSql = 'SELECT
                     b.branch_id,
                     br.name AS branch_name,
+                    b.id AS booking_id,
                     b.booking_reference,
+                    bse.event_date AS transaction_date,
                     bs.line_reference,
                     bs.currency,
-                    sat.airline,
+                    COALESCE(NULLIF(s.name, ""), NULLIF(bs.supplier_name_snapshot, ""), NULLIF(sat.airline, ""), "Supplier pending") AS supplier_name,
+                    COALESCE(NULLIF(t_service.full_name, ""), NULLIF(bs.passenger_name_snapshot, ""), "Passenger") AS passenger_name,
+                    COALESCE(NULLIF(CONCAT_WS("/", NULLIF(sat.sector_from, ""), NULLIF(sat.sector_to, "")), ""), "N/A") AS route,
                     sat.ticket_number,
                     sat.pnr,
                     sat.departure_date,
                     bs.service_status,
+                    sat.sale_amount AS issue_customer_debit,
+                    sat.supplier_cost AS issue_supplier_credit,
+                    bse.fare_difference_amount,
+                    bse.service_fee_amount,
+                    bse.penalty_amount AS customer_penalty_amount,
+                    COALESCE(CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.supplier_penalty_amount")), "") AS DECIMAL(18,2)), 0.00) AS supplier_penalty_amount,
+                    COALESCE(CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_amount")), "") AS DECIMAL(18,2)), 0.00) AS expected_supplier_refund_amount,
+                    bse.customer_refund_amount,
+                    bse.supplier_refund_amount,
                     CASE
-                        WHEN bse.event_type = "refund" THEN bse.customer_refund_amount
-                        WHEN bse.event_type = "reissue" THEN bse.fare_difference_amount + bse.service_fee_amount
-                        WHEN bse.event_type = "cancel" THEN bse.penalty_amount
-                        ELSE sat.sale_amount
-                    END AS sale_amount,
+                        WHEN bse.event_type = "refund" AND bse.supplier_refund_amount > 0.005
+                            THEN COALESCE(NULLIF(s.name, ""), NULLIF(bs.supplier_name_snapshot, ""), NULLIF(sat.airline, ""), "Supplier")
+                        WHEN bse.event_type = "refund" AND bse.customer_refund_amount > 0.005
+                            THEN COALESCE(NULLIF(refund_ta.account_name, ""), "Treasury")
+                        ELSE ""
+                    END AS refund_source_account,
                     CASE
-                        WHEN bse.event_type = "refund" THEN bse.supplier_refund_amount
-                        ELSE sat.supplier_cost
-                    END AS supplier_cost,
-                    COALESCE(refund_ta.account_name, "") AS refund_source_account,
-                    TRIM(CONCAT_WS(" | ",
-                        NULLIF(refund_detail.customer_bank_name, ""),
-                        NULLIF(refund_detail.customer_bank_account_title, ""),
-                        CASE
-                            WHEN NULLIF(refund_detail.customer_bank_account_no, "") IS NOT NULL
-                                THEN CONCAT("A/C ", refund_detail.customer_bank_account_no)
-                            ELSE NULL
-                        END,
-                        CASE
-                            WHEN NULLIF(refund_detail.customer_bank_iban, "") IS NOT NULL
-                                THEN CONCAT("IBAN ", refund_detail.customer_bank_iban)
-                            ELSE NULL
-                        END
-                    )) AS refund_destination_detail,
+                        WHEN bse.event_type = "refund" AND bse.supplier_refund_amount > 0.005
+                            THEN COALESCE(NULLIF(refund_ta.account_name, ""), "Treasury")
+                        WHEN bse.event_type = "refund" AND bse.customer_refund_amount > 0.005
+                            THEN COALESCE(NULLIF(TRIM(CONCAT_WS(" | ",
+                                NULLIF(refund_detail.customer_bank_name, ""),
+                                NULLIF(refund_detail.customer_bank_account_title, ""),
+                                CASE
+                                    WHEN NULLIF(refund_detail.customer_bank_account_no, "") IS NOT NULL
+                                        THEN CONCAT("A/C ", refund_detail.customer_bank_account_no)
+                                    ELSE NULL
+                                END,
+                                CASE
+                                    WHEN NULLIF(refund_detail.customer_bank_iban, "") IS NOT NULL
+                                        THEN CONCAT("IBAN ", refund_detail.customer_bank_iban)
+                                    ELSE NULL
+                                END
+                            )), ""), "Customer")
+                        ELSE ""
+                    END AS refund_destination_detail,
                     COALESCE(refund_detail.transfer_reference, "") AS transfer_reference,
                     COALESCE(NULLIF(bse.notes, ""), NULLIF(bse.reason, ""), sat.ticket_remarks) AS ticket_remarks,
                     CASE bse.event_type
@@ -2263,45 +4058,152 @@ final class ReportRepository extends BaseRepository
                 INNER JOIN service_air_ticket sat ON sat.booking_service_id = bs.id
                 INNER JOIN bookings b ON b.id = bse.booking_id
                 INNER JOIN branches br ON br.id = b.branch_id
+                LEFT JOIN suppliers s ON s.id = bs.supplier_id
+                LEFT JOIN travelers t_service ON t_service.id = bs.traveler_id
                 LEFT JOIN booking_service_refund_details refund_detail
                     ON refund_detail.service_event_id = bse.id
                 LEFT JOIN treasury_accounts refund_ta
                     ON refund_ta.id = refund_detail.treasury_account_id
                 WHERE b.branch_id IN (' . implode(', ', $eventBranchPlaceholders) . ')
                   AND bse.event_status = "posted"'
-                . $eventDateSql . '
+                . $eventDateSql . $eventBookingSql . '
                 UNION ALL
                 SELECT
                     b.branch_id,
                     br.name AS branch_name,
+                    b.id AS booking_id,
                     b.booking_reference,
+                    COALESCE(sat.departure_date, b.booking_date) AS transaction_date,
                     bs.line_reference,
                     bs.currency,
-                    sat.airline,
+                    COALESCE(NULLIF(s.name, ""), NULLIF(bs.supplier_name_snapshot, ""), NULLIF(sat.airline, ""), "Supplier pending") AS supplier_name,
+                    COALESCE(NULLIF(t_service.full_name, ""), NULLIF(bs.passenger_name_snapshot, ""), "Passenger") AS passenger_name,
+                    COALESCE(NULLIF(CONCAT_WS("/", NULLIF(sat.sector_from, ""), NULLIF(sat.sector_to, "")), ""), "N/A") AS route,
                     sat.ticket_number,
                     sat.pnr,
                     sat.departure_date,
                     bs.service_status,
-                    sat.sale_amount,
-                    sat.supplier_cost,
+                    sat.sale_amount AS issue_customer_debit,
+                    sat.supplier_cost AS issue_supplier_credit,
+                    0.00 AS fare_difference_amount,
+                    0.00 AS service_fee_amount,
+                    0.00 AS customer_penalty_amount,
+                    0.00 AS supplier_penalty_amount,
+                    0.00 AS expected_supplier_refund_amount,
+                    0.00 AS customer_refund_amount,
+                    0.00 AS supplier_refund_amount,
                     "" AS refund_source_account,
                     "" AS refund_destination_detail,
                     "" AS transfer_reference,
                     sat.ticket_remarks,
                     CASE
-                        WHEN LOWER(COALESCE(sat.ticket_remarks, "")) LIKE "%refund%" THEN "Refund"
-                        WHEN LOWER(COALESCE(sat.ticket_remarks, "")) LIKE "%reissue%" THEN "Reissue"
-                        WHEN LOWER(COALESCE(sat.ticket_remarks, "")) LIKE "%cancel%" OR LOWER(COALESCE(bs.service_status, "")) = "cancelled" THEN "Cancel"
+                        WHEN LOWER(COALESCE(bs.service_status, "")) = "cancelled" THEN "Cancel"
                         ELSE "Issue"
                     END AS transaction_type
                 FROM booking_services bs
                 INNER JOIN service_air_ticket sat ON sat.booking_service_id = bs.id
                 INNER JOIN bookings b ON b.id = bs.booking_id
                 INNER JOIN branches br ON br.id = b.branch_id
+                LEFT JOIN suppliers s ON s.id = bs.supplier_id
+                LEFT JOIN travelers t_service ON t_service.id = bs.traveler_id
                 WHERE b.branch_id IN (' . implode(', ', $fallbackBranchPlaceholders) . ')
                   AND bs.is_active = 1'
-                . $fallbackDateSql .
-                ' ORDER BY branch_name ASC, departure_date DESC, airline ASC, ticket_number ASC';
+                . $fallbackBookingSql
+                . ' AND NOT EXISTS (
+                    SELECT 1
+                    FROM booking_service_events bse_existing
+                    WHERE bse_existing.booking_service_id = bs.id
+                      AND bse_existing.event_status = "posted"
+                )'
+                . $fallbackDateSql;
+
+        $outerFilters = ['transaction_type IN ("Issue", "Reissue", "Refund")'];
+        if (in_array($transactionType, ['issue', 'reissue', 'refund'], true)) {
+            $outerFilters[] = 'LOWER(transaction_type) = :transaction_type';
+            $params['transaction_type'] = $transactionType;
+        }
+
+        $sql = 'SELECT *
+                FROM (' . $unionSql . ') register_rows
+                WHERE ' . implode(' AND ', $outerFilters) . '
+                ORDER BY transaction_date DESC, booking_reference DESC, line_reference ASC, transaction_type ASC';
+
+        return $this->fetchRows($sql, $params);
+    }
+
+    public function financialCorrectionRegister(
+        array $branchIds,
+        ?string $dateFrom,
+        ?string $dateTo,
+        int $businessSourceId = 0,
+        string $bookingReference = ''
+    ): array {
+        [$clause, $params] = $this->branchScope($branchIds);
+        $filters = [
+            'sfc.branch_id ' . $clause,
+        ];
+
+        if ($dateFrom !== null) {
+            $filters[] = 'sfc.correction_date >= :date_from';
+            $params['date_from'] = $dateFrom;
+        }
+        if ($dateTo !== null) {
+            $filters[] = 'sfc.correction_date <= :date_to';
+            $params['date_to'] = $dateTo;
+        }
+        if ($businessSourceId > 0) {
+            $filters[] = 'b.business_source_id = :business_source_id';
+            $params['business_source_id'] = $businessSourceId;
+        }
+        $bookingReference = trim($bookingReference);
+        if ($bookingReference !== '') {
+            $filters[] = 'sfc.booking_reference LIKE :booking_reference';
+            $params['booking_reference'] = '%' . $bookingReference . '%';
+        }
+
+        $sql = 'SELECT
+                    sfc.id,
+                    sfc.branch_id,
+                    br.name AS branch_name,
+                    sfc.booking_id,
+                    sfc.booking_reference,
+                    sfc.service_line_reference,
+                    sfc.service_type,
+                    sfc.correction_date,
+                    COALESCE(bs.currency, "PKR") AS currency,
+                    sfc.correction_reason,
+                    sfc.correction_note,
+                    sfc.prior_sale_price,
+                    sfc.new_sale_price,
+                    sfc.prior_purchase_cost,
+                    sfc.new_purchase_cost,
+                    sfc.prior_service_charge,
+                    sfc.new_service_charge,
+                    sfc.prior_discount_amount,
+                    sfc.new_discount_amount,
+                    sfc.prior_vat_amount,
+                    sfc.new_vat_amount,
+                    sfc.prior_final_sale_price,
+                    sfc.new_final_sale_price,
+                    sfc.released_customer_credit_amount,
+                    sfc.released_supplier_credit_amount,
+                    sfc.created_at,
+                    COALESCE(bs_src.name, "Unassigned Account") AS business_source_name,
+                    COALESCE(NULLIF(t_service.full_name, ""), NULLIF(bs.passenger_name_snapshot, ""), NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Passenger") AS passenger_name,
+                    COALESCE(NULLIF(CONCAT_WS("/", NULLIF(sat.sector_from, ""), NULLIF(sat.sector_to, "")), ""), "N/A") AS route,
+                    COALESCE(u.name, u.username, "System") AS edited_by
+                FROM service_financial_corrections sfc
+                INNER JOIN bookings b ON b.id = sfc.booking_id
+                INNER JOIN branches br ON br.id = sfc.branch_id
+                LEFT JOIN booking_services bs ON bs.id = sfc.booking_service_id
+                LEFT JOIN business_sources bs_src ON bs_src.id = b.business_source_id
+                LEFT JOIN booking_parties bp ON bp.booking_id = b.id
+                LEFT JOIN travelers t_lead ON t_lead.id = b.lead_traveler_id
+                LEFT JOIN travelers t_service ON t_service.id = bs.traveler_id
+                LEFT JOIN service_air_ticket sat ON sat.booking_service_id = bs.id
+                LEFT JOIN users u ON u.id = sfc.created_by_user_id
+                WHERE ' . implode(' AND ', $filters) . '
+                ORDER BY sfc.correction_date DESC, sfc.id DESC';
 
         return $this->fetchRows($sql, $params);
     }

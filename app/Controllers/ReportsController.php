@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Controllers;
 
 use App\Helpers\Authorization;
+use App\Helpers\AuditLog;
 use App\Helpers\Auth;
 use App\Helpers\Csrf;
 use App\Helpers\Flash;
@@ -84,6 +85,53 @@ final class ReportsController extends BaseController
 
         fclose($stream);
         exit;
+    }
+
+    public function accountLedgerPrint(): string
+    {
+        try {
+            $query = $_GET;
+            $query['report'] = 'customer_ledger';
+
+            $state = (new ReportService($this->app))->reportState(
+                $query,
+                Authorization::accessibleBranchIds(),
+                (int) Auth::id(),
+                'print'
+            );
+        } catch (RuntimeException $exception) {
+            Flash::error($exception->getMessage());
+            $this->redirect('/reports?report=customer_ledger');
+        }
+
+        return $this->view('reports/account_ledger_print', array_merge($state, [
+            'user' => Auth::user(),
+            'pageTitle' => 'Account Ledger Print',
+        ]), 'layouts/print');
+    }
+
+    public function printReport(): string
+    {
+        try {
+            if ((string) ($_GET['report'] ?? '') === 'accounting_integrity' && ! Auth::isFinancialAdmin()) {
+                throw new RuntimeException('Only super admin or branch admin can print accounting integrity checks.');
+            }
+
+            $state = (new ReportService($this->app))->reportState(
+                $_GET,
+                Authorization::accessibleBranchIds(),
+                (int) Auth::id(),
+                'print'
+            );
+        } catch (RuntimeException $exception) {
+            Flash::error($exception->getMessage());
+            $this->redirect('/reports');
+        }
+
+        return $this->view('reports/report_print', array_merge($state, [
+            'user' => Auth::user(),
+            'pageTitle' => 'Report Print',
+        ]), 'layouts/print');
     }
 
     public function supplierPrepaidReceipt(): string
@@ -194,6 +242,15 @@ final class ReportsController extends BaseController
                 (int) Auth::id(),
                 Authorization::accessibleBranchIds()
             );
+            $supplierCreditMessage = '';
+            if ((float) ($result['unallocated_amount'] ?? 0) > 0.005) {
+                $supplierCreditMessage = ' Supplier credit kept: '
+                    . (string) ($result['currency'] ?? 'PKR')
+                    . ' '
+                    . number_format((float) ($result['unallocated_amount'] ?? 0), 2)
+                    . '.';
+            }
+
             Flash::success(
                 'Global supplier payment '
                 . (string) ($result['payment_no'] ?? '')
@@ -206,6 +263,7 @@ final class ReportsController extends BaseController
                 . ' across '
                 . (int) ($result['allocation_count'] ?? 0)
                 . ' payable item(s).'
+                . $supplierCreditMessage
             );
         } catch (RuntimeException $exception) {
             Flash::error($exception->getMessage());
@@ -254,6 +312,9 @@ final class ReportsController extends BaseController
         $openReceivables = $selectedTravelerId > 0 && $selectedBranchId > 0
             ? $customerRepository->globalOpenReceivables($selectedBranchId, $selectedTravelerId, $currency)
             : [];
+        $availableAdvances = $selectedTravelerId > 0 && $selectedBranchId > 0
+            ? $customerRepository->availableCustomerAdvances($selectedBranchId, $selectedTravelerId, $currency)
+            : [];
 
         $treasuryAccounts = [];
         foreach (['cash', 'bank_transfer'] as $method) {
@@ -290,6 +351,7 @@ final class ReportsController extends BaseController
             'selectedCurrency' => $currency,
             'currencyOptions' => $currencyOptions,
             'openReceivables' => $openReceivables,
+            'availableAdvances' => $availableAdvances,
             'treasuryAccounts' => array_values($treasuryAccounts),
             'paymentMethods' => $paymentMethods,
         ]);
@@ -300,27 +362,50 @@ final class ReportsController extends BaseController
         Csrf::verifyOrFail($_POST['_token'] ?? null);
 
         try {
-            $result = (new CustomerReceiptWorkspaceService($this->app))->recordGlobalCustomerPayment(
-                $_POST,
-                (int) Auth::id(),
-                Authorization::accessibleBranchIds()
-            );
-            Flash::success(
-                'Global customer payment '
-                . (string) ($result['receipt_no'] ?? '')
-                . ' posted for '
-                . (string) ($result['customer_name'] ?? 'Customer')
-                . '. Allocated '
-                . (string) ($result['currency'] ?? 'PKR')
-                . ' '
-                . number_format((float) ($result['allocated_amount'] ?? 0), 2)
-                . ' across '
-                . (int) ($result['allocation_count'] ?? 0)
-                . ' receivable item(s).'
-                . ((float) ($result['unallocated_amount'] ?? 0) > 0
-                    ? ' Remaining customer credit: ' . (string) ($result['currency'] ?? 'PKR') . ' ' . number_format((float) ($result['unallocated_amount'] ?? 0), 2) . '.'
-                    : '')
-            );
+            $action = (string) ($_POST['settlement_action_button'] ?? $_POST['settlement_action'] ?? 'payment');
+            $service = new CustomerReceiptWorkspaceService($this->app);
+            if ($action === 'apply_advance') {
+                $result = $service->applyCustomerAdvance(
+                    $_POST,
+                    (int) Auth::id(),
+                    Authorization::accessibleBranchIds()
+                );
+                Flash::success(
+                    'Customer advance '
+                    . (string) ($result['receipt_no'] ?? '')
+                    . ' applied for '
+                    . (string) ($result['customer_name'] ?? 'Customer')
+                    . '. Allocated '
+                    . (string) ($result['currency'] ?? 'PKR')
+                    . ' '
+                    . number_format((float) ($result['allocated_amount'] ?? 0), 2)
+                    . ' across '
+                    . (int) ($result['allocation_count'] ?? 0)
+                    . ' receivable item(s).'
+                );
+            } else {
+                $result = $service->recordGlobalCustomerPayment(
+                    $_POST,
+                    (int) Auth::id(),
+                    Authorization::accessibleBranchIds()
+                );
+                Flash::success(
+                    'Global customer payment '
+                    . (string) ($result['receipt_no'] ?? '')
+                    . ' posted for '
+                    . (string) ($result['customer_name'] ?? 'Customer')
+                    . '. Allocated '
+                    . (string) ($result['currency'] ?? 'PKR')
+                    . ' '
+                    . number_format((float) ($result['allocated_amount'] ?? 0), 2)
+                    . ' across '
+                    . (int) ($result['allocation_count'] ?? 0)
+                    . ' receivable item(s).'
+                    . ((float) ($result['unallocated_amount'] ?? 0) > 0
+                        ? ' Remaining customer credit: ' . (string) ($result['currency'] ?? 'PKR') . ' ' . number_format((float) ($result['unallocated_amount'] ?? 0), 2) . '.'
+                        : '')
+                );
+            }
         } catch (RuntimeException $exception) {
             Flash::error($exception->getMessage());
         }
@@ -331,5 +416,310 @@ final class ReportsController extends BaseController
             'currency' => (string) ($_POST['receipt_currency'] ?? 'PKR'),
         ]);
         $this->redirect('/customers/settlements/global?' . $query);
+    }
+
+    public function saveCustomerAdvance(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+        $returnTo = $this->safeLocalReturnPath((string) ($_POST['return_to'] ?? ''), '/workspace');
+
+        try {
+            $result = (new CustomerReceiptWorkspaceService($this->app))->recordCustomerAdvance(
+                $_POST,
+                (int) Auth::id(),
+                Authorization::accessibleBranchIds()
+            );
+            AuditLog::record($this->app, 'customer.advance.recorded', [
+                'customer_receipt_id' => (int) ($result['receipt_id'] ?? 0),
+                'receipt_no' => (string) ($result['receipt_no'] ?? ''),
+                'traveler_id' => (int) ($_POST['traveler_id'] ?? 0),
+                'currency' => (string) ($result['currency'] ?? 'PKR'),
+                'received_amount' => (float) ($result['received_amount'] ?? 0),
+            ]);
+            Flash::success(
+                'Customer advance '
+                . (string) ($result['receipt_no'] ?? '')
+                . ' recorded for '
+                . (string) ($result['customer_name'] ?? 'Customer')
+                . ': '
+                . (string) ($result['currency'] ?? 'PKR')
+                . ' '
+                . number_format((float) ($result['received_amount'] ?? 0), 2)
+                . '.'
+            );
+            if ((string) ($_POST['print_after_save'] ?? '0') === '1' && (int) ($result['receipt_id'] ?? 0) > 0) {
+                try {
+                    echo $this->view('reports/customer_advance_receipt', $this->customerAdvanceReceiptViewData((int) $result['receipt_id']), 'layouts/print');
+                    exit;
+                } catch (RuntimeException $receiptException) {
+                    AuditLog::record($this->app, 'customer.advance.receipt.render_failed_after_save', [
+                        'customer_receipt_id' => (int) ($result['receipt_id'] ?? 0),
+                        'traveler_id' => (int) ($_POST['traveler_id'] ?? 0),
+                        'message' => $receiptException->getMessage(),
+                    ]);
+                    Flash::error('Customer advance was saved, but the receipt could not be opened.');
+                }
+            }
+        } catch (RuntimeException $exception) {
+            AuditLog::record($this->app, 'customer.advance.failed', [
+                'traveler_id' => (int) ($_POST['traveler_id'] ?? 0),
+                'branch_id' => (int) ($_POST['branch_id'] ?? 0),
+                'currency' => (string) ($_POST['receipt_currency'] ?? 'PKR'),
+                'message' => $exception->getMessage(),
+            ]);
+            Flash::error($exception->getMessage());
+        }
+
+        $this->redirect($returnTo);
+    }
+
+    public function customerAdvanceReceipt(): string
+    {
+        $receiptId = (int) ($_GET['receipt_id'] ?? 0);
+        try {
+            $viewData = $this->customerAdvanceReceiptViewData($receiptId);
+        } catch (RuntimeException $exception) {
+            AuditLog::record($this->app, 'customer.advance.receipt.open_failed', [
+                'customer_receipt_id' => $receiptId,
+                'message' => $exception->getMessage(),
+            ]);
+            Flash::error('Customer advance receipt could not be opened.');
+            $this->redirect('/workspace');
+        }
+
+        AuditLog::record($this->app, 'customer.advance.receipt.opened', [
+            'customer_receipt_id' => $receiptId,
+            'traveler_id' => (int) (($viewData['receipt']['traveler_id'] ?? 0)),
+        ]);
+
+        return $this->view('reports/customer_advance_receipt', $viewData, 'layouts/print');
+    }
+
+    private function customerAdvanceReceiptViewData(int $receiptId): array
+    {
+        $repository = new CustomerPaymentRepository($this->app);
+        $receipt = $repository->findReceiptById($receiptId);
+        if ($receipt === null) {
+            throw new RuntimeException('Receipt record was not found.');
+        }
+
+        $accessibleBranchIds = array_values(array_unique(array_map('intval', Authorization::accessibleBranchIds())));
+        $receiptBranchId = (int) ($receipt['branch_id'] ?? 0);
+        $receiptPurpose = (string) ($receipt['receipt_purpose'] ?? '');
+        $bookingReference = strtoupper(trim((string) ($receipt['booking_reference'] ?? '')));
+        $isCustomerAdvanceReceipt = $receiptPurpose === 'customer_advance'
+            || ($receiptPurpose === 'booking_payment' && $bookingReference === 'ADVANCE');
+
+        if (! in_array($receiptBranchId, $accessibleBranchIds, true)) {
+            throw new RuntimeException('Receipt branch is not accessible.');
+        }
+
+        if (! $isCustomerAdvanceReceipt) {
+            throw new RuntimeException('Receipt is not a customer advance receipt.');
+        }
+
+        $branchRow = [];
+        foreach ((new MasterDataRepository($this->app))->rows('branches') as $candidateBranchRow) {
+            if ((int) ($candidateBranchRow['id'] ?? 0) === $receiptBranchId) {
+                $branchRow = $candidateBranchRow;
+                break;
+            }
+        }
+
+        $branchCode = mb_strtolower(trim((string) ($branchRow['code'] ?? '')));
+        $receiptProfiles = config('branches.receipt_contacts', []);
+        $branchContact = is_array($receiptProfiles[$branchCode] ?? null) ? $receiptProfiles[$branchCode] : [];
+        $branchDirectory = [];
+
+        foreach ($receiptProfiles as $profileCode => $profile) {
+            if (! is_array($profile)) {
+                continue;
+            }
+
+            $location = trim((string) ($profile['location_label'] ?? ''));
+            $contactBits = [];
+            $landline = trim((string) ($profile['landline'] ?? ''));
+            $email = trim((string) ($profile['email'] ?? ''));
+
+            if ($landline !== '') {
+                $contactBits[] = $landline;
+            }
+            if ($email !== '') {
+                $contactBits[] = $email;
+            }
+
+            $branchDirectory[] = [
+                'branch' => trim((string) ($profile['display_name'] ?? ucfirst((string) $profileCode))),
+                'location' => $location,
+                'contact' => implode(' | ', $contactBits),
+            ];
+        }
+
+        return [
+            'title' => 'Customer Advance Receipt',
+            'receipt' => $receipt,
+            'customerName' => $repository->customerNameByTraveler((int) ($receipt['traveler_id'] ?? 0)),
+            'branchName' => (string) ($branchRow['name'] ?? ''),
+            'branchBranding' => [
+                'code' => $branchCode,
+                'name' => (string) ($branchRow['name'] ?? ''),
+                'receipt_name' => trim((string) ($branchContact['display_name'] ?? ((string) ($branchRow['name'] ?? '')))),
+                'contact' => $branchContact,
+            ],
+            'branchDirectory' => $branchDirectory,
+            'generatedAt' => date('Y-m-d H:i'),
+        ];
+    }
+
+    public function availableCustomerAdvances(): never
+    {
+        $branchId = (int) ($_GET['branch_id'] ?? 0);
+        $travelerId = (int) ($_GET['traveler_id'] ?? 0);
+        $currency = strtoupper(trim((string) ($_GET['currency'] ?? 'PKR')));
+        $accessibleBranchIds = array_values(array_unique(array_map('intval', Authorization::accessibleBranchIds())));
+
+        if ($branchId <= 0 || $travelerId <= 0 || ! in_array($branchId, $accessibleBranchIds, true)) {
+            $this->jsonResponse(['ok' => true, 'advances' => []]);
+        }
+
+        $advances = (new CustomerPaymentRepository($this->app))->availableCustomerAdvances(
+            $branchId,
+            $travelerId,
+            $currency
+        );
+
+        $this->jsonResponse([
+            'ok' => true,
+            'advances' => array_map(static function (array $advance): array {
+                return [
+                    'id' => (int) ($advance['id'] ?? 0),
+                    'receipt_no' => (string) ($advance['receipt_no'] ?? ''),
+                    'receipt_date' => (string) ($advance['receipt_date'] ?? ''),
+                    'currency' => (string) ($advance['currency'] ?? ''),
+                    'unallocated_amount' => (float) ($advance['unallocated_amount'] ?? 0),
+                ];
+            }, $advances),
+        ]);
+    }
+
+    public function refundCustomerAdvance(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+        $returnTo = $this->safeLocalReturnPath((string) ($_POST['return_to'] ?? ''), '/workspace');
+
+        try {
+            $result = (new CustomerReceiptWorkspaceService($this->app))->refundCustomerAdvance(
+                $_POST,
+                (int) Auth::id(),
+                Authorization::accessibleBranchIds()
+            );
+            Flash::success(
+                'Customer advance refunded for '
+                . (string) ($result['customer_name'] ?? 'Customer')
+                . ': '
+                . (string) ($result['currency'] ?? 'PKR')
+                . ' '
+                . number_format((float) ($result['amount'] ?? 0), 2)
+                . '.'
+            );
+        } catch (RuntimeException $exception) {
+            Flash::error($exception->getMessage());
+        }
+
+        $this->redirect($returnTo);
+    }
+
+    public function correctCustomerAdvance(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+        $returnTo = $this->safeLocalReturnPath((string) ($_POST['return_to'] ?? ''), '/reports?report=customer_advance_ledger');
+
+        try {
+            $result = (new CustomerReceiptWorkspaceService($this->app))->correctCustomerAdvance(
+                $_POST,
+                (int) Auth::id(),
+                Authorization::accessibleBranchIds()
+            );
+            AuditLog::record($this->app, 'customer.advance.corrected', [
+                'customer_receipt_id' => (int) ($_POST['customer_receipt_id'] ?? 0),
+                'traveler_id' => (int) ($_POST['traveler_id'] ?? 0),
+                'currency' => (string) ($result['currency'] ?? 'PKR'),
+                'amount' => (float) ($result['amount'] ?? 0),
+            ]);
+            Flash::success(
+                'Customer advance '
+                . (string) ($result['receipt_no'] ?? '')
+                . ' corrected for '
+                . (string) ($result['customer_name'] ?? 'Customer')
+                . '.'
+            );
+        } catch (RuntimeException $exception) {
+            AuditLog::record($this->app, 'customer.advance.correction_failed', [
+                'customer_receipt_id' => (int) ($_POST['customer_receipt_id'] ?? 0),
+                'traveler_id' => (int) ($_POST['traveler_id'] ?? 0),
+                'message' => $exception->getMessage(),
+            ]);
+            Flash::error($exception->getMessage());
+        }
+
+        $this->redirect($returnTo);
+    }
+
+    public function correctCustomerAdvanceRefund(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+        $returnTo = $this->safeLocalReturnPath((string) ($_POST['return_to'] ?? ''), '/reports?report=customer_advance_ledger');
+
+        try {
+            $result = (new CustomerReceiptWorkspaceService($this->app))->correctCustomerAdvanceRefund(
+                $_POST,
+                (int) Auth::id(),
+                Authorization::accessibleBranchIds()
+            );
+            AuditLog::record($this->app, 'customer.advance_refund.corrected', [
+                'customer_advance_refund_id' => (int) ($_POST['customer_advance_refund_id'] ?? 0),
+                'customer_receipt_id' => (int) ($_POST['customer_receipt_id'] ?? 0),
+                'traveler_id' => (int) ($_POST['traveler_id'] ?? 0),
+                'currency' => (string) ($result['currency'] ?? 'PKR'),
+                'amount' => (float) ($result['amount'] ?? 0),
+            ]);
+            Flash::success(
+                'Returned customer advance '
+                . (string) ($result['receipt_no'] ?? '')
+                . ' corrected for '
+                . (string) ($result['customer_name'] ?? 'Customer')
+                . '.'
+            );
+        } catch (RuntimeException $exception) {
+            AuditLog::record($this->app, 'customer.advance_refund.correction_failed', [
+                'customer_advance_refund_id' => (int) ($_POST['customer_advance_refund_id'] ?? 0),
+                'customer_receipt_id' => (int) ($_POST['customer_receipt_id'] ?? 0),
+                'traveler_id' => (int) ($_POST['traveler_id'] ?? 0),
+                'message' => $exception->getMessage(),
+            ]);
+            Flash::error($exception->getMessage());
+        }
+
+        $this->redirect($returnTo);
+    }
+
+    private function safeLocalReturnPath(string $path, string $fallback): string
+    {
+        $path = trim($path);
+        if ($path === '' || str_starts_with($path, '//') || preg_match('/^[a-z][a-z0-9+.-]*:/i', $path) === 1) {
+            return $fallback;
+        }
+
+        if (! str_starts_with($path, '/')) {
+            return $fallback;
+        }
+
+        $basePath = request_base_path();
+        if ($basePath !== '' && ($path === $basePath || str_starts_with($path, $basePath . '/'))) {
+            $path = substr($path, strlen($basePath));
+            $path = $path === '' ? '/' : $path;
+        }
+
+        return str_starts_with($path, '/') ? $path : $fallback;
     }
 }

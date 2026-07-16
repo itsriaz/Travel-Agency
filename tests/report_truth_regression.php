@@ -2,12 +2,14 @@
 
 declare(strict_types=1);
 
-define('BASE_PATH', dirname(__DIR__));
+defined('BASE_PATH') || define('BASE_PATH', dirname(__DIR__));
 
-require BASE_PATH . '/app/Helpers/functions.php';
-require BASE_PATH . '/app/Core/bootstrap.php';
+require_once BASE_PATH . '/app/Helpers/functions.php';
+require_once BASE_PATH . '/app/Core/bootstrap.php';
 
-$app = \App\Core\App::bootstrap(BASE_PATH);
+$app = (isset($app) && $app instanceof \App\Core\App)
+    ? $app
+    : \App\Core\App::bootstrap(BASE_PATH);
 
 $treasuryRepository = new \App\Repositories\TreasuryRepository($app);
 $reportRepository = new \App\Repositories\ReportRepository($app);
@@ -79,12 +81,83 @@ $check(
     $mismatches !== [] ? json_encode(array_slice($mismatches, 0, 10), JSON_UNESCAPED_SLASHES) : 'checked=' . $checkedAccounts
 );
 
+$agingRows = $reportRepository->receivableAging($branchIds, $asOfDate);
+$agingTotals = [];
+$agingInvalidRows = [];
+foreach ($agingRows as $row) {
+    $currency = strtoupper(trim((string) ($row['currency'] ?? 'PKR')));
+    $outstanding = round((float) ($row['outstanding_amount'] ?? 0), 2);
+    $overdueDays = (int) ($row['overdue_days'] ?? 0);
+    $bucket = $overdueDays <= 0
+        ? 'current'
+        : ($overdueDays <= 30
+            ? '1_30'
+            : ($overdueDays <= 60
+                ? '31_60'
+                : ($overdueDays <= 90 ? '61_90' : '91_plus')));
+
+    if ($currency === '' || $outstanding <= 0) {
+        $agingInvalidRows[] = [
+            'booking_reference' => (string) ($row['booking_reference'] ?? ''),
+            'currency' => $currency,
+            'outstanding_amount' => $outstanding,
+        ];
+        continue;
+    }
+
+    if (! isset($agingTotals[$currency])) {
+        $agingTotals[$currency] = [
+            'current' => 0.0,
+            '1_30' => 0.0,
+            '31_60' => 0.0,
+            '61_90' => 0.0,
+            '91_plus' => 0.0,
+            'outstanding' => 0.0,
+        ];
+    }
+
+    $agingTotals[$currency][$bucket] += $outstanding;
+    $agingTotals[$currency]['outstanding'] += $outstanding;
+}
+
+$agingMismatches = [];
+foreach ($agingTotals as $currency => $totals) {
+    $bucketTotal = round(
+        $totals['current']
+        + $totals['1_30']
+        + $totals['31_60']
+        + $totals['61_90']
+        + $totals['91_plus'],
+        2
+    );
+    $outstandingTotal = round($totals['outstanding'], 2);
+    if ($bucketTotal !== $outstandingTotal) {
+        $agingMismatches[] = [
+            'currency' => $currency,
+            'bucket_total' => $bucketTotal,
+            'outstanding_total' => $outstandingTotal,
+        ];
+    }
+}
+
+$check(
+    'Receivable Aging rows retain valid currency and positive outstanding values',
+    $agingInvalidRows === [],
+    $agingInvalidRows !== [] ? json_encode(array_slice($agingInvalidRows, 0, 10), JSON_UNESCAPED_SLASHES) : 'checked=' . count($agingRows)
+);
+$check(
+    'Receivable Aging currency buckets equal outstanding totals',
+    $agingMismatches === [],
+    $agingMismatches !== [] ? json_encode($agingMismatches, JSON_UNESCAPED_SLASHES) : 'currencies=' . count($agingTotals)
+);
+
 if ($failures !== []) {
     echo PHP_EOL . 'Report truth regression failed:' . PHP_EOL;
     foreach ($failures as $failure) {
         echo ' - ' . $failure . PHP_EOL;
     }
-    exit(1);
+    return 1;
 }
 
 echo PHP_EOL . 'Report truth regression passed.' . PHP_EOL;
+return 0;

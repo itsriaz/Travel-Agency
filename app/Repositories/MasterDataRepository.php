@@ -39,6 +39,16 @@ final class MasterDataRepository extends BaseRepository
             'columns' => ['code', 'name', 'linked_area', 'sort_order', 'is_system', 'is_active'],
             'order_by' => 'sort_order ASC, name ASC',
         ],
+        'expense_categories' => [
+            'table' => 'expense_categories',
+            'columns' => ['code', 'name', 'sort_order', 'is_system', 'is_active'],
+            'order_by' => 'sort_order ASC, name ASC',
+        ],
+        'business_sources' => [
+            'table' => 'business_sources',
+            'columns' => ['code', 'name', 'phone', 'address', 'description', 'is_system', 'is_active'],
+            'order_by' => 'is_active DESC, is_system DESC, name ASC',
+        ],
     ];
 
     public function rows(string $register): array
@@ -171,6 +181,27 @@ final class MasterDataRepository extends BaseRepository
         return $statement->fetchColumn() !== false;
     }
 
+    public function nameExists(string $register, string $name, ?int $excludeId = null): bool
+    {
+        $config = $this->config($register);
+        $statement = $this->db->prepare(
+            sprintf(
+                'SELECT id FROM %s WHERE name = :name%s LIMIT 1',
+                $config['table'],
+                $excludeId !== null ? ' AND id != :exclude_id' : ''
+            )
+        );
+        $params = ['name' => $name];
+
+        if ($excludeId !== null) {
+            $params['exclude_id'] = $excludeId;
+        }
+
+        $statement->execute($params);
+
+        return $statement->fetchColumn() !== false;
+    }
+
     public function deleteBlockedReason(string $register, int $id): ?string
     {
         $record = $this->find($register, $id);
@@ -188,8 +219,24 @@ final class MasterDataRepository extends BaseRepository
             'currencies' => $this->currencyDeleteBlockedReason((string) $record['code']),
             'payment_methods' => $this->codeReferenceReason('customer_receipts', 'payment_method', (string) $record['code'], 'This payment method is already used in customer receipts.'),
             'supplier_modes' => $this->codeReferenceReason('suppliers', 'supplier_mode', (string) $record['code'], 'This supplier mode is already used by suppliers.'),
+            'expense_categories' => $this->expenseCategoryDeleteBlockedReason($id),
+            'business_sources' => $this->businessSourceDeleteBlockedReason($id),
             default => null,
         };
+    }
+
+    private function businessSourceDeleteBlockedReason(int $businessSourceId): ?string
+    {
+        return $this->countByValue('bookings', 'business_source_id', $businessSourceId) > 0
+            ? 'This account is already used by one or more invoices.'
+            : null;
+    }
+
+    private function expenseCategoryDeleteBlockedReason(int $expenseCategoryId): ?string
+    {
+        return $this->countByValue('business_expenses', 'expense_category_id', $expenseCategoryId) > 0
+            ? 'This expense category is already used by recorded expenses.'
+            : null;
     }
 
     private function branchDeleteBlockedReason(int $branchId): ?string

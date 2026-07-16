@@ -87,19 +87,23 @@ final class Session
             return;
         }
 
-        $path = preg_match('/^[A-Za-z]:[\\\\\\/]/', $configuredPath) === 1 || str_starts_with($configuredPath, '/')
-            ? $configuredPath
-            : base_path('/' . ltrim($configuredPath, '/'));
+        $primaryPath = self::resolveSavePath($configuredPath);
+        if (self::isUsableSessionPath($primaryPath)) {
+            session_save_path($primaryPath);
 
-        if (! is_dir($path) && ! @mkdir($path, 0775, true) && ! is_dir($path)) {
-            throw new \RuntimeException('Unable to prepare secure session storage.');
+            return;
         }
 
-        if (! is_writable($path)) {
-            throw new \RuntimeException('Secure session storage is not writable.');
+        if (! self::isProductionEnvironment()) {
+            $fallbackPath = rtrim(sys_get_temp_dir(), "\\/") . DIRECTORY_SEPARATOR . 'travel-agency-sessions';
+            if (self::isUsableSessionPath($fallbackPath)) {
+                session_save_path($fallbackPath);
+
+                return;
+            }
         }
 
-        session_save_path($path);
+        throw new \RuntimeException('Secure session storage is not writable.');
     }
 
     private static function sameSiteValue(string $value): string
@@ -107,5 +111,42 @@ final class Session
         $normalized = ucfirst(mb_strtolower(trim($value)));
 
         return in_array($normalized, ['Lax', 'Strict', 'None'], true) ? $normalized : 'Lax';
+    }
+
+    private static function resolveSavePath(string $configuredPath): string
+    {
+        return preg_match('/^[A-Za-z]:[\\\\\\/]/', $configuredPath) === 1 || str_starts_with($configuredPath, '/')
+            ? $configuredPath
+            : base_path('/' . ltrim($configuredPath, '/'));
+    }
+
+    private static function isUsableSessionPath(string $path): bool
+    {
+        if (! is_dir($path) && ! @mkdir($path, 0775, true) && ! is_dir($path)) {
+            return false;
+        }
+
+        if (! is_writable($path)) {
+            return false;
+        }
+
+        $probeFile = rtrim($path, "\\/") . DIRECTORY_SEPARATOR . '.__session_probe_' . bin2hex(random_bytes(6));
+        $wroteProbe = @file_put_contents($probeFile, 'probe', LOCK_EX);
+        if ($wroteProbe === false) {
+            return false;
+        }
+
+        clearstatcache(true, $probeFile);
+        $removedProbe = @unlink($probeFile);
+        if (! $removedProbe && is_file($probeFile)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    private static function isProductionEnvironment(): bool
+    {
+        return mb_strtolower(trim((string) config('app.env', 'local'))) === 'production';
     }
 }

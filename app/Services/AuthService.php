@@ -83,7 +83,11 @@ final class AuthService extends Service
         }
 
         if (PasswordHasher::needsRehash((string) $user['password_hash'])) {
-            $userRepository->rehashPassword((int) $user['id'], $password);
+            try {
+                $userRepository->rehashPassword((int) $user['id'], $password);
+            } catch (\Throwable $exception) {
+                app_log_exception($exception, 'app.auth.password_rehash_failed');
+            }
         }
 
         $attempts->record($loginKey, $ipAddress, true, (int) $user['id']);

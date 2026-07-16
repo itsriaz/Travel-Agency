@@ -18,6 +18,9 @@ launcher/*.exe
 launcher/*.blockmap
 launcher/launcher_gate_private.pem
 launcher/*.pem
+launcher/release/
+launcher/workflow-audit.config.json
+launcher/preload (1).js
 
 ## Composer local dependencies are installed during deployment
 vendor/
@@ -26,9 +29,23 @@ vendor/
 storage/create_probe_session.php
 storage/recovery_probe.mjs
 storage/tmp_*.php
+storage/tmp/
+storage/runtime/
+storage/debug_*
+storage/diagnose_*
+storage/inspect_*
+storage/probe_*
+storage/show_cols_*
+storage/latest_*
+storage/browser_*_fixture.php
+storage/compare_*.py
+storage/tmp_*.txt
 storage/regression_screenshots/
 storage/pw-temp/
 storage/release-packages/
+tmp/
+output/
+tmp_*.php
 
 ## Runtime logs and PHP session artifacts
 storage/logs/*

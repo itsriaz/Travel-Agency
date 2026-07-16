@@ -181,6 +181,8 @@ final class SupplierRepository extends BaseRepository
                     s.id AS supplier_id,
                     s.code AS supplier_code,
                     s.name AS supplier_name,
+                    COALESCE(svc.passenger_names, '') AS passenger_name,
+                    COALESCE(svc.routes, '') AS route,
                     seed.currency,
                     COALESCE(ob.total_gross_amount, 0) AS total_gross_amount,
                     COALESCE(pay.total_paid_amount, 0) AS total_paid_amount,
@@ -198,6 +200,20 @@ final class SupplierRepository extends BaseRepository
                 INNER JOIN suppliers s ON s.id = seed.supplier_id
                 INNER JOIN bookings b ON b.booking_reference = seed.booking_reference
                 INNER JOIN branches br ON br.id = b.branch_id
+                LEFT JOIN (
+                    SELECT
+                        b_inner.booking_reference,
+                        bs_inner.supplier_id,
+                        GROUP_CONCAT(DISTINCT NULLIF(COALESCE(t.full_name, bs_inner.passenger_name_snapshot), '') ORDER BY COALESCE(t.full_name, bs_inner.passenger_name_snapshot) SEPARATOR ', ') AS passenger_names,
+                        GROUP_CONCAT(DISTINCT NULLIF(CONCAT_WS('/', NULLIF(sat.sector_from, ''), NULLIF(sat.sector_to, '')), '') ORDER BY sat.sector_from, sat.sector_to SEPARATOR ', ') AS routes
+                    FROM booking_services bs_inner
+                    INNER JOIN bookings b_inner ON b_inner.id = bs_inner.booking_id
+                    LEFT JOIN travelers t ON t.id = bs_inner.traveler_id
+                    LEFT JOIN service_air_ticket sat ON sat.booking_service_id = bs_inner.id
+                    WHERE bs_inner.is_active = 1
+                    GROUP BY b_inner.booking_reference, bs_inner.supplier_id
+                ) svc ON svc.booking_reference = seed.booking_reference
+                    AND svc.supplier_id = seed.supplier_id
                 LEFT JOIN (
                     SELECT
                         supplier_id,
@@ -236,6 +252,8 @@ final class SupplierRepository extends BaseRepository
                     s.id AS supplier_id,
                     s.code AS supplier_code,
                     s.name AS supplier_name,
+                    '' AS passenger_name,
+                    '' AS route,
                     a.currency,
                     0 AS total_gross_amount,
                     SUM(a.deposit_amount) AS total_paid_amount,
@@ -309,14 +327,17 @@ final class SupplierRepository extends BaseRepository
     public function registerAdvance(array $data): int
     {
         return $this->transaction(function () use ($data): int {
+            $hasSourcePaymentLink = $this->columnExists('supplier_advances', 'source_supplier_payment_id');
             $statement = $this->db->prepare(
                 'INSERT INTO supplier_advances (
-                    supplier_id, branch_id, currency, deposit_amount, available_amount, reference_no, remarks, received_at, created_by_user_id
+                    supplier_id, branch_id, currency, deposit_amount, available_amount, reference_no, remarks, received_at, created_by_user_id'
+                    . ($hasSourcePaymentLink ? ', source_supplier_payment_id' : '') . '
                  ) VALUES (
-                    :supplier_id, :branch_id, :currency, :deposit_amount, :available_amount, :reference_no, :remarks, :received_at, :created_by_user_id
+                    :supplier_id, :branch_id, :currency, :deposit_amount, :available_amount, :reference_no, :remarks, :received_at, :created_by_user_id'
+                    . ($hasSourcePaymentLink ? ', :source_supplier_payment_id' : '') . '
                  )'
             );
-            $statement->execute([
+            $params = [
                 'supplier_id' => $data['supplier_id'],
                 'branch_id' => $data['branch_id'],
                 'currency' => $data['currency'],
@@ -326,7 +347,11 @@ final class SupplierRepository extends BaseRepository
                 'remarks' => $data['remarks'] ?? null,
                 'received_at' => $data['received_at'] ?? null,
                 'created_by_user_id' => $data['actor_user_id'] ?? null,
-            ]);
+            ];
+            if ($hasSourcePaymentLink) {
+                $params['source_supplier_payment_id'] = $data['source_supplier_payment_id'] ?? null;
+            }
+            $statement->execute($params);
 
             $advanceId = (int) $this->db->lastInsertId();
 
@@ -337,6 +362,7 @@ final class SupplierRepository extends BaseRepository
                 'branch_id' => $data['branch_id'],
                 'currency' => $data['currency'],
                 'deposit_amount' => $data['deposit_amount'],
+                'source_supplier_payment_id' => $data['source_supplier_payment_id'] ?? null,
             ]);
 
             return $advanceId;
@@ -345,8 +371,11 @@ final class SupplierRepository extends BaseRepository
 
     public function findAdvanceById(int $advanceId): ?array
     {
+        $sourcePaymentSelect = $this->columnExists('supplier_advances', 'source_supplier_payment_id')
+            ? ', source_supplier_payment_id'
+            : ', NULL AS source_supplier_payment_id';
         $statement = $this->db->prepare(
-            'SELECT id, supplier_id, branch_id, currency, deposit_amount, available_amount, reference_no, remarks, received_at
+            'SELECT id, supplier_id, branch_id, currency, deposit_amount, available_amount, reference_no, remarks, received_at' . $sourcePaymentSelect . '
              FROM supplier_advances
              WHERE id = :id
              LIMIT 1'
@@ -429,6 +458,233 @@ final class SupplierRepository extends BaseRepository
         }
 
         return $balances;
+    }
+
+    public function availableRefundableCreditForService(int $supplierId, string $bookingReference, string $currency): float
+    {
+        $supplierId = (int) $supplierId;
+        $bookingReference = trim($bookingReference);
+        $currency = strtoupper(trim($currency));
+        if ($supplierId <= 0 || $bookingReference === '' || $currency === '') {
+            return 0.0;
+        }
+
+        $paymentStatement = $this->db->prepare(
+            'SELECT COALESCE(SUM(unallocated_amount), 0)
+             FROM supplier_payments
+             WHERE supplier_id = :supplier_id
+               AND booking_reference = :booking_reference
+               AND currency = :currency
+               AND unallocated_amount > 0'
+        );
+        $paymentStatement->execute([
+            'supplier_id' => $supplierId,
+            'booking_reference' => $bookingReference,
+            'currency' => $currency,
+        ]);
+
+        $advanceStatement = $this->db->prepare(
+            'SELECT COALESCE(SUM(available_amount), 0)
+             FROM supplier_advances
+             WHERE supplier_id = :supplier_id
+               AND currency = :currency
+               AND available_amount > 0'
+        );
+        $advanceStatement->execute([
+            'supplier_id' => $supplierId,
+            'currency' => $currency,
+        ]);
+
+        $paymentCredit = round((float) $paymentStatement->fetchColumn(), 2);
+        $advanceCredit = round((float) $advanceStatement->fetchColumn(), 2);
+
+        return round($paymentCredit + $advanceCredit, 2);
+    }
+
+    public function availableRefundablePaymentCreditForBooking(int $supplierId, string $bookingReference, string $currency): float
+    {
+        $supplierId = (int) $supplierId;
+        $bookingReference = trim($bookingReference);
+        $currency = strtoupper(trim($currency));
+        if ($supplierId <= 0 || $bookingReference === '' || $currency === '') {
+            return 0.0;
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT COALESCE(SUM(unallocated_amount), 0)
+             FROM supplier_payments
+             WHERE supplier_id = :supplier_id
+               AND booking_reference = :booking_reference
+               AND currency = :currency
+               AND unallocated_amount > 0
+               AND status <> "void"'
+        );
+        $statement->execute([
+            'supplier_id' => $supplierId,
+            'booking_reference' => $bookingReference,
+            'currency' => $currency,
+        ]);
+
+        return round((float) $statement->fetchColumn(), 2);
+    }
+
+    public function consumeRefundableCreditForService(
+        int $supplierId,
+        string $bookingReference,
+        string $currency,
+        float $amount,
+        ?int $actorUserId = null,
+        ?string $reason = null
+    ): array {
+        return $this->transaction(function () use ($supplierId, $bookingReference, $currency, $amount, $actorUserId, $reason): array {
+            $supplierId = (int) $supplierId;
+            $bookingReference = trim($bookingReference);
+            $currency = strtoupper(trim($currency));
+            $amount = round(max(0, $amount), 2);
+
+            if ($supplierId <= 0 || $bookingReference === '' || $currency === '' || $amount <= 0) {
+                throw new \RuntimeException('Supplier refundable credit consumption requires supplier, booking, currency, and amount.');
+            }
+
+            $paymentStatement = $this->db->prepare(
+                'SELECT id, payment_no, paid_amount, allocated_amount, unallocated_amount
+                 FROM supplier_payments
+                 WHERE supplier_id = :supplier_id
+                   AND booking_reference = :booking_reference
+                   AND currency = :currency
+                   AND unallocated_amount > 0.005
+                 ORDER BY payment_date DESC, id DESC
+                 FOR UPDATE'
+            );
+            $paymentStatement->execute([
+                'supplier_id' => $supplierId,
+                'booking_reference' => $bookingReference,
+                'currency' => $currency,
+            ]);
+            $paymentRows = $paymentStatement->fetchAll() ?: [];
+
+            $advanceStatement = $this->db->prepare(
+                'SELECT id, available_amount, received_at
+                 FROM supplier_advances
+                 WHERE supplier_id = :supplier_id
+                   AND currency = :currency
+                   AND available_amount > 0.005
+                 ORDER BY received_at ASC, id ASC
+                 FOR UPDATE'
+            );
+            $advanceStatement->execute([
+                'supplier_id' => $supplierId,
+                'currency' => $currency,
+            ]);
+            $advanceRows = $advanceStatement->fetchAll() ?: [];
+
+            $availableAmount = round(array_reduce(
+                $paymentRows,
+                static fn (float $carry, array $row): float => $carry + (float) ($row['unallocated_amount'] ?? 0),
+                0.0
+            ) + array_reduce(
+                $advanceRows,
+                static fn (float $carry, array $row): float => $carry + (float) ($row['available_amount'] ?? 0),
+                0.0
+            ), 2);
+
+            if ($amount > $availableAmount + 0.005) {
+                throw new \RuntimeException('Supplier refund exceeds available supplier advance/credit for this booking and currency.');
+            }
+
+            $updatePayment = $this->db->prepare(
+                'UPDATE supplier_payments
+                 SET unallocated_amount = :unallocated_amount,
+                     status = :status
+                 WHERE id = :payment_id'
+            );
+            $updateAdvance = $this->db->prepare(
+                'UPDATE supplier_advances
+                 SET available_amount = :available_amount
+                 WHERE id = :advance_id'
+            );
+
+            $remainingAmount = $amount;
+            $consumedPaymentAmount = 0.0;
+            $consumedAdvanceAmount = 0.0;
+            $affectedPaymentIds = [];
+            $affectedAdvanceIds = [];
+
+            foreach ($paymentRows as $paymentRow) {
+                if ($remainingAmount <= 0.005) {
+                    break;
+                }
+
+                $rowUnallocatedAmount = round((float) ($paymentRow['unallocated_amount'] ?? 0), 2);
+                $consumedAmount = min($remainingAmount, $rowUnallocatedAmount);
+                if ($consumedAmount <= 0) {
+                    continue;
+                }
+
+                $newUnallocatedAmount = round(max($rowUnallocatedAmount - $consumedAmount, 0), 2);
+                $allocatedAmount = round((float) ($paymentRow['allocated_amount'] ?? 0), 2);
+                $status = $allocatedAmount <= 0.005
+                    ? 'paid'
+                    : ($newUnallocatedAmount <= 0.005 ? 'fully_allocated' : 'partially_allocated');
+
+                $updatePayment->execute([
+                    'unallocated_amount' => $newUnallocatedAmount,
+                    'status' => $status,
+                    'payment_id' => (int) $paymentRow['id'],
+                ]);
+
+                $remainingAmount = round(max($remainingAmount - $consumedAmount, 0), 2);
+                $consumedPaymentAmount = round($consumedPaymentAmount + $consumedAmount, 2);
+                $affectedPaymentIds[] = (int) $paymentRow['id'];
+            }
+
+            foreach ($advanceRows as $advanceRow) {
+                if ($remainingAmount <= 0.005) {
+                    break;
+                }
+
+                $rowAvailableAmount = round((float) ($advanceRow['available_amount'] ?? 0), 2);
+                $consumedAmount = min($remainingAmount, $rowAvailableAmount);
+                if ($consumedAmount <= 0) {
+                    continue;
+                }
+
+                $newAvailableAmount = round(max($rowAvailableAmount - $consumedAmount, 0), 2);
+                $updateAdvance->execute([
+                    'available_amount' => $newAvailableAmount,
+                    'advance_id' => (int) $advanceRow['id'],
+                ]);
+
+                $remainingAmount = round(max($remainingAmount - $consumedAmount, 0), 2);
+                $consumedAdvanceAmount = round($consumedAdvanceAmount + $consumedAmount, 2);
+                $affectedAdvanceIds[] = (int) $advanceRow['id'];
+            }
+
+            if ($remainingAmount > 0.005) {
+                throw new \RuntimeException('Unable to consume refundable supplier credit from payment/advance sources.');
+            }
+
+            AuditLog::record($this->app, 'supplier.refundable_credit.consumed', [
+                'user_id' => $actorUserId,
+                'supplier_id' => $supplierId,
+                'booking_reference' => $bookingReference,
+                'currency' => $currency,
+                'amount' => $amount,
+                'consumed_payment_amount' => $consumedPaymentAmount,
+                'consumed_advance_amount' => $consumedAdvanceAmount,
+                'reason' => $reason,
+                'affected_payment_ids' => array_values(array_unique($affectedPaymentIds)),
+                'affected_advance_ids' => array_values(array_unique($affectedAdvanceIds)),
+            ]);
+
+            return [
+                'amount' => $amount,
+                'consumed_payment_amount' => $consumedPaymentAmount,
+                'consumed_advance_amount' => $consumedAdvanceAmount,
+                'affected_payment_ids' => array_values(array_unique($affectedPaymentIds)),
+                'affected_advance_ids' => array_values(array_unique($affectedAdvanceIds)),
+            ];
+        });
     }
 
     public function availableAdvanceCandidatesForSupplierName(string $supplierName): array
@@ -633,11 +889,18 @@ final class SupplierRepository extends BaseRepository
                 o.remarks,
                 b.id AS booking_id,
                 b.booking_date,
+                COALESCE(NULLIF(t.full_name, ""), NULLIF(bs.passenger_name_snapshot, ""), "Passenger") AS passenger_name,
+                COALESCE(NULLIF(CONCAT_WS("/", NULLIF(sat.sector_from, ""), NULLIF(sat.sector_to, "")), ""), "N/A") AS route,
                 s.name AS supplier_name,
                 s.supplier_mode
              FROM supplier_obligations o
              INNER JOIN suppliers s ON s.id = o.supplier_id
              LEFT JOIN bookings b ON b.booking_reference = o.booking_reference
+             LEFT JOIN booking_services bs
+                ON bs.booking_id = b.id
+               AND bs.line_reference = o.service_line_reference
+             LEFT JOIN travelers t ON t.id = bs.traveler_id
+             LEFT JOIN service_air_ticket sat ON sat.booking_service_id = bs.id
              WHERE o.branch_id = :branch_id
                AND o.supplier_id = :supplier_id
                AND o.currency = :currency
@@ -820,10 +1083,16 @@ final class SupplierRepository extends BaseRepository
         $scopeSelect = $this->columnExists('supplier_payments', 'payment_scope')
             ? ', payment_scope'
             : ', "booking" AS payment_scope';
+        $convertedAdvanceSelect = $this->columnExists('supplier_payments', 'converted_advance_amount')
+            ? ', converted_advance_amount'
+            : ', 0.00 AS converted_advance_amount';
+        $convertedAdvanceIdSelect = $this->columnExists('supplier_payments', 'converted_advance_id')
+            ? ', converted_advance_id'
+            : ', NULL AS converted_advance_id';
         $statement = $this->db->prepare(
             'SELECT id, supplier_id, branch_id, booking_reference, payment_no, payment_date, currency,
                     paid_amount, allocated_amount, unallocated_amount, payment_method' . $treasurySelect . ', reference_number, bank_card_detail,
-                    charges_amount, status, exchange_rate_to_booking, remarks' . $scopeSelect . ',
+                    charges_amount, status, exchange_rate_to_booking, remarks' . $scopeSelect . $convertedAdvanceSelect . $convertedAdvanceIdSelect . ',
                     ' . $this->supplierPaymentVoidMetadataSelect() . '
              FROM supplier_payments
              WHERE id = :id
@@ -833,6 +1102,71 @@ final class SupplierRepository extends BaseRepository
         $row = $statement->fetch();
 
         return $row !== false ? $row : null;
+    }
+
+    public function convertSupplierPaymentExcessToAdvance(int $paymentId, int $advanceId, float $amount, ?int $actorUserId = null): void
+    {
+        if (! $this->columnExists('supplier_payments', 'converted_advance_amount')
+            || ! $this->columnExists('supplier_payments', 'converted_advance_id')) {
+            throw new \RuntimeException('Supplier overpayment conversion requires the latest database migration.');
+        }
+
+        $this->transaction(function () use ($paymentId, $advanceId, $amount, $actorUserId): void {
+            $amount = round($amount, 2);
+            if ($amount <= 0.005) {
+                return;
+            }
+
+            $paymentStatement = $this->db->prepare(
+                'SELECT id, paid_amount, allocated_amount, unallocated_amount, converted_advance_amount
+                 FROM supplier_payments
+                 WHERE id = :payment_id
+                 FOR UPDATE'
+            );
+            $paymentStatement->execute(['payment_id' => $paymentId]);
+            $payment = $paymentStatement->fetch();
+
+            if ($payment === false) {
+                throw new \RuntimeException('Supplier payment not found for overpayment conversion.');
+            }
+
+            $unallocatedAmount = round((float) ($payment['unallocated_amount'] ?? 0), 2);
+            if ($amount - $unallocatedAmount > 0.005) {
+                throw new \RuntimeException('Supplier payment excess is no longer available to convert into advance.');
+            }
+
+            $remainingUnallocated = round(max(0, $unallocatedAmount - $amount), 2);
+            $allocatedAmount = round((float) ($payment['allocated_amount'] ?? 0), 2);
+            $convertedAdvanceAmount = round((float) ($payment['converted_advance_amount'] ?? 0) + $amount, 2);
+            $paidAmount = round((float) ($payment['paid_amount'] ?? 0), 2);
+            $status = ($remainingUnallocated <= 0.005 && abs($paidAmount - ($allocatedAmount + $convertedAdvanceAmount)) <= 0.005)
+                ? 'fully_allocated'
+                : 'partially_allocated';
+
+            $update = $this->db->prepare(
+                'UPDATE supplier_payments
+                 SET unallocated_amount = :unallocated_amount,
+                     converted_advance_amount = converted_advance_amount + :converted_advance_amount,
+                     converted_advance_id = :converted_advance_id,
+                     status = :status
+                 WHERE id = :payment_id'
+            );
+            $update->execute([
+                'unallocated_amount' => $remainingUnallocated,
+                'converted_advance_amount' => $amount,
+                'converted_advance_id' => $advanceId,
+                'status' => $status,
+                'payment_id' => $paymentId,
+            ]);
+
+            AuditLog::record($this->app, 'supplier.payment.excess_converted_to_advance', [
+                'user_id' => $actorUserId,
+                'supplier_payment_id' => $paymentId,
+                'supplier_advance_id' => $advanceId,
+                'converted_amount' => $amount,
+                'remaining_unallocated_amount' => $remainingUnallocated,
+            ]);
+        });
     }
 
     public function findObligationByBookingAndServiceLine(string $bookingReference, string $serviceLineReference): ?array
@@ -1155,6 +1489,10 @@ final class SupplierRepository extends BaseRepository
             $paymentConsumedAmount = $paymentCurrency === $obligationCurrency
                 ? $applicableAmount
                 : round($applicableAmount / $effectiveRate, 2);
+            $paymentRemainingAfterAllocation = round(max(0, $unallocatedAmount - $paymentConsumedAmount), 2);
+            $paymentStatusAfterAllocation = $paymentRemainingAfterAllocation <= 0.005
+                ? 'fully_allocated'
+                : 'partially_allocated';
 
             $insertAllocation = $this->db->prepare(
                 'INSERT INTO supplier_payment_allocations (
@@ -1176,16 +1514,13 @@ final class SupplierRepository extends BaseRepository
                 'UPDATE supplier_payments
                  SET allocated_amount = allocated_amount + :payment_allocated_amount,
                      unallocated_amount = GREATEST(0, unallocated_amount - :payment_unallocated_delta),
-                     status = CASE
-                         WHEN unallocated_amount - :payment_status_delta <= 0 THEN "fully_allocated"
-                         ELSE "partially_allocated"
-                     END
+                     status = :payment_status
                   WHERE id = :payment_id'
             );
             $updatePayment->execute([
                 'payment_allocated_amount' => $paymentConsumedAmount,
                 'payment_unallocated_delta' => $paymentConsumedAmount,
-                'payment_status_delta' => $paymentConsumedAmount,
+                'payment_status' => $paymentStatusAfterAllocation,
                 'payment_id' => $paymentId,
             ]);
 
@@ -1220,6 +1555,92 @@ final class SupplierRepository extends BaseRepository
 
             return $allocationId;
         });
+    }
+
+    public function availablePaymentRowsForBooking(int $supplierId, string $bookingReference, string $currency, array $preferredPaymentIds = []): array
+    {
+        if ($supplierId <= 0 || trim($bookingReference) === '' || trim($currency) === '') {
+            return [];
+        }
+
+        $orderClause = 'ORDER BY payment_date DESC, id DESC';
+        if ($preferredPaymentIds !== []) {
+            $preferredPaymentIds = array_values(array_filter(array_map('intval', $preferredPaymentIds), static fn (int $id): bool => $id > 0));
+            if ($preferredPaymentIds !== []) {
+                $preferredList = implode(', ', $preferredPaymentIds);
+                $orderClause = "ORDER BY CASE WHEN id IN ({$preferredList}) THEN 0 ELSE 1 END, payment_date DESC, id DESC";
+            }
+        }
+
+        $paymentScopeSelect = $this->columnExists('supplier_payments', 'payment_scope')
+            ? 'payment_scope'
+            : '"booking" AS payment_scope';
+
+        $statement = $this->db->prepare(
+            'SELECT id, payment_no, payment_date, currency, paid_amount, allocated_amount, unallocated_amount, exchange_rate_to_booking, booking_reference, branch_id, ' . $paymentScopeSelect . '
+             FROM supplier_payments
+             WHERE supplier_id = :supplier_id
+               AND booking_reference = :booking_reference
+               AND currency = :currency
+               AND status <> "void"
+               AND unallocated_amount > 0.005
+             ' . $orderClause
+        );
+        $statement->execute([
+            'supplier_id' => $supplierId,
+            'booking_reference' => $bookingReference,
+            'currency' => strtoupper(trim($currency)),
+        ]);
+
+        return $statement->fetchAll() ?: [];
+    }
+
+    public function availableAdvanceRowsForSupplier(int $supplierId, string $currency, array $preferredAdvanceIds = []): array
+    {
+        if ($supplierId <= 0 || trim($currency) === '') {
+            return [];
+        }
+
+        $advanceNoSelect = $this->columnExists('supplier_advances', 'advance_no')
+            ? 'advance_no'
+            : 'COALESCE(reference_no, CONCAT("SADV-", id)) AS advance_no';
+        $advanceDateColumn = $this->columnExists('supplier_advances', 'advance_date')
+            ? 'advance_date'
+            : 'received_at';
+        $amountReceivedSelect = $this->columnExists('supplier_advances', 'amount_received')
+            ? 'amount_received'
+            : 'deposit_amount AS amount_received';
+        $statusSelect = $this->columnExists('supplier_advances', 'status')
+            ? 'status'
+            : '"available" AS status';
+        $statusWhere = $this->columnExists('supplier_advances', 'status')
+            ? 'AND status <> "void"'
+            : '';
+
+        $orderClause = 'ORDER BY ' . $advanceDateColumn . ' DESC, id DESC';
+        if ($preferredAdvanceIds !== []) {
+            $preferredAdvanceIds = array_values(array_filter(array_map('intval', $preferredAdvanceIds), static fn (int $id): bool => $id > 0));
+            if ($preferredAdvanceIds !== []) {
+                $preferredList = implode(', ', $preferredAdvanceIds);
+                $orderClause = "ORDER BY CASE WHEN id IN ({$preferredList}) THEN 0 ELSE 1 END, {$advanceDateColumn} DESC, id DESC";
+            }
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT id, ' . $advanceNoSelect . ', ' . $advanceDateColumn . ' AS advance_date, currency, ' . $amountReceivedSelect . ', available_amount, ' . $statusSelect . '
+             FROM supplier_advances
+             WHERE supplier_id = :supplier_id
+               AND currency = :currency
+               ' . $statusWhere . '
+               AND available_amount > 0.005
+             ' . $orderClause
+        );
+        $statement->execute([
+            'supplier_id' => $supplierId,
+            'currency' => strtoupper(trim($currency)),
+        ]);
+
+        return $statement->fetchAll() ?: [];
     }
 
     public function paymentAllocationHistory(string $bookingReference): array
@@ -1812,6 +2233,183 @@ final class SupplierRepository extends BaseRepository
         $statement->execute(['obligation_id' => $obligationId]);
 
         return round((float) $statement->fetchColumn(), 2);
+    }
+
+    private function autoApplyUnallocatedSupplierPaymentCreditToObligation(array $obligation, float $remainingNetPayableAmount, ?int $actorUserId = null, ?string $traceId = null): array
+    {
+        $obligationId = (int) ($obligation['id'] ?? 0);
+        $supplierId = (int) ($obligation['supplier_id'] ?? 0);
+        $branchId = (int) ($obligation['branch_id'] ?? 0);
+        $bookingReference = (string) ($obligation['booking_reference'] ?? '');
+        $currency = strtoupper((string) ($obligation['currency'] ?? ''));
+        $remainingToApply = round(max(0, $remainingNetPayableAmount), 2);
+
+        if ($obligationId <= 0 || $supplierId <= 0 || $branchId <= 0 || $currency === '' || $remainingToApply <= 0.005) {
+            return [
+                'applied_amount' => 0.0,
+                'application_count' => 0,
+                'applications' => [],
+            ];
+        }
+
+        $hasPaymentScope = $this->columnExists('supplier_payments', 'payment_scope');
+        $scopeCondition = $hasPaymentScope
+            ? '(payment_scope = "global" OR booking_reference = :booking_reference)'
+            : 'booking_reference = :booking_reference';
+
+        $paymentStatement = $this->db->prepare(
+            'SELECT id, payment_no, payment_date, booking_reference, currency, paid_amount, allocated_amount,
+                    unallocated_amount' . ($hasPaymentScope ? ', payment_scope' : ', "booking" AS payment_scope') . '
+             FROM supplier_payments
+             WHERE supplier_id = :supplier_id
+               AND branch_id = :branch_id
+               AND currency = :currency
+               AND status <> "void"
+               AND unallocated_amount > 0.005
+               AND ' . $scopeCondition . '
+             ORDER BY payment_date ASC, id ASC
+             FOR UPDATE'
+        );
+        $paymentStatement->execute([
+            'supplier_id' => $supplierId,
+            'branch_id' => $branchId,
+            'currency' => $currency,
+            'booking_reference' => $bookingReference,
+        ]);
+        $paymentRows = $paymentStatement->fetchAll() ?: [];
+
+        $this->supplierAdvanceTraceLog('autoApplyAvailableAdvanceToObligation', 'supplier_payment_credit_rows_loaded', [
+            'trace_id' => $traceId,
+            'supplier_id' => $supplierId,
+            'branch_id' => $branchId,
+            'currency' => $currency,
+            'obligation_id' => $obligationId,
+            'booking_reference' => $bookingReference,
+            'payment_credit_row_count' => count($paymentRows),
+            'payment_credit_total' => round(array_reduce(
+                $paymentRows,
+                static fn (float $carry, array $row): float => $carry + (float) ($row['unallocated_amount'] ?? 0),
+                0.0
+            ), 2),
+            'reason' => 'supplier_overpayment_credit_pool',
+        ]);
+
+        if ($paymentRows === []) {
+            return [
+                'applied_amount' => 0.0,
+                'application_count' => 0,
+                'applications' => [],
+            ];
+        }
+
+        $insertAllocation = $this->db->prepare(
+            'INSERT INTO supplier_payment_allocations (
+                supplier_payment_id, supplier_obligation_id, allocated_amount, allocation_note, exchange_rate_used, created_by_user_id
+             ) VALUES (
+                :supplier_payment_id, :supplier_obligation_id, :allocated_amount, :allocation_note, 1.00000000, :created_by_user_id
+             )'
+        );
+        $updatePayment = $this->db->prepare(
+            'UPDATE supplier_payments
+             SET allocated_amount = allocated_amount + :allocated_amount_delta,
+                 unallocated_amount = GREATEST(0, unallocated_amount - :unallocated_amount_delta),
+                 status = :status
+             WHERE id = :payment_id'
+        );
+
+        $applications = [];
+        $appliedTotal = 0.0;
+        foreach ($paymentRows as $paymentRow) {
+            if ($remainingToApply <= 0.005) {
+                break;
+            }
+
+            $paymentId = (int) ($paymentRow['id'] ?? 0);
+            $availableAmount = round((float) ($paymentRow['unallocated_amount'] ?? 0), 2);
+            $appliedAmount = min($remainingToApply, $availableAmount);
+            if ($paymentId <= 0 || $appliedAmount <= 0.005) {
+                continue;
+            }
+
+            $remainingPaymentCredit = round(max(0, $availableAmount - $appliedAmount), 2);
+            $paymentStatus = $remainingPaymentCredit <= 0.005 ? 'fully_allocated' : 'partially_allocated';
+
+            $insertAllocation->execute([
+                'supplier_payment_id' => $paymentId,
+                'supplier_obligation_id' => $obligationId,
+                'allocated_amount' => $appliedAmount,
+                'allocation_note' => 'Automatically applied supplier overpayment credit to current payable.',
+                'created_by_user_id' => $actorUserId,
+            ]);
+
+            $updatePayment->execute([
+                'allocated_amount_delta' => $appliedAmount,
+                'unallocated_amount_delta' => $appliedAmount,
+                'status' => $paymentStatus,
+                'payment_id' => $paymentId,
+            ]);
+
+            $applications[] = [
+                'supplier_payment_id' => $paymentId,
+                'payment_no' => (string) ($paymentRow['payment_no'] ?? ''),
+                'payment_scope' => (string) ($paymentRow['payment_scope'] ?? 'booking'),
+                'applied_amount' => $appliedAmount,
+                'available_before' => $availableAmount,
+                'available_after' => $remainingPaymentCredit,
+            ];
+            $appliedTotal = round($appliedTotal + $appliedAmount, 2);
+            $remainingToApply = round($remainingToApply - $appliedAmount, 2);
+
+            AuditLog::record($this->app, 'supplier.payment_credit.auto_allocated', [
+                'user_id' => $actorUserId,
+                'supplier_payment_id' => $paymentId,
+                'supplier_obligation_id' => $obligationId,
+                'booking_reference' => $bookingReference,
+                'currency' => $currency,
+                'allocated_amount' => $appliedAmount,
+                'reason' => 'supplier_overpayment_credit_used_for_new_payable',
+            ]);
+
+            $this->supplierAdvanceTraceLog('autoApplyAvailableAdvanceToObligation', 'supplier_payment_credit_row_applied', [
+                'trace_id' => $traceId,
+                'supplier_id' => $supplierId,
+                'branch_id' => $branchId,
+                'currency' => $currency,
+                'obligation_id' => $obligationId,
+                'supplier_payment_id' => $paymentId,
+                'payment_no' => (string) ($paymentRow['payment_no'] ?? ''),
+                'applied_amount' => $appliedAmount,
+                'available_amount_before' => $availableAmount,
+                'available_amount_after' => $remainingPaymentCredit,
+                'reason' => 'supplier_overpayment_credit_used_for_new_payable',
+            ]);
+        }
+
+        if ($appliedTotal > 0.005) {
+            $grossAmount = round((float) ($obligation['gross_amount'] ?? 0), 2);
+            $advanceAppliedAmount = round((float) ($obligation['advance_applied_amount'] ?? 0), 2);
+            $paymentAllocatedAmount = $this->paymentAllocatedAmountForObligation($obligationId);
+            $netPayableAmount = round(max(0, $grossAmount - $advanceAppliedAmount - $paymentAllocatedAmount), 2);
+            $status = $this->obligationStatus($grossAmount, $advanceAppliedAmount, $paymentAllocatedAmount, $netPayableAmount);
+
+            $updateObligation = $this->db->prepare(
+                'UPDATE supplier_obligations
+                 SET net_payable_amount = :net_payable_amount,
+                     status = :status
+                 WHERE id = :obligation_id'
+            );
+            $updateObligation->execute([
+                'net_payable_amount' => $netPayableAmount,
+                'status' => $status,
+                'obligation_id' => $obligationId,
+            ]);
+        }
+
+        return [
+            'applied_amount' => $appliedTotal,
+            'application_count' => count($applications),
+            'applications' => $applications,
+        ];
     }
 
     private function obligationStatus(float $grossAmount, float $advanceAppliedAmount, float $paymentAllocatedAmount, float $netPayableAmount): string
@@ -2461,12 +3059,9 @@ final class SupplierRepository extends BaseRepository
             }
 
             $finalAppliedAmount = round($currentAppliedAmount, 2);
-            $finalNetPayableAmount = round(max(0, $grossAmount - $finalAppliedAmount), 2);
-            $finalStatus = $grossAmount <= 0
-                ? 'cancelled'
-                : ($finalNetPayableAmount <= 0
-                    ? ($finalAppliedAmount > 0 ? 'covered_by_advance' : 'open')
-                    : ($finalAppliedAmount > 0 ? 'partially_covered' : 'open'));
+            $finalPaymentAllocatedAmount = $this->paymentAllocatedAmountForObligation($obligationId);
+            $finalNetPayableAmount = round(max(0, $grossAmount - $finalAppliedAmount - $finalPaymentAllocatedAmount), 2);
+            $finalStatus = $this->obligationStatus($grossAmount, $finalAppliedAmount, $finalPaymentAllocatedAmount, $finalNetPayableAmount);
 
             $updateObligation->execute([
                 'advance_applied_amount' => $finalAppliedAmount,
@@ -2474,6 +3069,17 @@ final class SupplierRepository extends BaseRepository
                 'status' => $finalStatus,
                 'obligation_id' => $obligationId,
             ]);
+
+            $paymentCreditApplication = $this->autoApplyUnallocatedSupplierPaymentCreditToObligation(
+                array_merge($obligation, [
+                    'advance_applied_amount' => $finalAppliedAmount,
+                    'net_payable_amount' => $finalNetPayableAmount,
+                    'status' => $finalStatus,
+                ]),
+                $finalNetPayableAmount,
+                $actorUserId,
+                $traceId
+            );
 
             $updatedObligation = $this->findObligationById($obligationId) ?? $obligation;
             $this->supplierAdvanceTraceLog('autoApplyAvailableAdvanceToObligation', 'auto_apply_completed', [
@@ -2486,8 +3092,9 @@ final class SupplierRepository extends BaseRepository
                 'action' => 'reconcile_completed',
                 'applied_amount_delta' => round($finalAppliedAmount - $startingAppliedAmount, 2),
                 'advance_applied_amount' => round((float) ($updatedObligation['advance_applied_amount'] ?? 0), 2),
+                'supplier_payment_credit_applied_amount' => round((float) ($paymentCreditApplication['applied_amount'] ?? 0), 2),
                 'status' => (string) ($updatedObligation['status'] ?? ''),
-                'reason' => 'supplier_advance_reconciled_to_current_payable',
+                'reason' => 'supplier_advance_and_overpayment_credit_reconciled_to_current_payable',
             ]);
 
             return [
@@ -2499,6 +3106,9 @@ final class SupplierRepository extends BaseRepository
                 )),
                 'application_count' => count($applications),
                 'applications' => $applications,
+                'supplier_payment_credit_applied_amount' => round((float) ($paymentCreditApplication['applied_amount'] ?? 0), 2),
+                'supplier_payment_credit_application_count' => (int) ($paymentCreditApplication['application_count'] ?? 0),
+                'supplier_payment_credit_applications' => $paymentCreditApplication['applications'] ?? [],
                 'obligation' => $updatedObligation,
             ];
         });

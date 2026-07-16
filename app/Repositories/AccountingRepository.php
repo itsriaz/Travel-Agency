@@ -14,10 +14,21 @@ final class AccountingRepository extends BaseRepository
     public function postJournalEntry(array $header, array $lines): int
     {
         return $this->transaction(function () use ($header, $lines): int {
+            $effectiveLines = array_values(array_filter($lines, static function (array $line): bool {
+                $debitAmount = round((float) ($line['debit_amount'] ?? 0), 2);
+                $creditAmount = round((float) ($line['credit_amount'] ?? 0), 2);
+
+                return $debitAmount > 0 || $creditAmount > 0;
+            }));
+
+            if ($effectiveLines === []) {
+                throw new RuntimeException('Journal entry has no effective lines to post.');
+            }
+
             $debitTotal = 0.0;
             $creditTotal = 0.0;
 
-            foreach ($lines as $line) {
+            foreach ($effectiveLines as $line) {
                 $debitTotal += (float) ($line['debit_amount'] ?? 0);
                 $creditTotal += (float) ($line['credit_amount'] ?? 0);
             }
@@ -71,7 +82,7 @@ final class AccountingRepository extends BaseRepository
                 implode(', ', $linePlaceholders)
             ));
 
-            foreach ($lines as $line) {
+            foreach ($effectiveLines as $line) {
                 $linePayload = [
                     'journal_entry_id' => $journalEntryId,
                     'account_id' => isset($line['account_id']) && (int) ($line['account_id'] ?? 0) > 0
@@ -102,6 +113,88 @@ final class AccountingRepository extends BaseRepository
 
             return $journalEntryId;
         });
+    }
+
+    public function reverseJournalEntry(int $journalEntryId, array $options = []): ?int
+    {
+        if ($journalEntryId <= 0) {
+            return null;
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT
+                je.id AS journal_entry_id,
+                je.branch_id,
+                je.booking_reference,
+                je.currency,
+                coa.code AS account_code,
+                jel.service_line_reference,
+                jel.supplier_obligation_id,
+                ' . ($this->columnExists('journal_entry_lines', 'supplier_payment_id') ? 'jel.supplier_payment_id' : 'NULL AS supplier_payment_id') . ',
+                jel.customer_receivable_item_id,
+                jel.customer_receipt_id,
+                jel.line_description,
+                jel.debit_amount,
+                jel.credit_amount
+             FROM journal_entries je
+             INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+             INNER JOIN chart_of_accounts coa ON coa.id = jel.account_id
+             WHERE je.id = :journal_entry_id
+             ORDER BY jel.id ASC'
+        );
+        $statement->execute(['journal_entry_id' => $journalEntryId]);
+        $rows = $statement->fetchAll() ?: [];
+
+        if ($rows === []) {
+            return null;
+        }
+
+        $firstRow = $rows[0];
+        $lines = [];
+        foreach ($rows as $row) {
+            $debitAmount = round((float) ($row['debit_amount'] ?? 0), 2);
+            $creditAmount = round((float) ($row['credit_amount'] ?? 0), 2);
+            if ($debitAmount <= 0 && $creditAmount <= 0) {
+                continue;
+            }
+
+            $lines[] = [
+                'account_code' => (string) ($row['account_code'] ?? ''),
+                'service_line_reference' => ($row['service_line_reference'] ?? null) !== null && (string) ($row['service_line_reference'] ?? '') !== ''
+                    ? (string) $row['service_line_reference']
+                    : null,
+                'supplier_obligation_id' => isset($row['supplier_obligation_id']) && (int) ($row['supplier_obligation_id'] ?? 0) > 0
+                    ? (int) $row['supplier_obligation_id']
+                    : null,
+                'supplier_payment_id' => isset($row['supplier_payment_id']) && (int) ($row['supplier_payment_id'] ?? 0) > 0
+                    ? (int) $row['supplier_payment_id']
+                    : null,
+                'customer_receivable_item_id' => isset($row['customer_receivable_item_id']) && (int) ($row['customer_receivable_item_id'] ?? 0) > 0
+                    ? (int) $row['customer_receivable_item_id']
+                    : null,
+                'customer_receipt_id' => isset($row['customer_receipt_id']) && (int) ($row['customer_receipt_id'] ?? 0) > 0
+                    ? (int) $row['customer_receipt_id']
+                    : null,
+                'line_description' => (string) ($options['line_description_prefix'] ?? 'Reversal: ') . (string) ($row['line_description'] ?? ''),
+                'debit_amount' => $creditAmount,
+                'credit_amount' => $debitAmount,
+            ];
+        }
+
+        if ($lines === []) {
+            return null;
+        }
+
+        return $this->postJournalEntry([
+            'branch_id' => (int) ($options['branch_id'] ?? $firstRow['branch_id'] ?? 0),
+            'booking_reference' => $options['booking_reference'] ?? ($firstRow['booking_reference'] ?? null),
+            'source_type' => (string) ($options['source_type'] ?? 'journal_reversal'),
+            'source_reference' => $options['source_reference'] ?? ('REV-JE-' . $journalEntryId),
+            'entry_date' => $options['entry_date'] ?? date('Y-m-d'),
+            'currency' => $options['currency'] ?? ($firstRow['currency'] ?? 'PKR'),
+            'narration' => $options['narration'] ?? ('Journal reversal for JE-' . $journalEntryId),
+            'actor_user_id' => $options['actor_user_id'] ?? null,
+        ], $lines);
     }
 
     public function postReceivableCreated(array $data): int
@@ -624,6 +717,76 @@ final class AccountingRepository extends BaseRepository
         ]);
     }
 
+    public function postCustomerDirectSupplierPayment(array $data): int
+    {
+        return $this->postJournalEntry([
+            'branch_id' => $data['branch_id'],
+            'booking_reference' => $data['booking_reference'],
+            'source_type' => 'customer_direct_supplier_payment',
+            'source_reference' => $data['source_reference'] ?? null,
+            'entry_date' => $data['entry_date'],
+            'currency' => $data['currency'],
+            'narration' => $data['narration'] ?? 'Customer paid supplier directly',
+            'actor_user_id' => $data['actor_user_id'] ?? null,
+        ], [
+            [
+                'account_code' => 'AP_CONTROL',
+                'service_line_reference' => $data['service_line_reference'] ?? null,
+                'supplier_obligation_id' => $data['supplier_obligation_id'] ?? null,
+                'supplier_payment_id' => $data['supplier_payment_id'] ?? null,
+                'line_description' => 'Supplier payable reduced by direct customer payment',
+                'debit_amount' => $data['amount'],
+                'credit_amount' => 0,
+            ],
+            [
+                'account_code' => 'AR_CONTROL',
+                'service_line_reference' => $data['service_line_reference'] ?? null,
+                'customer_receivable_item_id' => $data['customer_receivable_item_id'] ?? null,
+                'customer_receipt_id' => $data['customer_receipt_id'] ?? null,
+                'line_description' => 'Customer receivable reduced by direct supplier payment',
+                'debit_amount' => 0,
+                'credit_amount' => $data['amount'],
+            ],
+        ]);
+    }
+
+    public function postCustomerAdvanceRefund(array $data): int
+    {
+        $amount = round((float) ($data['amount'] ?? 0), 2);
+        if ($amount <= 0) {
+            throw new RuntimeException('Customer advance refund amount must be greater than zero.');
+        }
+
+        $cashAccount = $this->customerReceiptAssetAccount($data);
+
+        return $this->postJournalEntry([
+            'branch_id' => $data['branch_id'],
+            'booking_reference' => null,
+            'source_type' => 'customer_advance_refunded',
+            'source_reference' => $data['source_reference'] ?? null,
+            'entry_date' => $data['entry_date'],
+            'currency' => $data['currency'],
+            'narration' => $data['narration'] ?? 'Customer advance refunded',
+            'actor_user_id' => $data['actor_user_id'] ?? null,
+        ], [
+            [
+                'account_code' => 'CUSTOMER_CREDIT',
+                'customer_receipt_id' => $data['customer_receipt_id'] ?? null,
+                'line_description' => 'Customer advance credit reduced',
+                'debit_amount' => $amount,
+                'credit_amount' => 0,
+            ],
+            [
+                'account_code' => $cashAccount['account_code'],
+                'account_id' => $cashAccount['account_id'],
+                'customer_receipt_id' => $data['customer_receipt_id'] ?? null,
+                'line_description' => 'Cash or bank returned to customer',
+                'debit_amount' => 0,
+                'credit_amount' => $amount,
+            ],
+        ]);
+    }
+
     public function postCustomerReceiptAllocationRelease(array $data): int
     {
         return $this->postJournalEntry([
@@ -653,6 +816,108 @@ final class AccountingRepository extends BaseRepository
                 'credit_amount' => $data['released_amount'],
             ],
         ]);
+    }
+
+    public function postBusinessExpenseRecorded(array $data): int
+    {
+        $amount = (float) ($data['amount'] ?? 0);
+        if ($amount <= 0) {
+            throw new RuntimeException('Business expense amount must be greater than zero.');
+        }
+
+        $sourceAccountId = (int) ($data['source_account_id'] ?? 0);
+        $sourceAccountCode = trim((string) ($data['source_account_code'] ?? ''));
+        if ($sourceAccountId <= 0 && $sourceAccountCode === '') {
+            throw new RuntimeException('Business expense source account could not be resolved.');
+        }
+
+        return $this->postJournalEntry([
+            'branch_id' => $data['branch_id'],
+            'booking_reference' => $data['booking_reference'] ?? null,
+            'source_type' => 'business_expense_recorded',
+            'source_reference' => $data['source_reference'] ?? null,
+            'entry_date' => $data['entry_date'],
+            'currency' => $data['currency'],
+            'narration' => $data['narration'] ?? 'Business expense recorded',
+            'actor_user_id' => $data['actor_user_id'] ?? null,
+        ], [
+            [
+                'account_code' => 'OPERATING_EXPENSES',
+                'line_description' => $data['expense_line_description'] ?? 'Operating expense recognized',
+                'debit_amount' => $amount,
+                'credit_amount' => 0,
+            ],
+            [
+                'account_code' => $sourceAccountCode,
+                'account_id' => $sourceAccountId > 0 ? $sourceAccountId : null,
+                'line_description' => $data['source_line_description'] ?? 'Cash or bank source account reduced by expense',
+                'debit_amount' => 0,
+                'credit_amount' => $amount,
+            ],
+        ]);
+    }
+
+    public function postBusinessExpenseEditReversal(array $data): ?int
+    {
+        $originalJournalEntryId = (int) ($data['journal_entry_id'] ?? 0);
+        if ($originalJournalEntryId <= 0) {
+            return null;
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT
+                je.id AS journal_entry_id,
+                je.branch_id,
+                je.booking_reference,
+                je.currency,
+                coa.code AS account_code,
+                jel.line_description,
+                jel.debit_amount,
+                jel.credit_amount
+             FROM journal_entries je
+             INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+             INNER JOIN chart_of_accounts coa ON coa.id = jel.account_id
+             WHERE je.id = :journal_entry_id
+               AND je.source_type = "business_expense_recorded"
+             ORDER BY jel.id ASC'
+        );
+        $statement->execute(['journal_entry_id' => $originalJournalEntryId]);
+        $rows = $statement->fetchAll() ?: [];
+
+        if ($rows === []) {
+            return null;
+        }
+
+        $lines = [];
+        foreach ($rows as $row) {
+            $debitAmount = round((float) ($row['debit_amount'] ?? 0), 2);
+            $creditAmount = round((float) ($row['credit_amount'] ?? 0), 2);
+            if ($debitAmount <= 0 && $creditAmount <= 0) {
+                continue;
+            }
+
+            $lines[] = [
+                'account_code' => (string) ($row['account_code'] ?? ''),
+                'line_description' => 'Business expense correction reversal: ' . (string) ($row['line_description'] ?? ''),
+                'debit_amount' => $creditAmount,
+                'credit_amount' => $debitAmount,
+            ];
+        }
+
+        if ($lines === []) {
+            return null;
+        }
+
+        return $this->postJournalEntry([
+            'branch_id' => $data['branch_id'],
+            'booking_reference' => $data['booking_reference'] ?? null,
+            'source_type' => 'business_expense_corrected_reversal',
+            'source_reference' => $data['source_reference'] ?? null,
+            'entry_date' => $data['entry_date'],
+            'currency' => $data['currency'],
+            'narration' => $data['narration'] ?? 'Business expense correction reversal',
+            'actor_user_id' => $data['actor_user_id'] ?? null,
+        ], $lines);
     }
 
     public function postCustomerReceiptVoidReversal(array $data): ?int
@@ -785,6 +1050,217 @@ final class AccountingRepository extends BaseRepository
         ], $lines);
     }
 
+    public function postServiceRefundReversal(array $data): ?int
+    {
+        $originalJournalEntryId = (int) ($data['journal_entry_id'] ?? 0);
+        if ($originalJournalEntryId <= 0) {
+            return null;
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT
+                je.id AS journal_entry_id,
+                je.branch_id,
+                je.booking_reference,
+                je.currency,
+                coa.code AS account_code,
+                jel.service_line_reference,
+                jel.line_description,
+                jel.debit_amount,
+                jel.credit_amount
+             FROM journal_entries je
+             INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+             INNER JOIN chart_of_accounts coa ON coa.id = jel.account_id
+             WHERE je.id = :journal_entry_id
+               AND je.source_type = "service_refund_posted"
+             ORDER BY jel.id ASC'
+        );
+        $statement->execute(['journal_entry_id' => $originalJournalEntryId]);
+        $rows = $statement->fetchAll() ?: [];
+
+        if ($rows === []) {
+            return null;
+        }
+
+        $lines = [];
+        foreach ($rows as $row) {
+            $debitAmount = round((float) ($row['debit_amount'] ?? 0), 2);
+            $creditAmount = round((float) ($row['credit_amount'] ?? 0), 2);
+            if ($debitAmount <= 0 && $creditAmount <= 0) {
+                continue;
+            }
+
+            $lines[] = [
+                'account_code' => (string) ($row['account_code'] ?? ''),
+                'service_line_reference' => ($row['service_line_reference'] ?? null) !== null && (string) ($row['service_line_reference'] ?? '') !== ''
+                    ? (string) $row['service_line_reference']
+                    : null,
+                'line_description' => 'Service refund reversal: ' . (string) ($row['line_description'] ?? ''),
+                'debit_amount' => $creditAmount,
+                'credit_amount' => $debitAmount,
+            ];
+        }
+
+        if ($lines === []) {
+            return null;
+        }
+
+        return $this->postJournalEntry([
+            'branch_id' => $data['branch_id'],
+            'booking_reference' => $data['booking_reference'],
+            'source_type' => 'service_refund_reversed',
+            'source_reference' => $data['source_reference'] ?? null,
+            'entry_date' => $data['entry_date'],
+            'currency' => $data['currency'],
+            'narration' => $data['narration'] ?? 'Service refund reversal',
+            'actor_user_id' => $data['actor_user_id'] ?? null,
+        ], $lines);
+    }
+
+    public function postServiceRefundComponentReversal(array $data): ?int
+    {
+        $customerRefundAmount = round((float) ($data['customer_refund_amount'] ?? 0), 2);
+        $supplierRefundAmount = round((float) ($data['supplier_refund_amount'] ?? 0), 2);
+        if ($customerRefundAmount <= 0 && $supplierRefundAmount <= 0) {
+            return null;
+        }
+
+        $assetAccount = $this->paymentMethodAssetAccount($data);
+        $cashAccountCode = (string) $assetAccount['account_code'];
+        $lines = [];
+
+        if ($customerRefundAmount > 0) {
+            $lines[] = [
+                'account_code' => $cashAccountCode,
+                'service_line_reference' => $data['service_line_reference'] ?? null,
+                'line_description' => 'Customer refund reversal cash restored',
+                'debit_amount' => $customerRefundAmount,
+                'credit_amount' => 0,
+            ];
+            $lines[] = [
+                'account_code' => 'CUSTOMER_CREDIT',
+                'service_line_reference' => $data['service_line_reference'] ?? null,
+                'line_description' => 'Customer refund reversal credit restored',
+                'debit_amount' => 0,
+                'credit_amount' => $customerRefundAmount,
+            ];
+        }
+
+        if ($supplierRefundAmount > 0) {
+            $lines[] = [
+                'account_code' => 'SUPPLIER_ADVANCES',
+                'service_line_reference' => $data['service_line_reference'] ?? null,
+                'line_description' => 'Supplier refund reversal credit restored',
+                'debit_amount' => $supplierRefundAmount,
+                'credit_amount' => 0,
+            ];
+            $lines[] = [
+                'account_code' => $cashAccountCode,
+                'service_line_reference' => $data['service_line_reference'] ?? null,
+                'line_description' => 'Supplier refund reversal cash reversed',
+                'debit_amount' => 0,
+                'credit_amount' => $supplierRefundAmount,
+            ];
+        }
+
+        return $this->postJournalEntry([
+            'branch_id' => $data['branch_id'],
+            'booking_reference' => $data['booking_reference'],
+            'source_type' => 'service_refund_component_reversed',
+            'source_reference' => $data['source_reference'] ?? null,
+            'entry_date' => $data['entry_date'],
+            'currency' => $data['currency'],
+            'narration' => $data['narration'] ?? 'Service refund component reversal',
+            'actor_user_id' => $data['actor_user_id'] ?? null,
+        ], $lines);
+    }
+
+    public function postDirectTreasuryEntry(array $data): int
+    {
+        $amount = round((float) ($data['amount'] ?? 0), 2);
+        if ($amount <= 0) {
+            throw new RuntimeException('Direct treasury entry amount must be greater than zero.');
+        }
+
+        $transactionType = (string) ($data['transaction_type'] ?? '');
+        if (! in_array($transactionType, ['adjustment_increase', 'adjustment_decrease'], true)) {
+            throw new RuntimeException('Direct treasury entry type is invalid.');
+        }
+
+        $treasuryAccount = $this->treasuryAccountLedgerReference((int) ($data['treasury_account_id'] ?? 0));
+        if ($treasuryAccount === null) {
+            throw new RuntimeException('Direct treasury entry requires a valid cash or bank account.');
+        }
+
+        $counterparty = trim((string) ($data['counterparty_name'] ?? ''));
+        $counterpartyLabel = $counterparty !== '' ? $counterparty : 'Direct treasury counterparty';
+        $treasuryAccountName = trim((string) ($treasuryAccount['account_name'] ?? ''));
+        if ($treasuryAccountName === '') {
+            $treasuryAccountName = (string) ($treasuryAccount['account_code'] ?? 'treasury account');
+        }
+
+        if ($transactionType === 'adjustment_increase') {
+            $contraAccount = $this->ensureAccountByCode(
+                'TREASURY_MISC_RECEIPTS',
+                'Direct Treasury Receipts',
+                'revenue',
+                'credit'
+            );
+
+            $lines = [
+                [
+                    'account_id' => $treasuryAccount['account_id'],
+                    'account_code' => $treasuryAccount['account_code'],
+                    'line_description' => 'Money received into ' . $treasuryAccountName . ' from ' . $counterpartyLabel,
+                    'debit_amount' => $amount,
+                    'credit_amount' => 0,
+                ],
+                [
+                    'account_id' => $contraAccount['account_id'],
+                    'account_code' => $contraAccount['account_code'],
+                    'line_description' => 'Direct treasury receipt recognized for ' . $counterpartyLabel,
+                    'debit_amount' => 0,
+                    'credit_amount' => $amount,
+                ],
+            ];
+        } else {
+            $contraAccount = $this->ensureAccountByCode(
+                'TREASURY_MISC_PAYMENTS',
+                'Direct Treasury Payments',
+                'expense',
+                'debit'
+            );
+
+            $lines = [
+                [
+                    'account_id' => $contraAccount['account_id'],
+                    'account_code' => $contraAccount['account_code'],
+                    'line_description' => 'Direct treasury payment recognized for ' . $counterpartyLabel,
+                    'debit_amount' => $amount,
+                    'credit_amount' => 0,
+                ],
+                [
+                    'account_id' => $treasuryAccount['account_id'],
+                    'account_code' => $treasuryAccount['account_code'],
+                    'line_description' => 'Money paid out from ' . $treasuryAccountName . ' to ' . $counterpartyLabel,
+                    'debit_amount' => 0,
+                    'credit_amount' => $amount,
+                ],
+            ];
+        }
+
+        return $this->postJournalEntry([
+            'branch_id' => $data['branch_id'],
+            'booking_reference' => null,
+            'source_type' => 'direct_treasury_entry_posted',
+            'source_reference' => $data['source_reference'] ?? null,
+            'entry_date' => $data['entry_date'],
+            'currency' => $data['currency'],
+            'narration' => $data['narration'] ?? 'Direct treasury entry posted',
+            'actor_user_id' => $data['actor_user_id'] ?? null,
+        ], $lines);
+    }
+
     public function postTreasuryTransfer(array $data): int
     {
         $amount = round((float) ($data['amount'] ?? 0), 2);
@@ -884,6 +1360,68 @@ final class AccountingRepository extends BaseRepository
             'entry_date' => $data['entry_date'],
             'currency' => $data['currency'],
             'narration' => $data['narration'] ?? 'Treasury transfer void reversal',
+            'actor_user_id' => $data['actor_user_id'] ?? null,
+        ], $lines);
+    }
+
+    public function postDirectTreasuryEntryVoidReversal(array $data): ?int
+    {
+        $originalJournalEntryId = (int) ($data['journal_entry_id'] ?? 0);
+        if ($originalJournalEntryId <= 0) {
+            return null;
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT
+                je.id AS journal_entry_id,
+                je.branch_id,
+                je.currency,
+                coa.code AS account_code,
+                jel.line_description,
+                jel.debit_amount,
+                jel.credit_amount
+             FROM journal_entries je
+             INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+             INNER JOIN chart_of_accounts coa ON coa.id = jel.account_id
+             WHERE je.id = :journal_entry_id
+               AND je.source_type = "direct_treasury_entry_posted"
+             ORDER BY jel.id ASC'
+        );
+        $statement->execute(['journal_entry_id' => $originalJournalEntryId]);
+        $rows = $statement->fetchAll() ?: [];
+
+        if ($rows === []) {
+            return null;
+        }
+
+        $lines = [];
+        foreach ($rows as $row) {
+            $debitAmount = round((float) ($row['debit_amount'] ?? 0), 2);
+            $creditAmount = round((float) ($row['credit_amount'] ?? 0), 2);
+            if ($debitAmount <= 0 && $creditAmount <= 0) {
+                continue;
+            }
+
+            $lines[] = [
+                'account_code' => (string) ($row['account_code'] ?? ''),
+                'line_description' => 'Direct treasury void reversal: ' . (string) ($row['line_description'] ?? ''),
+                'debit_amount' => $creditAmount,
+                'credit_amount' => $debitAmount,
+            ];
+        }
+
+        if ($lines === []) {
+            return null;
+        }
+
+        return $this->postJournalEntry([
+            'branch_id' => $data['branch_id'],
+            'booking_reference' => null,
+            'source_type' => 'direct_treasury_entry_void_reversed',
+            'source_reference' => $data['source_reference'] ?? null,
+            'entry_date' => $data['entry_date'],
+            'currency' => $data['currency'],
+            'narration' => $data['narration'] ?? 'Direct treasury entry void reversal',
             'actor_user_id' => $data['actor_user_id'] ?? null,
         ], $lines);
     }
@@ -1034,6 +1572,8 @@ final class AccountingRepository extends BaseRepository
             'customer_receipt_allocated' => 'Customer Receipt Allocated',
             'customer_receipt_allocation_released' => 'Customer Allocation Released',
             'customer_receipt_void_reversed' => 'Customer Receipt Void Reversed',
+            'customer_advance_refunded' => 'Customer Advance Refunded',
+            'service_refund_reversed' => 'Service Refund Reversed',
             'supplier_advance_recorded' => 'Supplier Advance Recorded',
             'supplier_advance_applied' => 'Supplier Advance Applied',
             'supplier_advance_adjusted' => 'Supplier Advance Adjusted',
@@ -1042,6 +1582,8 @@ final class AccountingRepository extends BaseRepository
             'supplier_payment_allocated' => 'Supplier Payment Allocated',
             'treasury_transfer_posted' => 'Treasury Transfer Posted',
             'treasury_transfer_void_reversed' => 'Treasury Transfer Void Reversed',
+            'direct_treasury_entry_posted' => 'Direct Treasury Entry Posted',
+            'direct_treasury_entry_void_reversed' => 'Direct Treasury Entry Void Reversed',
             default => ucwords(str_replace('_', ' ', $sourceType)),
         };
     }
@@ -1073,6 +1615,42 @@ final class AccountingRepository extends BaseRepository
         $this->accountIdCache[$code] = $accountId;
 
         return $accountId;
+    }
+
+    private function ensureAccountByCode(string $code, string $name, string $accountType, string $normalBalance): array
+    {
+        $statement = $this->db->prepare(
+            'SELECT id
+             FROM chart_of_accounts
+             WHERE code = :code
+             LIMIT 1'
+        );
+        $statement->execute(['code' => $code]);
+        $accountId = (int) ($statement->fetchColumn() ?: 0);
+
+        if ($accountId <= 0) {
+            $insert = $this->db->prepare(
+                'INSERT INTO chart_of_accounts (
+                    code, name, account_type, normal_balance, is_system, is_active
+                 ) VALUES (
+                    :code, :name, :account_type, :normal_balance, 1, 1
+                 )'
+            );
+            $insert->execute([
+                'code' => $code,
+                'name' => $name,
+                'account_type' => $accountType,
+                'normal_balance' => $normalBalance,
+            ]);
+            $accountId = (int) $this->db->lastInsertId();
+        }
+
+        $this->accountIdCache[$code] = $accountId;
+
+        return [
+            'account_code' => $code,
+            'account_id' => $accountId,
+        ];
     }
 
     private function customerReceiptAssetAccount(array $data): array
@@ -1146,6 +1724,7 @@ final class AccountingRepository extends BaseRepository
             return [
                 'account_code' => $desiredCode,
                 'account_id' => $linkedAccountId,
+                'account_name' => (string) ($account['account_name'] ?? $desiredCode),
             ];
         }
 
@@ -1190,6 +1769,7 @@ final class AccountingRepository extends BaseRepository
             ? [
                 'account_code' => $desiredCode,
                 'account_id' => $existingId,
+                'account_name' => (string) ($account['account_name'] ?? $desiredCode),
             ]
             : null;
     }

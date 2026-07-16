@@ -37,8 +37,54 @@ final class SecuritySettingsService extends Service
         $summary = $this->userSummary($userId);
         $roleCode = (string) (($summary['user']['role_code'] ?? '') ?: '');
         $summary['branch_access_ids'] = $users->branchIdsForUser($userId, $roleCode);
+        $summary['events'] = array_map(function (array $event): array {
+            $payload = [];
+            $rawPayload = (string) ($event['payload_json'] ?? '');
+            if ($rawPayload !== '') {
+                $decoded = json_decode($rawPayload, true);
+                if (is_array($decoded)) {
+                    $payload = $decoded;
+                }
+            }
+
+            $countryCode = strtoupper(trim((string) ($payload['country_code'] ?? $payload['request_country_code'] ?? '')));
+            $countryName = match ($countryCode) {
+                'PK' => 'Pakistan',
+                'AE' => 'United Arab Emirates',
+                'US' => 'United States',
+                'GB' => 'United Kingdom',
+                default => $countryCode,
+            };
+
+            return $event + [
+                'country_code' => $countryCode,
+                'country_name' => $countryName !== '' ? $countryName : '-',
+                'device_label' => trim((string) ($payload['device_label'] ?? '')),
+                'user_agent_summary' => $this->summarizeUserAgent((string) ($event['user_agent'] ?? '')),
+            ];
+        }, $summary['events'] ?? []);
 
         return $summary;
+    }
+
+    private function summarizeUserAgent(string $userAgent): string
+    {
+        $userAgent = trim($userAgent);
+        if ($userAgent === '') {
+            return '-';
+        }
+
+        $segments = preg_split('/\s+/', $userAgent) ?: [];
+        $filtered = [];
+        foreach ($segments as $segment) {
+            if ($segment === '' || str_starts_with($segment, 'Mozilla/') || str_starts_with($segment, 'AppleWebKit/') || str_starts_with($segment, 'Safari/')) {
+                continue;
+            }
+            $filtered[] = $segment;
+        }
+
+        $summary = trim(implode(' | ', array_slice($filtered, 0, 4)));
+        return $summary !== '' ? $summary : $userAgent;
     }
 
     public function adminRoleBranchOptions(): array
@@ -271,12 +317,52 @@ final class SecuritySettingsService extends Service
     public static function buildSessionData(\App\Core\App $app, array $user, bool $twoFactorVerified): UserSessionData
     {
         $users = new UserRepository($app);
-        $accessibleBranchIds = array_map('intval', $users->branchIdsForUser((int) $user['id'], $user['role_code']));
-        $branchOptions = (new \App\Repositories\BookingRepository($app))->branchOptions($accessibleBranchIds);
+        $userId = (int) ($user['id'] ?? 0);
+        $roleCode = (string) ($user['role_code'] ?? '');
+        $defaultBranchId = (int) ($user['default_branch_id'] ?? 0);
+        $accessibleBranchIds = array_map('intval', $users->branchIdsForUser($userId, $roleCode));
+        $bookingRepository = new \App\Repositories\BookingRepository($app);
+
+        if ($roleCode !== 'super_admin' && $accessibleBranchIds === [] && $defaultBranchId > 0) {
+            $fallbackBranchOptions = $bookingRepository->branchOptions([$defaultBranchId]);
+            if ($fallbackBranchOptions !== []) {
+                $accessibleBranchIds = [$defaultBranchId];
+                app_write_log('auth.session.branch_access_fallback', 'User branch access rows were missing; default branch fallback applied.', [
+                    'user_id' => $userId,
+                    'role_code' => $roleCode,
+                    'default_branch_id' => $defaultBranchId,
+                    'two_factor_verified' => $twoFactorVerified,
+                ]);
+            }
+        }
+
+        if ($roleCode !== 'super_admin' && $accessibleBranchIds === []) {
+            app_write_log('auth.session.branch_access_missing', 'User session could not resolve any accessible branch.', [
+                'user_id' => $userId,
+                'role_code' => $roleCode,
+                'default_branch_id' => $defaultBranchId,
+                'two_factor_verified' => $twoFactorVerified,
+            ]);
+            throw new RuntimeException('Your account does not have an active branch assignment. Please contact the administrator.');
+        }
+
+        $branchOptions = $bookingRepository->branchOptions($accessibleBranchIds);
         $activeBranchId = (new BranchContextService($app))->resolveLoginActiveBranchId(
-            (int) $user['default_branch_id'],
+            $defaultBranchId,
             $accessibleBranchIds
         );
+
+        if ($roleCode !== 'super_admin' && $activeBranchId <= 0) {
+            app_write_log('auth.session.active_branch_missing', 'User session could not resolve an active branch.', [
+                'user_id' => $userId,
+                'role_code' => $roleCode,
+                'default_branch_id' => $defaultBranchId,
+                'accessible_branch_ids' => $accessibleBranchIds,
+                'two_factor_verified' => $twoFactorVerified,
+            ]);
+            throw new RuntimeException('Your account could not resolve an active branch. Please contact the administrator.');
+        }
+
         $branchNameById = [];
         foreach ($branchOptions as $branchOption) {
             $branchId = (int) ($branchOption['id'] ?? 0);
@@ -286,7 +372,6 @@ final class SecuritySettingsService extends Service
 
             $branchNameById[$branchId] = (string) ($branchOption['name'] ?? '');
         }
-        $defaultBranchId = (int) ($user['default_branch_id'] ?? 0);
         $activeBranchName = (string) ($branchNameById[$activeBranchId] ?? '');
         $defaultBranchName = (string) ($branchNameById[$defaultBranchId] ?? ($user['default_branch_name'] ?? ''));
         $accessibleBranchNames = [];

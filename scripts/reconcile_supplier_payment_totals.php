@@ -20,6 +20,27 @@ if (isset($options['help'])) {
 
 $apply = array_key_exists('apply', $options);
 
+$columnExists = static function (PDO $db, string $tableName, string $columnName): bool {
+    $statement = $db->prepare(
+        'SELECT COUNT(*)
+         FROM INFORMATION_SCHEMA.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE()
+           AND TABLE_NAME = :table_name
+           AND COLUMN_NAME = :column_name'
+    );
+    $statement->execute([
+        'table_name' => $tableName,
+        'column_name' => $columnName,
+    ]);
+
+    return (int) $statement->fetchColumn() > 0;
+};
+
+$hasConvertedAdvanceAmount = $columnExists($db, 'supplier_payments', 'converted_advance_amount');
+$convertedAdvanceSelect = $hasConvertedAdvanceAmount
+    ? 'sp.converted_advance_amount'
+    : '0.00';
+
 $rows = $db->query(
     'SELECT
         sp.id,
@@ -29,6 +50,7 @@ $rows = $db->query(
         sp.paid_amount,
         sp.allocated_amount AS stored_allocated_amount,
         sp.unallocated_amount AS stored_unallocated_amount,
+        ' . $convertedAdvanceSelect . ' AS converted_advance_amount,
         sp.status AS stored_status,
         COALESCE(SUM(spa.allocated_amount), 0) AS allocation_rows_total
      FROM supplier_payments sp
@@ -36,9 +58,9 @@ $rows = $db->query(
      WHERE sp.status <> "void"
      GROUP BY sp.id
      HAVING ABS(sp.allocated_amount - allocation_rows_total) > 0.005
-         OR ABS(sp.unallocated_amount - GREATEST(0, sp.paid_amount - allocation_rows_total)) > 0.005
+         OR ABS(sp.unallocated_amount - GREATEST(0, sp.paid_amount - allocation_rows_total - converted_advance_amount)) > 0.005
          OR sp.status <> CASE
-             WHEN GREATEST(0, sp.paid_amount - allocation_rows_total) <= 0.005 THEN "fully_allocated"
+             WHEN GREATEST(0, sp.paid_amount - allocation_rows_total - converted_advance_amount) <= 0.005 THEN "fully_allocated"
              WHEN allocation_rows_total > 0 THEN "partially_allocated"
              ELSE "paid"
          END
@@ -56,7 +78,8 @@ $repairRows = [];
 foreach ($rows as $row) {
     $paidAmount = round((float) $row['paid_amount'], 2);
     $allocatedAmount = round((float) $row['allocation_rows_total'], 2);
-    $unallocatedAmount = round(max(0, $paidAmount - $allocatedAmount), 2);
+    $convertedAdvanceAmount = round((float) ($row['converted_advance_amount'] ?? 0), 2);
+    $unallocatedAmount = round(max(0, $paidAmount - $allocatedAmount - $convertedAdvanceAmount), 2);
     $status = $unallocatedAmount <= 0.005
         ? 'fully_allocated'
         : ($allocatedAmount > 0 ? 'partially_allocated' : 'paid');
@@ -70,6 +93,7 @@ foreach ($rows as $row) {
         'new_allocated_amount' => number_format($allocatedAmount, 2, '.', ''),
         'stored_unallocated_amount' => (string) $row['stored_unallocated_amount'],
         'new_unallocated_amount' => number_format($unallocatedAmount, 2, '.', ''),
+        'converted_advance_amount' => number_format($convertedAdvanceAmount, 2, '.', ''),
         'stored_status' => (string) $row['stored_status'],
         'new_status' => $status,
     ];

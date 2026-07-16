@@ -150,6 +150,25 @@ function app_request_id(): string
 
 function app_request_log_context(): array
 {
+    $requestValue = static function (string $key): mixed {
+        if (array_key_exists($key, $_POST)) {
+            return $_POST[$key];
+        }
+
+        if (array_key_exists($key, $_GET)) {
+            return $_GET[$key];
+        }
+
+        return null;
+    };
+
+    $bookingId = (int) ($requestValue('booking_id') ?? 0);
+    $serviceId = (int) ($requestValue('service_id') ?? 0);
+    $customerReceiptId = (int) ($requestValue('customer_receipt_id') ?? 0);
+    $supplierPaymentId = (int) ($requestValue('supplier_payment_id') ?? 0);
+    $bookingReference = trim((string) ($requestValue('booking_reference') ?? ''));
+    $quickSearch = trim((string) ($requestValue('q') ?? ''));
+
     return [
         'request_id' => app_request_id(),
         'url' => $_SERVER['REQUEST_URI'] ?? null,
@@ -157,6 +176,12 @@ function app_request_log_context(): array
         'ip' => $_SERVER['REMOTE_ADDR'] ?? null,
         'user_agent' => isset($_SERVER['HTTP_USER_AGENT']) ? substr((string) $_SERVER['HTTP_USER_AGENT'], 0, 220) : null,
         'referer' => isset($_SERVER['HTTP_REFERER']) ? substr((string) $_SERVER['HTTP_REFERER'], 0, 220) : null,
+        'booking_id' => $bookingId > 0 ? $bookingId : null,
+        'booking_reference' => $bookingReference !== '' ? substr($bookingReference, 0, 80) : null,
+        'quick_search' => $quickSearch !== '' ? substr($quickSearch, 0, 120) : null,
+        'service_id' => $serviceId > 0 ? $serviceId : null,
+        'customer_receipt_id' => $customerReceiptId > 0 ? $customerReceiptId : null,
+        'supplier_payment_id' => $supplierPaymentId > 0 ? $supplierPaymentId : null,
     ];
 }
 

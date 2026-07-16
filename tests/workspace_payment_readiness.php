@@ -2,12 +2,14 @@
 
 declare(strict_types=1);
 
-define('BASE_PATH', dirname(__DIR__));
+defined('BASE_PATH') || define('BASE_PATH', dirname(__DIR__));
 
-require BASE_PATH . '/app/Helpers/functions.php';
-require BASE_PATH . '/app/Core/bootstrap.php';
+require_once BASE_PATH . '/app/Helpers/functions.php';
+require_once BASE_PATH . '/app/Core/bootstrap.php';
 
-$app = \App\Core\App::bootstrap(BASE_PATH);
+$app = (isset($app) && $app instanceof \App\Core\App)
+    ? $app
+    : \App\Core\App::bootstrap(BASE_PATH);
 /** @var PDO $db */
 $db = $app->get('db');
 
@@ -151,6 +153,21 @@ $check(
     ])
 );
 $check(
+    'Workspace payment scope controls support whole-invoice and passenger-specific receipt targeting',
+    $containsAll($workspaceView, [
+        'name="receipt_scope"',
+        'data-payment-receipt-scope',
+        'name="target_receivable_item_id"',
+        'data-payment-target-receivable',
+    ])
+        && $containsAll($workspaceJs, [
+            'const paymentReceiptScopeSelect =',
+            'const paymentTargetReceivableSelect =',
+            'const currentBookingReceivableTargets = (currency = \'\') => {',
+            'const syncReceiptScopeTargets = () => {',
+        ])
+);
+$check(
     'Booking supplier payable table supports select all',
     $containsAll($workspaceView, [
         'data-simple-postpaid-select-all',
@@ -190,6 +207,14 @@ $check(
     ])
 );
 $check(
+    'Workspace payment save persists a new draft service before reusing existing booking payment state',
+    $containsAll($workspaceJs, [
+        'const currentServiceDraftRequiresPersistBeforePayment = () => {',
+        'const draftNeedsPersist = currentServiceDraftRequiresPersistBeforePayment();',
+        "window.workspaceDebugEnterFlow('payment-save-commit-draft-skip-existing'",
+    ])
+);
+$check(
     'Exchange settlement modal flow is present',
     $containsAll($workspaceJs, [
         'async function openExchangeSettlementModal(options = {})',
@@ -210,7 +235,17 @@ $check(
         'public function saveReceipt(array $input, int $actorUserId, array $accessibleBranchIds): array',
         'private function saveExchangeSettlement(array $input, int $actorUserId, array $accessibleBranchIds): array',
         'private function resolveReceiptTreasuryAccountId(array $input, array $payload, int $branchId): ?int',
+        'private const ALLOWED_RECEIPT_SCOPES = [\'whole_invoice\', \'passenger_specific\'];',
+        'private function shouldPostReceiptAccounting(array $payload): bool',
+        'resolveReceiptAllocationTargetId(',
         'Please configure/select a cash or bank account for this payment.',
+    ])
+);
+$check(
+    'Zero-value receipt saves skip empty accounting posts',
+    $containsAll($receiptService, [
+        'if ($this->shouldPostReceiptAccounting($payload)) {',
+        'postCustomerReceiptRecorded([',
     ])
 );
 $check(
@@ -232,6 +267,29 @@ $check(
     $containsAll($publicIndex, [
         '/workspace/payments/receipts/save',
         'saveReceipt',
+    ])
+);
+$check(
+    'Add Service saves the current service without creating zero-value receipt rows',
+    $containsAll($workspaceJs, [
+        "workflowOrigin: 'add_service'",
+        'suppressReceiptCreation: enteredPaymentAmount <= 0.005',
+        "receipt_action: suppressReceiptCreation ? 'no_receipt' : 'save'",
+    ])
+);
+$check(
+    'Receipt printing is guarded against duplicate opens in one click flow',
+    $containsAll($workspaceJs, [
+        'const openCustomerReceiptWindowOnce =',
+        'window.__travelReceiptOpenGuard',
+        'window.__travelReceiptClickGuard',
+        'receipt-open:calling-window-open',
+        'print-receipt:click-handler-entered',
+        'print-receipt:blocked-duplicate-click',
+        'event.stopImmediatePropagation();',
+        "receipt-open:blocked-duplicate",
+        "openCustomerReceiptWindowOnce('print-after-save')",
+        "openCustomerReceiptWindowOnce('save-payment')",
     ])
 );
 
@@ -331,7 +389,8 @@ if ($failures !== []) {
     foreach ($failures as $failure) {
         echo ' - ' . $failure . PHP_EOL;
     }
-    exit(1);
+    return 1;
 }
 
 echo PHP_EOL . 'Workspace/payment readiness checks passed.' . PHP_EOL;
+return 0;

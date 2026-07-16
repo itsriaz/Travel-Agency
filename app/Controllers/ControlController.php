@@ -13,6 +13,7 @@ use App\Repositories\BookingRepository;
 use App\Repositories\BookingServiceRepository;
 use App\Repositories\ExpenseRepository;
 use App\Repositories\MasterDataRepository;
+use App\Repositories\TreasuryRepository;
 use App\Services\AccountingFoundationService;
 use App\Services\AccountingSetupService;
 use App\Services\CustomerPaymentFoundationService;
@@ -33,6 +34,8 @@ final class ControlController extends BaseController
             'payment_methods',
             'supplier_modes',
             'document_types',
+            'expense_categories',
+            'business_sources',
         ]);
         $editId = (int) ($_GET['id'] ?? 0);
 
@@ -42,6 +45,8 @@ final class ControlController extends BaseController
         $paymentMethods = $this->decorateMasterRows($repository->rows('payment_methods'));
         $supplierModes = $this->decorateMasterRows($repository->rows('supplier_modes'));
         $documentTypes = $this->decorateMasterRows($repository->rows('document_types'));
+        $expenseCategories = $this->decorateMasterRows($repository->rows('expense_categories'));
+        $businessSources = $this->decorateMasterRows($repository->rows('business_sources'));
 
         $currencyOptions = array_map(
             static fn (array $row): array => [
@@ -66,7 +71,6 @@ final class ControlController extends BaseController
                     $branches,
                     $editRegister === 'branches' ? $repository->find('branches', $editId) : null,
                     [
-                        ['key' => 'code', 'label' => 'Code'],
                         ['key' => 'name', 'label' => 'Name'],
                         ['key' => 'city', 'label' => 'City'],
                         ['key' => 'country_code', 'label' => 'Country'],
@@ -74,7 +78,6 @@ final class ControlController extends BaseController
                         ['key' => 'status_label', 'label' => 'Status'],
                     ],
                     [
-                        ['name' => 'code', 'label' => 'Code', 'type' => 'text', 'maxlength' => 50, 'required' => true],
                         ['name' => 'name', 'label' => 'Name', 'type' => 'text', 'maxlength' => 190, 'required' => true],
                         ['name' => 'city', 'label' => 'City', 'type' => 'text', 'maxlength' => 120],
                         ['name' => 'country_code', 'label' => 'Country', 'type' => 'text', 'maxlength' => 2, 'required' => true],
@@ -89,14 +92,12 @@ final class ControlController extends BaseController
                     $currencies,
                     $editRegister === 'currencies' ? $repository->find('currencies', $editId) : null,
                     [
-                        ['key' => 'code', 'label' => 'Code'],
                         ['key' => 'name', 'label' => 'Name'],
                         ['key' => 'symbol', 'label' => 'Symbol'],
                         ['key' => 'reporting_role', 'label' => 'Reporting Role'],
                         ['key' => 'status_label', 'label' => 'Status'],
                     ],
                     [
-                        ['name' => 'code', 'label' => 'Code', 'type' => 'text', 'maxlength' => 3, 'required' => true],
                         ['name' => 'name', 'label' => 'Name', 'type' => 'text', 'maxlength' => 120, 'required' => true],
                         ['name' => 'symbol', 'label' => 'Symbol', 'type' => 'text', 'maxlength' => 10],
                         ['name' => 'reporting_role', 'label' => 'Role', 'type' => 'text', 'maxlength' => 190, 'required' => true],
@@ -111,13 +112,11 @@ final class ControlController extends BaseController
                     $serviceTypes,
                     $editRegister === 'service_types' ? $repository->find('service_types', $editId) : null,
                     [
-                        ['key' => 'code', 'label' => 'Code'],
                         ['key' => 'name', 'label' => 'Name'],
                         ['key' => 'posting_mode', 'label' => 'Posting Mode'],
                         ['key' => 'status_label', 'label' => 'Status'],
                     ],
                     [
-                        ['name' => 'code', 'label' => 'Code', 'type' => 'text', 'maxlength' => 20, 'required' => true],
                         ['name' => 'name', 'label' => 'Name', 'type' => 'text', 'maxlength' => 120, 'required' => true],
                         ['name' => 'posting_mode', 'label' => 'Posting', 'type' => 'text', 'maxlength' => 190, 'required' => true],
                         ['name' => 'sort_order', 'label' => 'Sort', 'type' => 'number', 'min' => 0],
@@ -131,14 +130,12 @@ final class ControlController extends BaseController
                     $paymentMethods,
                     $editRegister === 'payment_methods' ? $repository->find('payment_methods', $editId) : null,
                     [
-                        ['key' => 'code', 'label' => 'Code'],
                         ['key' => 'name', 'label' => 'Name'],
                         ['key' => 'ledger_target', 'label' => 'Ledger Target'],
                         ['key' => 'charges_target', 'label' => 'Charges Target'],
                         ['key' => 'status_label', 'label' => 'Status'],
                     ],
                     [
-                        ['name' => 'code', 'label' => 'Code', 'type' => 'text', 'maxlength' => 50, 'required' => true],
                         ['name' => 'name', 'label' => 'Name', 'type' => 'text', 'maxlength' => 120, 'required' => true],
                         ['name' => 'ledger_target', 'label' => 'Ledger', 'type' => 'text', 'maxlength' => 120, 'required' => true],
                         ['name' => 'charges_target', 'label' => 'Charges', 'type' => 'text', 'maxlength' => 120],
@@ -153,13 +150,11 @@ final class ControlController extends BaseController
                     $supplierModes,
                     $editRegister === 'supplier_modes' ? $repository->find('supplier_modes', $editId) : null,
                     [
-                        ['key' => 'code', 'label' => 'Code'],
                         ['key' => 'name', 'label' => 'Name'],
                         ['key' => 'behavior', 'label' => 'Behavior'],
                         ['key' => 'status_label', 'label' => 'Status'],
                     ],
                     [
-                        ['name' => 'code', 'label' => 'Code', 'type' => 'text', 'maxlength' => 50, 'required' => true],
                         ['name' => 'name', 'label' => 'Name', 'type' => 'text', 'maxlength' => 120, 'required' => true],
                         ['name' => 'behavior', 'label' => 'Behavior', 'type' => 'select', 'required' => true, 'options' => $this->choiceOptions([
                             'Creates direct supplier payable' => 'Creates direct supplier payable',
@@ -176,13 +171,11 @@ final class ControlController extends BaseController
                     $documentTypes,
                     $editRegister === 'document_types' ? $repository->find('document_types', $editId) : null,
                     [
-                        ['key' => 'code', 'label' => 'Code'],
                         ['key' => 'name', 'label' => 'Name'],
                         ['key' => 'linked_area', 'label' => 'Linked Area'],
                         ['key' => 'status_label', 'label' => 'Status'],
                     ],
                     [
-                        ['name' => 'code', 'label' => 'Code', 'type' => 'text', 'maxlength' => 50, 'required' => true],
                         ['name' => 'name', 'label' => 'Name', 'type' => 'text', 'maxlength' => 120, 'required' => true],
                         ['name' => 'linked_area', 'label' => 'Linked Area', 'type' => 'select', 'required' => true, 'options' => $this->choiceOptions([
                             'Booking' => 'Booking File',
@@ -195,6 +188,43 @@ final class ControlController extends BaseController
                             'Supplier Obligation' => 'Supplier Obligation',
                         ])],
                         ['name' => 'sort_order', 'label' => 'Sort', 'type' => 'number', 'min' => 0],
+                        ['name' => 'is_active', 'label' => 'Status', 'type' => 'select', 'options' => $this->statusOptions()],
+                    ]
+                ),
+                $this->masterPanel(
+                    'expense_categories',
+                    'Expense Categories',
+                    'Reusable admin expense categories used in the business-expense dropdown and reporting.',
+                    $expenseCategories,
+                    $editRegister === 'expense_categories' ? $repository->find('expense_categories', $editId) : null,
+                    [
+                        ['key' => 'name', 'label' => 'Name'],
+                        ['key' => 'sort_order', 'label' => 'Sort'],
+                        ['key' => 'status_label', 'label' => 'Status'],
+                    ],
+                    [
+                        ['name' => 'name', 'label' => 'Name', 'type' => 'text', 'maxlength' => 120, 'required' => true],
+                        ['name' => 'sort_order', 'label' => 'Sort', 'type' => 'number', 'min' => 0],
+                        ['name' => 'is_active', 'label' => 'Status', 'type' => 'select', 'options' => $this->statusOptions()],
+                    ]
+                ),
+                $this->masterPanel(
+                    'business_sources',
+                    'Accounts',
+                    'Business-source accounts used to track who brought each invoice or booking.',
+                    $businessSources,
+                    $editRegister === 'business_sources' ? $repository->find('business_sources', $editId) : null,
+                    [
+                        ['key' => 'name', 'label' => 'Account'],
+                        ['key' => 'phone', 'label' => 'Phone'],
+                        ['key' => 'address', 'label' => 'Address'],
+                        ['key' => 'status_label', 'label' => 'Status'],
+                    ],
+                    [
+                        ['name' => 'name', 'label' => 'Account', 'type' => 'text', 'maxlength' => 190, 'required' => true],
+                        ['name' => 'phone', 'label' => 'Phone', 'type' => 'text', 'maxlength' => 50],
+                        ['name' => 'address', 'label' => 'Address', 'type' => 'text', 'maxlength' => 500],
+                        ['name' => 'description', 'label' => 'Description', 'type' => 'textarea', 'maxlength' => 4000, 'stack' => true],
                         ['name' => 'is_active', 'label' => 'Status', 'type' => 'select', 'options' => $this->statusOptions()],
                     ]
                 ),
@@ -411,6 +441,7 @@ final class ControlController extends BaseController
             'expense_category_id' => (int) ($_GET['expense_category_id'] ?? 0),
             'currency' => mb_strtoupper(trim((string) ($_GET['currency'] ?? ''))),
         ];
+        $expenseWideView = (string) ($_GET['wide'] ?? '') === '1';
 
         $categories = $this->decorateMasterRows($repository->categoryRows());
         $expenses = array_map(static function (array $row): array {
@@ -458,7 +489,32 @@ final class ControlController extends BaseController
             ],
             $masterData->rows('payment_methods')
         );
+        $expenseTreasuryAccountOptions = array_map(
+            static function (array $row): array {
+                $branchName = trim((string) ($row['branch_name'] ?? ''));
+                $accountName = trim((string) ($row['account_name'] ?? ''));
+                $currency = strtoupper(trim((string) ($row['currency'] ?? 'PKR')));
+                $type = strtolower(trim((string) ($row['account_type'] ?? '')));
+
+                return [
+                    'value' => (string) ($row['id'] ?? ''),
+                    'label' => trim($accountName . ($branchName !== '' ? ' - ' . $branchName : '') . ' (' . $currency . ')'),
+                    'branch_id' => (string) ($row['branch_id'] ?? ''),
+                    'currency' => $currency,
+                    'account_type' => $type,
+                ];
+            },
+            array_values(array_filter(
+                (new TreasuryRepository($this->app))->accounts($accessibleBranchIds),
+                static fn (array $row): bool => (int) ($row['is_active'] ?? 0) === 1
+            ))
+        );
+        $expenseCorrectionRepository = new \App\Repositories\BusinessExpenseCorrectionRepository($this->app);
+        $expenseCorrectionHistoryReady = $expenseCorrectionRepository->correctionsTableExists();
         $expenseEditRecord = $editRegister === 'business_expenses' ? $repository->findExpense($editId, $accessibleBranchIds) : null;
+        $expenseCorrectionRows = $expenseEditRecord !== null && $expenseCorrectionHistoryReady
+            ? $expenseCorrectionRepository->rowsForExpense((int) ($expenseEditRecord['id'] ?? 0))
+            : [];
 
         return $this->view('control/expenses', [
             'title' => 'Business Expenses',
@@ -470,62 +526,12 @@ final class ControlController extends BaseController
             'expenseBranchOptions' => $branchOptions,
             'expenseCurrencyOptions' => $currencyOptions,
             'expensePaymentMethodOptions' => $paymentMethodOptions,
+            'expenseTreasuryAccountOptions' => $expenseTreasuryAccountOptions,
             'expenseEditRecord' => $expenseEditRecord,
-            'panels' => [
-                $this->masterPanel(
-                    'expense_categories',
-                    'Expense Categories',
-                    'Maintain reusable admin expense categories without mixing them into booking/service costing.',
-                    $categories,
-                    $editRegister === 'expense_categories' ? $repository->findCategory($editId) : null,
-                    [
-                        ['key' => 'code', 'label' => 'Code'],
-                        ['key' => 'name', 'label' => 'Name'],
-                        ['key' => 'sort_order', 'label' => 'Sort'],
-                        ['key' => 'status_label', 'label' => 'Status'],
-                    ],
-                    [
-                        ['name' => 'code', 'label' => 'Code', 'type' => 'text', 'maxlength' => 50, 'required' => true],
-                        ['name' => 'name', 'label' => 'Name', 'type' => 'text', 'maxlength' => 120, 'required' => true],
-                        ['name' => 'sort_order', 'label' => 'Sort', 'type' => 'number', 'min' => 0],
-                        ['name' => 'is_active', 'label' => 'Status', 'type' => 'select', 'options' => $this->statusOptions()],
-                    ]
-                ),
-                $this->masterPanel(
-                    'business_expenses',
-                    'Business Expenses',
-                    'Record branch/admin expenses outside booking workspace so net profit can be measured separately from gross profit.',
-                    $expenses,
-                    $expenseEditRecord,
-                    [
-                        ['key' => 'expense_date', 'label' => 'Date'],
-                        ['key' => 'branch', 'label' => 'Branch'],
-                        ['key' => 'category', 'label' => 'Category'],
-                        ['key' => 'title', 'label' => 'Title'],
-                        ['key' => 'amount_display', 'label' => 'Amount'],
-                        ['key' => 'payment_method_display', 'label' => 'Payment'],
-                        ['key' => 'paid_to_name', 'label' => 'Paid To'],
-                        ['key' => 'status_label', 'label' => 'Status'],
-                        ['key' => 'entered_by', 'label' => 'Entered By'],
-                    ],
-                    [
-                        ['name' => 'expense_date', 'label' => 'Expense Date', 'type' => 'date', 'required' => true, 'default' => date('Y-m-d')],
-                        ['name' => 'branch_id', 'label' => 'Branch', 'type' => 'select', 'required' => true, 'options' => $branchOptions],
-                        ['name' => 'expense_category_id', 'label' => 'Expense Category', 'type' => 'select', 'required' => true, 'options' => $categoryOptions],
-                        ['name' => 'title', 'label' => 'Expense Title', 'type' => 'text', 'maxlength' => 190, 'required' => true],
-                        ['name' => 'amount', 'label' => 'Amount', 'type' => 'number', 'required' => true, 'min' => 0.01],
-                        ['name' => 'currency', 'label' => 'Currency', 'type' => 'select', 'required' => true, 'options' => $currencyOptions],
-                        ['name' => 'payment_method', 'label' => 'Payment Method', 'type' => 'select', 'required' => true, 'options' => $paymentMethodOptions],
-                        ['name' => 'paid_to_name', 'label' => 'Paid To', 'type' => 'text', 'maxlength' => 190],
-                        ['name' => 'reference_number', 'label' => 'Reference No.', 'type' => 'text', 'maxlength' => 120],
-                        ['name' => 'expense_status', 'label' => 'Status', 'type' => 'select', 'required' => true, 'options' => $this->choiceOptions([
-                            'posted' => 'Posted',
-                            'active' => 'Active',
-                        ])],
-                        ['name' => 'notes', 'label' => 'Notes', 'type' => 'textarea', 'maxlength' => 4000, 'stack' => true],
-                    ]
-                ),
-            ],
+            'expenseCorrectionRows' => $expenseCorrectionRows,
+            'expenseCorrectionHistoryReady' => $expenseCorrectionHistoryReady,
+            'expenseWideView' => $expenseWideView,
+            'expenseCategoryCount' => count($categories),
         ]);
     }
 

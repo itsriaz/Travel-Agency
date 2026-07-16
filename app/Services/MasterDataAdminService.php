@@ -21,9 +21,16 @@ final class MasterDataAdminService extends Service
         }
 
         $payload = $this->validatedPayload($register, $input, $existing);
+        if ((string) ($payload['code'] ?? '') === '') {
+            $payload['code'] = $this->autoGenerateCode($repository, $register, $payload, $existing);
+        }
 
         if ($repository->codeExists($register, (string) $payload['code'], $id > 0 ? $id : null)) {
             throw new RuntimeException('This code is already in use in the selected register.');
+        }
+
+        if ($repository->nameExists($register, (string) $payload['name'], $id > 0 ? $id : null)) {
+            throw new RuntimeException('This name is already in use in the selected register.');
         }
 
         $savedId = $repository->save($register, array_merge($payload, ['id' => $id]));
@@ -83,20 +90,21 @@ final class MasterDataAdminService extends Service
             'payment_methods' => $this->validatePaymentMethod($input, $existing),
             'supplier_modes' => $this->validateSupplierMode($input, $existing),
             'document_types' => $this->validateDocumentType($input, $existing),
+            'expense_categories' => $this->validateExpenseCategory($input, $existing),
+            'business_sources' => $this->validateBusinessSource($input, $existing),
             default => throw new RuntimeException('Unknown master-data register.'),
         };
     }
 
     private function validateBranch(array $input): array
     {
-        $code = $this->normalizeCode((string) ($input['code'] ?? ''), 'lower');
         $name = $this->requiredText($input['name'] ?? null, 'Branch name', 190);
         $city = $this->optionalText($input['city'] ?? null, 120);
         $countryCode = $this->normalizeCountryCode((string) ($input['country_code'] ?? ''));
         $baseCurrency = $this->normalizeCurrencyCode((string) ($input['base_currency'] ?? ''));
 
         return [
-            'code' => $this->assertPattern($code, '/^[a-z0-9_-]{2,50}$/', 'Branch code must use lowercase letters, numbers, dashes, or underscores.'),
+            'code' => '',
             'name' => $name,
             'city' => $city,
             'country_code' => $countryCode,
@@ -107,9 +115,8 @@ final class MasterDataAdminService extends Service
 
     private function validateCurrency(array $input, ?array $existing): array
     {
-        $code = $this->normalizeCurrencyCode((string) ($input['code'] ?? ''));
         $payload = [
-            'code' => $code,
+            'code' => $existing['code'] ?? '',
             'name' => $this->requiredText($input['name'] ?? null, 'Currency name', 120),
             'symbol' => $this->optionalText($input['symbol'] ?? null, 10),
             'reporting_role' => $this->requiredText($input['reporting_role'] ?? null, 'Reporting role', 190),
@@ -124,9 +131,8 @@ final class MasterDataAdminService extends Service
 
     private function validateServiceType(array $input, ?array $existing): array
     {
-        $code = $this->normalizeCode((string) ($input['code'] ?? ''), 'upper');
         $payload = [
-            'code' => $this->assertPattern($code, '/^[A-Z0-9_-]{2,20}$/', 'Service type code must use uppercase letters, numbers, dashes, or underscores.'),
+            'code' => $existing['code'] ?? '',
             'name' => $this->requiredText($input['name'] ?? null, 'Service type name', 120),
             'posting_mode' => $this->requiredText($input['posting_mode'] ?? null, 'Posting mode', 190),
             'sort_order' => $this->normalizeSortOrder($input['sort_order'] ?? 0),
@@ -140,9 +146,8 @@ final class MasterDataAdminService extends Service
 
     private function validatePaymentMethod(array $input, ?array $existing): array
     {
-        $code = $this->normalizeCode((string) ($input['code'] ?? ''), 'lower');
         $payload = [
-            'code' => $this->assertPattern($code, '/^[a-z0-9_]{2,50}$/', 'Payment method code must use lowercase letters, numbers, or underscores.'),
+            'code' => $existing['code'] ?? '',
             'name' => $this->requiredText($input['name'] ?? null, 'Payment method name', 120),
             'ledger_target' => $this->requiredText($input['ledger_target'] ?? null, 'Ledger target', 120),
             'charges_target' => $this->optionalText($input['charges_target'] ?? null, 120),
@@ -157,7 +162,6 @@ final class MasterDataAdminService extends Service
 
     private function validateSupplierMode(array $input, ?array $existing): array
     {
-        $code = $this->normalizeCode((string) ($input['code'] ?? ''), 'lower');
         $behavior = $this->requiredText($input['behavior'] ?? null, 'Behavior', 190);
         $allowedBehaviors = [
             'Creates direct supplier payable',
@@ -168,7 +172,7 @@ final class MasterDataAdminService extends Service
         }
 
         $payload = [
-            'code' => $this->assertPattern($code, '/^[a-z0-9_]{2,50}$/', 'Supplier mode code must use lowercase letters, numbers, or underscores.'),
+            'code' => $existing['code'] ?? '',
             'name' => $this->requiredText($input['name'] ?? null, 'Supplier mode name', 120),
             'behavior' => $behavior,
             'sort_order' => $this->normalizeSortOrder($input['sort_order'] ?? 0),
@@ -182,7 +186,6 @@ final class MasterDataAdminService extends Service
 
     private function validateDocumentType(array $input, ?array $existing): array
     {
-        $code = $this->normalizeCode((string) ($input['code'] ?? ''), 'lower');
         $linkedArea = $this->requiredText($input['linked_area'] ?? null, 'Linked area', 120);
         $allowedLinkedAreas = [
             'Booking',
@@ -199,7 +202,7 @@ final class MasterDataAdminService extends Service
         }
 
         $payload = [
-            'code' => $this->assertPattern($code, '/^[a-z0-9_]{2,50}$/', 'Document type code must use lowercase letters, numbers, or underscores.'),
+            'code' => $existing['code'] ?? '',
             'name' => $this->requiredText($input['name'] ?? null, 'Document type name', 120),
             'linked_area' => $linkedArea,
             'sort_order' => $this->normalizeSortOrder($input['sort_order'] ?? 0),
@@ -209,6 +212,108 @@ final class MasterDataAdminService extends Service
         $this->assertSystemRowEditable($existing, $payload['code'], $payload['is_active']);
 
         return $payload;
+    }
+
+    private function validateExpenseCategory(array $input, ?array $existing): array
+    {
+        $payload = [
+            'code' => $existing['code'] ?? '',
+            'name' => $this->requiredText($input['name'] ?? null, 'Expense category name', 120),
+            'sort_order' => $this->normalizeSortOrder($input['sort_order'] ?? 0),
+            'is_active' => $this->normalizeBoolean($input['is_active'] ?? 1),
+        ];
+
+        $this->assertSystemRowEditable($existing, $payload['code'], $payload['is_active']);
+
+        return $payload;
+    }
+
+    private function validateBusinessSource(array $input, ?array $existing): array
+    {
+        $payload = [
+            'code' => $existing['code'] ?? '',
+            'name' => $this->requiredText($input['name'] ?? null, 'Account name', 190),
+            'phone' => $this->optionalText($input['phone'] ?? null, 50),
+            'address' => $this->optionalText($input['address'] ?? null, 500),
+            'description' => $this->optionalText($input['description'] ?? null, 4000),
+            'is_active' => $this->normalizeBoolean($input['is_active'] ?? 1),
+        ];
+
+        $this->assertSystemRowEditable($existing, $payload['code'], $payload['is_active']);
+
+        return $payload;
+    }
+
+    private function autoGenerateCode(MasterDataRepository $repository, string $register, array $payload, ?array $existing): string
+    {
+        if ($existing !== null && trim((string) ($existing['code'] ?? '')) !== '') {
+            return (string) $existing['code'];
+        }
+
+        $name = trim((string) ($payload['name'] ?? ''));
+        $city = trim((string) ($payload['city'] ?? ''));
+
+        return match ($register) {
+            'branches' => $this->uniqueCode($repository, $register, $this->slugCode($name !== '' ? $name : $city, 'lower', 50), 'lower', 50),
+            'currencies' => $this->uniqueCode($repository, $register, $this->currencyStyleCode($name), 'upper', 3),
+            'service_types' => $this->uniqueCode($repository, $register, $this->slugCode($name, 'upper', 20), 'upper', 20),
+            'payment_methods', 'supplier_modes', 'document_types', 'expense_categories', 'business_sources'
+                => $this->uniqueCode($repository, $register, $this->slugCode($name, 'lower', 50), 'lower', 50),
+            default => throw new RuntimeException('Unknown master-data register.'),
+        };
+    }
+
+    private function uniqueCode(MasterDataRepository $repository, string $register, string $baseCode, string $mode, int $maxLength): string
+    {
+        $normalizedBase = $this->normalizeGeneratedCode($baseCode, $mode);
+        if ($normalizedBase === '') {
+            $normalizedBase = $mode === 'upper' ? 'ITEM' : 'item';
+        }
+
+        $candidate = mb_substr($normalizedBase, 0, $maxLength);
+        if (! $repository->codeExists($register, $candidate, null)) {
+            return $candidate;
+        }
+
+        for ($suffix = 2; $suffix <= 9999; $suffix++) {
+            $suffixText = (string) $suffix;
+            $trimmedBase = mb_substr($normalizedBase, 0, max(1, $maxLength - mb_strlen($suffixText) - 1));
+            $candidate = $trimmedBase . '_' . $suffixText;
+            if (! $repository->codeExists($register, $candidate, null)) {
+                return $candidate;
+            }
+        }
+
+        throw new RuntimeException('Unable to generate a unique system code for this record.');
+    }
+
+    private function slugCode(string $value, string $mode, int $maxLength): string
+    {
+        $normalized = preg_replace('/[^A-Za-z0-9]+/', '_', trim($value)) ?? '';
+        $normalized = trim($normalized, '_');
+        $normalized = $this->normalizeGeneratedCode($normalized, $mode);
+
+        return mb_substr($normalized, 0, $maxLength);
+    }
+
+    private function currencyStyleCode(string $name): string
+    {
+        $lettersOnly = preg_replace('/[^A-Za-z]/', '', $name) ?? '';
+        $lettersOnly = mb_strtoupper($lettersOnly);
+        if (mb_strlen($lettersOnly) >= 3) {
+            return mb_substr($lettersOnly, 0, 3);
+        }
+
+        return str_pad($lettersOnly !== '' ? $lettersOnly : 'CUR', 3, 'X');
+    }
+
+    private function normalizeGeneratedCode(string $value, string $mode): string
+    {
+        return match ($mode) {
+            'upper' => mb_strtoupper($value),
+            'lower' => mb_strtolower($value),
+            default => $value,
+        };
     }
 
     private function assertSystemRowEditable(?array $existing, string $newCode, int $isActive): void
