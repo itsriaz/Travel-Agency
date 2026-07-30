@@ -1,6 +1,6 @@
 {
   "name": "travel-agency-launcher",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Windows desktop launcher for Travel Agency Operations",
   "author": "Imdad International Travel Agency / Noble Route Travel And Tours LLC",
   "main": "main.js",

@@ -50,6 +50,91 @@ $globalView = is_file(BASE_PATH . '/app/Views/reports/global_supplier_settlement
 $workspaceStationView = is_file(BASE_PATH . '/app/Views/workspace/partials/station.php')
     ? (string) file_get_contents(BASE_PATH . '/app/Views/workspace/partials/station.php')
     : '';
+$workspaceJavascript = is_file(BASE_PATH . '/public/assets/js/workspace.js')
+    ? (string) file_get_contents(BASE_PATH . '/public/assets/js/workspace.js')
+    : '';
+$applicationCss = is_file(BASE_PATH . '/public/assets/css/app.css')
+    ? (string) file_get_contents(BASE_PATH . '/public/assets/css/app.css')
+    : '';
+$supplierFoundationService = is_file(BASE_PATH . '/app/Services/SupplierFoundationService.php')
+    ? (string) file_get_contents(BASE_PATH . '/app/Services/SupplierFoundationService.php')
+    : '';
+$renderedCountScopeView = \App\Core\View::make(
+    BASE_PATH . '/app/Views/reports/global_supplier_settlement.php',
+    [
+        'branchOptions' => [['id' => 2, 'name' => 'Noble Route']],
+        'supplierOptions' => [[
+            'id' => 10,
+            'name' => 'AirBlue',
+            'open_payable_count' => 28,
+        ]],
+        'currencyOptions' => [[
+            'currency' => 'PKR',
+            'open_payable_count' => 1,
+            'open_payable_amount' => 24000,
+        ]],
+        'openObligations' => [[
+            'id' => 100,
+            'booking_reference' => 'BK-TEST',
+            'currency' => 'PKR',
+            'gross_amount' => 24000,
+            'advance_applied_amount' => 0,
+            'net_payable_amount' => 24000,
+        ]],
+        'sourceAccounts' => [],
+        'paymentMethods' => ['cash' => 'Cash'],
+        'selectedBranchId' => 2,
+        'selectedSupplierId' => 10,
+        'selectedCurrency' => 'PKR',
+    ]
+);
+$renderedPaymentConfirmationView = \App\Core\View::make(
+    BASE_PATH . '/app/Views/reports/global_supplier_settlement.php',
+    [
+        'branchOptions' => [['id' => 2, 'name' => 'Noble Route']],
+        'supplierOptions' => [['id' => 10, 'name' => 'AirBlue', 'open_payable_count' => 2]],
+        'currencyOptions' => [['currency' => 'PKR', 'open_payable_count' => 2, 'open_payable_amount' => 50000]],
+        'openObligations' => [],
+        'sourceAccounts' => [],
+        'paymentMethods' => ['cash' => 'Cash'],
+        'selectedBranchId' => 2,
+        'selectedSupplierId' => 10,
+        'selectedCurrency' => 'PKR',
+        'postedPaymentConfirmation' => [
+            'id' => 50,
+            'payment_no' => 'SPAY-TEST-50',
+            'supplier_name' => 'AirBlue',
+            'currency' => 'PKR',
+            'paid_amount' => 24000,
+            'allocated_amount' => 24000,
+            'converted_advance_amount' => 0,
+            'allocations' => [[
+                'booking_reference' => 'BK-TEST',
+                'booking_date' => '2026-07-21',
+                'passenger_name' => 'TEST PASSENGER',
+                'route' => 'N/A',
+                'currency' => 'PKR',
+                'allocated_amount' => 24000,
+                'remaining_outstanding' => 0,
+            ]],
+        ],
+    ]
+);
+$renderedNewPaymentSelectionView = \App\Core\View::make(
+    BASE_PATH . '/app/Views/reports/global_supplier_settlement.php',
+    [
+        'branchOptions' => [['id' => 2, 'name' => 'Noble Route']],
+        'supplierOptions' => [],
+        'currencyOptions' => [],
+        'openObligations' => [],
+        'sourceAccounts' => [],
+        'paymentMethods' => ['cash' => 'Cash'],
+        'selectedBranchId' => 0,
+        'selectedSupplierId' => 0,
+        'selectedCurrency' => '',
+        'startNewPayment' => true,
+    ]
+);
 $columnExists = static function (string $table, string $column) use ($db): bool {
     $statement = $db->prepare(
         'SELECT 1
@@ -113,22 +198,62 @@ $check(
         && str_contains($publicIndex, 'saveGlobalSupplierSettlement')
 );
 $check(
-    'Payable aging links to global supplier settlement',
-    str_contains($reportView, 'Global Supplier Settlement')
+    'Payable aging links to supplier payment',
+    str_contains($reportView, 'Supplier Payment')
         && str_contains($reportView, "/suppliers/settlements/global")
 );
 $check(
-    'Supplier payment finder links to global supplier payment',
+    'Supplier payment finder links to supplier payment',
     str_contains($workspaceStationView, 'data-supplier-history-modal')
-        && str_contains($workspaceStationView, 'Global Supplier Payment')
+        && str_contains($workspaceStationView, '>Supplier Payment</a>')
         && str_contains($workspaceStationView, "/suppliers/settlements/global")
 );
 $check(
-    'Global supplier settlement view posts selected payable rows',
-    str_contains($globalView, 'global_supplier_obligation_id[]')
-        && str_contains($globalView, 'data-global-payable-select-all')
+    'Supplier payment is entered once against the supplier account',
+    str_contains($globalView, 'data-supplier-account-payable')
+        && ! str_contains($globalView, 'global_supplier_obligation_id[]')
+        && ! str_contains($globalView, 'data-global-payable-select-all')
         && str_contains($globalView, 'data-global-supplier-settlement-form')
         && str_contains($globalView, 'supplier_treasury_account_id')
+);
+$check(
+    'Supplier account payable automatically drives the lump-sum preview',
+    str_contains($renderedCountScopeView, 'data-supplier-account-payable="24000.00"')
+        && ! str_contains($renderedCountScopeView, 'Supplier Account Payable')
+        && ! str_contains($renderedCountScopeView, 'open invoice(s)')
+        && str_contains($globalView, 'amountField.value = total.toFixed(2)')
+);
+$check(
+    'Completed supplier-account payment is clearly confirmed before another payment can begin',
+    str_contains($renderedPaymentConfirmationView, 'Payment Completed')
+        && str_contains($renderedPaymentConfirmationView, 'SPAY-TEST-50')
+        && ! str_contains($renderedPaymentConfirmationView, 'checked disabled')
+        && str_contains($renderedPaymentConfirmationView, 'Make Another Payment')
+        && str_contains($renderedPaymentConfirmationView, 'supplier-account payment is posted')
+);
+$check(
+    'Make Another Payment starts with explicit branch and supplier selection',
+    str_contains($renderedPaymentConfirmationView, 'start_new_payment=1')
+        && str_contains($renderedNewPaymentSelectionView, 'name="start_new_payment" value="1"')
+        && str_contains($renderedNewPaymentSelectionView, '>Select Branch</option>')
+        && str_contains($renderedNewPaymentSelectionView, '>Select Supplier</option>')
+        && str_contains($renderedNewPaymentSelectionView, '>Select supplier first</option>')
+        && str_contains($controller, '$selectedSupplierId = $startNewPayment ? 0')
+);
+$check(
+    'Successful global payment redirects to its branch-scoped confirmation',
+    str_contains($controller, "\$queryData['posted_payment_id'] = \$postedPaymentId")
+        && str_contains($controller, 'globalSupplierPaymentConfirmation')
+        && str_contains($repository, 'public function globalSupplierPaymentConfirmation')
+        && str_contains($repository, 'p.branch_id IN (')
+);
+$check(
+    'Selected supplier count uses the same currency-filtered rows as the payable detail table',
+    str_contains($globalView, '$selectedCurrencyPayableCount = count($openObligations)')
+        && str_contains($globalView, '$payableCountScope = $isSelectedSupplier')
+        && str_contains($globalView, "' total'")
+        && str_contains($renderedCountScopeView, 'AirBlue / 1 PKR payable(s)')
+        && ! str_contains($renderedCountScopeView, 'AirBlue / 28 payable(s)')
 );
 $check(
     'Global supplier settlement filters auto-load without a manual Load button',
@@ -143,11 +268,32 @@ $check(
         && str_contains($repository, "payment_scope")
 );
 $check(
-    'Repository can load and lock global payable selections',
+    'Booking supplier finder and history include lump-sum global allocations',
+    str_contains($supplierHistoryFinderMethod, 'supplier_payment_allocations a_paid')
+        && str_contains($supplierHistoryFinderMethod, 'o_paid.booking_reference')
+        && str_contains($repository, 'booking_allocation.booking_allocated_amount')
+        && str_contains($supplierFoundationService, "'paymentAllocatedAmount'")
+        && str_contains($supplierFoundationService, "\$supplier['totalPaid'] = 0.0")
+);
+$check(
+    'Supplier finder uses one payment workflow and predictable contextual actions',
+    str_contains($workspaceStationView, 'supplierPositionReadOnly')
+        && str_contains($workspaceJavascript, 'Pay Supplier')
+        && str_contains($workspaceJavascript, 'supplier-history-prepaid-action')
+        && str_contains($workspaceJavascript, '>Edit</button>')
+        && ! str_contains($workspaceJavascript, 'View Supplier Position')
+        && ! str_contains($workspaceJavascript, 'View Payment Details')
+        && str_contains($workspaceController, '&supplier_position=1&return_to_supplier_payment=1#dock-panel-suppliers')
+        && str_contains($workspaceJavascript, "get('return_to_supplier_payment') === '1'")
+        && str_contains($workspaceJavascript, 'openSupplierHistoryModal();')
+        && str_contains($workspaceController, "'start_new_payment' => 1")
+);
+$check(
+    'Repository locks the complete supplier-account payable position',
     str_contains($repository, 'globalOpenObligations')
         && str_contains($repository, 'globalSettlementSupplierOptions')
         && str_contains($repository, 'globalSettlementCurrencies')
-        && str_contains($repository, 'openGlobalObligationsForSettlement')
+        && str_contains($repository, 'openSupplierAccountObligationsForSettlement')
         && str_contains($repository, 'FOR UPDATE')
 );
 $check(
@@ -159,15 +305,15 @@ $check(
 );
 $check(
     'Service records one global supplier payment and allocates it',
-    str_contains($service, 'recordGlobalPostpaidSupplierPayment')
+    str_contains($service, 'recordSupplierAccountPayment')
         && str_contains($service, "'booking_reference' => 'GLOBAL'")
         && str_contains($service, "'payment_scope' => 'global'")
-        && str_contains($service, 'Global supplier settlement auto-allocation')
+        && str_contains($service, 'Internal supplier-account reconciliation')
 );
 $check(
-    'Global supplier settlement validates by payable rows instead of supplier master branch',
+    'Global supplier settlement validates the supplier and internally loads its complete payable account',
     str_contains($service, '$this->assertSupplierActive($supplier);')
-        && str_contains($service, 'openGlobalObligationsForSettlement')
+        && str_contains($service, 'openSupplierAccountObligationsForSettlement')
         && ! str_contains($service, '$this->assertSupplierAllowedForBranch($supplier, $branchId);' . PHP_EOL . '        $supplierId')
 );
 $check(
@@ -226,7 +372,58 @@ $check(
     'Controller exposes global supplier settlement screen and save action',
     str_contains($controller, 'globalSupplierSettlement')
         && str_contains($controller, 'saveGlobalSupplierSettlement')
-        && str_contains($controller, 'recordGlobalPostpaidSupplierPayment')
+        && str_contains($controller, 'recordSupplierAccountPayment')
+);
+$check(
+    'Global supplier payment history is searchable with branch-safe filters',
+    str_contains($publicIndex, "'/suppliers/settlements/global/history'")
+        && str_contains($controller, 'globalSupplierPaymentHistory(): never')
+        && str_contains($repository, 'searchGlobalSupplierPayments')
+        && str_contains($repository, 'globalSupplierPaymentSupplierOptions')
+        && str_contains($repository, 'p.supplier_id = ?')
+        && str_contains($repository, "p.payment_no LIKE ? OR s.name LIKE ? OR s.code LIKE ?")
+        && str_contains($repository, 'p.branch_id IN (')
+        && str_contains($globalView, 'history_date_from')
+        && str_contains($globalView, 'history_date_to')
+        && str_contains($globalView, 'history_supplier_id')
+        && str_contains($globalView, 'history_branch_id')
+        && str_contains($globalView, 'history_status')
+);
+$check(
+    'Supplier payment filters and entry form stay professionally contained',
+    str_contains($globalView, 'global-payment-history-filter--search')
+        && str_contains($globalView, 'global-payment-history-filter-actions')
+        && str_contains($globalView, 'global-settlement-payment-entry')
+        && str_contains($globalView, 'global-settlement-payment-actions')
+        && str_contains($applicationCss, 'grid-template-columns: repeat(16, minmax(0, 1fr));')
+        && str_contains($applicationCss, '.global-settlement-payment-entry__header')
+        && str_contains($applicationCss, '.global-payment-history-filter-actions .btn')
+);
+$check(
+    'Supplier advance transaction and balance reports support wide view',
+    str_contains($reportView, "'supplier_prepaid_payments', 'prepaid_supplier_ledger'")
+        && str_contains($reportView, 'id="customer-ledger-expand-button"')
+        && str_contains($reportView, 'id="customer-ledger-close-button"')
+);
+$check(
+    'Recent supplier payments visually group each payment with its actions',
+    str_contains($globalView, 'foreach ($globalPaymentHistory as $paymentIndex => $payment)')
+        && str_contains($globalView, 'global-payment-history-group--light')
+        && str_contains($globalView, 'global-payment-history-group--tinted')
+        && str_contains($applicationCss, '.global-payment-history-table tbody tr.global-payment-history-group--light > td')
+        && str_contains($applicationCss, '.global-payment-history-table tbody tr.global-payment-history-group--tinted > td')
+);
+$check(
+    'Supplier Payment Finder has a direct searchable payment edit modal',
+    str_contains($workspaceStationView, 'Edit Supplier Payment')
+        && str_contains($workspaceStationView, 'data-global-payment-manager-modal')
+        && str_contains($workspaceStationView, 'data-global-payment-manager-date-from')
+        && str_contains($workspaceStationView, 'data-global-payment-manager-supplier')
+        && str_contains($workspaceStationView, 'data-global-payment-manager-branch')
+        && str_contains($workspaceJavascript, 'loadGlobalPaymentManager')
+        && str_contains($workspaceStationView, 'data-supplier-payment-edit-modal')
+        && str_contains($workspaceJavascript, 'data-supplier-payment-edit-open')
+        && str_contains($workspaceJavascript, 'submitSupplierPaymentEdit')
 );
 
 if ($failures !== []) {

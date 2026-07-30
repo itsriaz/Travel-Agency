@@ -18,6 +18,7 @@ final class AuditLogRepository extends BaseRepository
             'traveler.attached',
             'service.created',
             'service.updated',
+            'service.supplier_corrected',
             'service.financial_corrected',
             'service.cancelled',
             'service.refund.posted',
@@ -27,6 +28,7 @@ final class AuditLogRepository extends BaseRepository
             'customer.receipt.voided',
             'supplier.payment.created',
             'supplier.payment.allocated',
+            'supplier.payment.supplier_corrected',
             'supplier.payment.voided',
             'reminder.created',
             'reminder.updated',
@@ -113,7 +115,7 @@ final class AuditLogRepository extends BaseRepository
         $serviceReference = trim((string) ($payload['service_line_reference'] ?? $payload['service_line'] ?? ''));
         $receiptNumber = trim((string) ($payload['receipt_no'] ?? ''));
         $supplierCode = trim((string) ($payload['supplier_code'] ?? ''));
-        $supplierName = trim((string) ($payload['supplier_name'] ?? ''));
+        $supplierName = trim((string) ($payload['supplier_name'] ?? $payload['new_supplier_name'] ?? ''));
         $travelerRole = trim((string) ($payload['traveler_role'] ?? ''));
         $passengerName = trim((string) ($payload['service_passenger_name'] ?? $payload['passenger_name'] ?? $payload['traveler_name'] ?? ''));
         $customerName = trim((string) ($payload['customer_name'] ?? $payload['lead_traveler_name'] ?? ''));
@@ -129,6 +131,7 @@ final class AuditLogRepository extends BaseRepository
             'traveler.attached' => 'Passenger attached',
             'service.created' => 'Service added',
             'service.updated' => 'Service updated',
+            'service.supplier_corrected' => 'Service supplier corrected',
             'service.financial_corrected' => 'Service price edited',
             'service.cancelled' => 'Service cancelled',
             'service.refund.posted' => 'Refund posted',
@@ -138,6 +141,7 @@ final class AuditLogRepository extends BaseRepository
             'customer.receipt.voided' => 'Customer payment voided',
             'supplier.payment.created' => 'Supplier payment saved',
             'supplier.payment.allocated' => 'Supplier payment allocated',
+            'supplier.payment.supplier_corrected' => 'Supplier payment supplier corrected',
             'supplier.payment.voided' => 'Supplier payment voided',
             'reminder.created' => 'Reminder created',
             'reminder.updated' => 'Reminder updated',

@@ -216,19 +216,29 @@ $serviceLines = array_map(static function (array $serviceRow): array {
         'latestRefundEventId' => (int) ($serviceRow['latest_refund_event_id'] ?? 0),
         'latestCustomerRefundEventId' => (int) ($serviceRow['latest_customer_refund_event_id'] ?? 0),
         'latestCustomerRefundAmountOnly' => (float) ($serviceRow['latest_customer_refund_amount_only'] ?? 0),
+        'latestCustomerRefundPaymentMethod' => (string) ($serviceRow['latest_customer_refund_payment_method'] ?? 'cash'),
+        'latestCustomerRefundDetail' => (array) ($serviceRow['latest_customer_refund_detail'] ?? []),
         'latestSupplierRefundEventId' => (int) ($serviceRow['latest_supplier_refund_event_id'] ?? 0),
         'latestSupplierRefundAmountOnly' => (float) ($serviceRow['latest_supplier_refund_amount_only'] ?? 0),
+        'latestSupplierRefundPaymentMethod' => (string) ($serviceRow['latest_supplier_refund_payment_method'] ?? 'cash'),
+        'latestSupplierRefundDetail' => (array) ($serviceRow['latest_supplier_refund_detail'] ?? []),
         'latestRefundEventDate' => (string) ($serviceRow['latest_refund_event_date'] ?? ''),
         'latestRefundCustomerAmount' => (float) ($serviceRow['latest_refund_customer_amount'] ?? 0),
         'latestRefundSupplierAmount' => (float) ($serviceRow['latest_refund_supplier_amount'] ?? 0),
+        'reissueEvents' => is_array($serviceRow['reissue_events'] ?? null) ? $serviceRow['reissue_events'] : [],
         'latestCancelEventId' => (int) ($serviceRow['latest_cancel_event_id'] ?? 0),
         'hasCancellationEvent' => (int) ($serviceRow['latest_cancel_event_id'] ?? 0) > 0,
         'latestCancelFinanciallySettled' => (bool) ($serviceRow['latest_cancel_financially_settled'] ?? false),
         'latestCancelCustomerPenaltyAmount' => (float) ($serviceRow['latest_cancel_customer_penalty_amount'] ?? 0),
+        'latestCancelAgencyFeeRefundAmount' => (float) ($serviceRow['latest_cancel_agency_fee_refund_amount'] ?? 0),
         'latestCancelSupplierPenaltyAmount' => (float) ($serviceRow['latest_cancel_supplier_penalty_amount'] ?? 0),
         'latestCancelExpectedSupplierRefundAmount' => (float) ($serviceRow['latest_cancel_expected_supplier_refund_amount'] ?? 0),
+        'latestCancelCustomerRefundBasisAmount' => (float) ($serviceRow['latest_cancel_customer_refund_basis_amount'] ?? 0),
+        'latestCancelPriorCustomerDueAmount' => (float) ($serviceRow['latest_cancel_prior_customer_due_amount'] ?? 0),
         'latestCancelReleasedCustomerCreditAmount' => (float) ($serviceRow['latest_cancel_released_customer_credit_amount'] ?? 0),
         'latestCancelReleasedSupplierCreditAmount' => (float) ($serviceRow['latest_cancel_released_supplier_credit_amount'] ?? 0),
+        'currentCustomerInvoiceAmount' => (float) ($serviceRow['current_customer_invoice_amount'] ?? 0),
+        'currentCustomerReceivedAmount' => (float) ($serviceRow['current_customer_received_amount'] ?? 0),
         'customerRefundableCreditAmount' => (float) ($serviceRow['customer_refundable_credit_amount'] ?? 0),
         'supplierRefundableCreditAmount' => (float) ($serviceRow['supplier_refundable_credit_amount'] ?? 0),
         'customerRefundReceivedAmount' => (float) ($serviceRow['customer_refund_received_amount'] ?? 0),
@@ -621,6 +631,7 @@ foreach (($customerPaymentFoundation['serviceReceivables'] ?? []) as $receivable
 }
 
 $payableByLine = [];
+$supplierSettlementByLine = [];
 foreach (($supplierFoundation['obligations'] ?? []) as $obligationRow) {
     $lineReference = trim((string) ($obligationRow['serviceLineReference'] ?? ''));
     $currency = trim((string) ($obligationRow['currency'] ?? ''));
@@ -633,6 +644,14 @@ foreach (($supplierFoundation['obligations'] ?? []) as $obligationRow) {
         'netPayableAmount' => round((float) ($obligationRow['netPayableAmount'] ?? 0), 2),
         'advanceAppliedAmount' => round((float) ($obligationRow['advanceAppliedAmount'] ?? 0), 2),
     ];
+
+    $lineSettlementKey = strtoupper($lineReference);
+    if (! isset($supplierSettlementByLine[$lineSettlementKey])) {
+        $supplierSettlementByLine[$lineSettlementKey] = 0.0;
+    }
+    $supplierSettlementByLine[$lineSettlementKey] +=
+        max((float) ($obligationRow['paymentAllocatedAmount'] ?? 0), 0)
+        + max((float) ($obligationRow['advanceAppliedAmount'] ?? 0), 0);
 }
 
 foreach ($serviceLines as &$serviceLine) {
@@ -673,6 +692,10 @@ foreach ($serviceLines as &$serviceLine) {
     $serviceLine['allocatedAmount'] = round($resolvedAllocated, 2);
     $serviceLine['outstandingAmount'] = round(max($resolvedOutstanding, 0), 2);
     $serviceLine['rowPayable'] = round($resolvedPayable, 2);
+    $serviceLine['supplierSettledAmount'] = round(
+        (float) ($supplierSettlementByLine[strtoupper(trim((string) ($serviceLine['lineNumber'] ?? '')))] ?? 0),
+        2
+    );
     $serviceLine['rowProfit'] = round($resolvedProfit, 2);
     $serviceLine['rowFinancialSource'] = $hasReceivableRow || array_key_exists($lineKey, $payableByLine)
         ? 'persisted'

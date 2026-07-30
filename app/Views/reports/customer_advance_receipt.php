@@ -14,7 +14,24 @@ $paymentMethod = ucwords(str_replace('_', ' ', trim((string) ($receipt['payment_
 $referenceNumber = trim((string) ($receipt['reference_number'] ?? ''));
 $bankCardDetail = trim((string) ($receipt['bank_card_detail'] ?? ''));
 $remarks = trim((string) ($receipt['remarks'] ?? ''));
+$businessSourceName = trim((string) ($receipt['business_source_name'] ?? ''));
 $branchCode = mb_strtolower(trim((string) ($branchBranding['code'] ?? '')));
+$branchIdentity = mb_strtolower(trim(implode(' ', [
+    (string) ($branchBranding['receipt_name'] ?? ''),
+    (string) ($branchBranding['name'] ?? ''),
+])));
+$isNobleRouteReceipt = $branchCode === 'dubai'
+    || str_contains($branchIdentity, 'noble route');
+$nobleRouteSignatureSrc = '';
+if ($isNobleRouteReceipt) {
+    $nobleRouteSignaturePath = base_path('public/assets/images/receipt-branches/noble-route-signature.png');
+    $nobleRouteSignatureBytes = is_readable($nobleRouteSignaturePath)
+        ? file_get_contents($nobleRouteSignaturePath)
+        : false;
+    $nobleRouteSignatureSrc = is_string($nobleRouteSignatureBytes)
+        ? 'data:image/png;base64,' . base64_encode($nobleRouteSignatureBytes)
+        : asset('images/receipt-branches/noble-route-signature.png') . '?v=20260727-2';
+}
 $generatedAt = trim((string) ($generatedAt ?? ''));
 $primaryContactLogo = trim((string) ($branchContact['logo_path'] ?? ''));
 $primaryContactLogoSrc = $primaryContactLogo !== '' ? asset(ltrim($primaryContactLogo, '/')) : '';
@@ -168,6 +185,7 @@ $receiptIcon = static function (string $type): string {
                 <div><span>Receipt No.</span><strong><?= e((string) ($receipt['receipt_no'] ?? '')) ?></strong></div>
                 <div><span>Receipt Date</span><strong><?= e((string) ($receipt['receipt_date'] ?? '')) ?></strong></div>
                 <div><span>Customer Name</span><strong><?= e($customerName !== '' ? $customerName : 'Customer') ?></strong></div>
+                <div><span>Account Holder</span><strong><?= e($businessSourceName !== '' ? $businessSourceName : 'Unassigned Account') ?></strong></div>
                 <div><span>Branch</span><strong><?= e((string) ($branchBranding['receipt_name'] ?? $branchName ?? '')) ?></strong></div>
                 <div><span>Payment Method</span><strong><?= e($paymentMethod !== '' ? $paymentMethod : 'N/A') ?></strong></div>
                 <div><span>Deposit Account</span><strong><?= e(trim((string) ($receipt['treasury_account_name'] ?? '')) !== '' ? (string) ($receipt['treasury_account_name'] ?? '') : 'N/A') ?></strong></div>
@@ -216,22 +234,30 @@ $receiptIcon = static function (string $type): string {
 
         <footer class="receipt-sheet__foot">
             <div class="receipt-signatures">
-                <div>
+                <div class="receipt-signatures__identity">
                     <span>Received By</span>
                     <strong>Authorized Staff</strong>
                 </div>
-                <div>
-                    <span>Authorized By</span>
-                    <strong><?= e((string) ($branchBranding['name'] ?? 'Travel Agency')) ?></strong>
+                <div class="receipt-sheet__note receipt-signatures__thank-you">Thank you for your business.</div>
+                <?php if ($nobleRouteSignatureSrc !== ''): ?>
+                    <img
+                        class="receipt-signatures__image"
+                        src="<?= e($nobleRouteSignatureSrc) ?>"
+                        alt="Authorized signature"
+                    >
+                <?php else: ?>
+                    <span class="receipt-signatures__image-placeholder" aria-hidden="true"></span>
+                <?php endif; ?>
+                <div class="receipt-sheet__note receipt-sheet__note--muted receipt-signatures__generated">
+                    This is a computer-generated receipt.
                 </div>
             </div>
-            <div class="receipt-sheet__note">Thank you for your business.</div>
-            <div class="receipt-sheet__note receipt-sheet__note--muted">This is a computer-generated receipt.</div>
             <?php if ($branchDirectory !== []): ?>
                 <div class="receipt-branches">
                     <span>Our branches</span>
                     <?php foreach ($branchDirectory as $branchLine): ?>
-                        <div class="receipt-branches__row">
+                        <?php $isNobleRouteBranchLine = str_contains(mb_strtolower((string) ($branchLine['branch'] ?? '')), 'noble route'); ?>
+                        <div class="receipt-branches__row<?= $isNobleRouteBranchLine ? ' receipt-branches__row--right' : '' ?>">
                             <strong class="receipt-branches__name"><?= e((string) ($branchLine['branch'] ?? 'Branch')) ?></strong>
                             <?php
                             $branchLineMeta = array_values(array_filter([

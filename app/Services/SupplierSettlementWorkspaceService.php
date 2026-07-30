@@ -157,7 +157,7 @@ final class SupplierSettlementWorkspaceService extends Service
                     $obligations
                 ))));
                 if ($paidAmount > $selectedOutstandingTotal + 0.005 && count($selectedSupplierIds) !== 1) {
-                    throw new RuntimeException('Supplier overpayment can only be recorded when one supplier is selected. Split the payment or use Prepaid Supplier Payment for the intended supplier.');
+                    throw new RuntimeException('A supplier payment must belong to one supplier. Use Supplier Payment for that supplier; any excess will become supplier advance automatically.');
                 }
 
                 $paymentPayload = [
@@ -316,17 +316,16 @@ final class SupplierSettlementWorkspaceService extends Service
         }
     }
 
-    public function recordGlobalPostpaidSupplierPayment(array $input, int $actorUserId, array $accessibleBranchIds): array
+    /**
+     * Records one supplier-account payment. Open payables are reconciled in
+     * the background and any excess is retained as reusable supplier advance.
+     */
+    public function recordSupplierAccountPayment(array $input, int $actorUserId, array $accessibleBranchIds): array
     {
         $branchId = $this->resolveAccessibleBranchId((int) ($input['branch_id'] ?? 0), $accessibleBranchIds);
         $supplier = $this->resolveSupplier($input, $accessibleBranchIds);
         $this->assertSupplierActive($supplier);
         $supplierId = (int) ($supplier['id'] ?? 0);
-        $selectedObligationIds = $this->normalizedSelectedObligationIds($input['global_supplier_obligation_id'] ?? []);
-        if ($selectedObligationIds === []) {
-            throw new RuntimeException('Please select at least one supplier payable.');
-        }
-
         $currency = $this->normalizeCurrency((string) ($input['supplier_payment_currency'] ?? 'PKR'));
         $paidAmount = $this->positiveMoney($input['supplier_paid_amount'] ?? 0, 'Supplier paid amount');
         $paymentPayload = [
@@ -357,20 +356,11 @@ final class SupplierSettlementWorkspaceService extends Service
         }
 
         try {
-            $obligations = $repository->openGlobalObligationsForSettlement(
-                $selectedObligationIds,
+            $obligations = $repository->openSupplierAccountObligationsForSettlement(
                 $branchId,
                 $supplierId,
                 $currency
             );
-            if (count($obligations) !== count($selectedObligationIds)) {
-                throw new RuntimeException('One or more selected supplier payable rows are no longer available.');
-            }
-
-            $selectedOutstandingTotal = round(array_sum(array_map(
-                static fn (array $row): float => (float) ($row['net_payable_amount'] ?? 0),
-                $obligations
-            )), 2);
             $paymentNo = $repository->nextSupplierPaymentNumber();
             $paymentId = $repository->createSupplierPayment(array_merge($paymentPayload, [
                 'supplier_id' => $supplierId,
@@ -394,7 +384,7 @@ final class SupplierSettlementWorkspaceService extends Service
                 'entry_date' => $paymentPayload['payment_date'],
                 'currency' => $currency,
                 'actor_user_id' => $actorUserId,
-                'narration' => 'Global supplier payment recorded',
+                'narration' => 'Supplier payment recorded',
             ]);
 
             $remainingAmount = $paidAmount;
@@ -421,7 +411,7 @@ final class SupplierSettlementWorkspaceService extends Service
                     (int) $obligation['id'],
                     $allocationAmount,
                     null,
-                    'Global supplier settlement auto-allocation',
+                    'Internal supplier-account reconciliation',
                     $actorUserId
                 );
 
@@ -437,7 +427,7 @@ final class SupplierSettlementWorkspaceService extends Service
                     'entry_date' => $paymentPayload['payment_date'],
                     'currency' => $currency,
                     'actor_user_id' => $actorUserId,
-                    'narration' => 'Global supplier payment allocated to payable',
+                    'narration' => 'Supplier account payment reconciled internally',
                 ]);
 
                 $affectedBookingReferences[$bookingReference] = true;
@@ -498,7 +488,111 @@ final class SupplierSettlementWorkspaceService extends Service
                 throw $exception;
             }
 
-            throw new RuntimeException('Global supplier payment could not be saved.', 0, $exception);
+            throw new RuntimeException('Supplier payment could not be saved.', 0, $exception);
+        }
+    }
+
+    /**
+     * Backward-compatible alias for older callers and deployed integrations.
+     */
+    public function recordGlobalPostpaidSupplierPayment(array $input, int $actorUserId, array $accessibleBranchIds): array
+    {
+        return $this->recordSupplierAccountPayment($input, $actorUserId, $accessibleBranchIds);
+    }
+
+    public function voidGlobalSupplierPayment(array $input, int $actorUserId, array $accessibleBranchIds): array
+    {
+        $this->assertFinancialAdminActor($actorUserId, 'Only super admin or branch admin can void supplier payments.');
+
+        $paymentId = (int) ($input['supplier_payment_id'] ?? 0);
+        $voidReason = $this->requiredVoidReason($input['void_reason'] ?? null);
+        if ($paymentId <= 0) {
+            throw new RuntimeException('Select a valid supplier payment.');
+        }
+
+        $repository = new SupplierRepository($this->app);
+        $payment = $repository->findSupplierPaymentById($paymentId);
+        if ($payment === null) {
+            throw new RuntimeException('The selected supplier payment could not be found.');
+        }
+
+        $accessibleIds = array_map('intval', $accessibleBranchIds);
+        if (! in_array((int) ($payment['branch_id'] ?? 0), $accessibleIds, true)) {
+            throw new RuntimeException('You cannot correct a supplier payment outside your accessible branches.');
+        }
+
+        $paymentScope = str_replace(' ', '_', mb_strtolower(trim((string) ($payment['payment_scope'] ?? ''))));
+        if ($paymentScope !== 'global' && strtoupper(trim((string) ($payment['booking_reference'] ?? ''))) !== 'GLOBAL') {
+            throw new RuntimeException('This correction screen can reverse only bulk supplier payments. Open a booking-linked payment from its booking.');
+        }
+
+        if (str_replace(' ', '_', mb_strtolower(trim((string) ($payment['status'] ?? '')))) === 'void') {
+            throw new RuntimeException('This supplier payment is already void.');
+        }
+
+        /** @var PDO $db */
+        $db = $this->app->get('db');
+        $startedTransaction = ! $db->inTransaction();
+        if ($startedTransaction) {
+            $db->beginTransaction();
+        }
+
+        try {
+            $neutralizedAdvance = $repository->neutralizeUnusedConvertedAdvanceForPaymentVoid($paymentId, $actorUserId);
+            $reversalReference = 'VOID-' . (string) ($payment['payment_no'] ?? ('P-' . $paymentId));
+            $reversalJournalEntryId = (new AccountingRepository($this->app))->postSupplierPaymentVoidReversal([
+                'branch_id' => (int) ($payment['branch_id'] ?? 0),
+                'booking_reference' => null,
+                'supplier_payment_id' => $paymentId,
+                'payment_no' => (string) ($payment['payment_no'] ?? ''),
+                'source_reference' => $reversalReference,
+                'entry_date' => date('Y-m-d'),
+                'currency' => (string) ($payment['currency'] ?? 'PKR'),
+                'narration' => 'Supplier payment void reversal for ' . (string) ($payment['payment_no'] ?? $paymentId),
+                'actor_user_id' => $actorUserId,
+            ]);
+
+            $voidResult = $repository->voidSupplierPayment(
+                $paymentId,
+                $voidReason,
+                $actorUserId,
+                $reversalReference,
+                $reversalJournalEntryId
+            );
+
+            AuditLog::record($this->app, 'supplier.global_payment.voided', [
+                'user_id' => $actorUserId,
+                'supplier_payment_id' => $paymentId,
+                'payment_no' => (string) ($voidResult['payment_no'] ?? ''),
+                'supplier_id' => (int) ($voidResult['supplier_id'] ?? 0),
+                'branch_id' => (int) ($voidResult['branch_id'] ?? 0),
+                'void_reason' => $voidReason,
+                'reversal_reference' => $reversalReference,
+                'reversal_journal_entry_id' => $reversalJournalEntryId,
+                'allocation_count_reversed' => (int) ($voidResult['allocation_count_reversed'] ?? 0),
+                'total_allocated_amount_reversed' => (float) ($voidResult['total_allocated_amount_reversed'] ?? 0),
+                'affected_supplier_obligation_ids' => $voidResult['affected_supplier_obligation_ids'] ?? [],
+                'neutralized_supplier_advance' => $neutralizedAdvance,
+            ]);
+
+            if ($startedTransaction && $db->inTransaction()) {
+                $db->commit();
+            }
+
+            return array_merge($voidResult, [
+                'reversal_journal_entry_id' => $reversalJournalEntryId,
+                'neutralized_supplier_advance' => $neutralizedAdvance,
+            ]);
+        } catch (\Throwable $exception) {
+            if ($startedTransaction && $db->inTransaction()) {
+                $db->rollBack();
+            }
+
+            if ($exception instanceof RuntimeException) {
+                throw $exception;
+            }
+
+            throw new RuntimeException('Supplier payment could not be voided.', 0, $exception);
         }
     }
 
@@ -719,6 +813,577 @@ final class SupplierSettlementWorkspaceService extends Service
         ];
     }
 
+    public function correctSupplierPayment(array $input, int $actorUserId, array $accessibleBranchIds): array
+    {
+        $this->assertFinancialAdminActor($actorUserId, 'Only super admin or branch admin can correct supplier payments.');
+
+        $paymentId = (int) ($input['supplier_payment_id'] ?? 0);
+        if ($paymentId <= 0) {
+            throw new RuntimeException('Select a valid supplier payment.');
+        }
+
+        $repository = new SupplierRepository($this->app);
+        $payment = $repository->findSupplierPaymentById($paymentId);
+        if ($payment === null) {
+            throw new RuntimeException('The selected supplier payment could not be found.');
+        }
+
+        $accessibleIds = array_values(array_unique(array_map('intval', $accessibleBranchIds)));
+        $branchId = (int) ($payment['branch_id'] ?? 0);
+        if (! in_array($branchId, $accessibleIds, true)) {
+            throw new RuntimeException('You cannot correct a supplier payment outside your accessible branches.');
+        }
+        if (str_replace(' ', '_', mb_strtolower(trim((string) ($payment['status'] ?? '')))) === 'void') {
+            throw new RuntimeException('A void supplier payment cannot be edited.');
+        }
+
+        $supplier = $this->resolveSupplier([
+            'supplier_id' => (int) ($input['supplier_id'] ?? $payment['supplier_id'] ?? 0),
+        ], $accessibleIds);
+        $this->assertSupplierActive($supplier);
+
+        $corrected = [
+            'supplier_id' => (int) ($supplier['id'] ?? 0),
+            'payment_date' => $this->normalizeDate((string) ($input['payment_date'] ?? $payment['payment_date'] ?? ''), 'Supplier payment date'),
+            'currency' => $this->normalizeCurrency((string) ($input['currency'] ?? $payment['currency'] ?? 'PKR')),
+            'paid_amount' => $this->positiveMoney($input['paid_amount'] ?? $payment['paid_amount'] ?? 0, 'Supplier paid amount'),
+            'payment_method' => $this->normalizeMethod((string) ($input['payment_method'] ?? $payment['payment_method'] ?? 'cash')),
+            'treasury_account_id' => (int) ($input['treasury_account_id'] ?? $payment['treasury_account_id'] ?? 0),
+            'reference_number' => $this->optionalText($input['reference_number'] ?? $payment['reference_number'] ?? null, 100),
+            'bank_card_detail' => $this->optionalText($input['bank_card_detail'] ?? $payment['bank_card_detail'] ?? null, 190),
+            'remarks' => $this->optionalText($input['remarks'] ?? $payment['remarks'] ?? null, 4000),
+        ];
+        $reasonInput = trim((string) ($input['correction_reason'] ?? ''));
+        $correctionReason = $reasonInput !== ''
+            ? $this->requiredVoidReason($reasonInput)
+            : 'Supplier payment corrected by user';
+
+        $financialChanged = (int) ($payment['supplier_id'] ?? 0) !== $corrected['supplier_id']
+            || (string) ($payment['payment_date'] ?? '') !== $corrected['payment_date']
+            || strtoupper((string) ($payment['currency'] ?? '')) !== $corrected['currency']
+            || abs((float) ($payment['paid_amount'] ?? 0) - $corrected['paid_amount']) > 0.005
+            || str_replace(' ', '_', mb_strtolower((string) ($payment['payment_method'] ?? ''))) !== $corrected['payment_method']
+            || (int) ($payment['treasury_account_id'] ?? 0) !== $corrected['treasury_account_id'];
+        $supplierChanged = (int) ($payment['supplier_id'] ?? 0) !== $corrected['supplier_id'];
+        $otherFinancialChanged = (string) ($payment['payment_date'] ?? '') !== $corrected['payment_date']
+            || strtoupper((string) ($payment['currency'] ?? '')) !== $corrected['currency']
+            || abs((float) ($payment['paid_amount'] ?? 0) - $corrected['paid_amount']) > 0.005
+            || str_replace(' ', '_', mb_strtolower((string) ($payment['payment_method'] ?? ''))) !== $corrected['payment_method']
+            || (int) ($payment['treasury_account_id'] ?? 0) !== $corrected['treasury_account_id'];
+        $allocationCurrencies = $repository->supplierPaymentAllocationCurrencies($paymentId);
+        if ($financialChanged && $allocationCurrencies !== []) {
+            if (count($allocationCurrencies) !== 1 || $allocationCurrencies[0] !== $corrected['currency']) {
+                $requiredCurrency = count($allocationCurrencies) === 1
+                    ? $allocationCurrencies[0]
+                    : implode(', ', $allocationCurrencies);
+                throw new RuntimeException(
+                    'Supplier payment currency must match the currency of its allocated supplier invoices. '
+                    . 'This payment is allocated to ' . $requiredCurrency . ' invoices, so '
+                    . $corrected['currency'] . ' cannot be selected.'
+                );
+            }
+        }
+
+        if (! $financialChanged) {
+            $repository->updateSupplierPaymentMetadata($paymentId, [
+                'reference_number' => $corrected['reference_number'],
+                'bank_card_detail' => $corrected['bank_card_detail'],
+                'remarks' => $corrected['remarks'],
+            ], $actorUserId);
+            AuditLog::record($this->app, 'supplier.payment.metadata_corrected', [
+                'user_id' => $actorUserId,
+                'supplier_payment_id' => $paymentId,
+                'payment_no' => (string) ($payment['payment_no'] ?? ''),
+                'reason' => $correctionReason,
+            ]);
+
+            return [
+                'mode' => 'metadata',
+                'supplier_payment_id' => $paymentId,
+                'payment_no' => (string) ($payment['payment_no'] ?? ''),
+                'payment' => $repository->findSupplierPaymentById($paymentId),
+            ];
+        }
+
+        if ($supplierChanged && ! $otherFinancialChanged) {
+            /** @var PDO $db */
+            $db = $this->app->get('db');
+            $startedTransaction = ! $db->inTransaction();
+            if ($startedTransaction) {
+                $db->beginTransaction();
+            }
+            try {
+                $supplierResult = $this->correctSupplierPaymentSupplier([
+                    'supplier_payment_id' => $paymentId,
+                    'replacement_supplier_id' => $corrected['supplier_id'],
+                    'correction_reason' => $correctionReason,
+                ], $actorUserId, $accessibleIds);
+                $repository->updateSupplierPaymentMetadata($paymentId, [
+                    'reference_number' => $corrected['reference_number'],
+                    'bank_card_detail' => $corrected['bank_card_detail'],
+                    'remarks' => $corrected['remarks'],
+                ], $actorUserId);
+                if ($startedTransaction && $db->inTransaction()) {
+                    $db->commit();
+                }
+
+                return array_merge($supplierResult, [
+                    'mode' => 'supplier',
+                    'supplier_payment_id' => $paymentId,
+                    'payment' => $repository->findSupplierPaymentById($paymentId),
+                ]);
+            } catch (\Throwable $exception) {
+                if ($startedTransaction && $db->inTransaction()) {
+                    $db->rollBack();
+                }
+                if ($exception instanceof RuntimeException) {
+                    throw $exception;
+                }
+
+                throw new RuntimeException('Supplier payment supplier could not be corrected.', 0, $exception);
+            }
+        }
+
+        /** @var PDO $db */
+        $db = $this->app->get('db');
+        $startedTransaction = ! $db->inTransaction();
+        if ($startedTransaction) {
+            $db->beginTransaction();
+        }
+
+        try {
+            $originalAllocationIds = $repository->supplierPaymentAllocationObligationIds($paymentId);
+            $scope = str_replace(' ', '_', mb_strtolower(trim((string) ($payment['payment_scope'] ?? 'booking'))));
+            $isGlobal = $scope === 'global' || strtoupper(trim((string) ($payment['booking_reference'] ?? ''))) === 'GLOBAL';
+
+            $accounting = new AccountingRepository($this->app);
+            $linkedAdvanceAmount = round((float) ($payment['converted_advance_amount'] ?? 0), 2);
+            if ($originalAllocationIds !== [] || $linkedAdvanceAmount > 0.005) {
+                $releaseResult = $repository->correctSupplierPaymentSupplier(
+                    $paymentId,
+                    (int) ($payment['supplier_id'] ?? 0),
+                    $actorUserId,
+                    $correctionReason
+                );
+                foreach ((array) ($releaseResult['released_settlements'] ?? []) as $index => $releasedSettlement) {
+                    $releasedAmount = round((float) ($releasedSettlement['released_amount'] ?? 0), 2);
+                    if ($releasedAmount <= 0.005) {
+                        continue;
+                    }
+                    $accounting->postSupplierSettlementRelease([
+                        'branch_id' => $branchId,
+                        'booking_reference' => (string) ($releasedSettlement['booking_reference'] ?? ''),
+                        'source_reference' => 'SUPPLIER-PAYMENT-CORRECTION-' . (string) ($payment['payment_no'] ?? $paymentId) . '-RELEASE-' . ($index + 1),
+                        'service_line_reference' => (string) ($releasedSettlement['service_line_reference'] ?? '') !== ''
+                            ? (string) $releasedSettlement['service_line_reference']
+                            : null,
+                        'supplier_obligation_id' => (int) ($releasedSettlement['supplier_obligation_id'] ?? 0),
+                        'released_amount' => $releasedAmount,
+                        'entry_date' => $corrected['payment_date'],
+                        'currency' => (string) ($releasedSettlement['currency'] ?? $corrected['currency']),
+                        'actor_user_id' => $actorUserId,
+                        'narration' => 'Supplier settlement released for payment correction',
+                    ]);
+                }
+            }
+
+            if ($isGlobal) {
+                $this->voidGlobalSupplierPayment([
+                    'supplier_payment_id' => $paymentId,
+                    'void_reason' => $correctionReason,
+                ], $actorUserId, $accessibleIds);
+            } else {
+                $booking = (new BookingRepository($this->app))->findBookingByReference(
+                    (string) ($payment['booking_reference'] ?? ''),
+                    $accessibleIds
+                );
+                if ($booking === null) {
+                    throw new RuntimeException('The booking linked to this supplier payment could not be found.');
+                }
+                $this->voidSupplierPayment([
+                    'booking_id' => (int) ($booking['id'] ?? 0),
+                    'supplier_payment_id' => $paymentId,
+                    'void_reason' => $correctionReason,
+                ], $actorUserId, $accessibleIds);
+            }
+
+            $corrected['treasury_account_id'] = $this->resolveSupplierPaymentTreasuryAccountId(
+                [
+                    'payment_method' => $corrected['payment_method'],
+                    'currency' => $corrected['currency'],
+                    'paid_amount' => $corrected['paid_amount'],
+                    'charges_amount' => 0,
+                ],
+                $branchId,
+                $corrected['treasury_account_id']
+            );
+
+            $targetBookingReference = $isGlobal ? null : (string) ($payment['booking_reference'] ?? '');
+            $obligations = $repository->openObligationsForCorrectedSupplierPayment(
+                $corrected['supplier_id'],
+                $branchId,
+                $corrected['currency'],
+                $targetBookingReference
+            );
+            if ($corrected['supplier_id'] === (int) ($payment['supplier_id'] ?? 0) && $originalAllocationIds !== []) {
+                $priority = array_flip($originalAllocationIds);
+                usort($obligations, static function (array $left, array $right) use ($priority): int {
+                    $leftPriority = $priority[(int) ($left['id'] ?? 0)] ?? PHP_INT_MAX;
+                    $rightPriority = $priority[(int) ($right['id'] ?? 0)] ?? PHP_INT_MAX;
+
+                    return $leftPriority <=> $rightPriority;
+                });
+            }
+
+            $paymentNo = $repository->nextSupplierPaymentNumber();
+            $replacementId = $repository->createSupplierPayment([
+                'supplier_id' => $corrected['supplier_id'],
+                'branch_id' => $branchId,
+                'booking_reference' => $isGlobal ? 'GLOBAL' : (string) ($payment['booking_reference'] ?? ''),
+                'payment_scope' => $isGlobal ? 'global' : 'booking',
+                'payment_no' => $paymentNo,
+                'payment_date' => $corrected['payment_date'],
+                'currency' => $corrected['currency'],
+                'paid_amount' => $corrected['paid_amount'],
+                'payment_method' => $corrected['payment_method'],
+                'treasury_account_id' => $corrected['treasury_account_id'],
+                'reference_number' => $corrected['reference_number'],
+                'bank_card_detail' => $corrected['bank_card_detail'],
+                'charges_amount' => 0,
+                'status' => 'paid',
+                'exchange_rate_to_booking' => null,
+                'remarks' => $corrected['remarks'],
+                'actor_user_id' => $actorUserId,
+            ]);
+
+            $accounting->postSupplierPaymentRecorded([
+                'branch_id' => $branchId,
+                'booking_reference' => $isGlobal ? null : (string) ($payment['booking_reference'] ?? ''),
+                'payment_no' => $paymentNo,
+                'supplier_payment_id' => $replacementId,
+                'paid_amount' => $corrected['paid_amount'],
+                'charges_amount' => 0,
+                'payment_method' => $corrected['payment_method'],
+                'treasury_account_id' => $corrected['treasury_account_id'],
+                'entry_date' => $corrected['payment_date'],
+                'currency' => $corrected['currency'],
+                'actor_user_id' => $actorUserId,
+                'narration' => 'Corrected supplier payment recorded',
+            ]);
+
+            $remainingAmount = $corrected['paid_amount'];
+            $allocatedAmount = 0.0;
+            $allocationCount = 0;
+            foreach ($obligations as $obligation) {
+                if ($remainingAmount <= 0.005) {
+                    break;
+                }
+                $obligationBalance = round((float) ($obligation['net_payable_amount'] ?? 0), 2);
+                $allocationAmount = min($remainingAmount, $obligationBalance);
+                if ($allocationAmount <= 0.005) {
+                    continue;
+                }
+                $allocationId = $repository->allocateSupplierPayment(
+                    $replacementId,
+                    (int) ($obligation['id'] ?? 0),
+                    $allocationAmount,
+                    null,
+                    'Automatic allocation after supplier payment correction',
+                    $actorUserId
+                );
+                $accounting->postSupplierPaymentAllocation([
+                    'branch_id' => $branchId,
+                    'booking_reference' => (string) ($obligation['booking_reference'] ?? ''),
+                    'source_reference' => $paymentNo . '-ALLOC-' . $allocationId,
+                    'service_line_reference' => (string) ($obligation['service_line_reference'] ?? '') !== ''
+                        ? (string) $obligation['service_line_reference']
+                        : null,
+                    'supplier_obligation_id' => (int) ($obligation['id'] ?? 0),
+                    'supplier_payment_id' => $replacementId,
+                    'allocated_amount' => $allocationAmount,
+                    'entry_date' => $corrected['payment_date'],
+                    'currency' => $corrected['currency'],
+                    'actor_user_id' => $actorUserId,
+                    'narration' => 'Corrected supplier payment allocated to payable',
+                ]);
+                $remainingAmount = round($remainingAmount - $allocationAmount, 2);
+                $allocatedAmount = round($allocatedAmount + $allocationAmount, 2);
+                $allocationCount++;
+            }
+
+            $advanceId = null;
+            $advanceAmount = round(max($remainingAmount, 0), 2);
+            if ($advanceAmount > 0.005) {
+                $advanceId = $repository->registerAdvance([
+                    'supplier_id' => $corrected['supplier_id'],
+                    'branch_id' => $branchId,
+                    'currency' => $corrected['currency'],
+                    'deposit_amount' => $advanceAmount,
+                    'available_amount' => $advanceAmount,
+                    'reference_no' => $paymentNo,
+                    'remarks' => 'Corrected supplier payment remainder retained as supplier advance.',
+                    'received_at' => $corrected['payment_date'],
+                    'actor_user_id' => $actorUserId,
+                    'source_supplier_payment_id' => $replacementId,
+                ]);
+                $repository->convertSupplierPaymentExcessToAdvance(
+                    $replacementId,
+                    $advanceId,
+                    $advanceAmount,
+                    $actorUserId
+                );
+            }
+
+            AuditLog::record($this->app, 'supplier.payment.corrected', [
+                'user_id' => $actorUserId,
+                'original_supplier_payment_id' => $paymentId,
+                'original_payment_no' => (string) ($payment['payment_no'] ?? ''),
+                'replacement_supplier_payment_id' => $replacementId,
+                'replacement_payment_no' => $paymentNo,
+                'payment_scope' => $isGlobal ? 'global' : 'booking',
+                'reason' => $correctionReason,
+                'before' => [
+                    'supplier_id' => (int) ($payment['supplier_id'] ?? 0),
+                    'payment_date' => (string) ($payment['payment_date'] ?? ''),
+                    'currency' => (string) ($payment['currency'] ?? ''),
+                    'paid_amount' => round((float) ($payment['paid_amount'] ?? 0), 2),
+                    'payment_method' => (string) ($payment['payment_method'] ?? ''),
+                    'treasury_account_id' => (int) ($payment['treasury_account_id'] ?? 0),
+                ],
+                'after' => $corrected,
+                'allocated_amount' => $allocatedAmount,
+                'advance_amount' => $advanceAmount,
+            ]);
+
+            if ($startedTransaction && $db->inTransaction()) {
+                $db->commit();
+            }
+
+            return [
+                'mode' => 'financial',
+                'supplier_payment_id' => $replacementId,
+                'original_supplier_payment_id' => $paymentId,
+                'payment_no' => $paymentNo,
+                'allocated_amount' => $allocatedAmount,
+                'advance_amount' => $advanceAmount,
+                'allocation_count' => $allocationCount,
+                'payment_scope' => $isGlobal ? 'global' : 'booking',
+                'payment' => $repository->findSupplierPaymentById($replacementId),
+            ];
+        } catch (\Throwable $exception) {
+            if ($startedTransaction && $db->inTransaction()) {
+                $db->rollBack();
+            }
+            if ($exception instanceof RuntimeException) {
+                throw $exception;
+            }
+
+            throw new RuntimeException('Supplier payment correction could not be saved.', 0, $exception);
+        }
+    }
+
+    public function correctSupplierPaymentSupplier(array $input, int $actorUserId, array $accessibleBranchIds): array
+    {
+        $this->assertFinancialAdminActor($actorUserId, 'Only super admin or branch admin can correct a supplier payment supplier.');
+
+        $paymentId = (int) ($input['supplier_payment_id'] ?? 0);
+        $replacementSupplierId = (int) ($input['replacement_supplier_id'] ?? 0);
+        $reasonInput = trim((string) ($input['correction_reason'] ?? $input['void_reason'] ?? ''));
+        $correctionReason = $reasonInput === ''
+            ? 'Supplier corrected by user'
+            : $this->requiredVoidReason($reasonInput);
+        if ($paymentId <= 0) {
+            throw new RuntimeException('Select a valid supplier payment to correct.');
+        }
+        if ($replacementSupplierId <= 0) {
+            throw new RuntimeException('Select the correct supplier for this payment.');
+        }
+
+        $repository = new SupplierRepository($this->app);
+        $payment = $repository->findSupplierPaymentById($paymentId);
+        if ($payment === null) {
+            throw new RuntimeException('The selected supplier payment could not be found.');
+        }
+
+        $accessibleIds = array_map('intval', $accessibleBranchIds);
+        if (! in_array((int) ($payment['branch_id'] ?? 0), $accessibleIds, true)) {
+            throw new RuntimeException('You cannot correct a supplier payment outside your accessible branches.');
+        }
+
+        $bookingId = (int) ($input['booking_id'] ?? 0);
+        if ($bookingId > 0) {
+            $booking = $this->loadBooking($bookingId, $accessibleBranchIds);
+            $bookingReference = (string) ($booking['booking_reference'] ?? '');
+            $paymentReference = strtoupper(trim((string) ($payment['booking_reference'] ?? '')));
+            if ($paymentReference !== 'GLOBAL' && $paymentReference !== strtoupper(trim($bookingReference))) {
+                throw new RuntimeException('The selected supplier payment is not linked to this booking.');
+            }
+        }
+
+        /** @var PDO $db */
+        $db = $this->app->get('db');
+        $startedTransaction = ! $db->inTransaction();
+        if ($startedTransaction) {
+            $db->beginTransaction();
+        }
+
+        try {
+            $result = $repository->correctSupplierPaymentSupplier(
+                $paymentId,
+                $replacementSupplierId,
+                $actorUserId,
+                $correctionReason
+            );
+
+            $accounting = new AccountingRepository($this->app);
+            $releaseJournalIds = [];
+            foreach ((array) ($result['released_settlements'] ?? []) as $index => $releasedSettlement) {
+                $releasedAmount = round((float) ($releasedSettlement['released_amount'] ?? 0), 2);
+                if ($releasedAmount <= 0.005) {
+                    continue;
+                }
+                $releaseJournalIds[] = $accounting->postSupplierSettlementRelease([
+                    'branch_id' => (int) ($result['branch_id'] ?? 0),
+                    'booking_reference' => (string) ($releasedSettlement['booking_reference'] ?? ''),
+                    'source_reference' => 'SUPPLIER-CORRECTION-' . (string) ($result['payment_no'] ?? $paymentId) . '-RELEASE-' . ($index + 1),
+                    'service_line_reference' => (string) ($releasedSettlement['service_line_reference'] ?? '') !== ''
+                        ? (string) $releasedSettlement['service_line_reference']
+                        : null,
+                    'supplier_obligation_id' => (int) ($releasedSettlement['supplier_obligation_id'] ?? 0),
+                    'released_amount' => $releasedAmount,
+                    'entry_date' => date('Y-m-d'),
+                    'currency' => (string) ($releasedSettlement['currency'] ?? $result['currency'] ?? 'PKR'),
+                    'actor_user_id' => $actorUserId,
+                    'narration' => 'Supplier payment allocation released for supplier correction',
+                ]);
+            }
+
+            $paymentScope = str_replace(' ', '_', mb_strtolower(trim((string) ($result['payment_scope'] ?? 'booking'))));
+            $targetBookingReference = $paymentScope === 'global'
+                ? null
+                : (string) ($result['booking_reference'] ?? '');
+            $targetObligations = $repository->openObligationsForCorrectedSupplierPayment(
+                $replacementSupplierId,
+                (int) ($result['branch_id'] ?? 0),
+                (string) ($result['currency'] ?? 'PKR'),
+                $targetBookingReference
+            );
+
+            $remainingAmount = round((float) ($result['reallocatable_amount'] ?? 0), 2);
+            $reallocatedAmount = 0.0;
+            $newAllocations = [];
+            foreach ($targetObligations as $obligation) {
+                if ($remainingAmount <= 0.005) {
+                    break;
+                }
+                $obligationBalance = round((float) ($obligation['net_payable_amount'] ?? 0), 2);
+                $allocationAmount = min($remainingAmount, $obligationBalance);
+                if ($allocationAmount <= 0.005) {
+                    continue;
+                }
+                $allocationId = $repository->allocateSupplierPayment(
+                    $paymentId,
+                    (int) ($obligation['id'] ?? 0),
+                    $allocationAmount,
+                    null,
+                    'Automatic reallocation after supplier correction',
+                    $actorUserId
+                );
+                $accounting->postSupplierPaymentAllocation([
+                    'branch_id' => (int) ($result['branch_id'] ?? 0),
+                    'booking_reference' => (string) ($obligation['booking_reference'] ?? ''),
+                    'source_reference' => (string) ($result['payment_no'] ?? $paymentId) . '-REALLOC-' . $allocationId,
+                    'service_line_reference' => (string) ($obligation['service_line_reference'] ?? '') !== ''
+                        ? (string) $obligation['service_line_reference']
+                        : null,
+                    'supplier_obligation_id' => (int) ($obligation['id'] ?? 0),
+                    'supplier_payment_id' => $paymentId,
+                    'allocated_amount' => $allocationAmount,
+                    'entry_date' => (string) ($result['payment_date'] ?? date('Y-m-d')),
+                    'currency' => (string) ($obligation['currency'] ?? $result['currency'] ?? 'PKR'),
+                    'actor_user_id' => $actorUserId,
+                    'narration' => 'Corrected supplier payment allocated to payable',
+                ]);
+                $newAllocations[] = [
+                    'allocation_id' => $allocationId,
+                    'supplier_obligation_id' => (int) ($obligation['id'] ?? 0),
+                    'booking_reference' => (string) ($obligation['booking_reference'] ?? ''),
+                    'allocated_amount' => $allocationAmount,
+                ];
+                $remainingAmount = round($remainingAmount - $allocationAmount, 2);
+                $reallocatedAmount = round($reallocatedAmount + $allocationAmount, 2);
+            }
+
+            $newAdvanceId = null;
+            $newAdvanceAmount = round(max($remainingAmount, 0), 2);
+            if ($newAdvanceAmount > 0.005) {
+                $newAdvanceId = $repository->registerAdvance([
+                    'supplier_id' => $replacementSupplierId,
+                    'branch_id' => (int) ($result['branch_id'] ?? 0),
+                    'currency' => (string) ($result['currency'] ?? 'PKR'),
+                    'deposit_amount' => $newAdvanceAmount,
+                    'available_amount' => $newAdvanceAmount,
+                    'reference_no' => (string) ($result['payment_no'] ?? ''),
+                    'remarks' => 'Supplier payment remainder converted to advance after supplier correction.',
+                    'received_at' => (string) ($result['payment_date'] ?? date('Y-m-d')),
+                    'actor_user_id' => $actorUserId,
+                    'source_supplier_payment_id' => $paymentId,
+                ]);
+                $repository->convertSupplierPaymentExcessToAdvance(
+                    $paymentId,
+                    $newAdvanceId,
+                    $newAdvanceAmount,
+                    $actorUserId
+                );
+            }
+
+            $result['release_journal_entry_ids'] = $releaseJournalIds;
+            $result['new_allocations'] = $newAllocations;
+            $result['reallocated_amount'] = $reallocatedAmount;
+            $result['new_allocation_count'] = count($newAllocations);
+            $result['new_advance_id'] = $newAdvanceId;
+            $result['new_advance_amount'] = $newAdvanceAmount;
+
+            AuditLog::record($this->app, 'supplier.payment.supplier_corrected', [
+                'user_id' => $actorUserId,
+                'supplier_payment_id' => $paymentId,
+                'payment_no' => (string) ($result['payment_no'] ?? ''),
+                'booking_id' => $bookingId,
+                'booking_reference' => (string) ($result['booking_reference'] ?? ''),
+                'branch_id' => (int) ($result['branch_id'] ?? 0),
+                'currency' => (string) ($result['currency'] ?? 'PKR'),
+                'old_supplier_id' => (int) ($result['old_supplier_id'] ?? 0),
+                'old_supplier_name' => (string) ($result['old_supplier_name'] ?? ''),
+                'new_supplier_id' => (int) ($result['new_supplier_id'] ?? 0),
+                'new_supplier_name' => (string) ($result['new_supplier_name'] ?? ''),
+                'allocation_count_released' => (int) ($result['allocation_count_released'] ?? 0),
+                'advance_application_count_released' => (int) ($result['advance_application_count_released'] ?? 0),
+                'linked_advance_count_neutralized' => (int) ($result['linked_advance_count_neutralized'] ?? 0),
+                'new_allocation_count' => (int) ($result['new_allocation_count'] ?? 0),
+                'reallocated_amount' => (float) ($result['reallocated_amount'] ?? 0),
+                'new_advance_amount' => (float) ($result['new_advance_amount'] ?? 0),
+                'old_payables_reopened' => true,
+                'correction_reason' => $correctionReason,
+                'cash_movement_changed' => false,
+            ]);
+
+            if ($startedTransaction && $db->inTransaction()) {
+                $db->commit();
+            }
+
+            return $result + ['booking_id' => $bookingId];
+        } catch (\Throwable $exception) {
+            if ($startedTransaction && $db->inTransaction()) {
+                $db->rollBack();
+            }
+            if ($exception instanceof RuntimeException) {
+                throw $exception;
+            }
+
+            throw new RuntimeException('The supplier payment supplier could not be corrected.', 0, $exception);
+        }
+    }
+
     public function recordSupplierAdvance(array $input, int $actorUserId, array $accessibleBranchIds): array
     {
         $booking = $this->loadBooking((int) ($input['booking_id'] ?? 0), $accessibleBranchIds);
@@ -760,6 +1425,14 @@ final class SupplierSettlementWorkspaceService extends Service
                 'actor_user_id' => $actorUserId,
             ]);
 
+            $reconciliation = $this->applyAvailableSupplierAdvancesToOpenPayables(
+                [(int) $booking['branch_id']],
+                $actorUserId,
+                (int) $supplier['id'],
+                $currency,
+                $advanceDate
+            );
+
             $advance = $repository->findAdvanceById($advanceId);
 
             if ($startedTransaction && $db->inTransaction()) {
@@ -769,6 +1442,8 @@ final class SupplierSettlementWorkspaceService extends Service
             return [
                 'advance' => $advance,
                 'booking_id' => (int) $booking['id'],
+                'applied_amount' => (float) ($reconciliation['applied_amount'] ?? 0),
+                'application_count' => (int) ($reconciliation['application_count'] ?? 0),
             ];
         } catch (\Throwable $exception) {
             if ($startedTransaction && $db->inTransaction()) {
@@ -789,8 +1464,18 @@ final class SupplierSettlementWorkspaceService extends Service
         $supplier = $this->resolveSupplier($input, $accessibleBranchIds);
         $this->assertSupplierActive($supplier);
         $currency = $this->normalizeCurrency((string) ($input['advance_currency'] ?? 'PKR'));
+        $paymentMethod = $this->normalizeMethod((string) ($input['advance_payment_method'] ?? 'cash'));
+        if (! in_array($paymentMethod, ['cash', 'bank_transfer'], true)) {
+            throw new RuntimeException('Prepaid supplier payments must use Cash or Bank Transfer.');
+        }
         $depositAmount = $this->positiveMoney($input['advance_amount'] ?? 0, 'Advance amount');
         $advanceDate = $this->normalizeDate((string) ($input['advance_date'] ?? ''), 'Advance date');
+        $treasuryAccountId = $this->resolveSupplierPaymentTreasuryAccountId([
+            'payment_method' => $paymentMethod,
+            'currency' => $currency,
+            'paid_amount' => $depositAmount,
+            'charges_amount' => 0,
+        ], $branchId, (int) ($input['advance_treasury_account_id'] ?? 0));
 
         /** @var PDO $db */
         $db = $this->app->get('db');
@@ -812,19 +1497,32 @@ final class SupplierSettlementWorkspaceService extends Service
                 'reference_no' => $this->optionalText($input['advance_reference_number'] ?? null, 100),
                 'remarks' => $this->optionalText($input['advance_remarks'] ?? null, 4000),
                 'received_at' => $advanceDate,
+                'payment_method' => $paymentMethod,
+                'treasury_account_id' => $treasuryAccountId,
                 'actor_user_id' => $actorUserId,
             ]);
 
-            $accounting->postSupplierAdvanceDeposit([
+            $journalEntryId = $accounting->postSupplierAdvanceDeposit([
                 'branch_id' => $branchId,
                 'booking_reference' => null,
                 'source_reference' => 'SADV-' . $advanceId,
                 'entry_date' => $advanceDate,
                 'currency' => $currency,
                 'amount' => $depositAmount,
+                'payment_method' => $paymentMethod,
+                'treasury_account_id' => $treasuryAccountId,
                 'actor_user_id' => $actorUserId,
                 'narration' => 'Global prepaid supplier payment recorded',
             ]);
+            $repository->attachAdvanceJournal($advanceId, $journalEntryId);
+
+            $reconciliation = $this->applyAvailableSupplierAdvancesToOpenPayables(
+                [$branchId],
+                $actorUserId,
+                (int) $supplier['id'],
+                $currency,
+                $advanceDate
+            );
 
             $advance = $repository->findAdvanceById($advanceId);
 
@@ -838,6 +1536,10 @@ final class SupplierSettlementWorkspaceService extends Service
                 'supplier_name' => (string) ($supplier['name'] ?? 'Supplier'),
                 'currency' => $currency,
                 'amount' => $depositAmount,
+                'payment_method' => $paymentMethod,
+                'treasury_account_id' => $treasuryAccountId,
+                'applied_amount' => (float) ($reconciliation['applied_amount'] ?? 0),
+                'application_count' => (int) ($reconciliation['application_count'] ?? 0),
             ];
         } catch (\Throwable $exception) {
             if ($startedTransaction && $db->inTransaction()) {
@@ -848,7 +1550,289 @@ final class SupplierSettlementWorkspaceService extends Service
                 throw $exception;
             }
 
-            throw new RuntimeException('Global supplier advance could not be saved.', 0, $exception);
+            throw new RuntimeException('Supplier advance could not be saved.', 0, $exception);
+        }
+    }
+
+    public function applyAvailableSupplierAdvancesToOpenPayables(
+        array $branchIds,
+        int $actorUserId,
+        int $supplierId = 0,
+        string $currency = '',
+        ?string $entryDate = null
+    ): array {
+        $branchIds = array_values(array_unique(array_filter(array_map('intval', $branchIds))));
+        if ($branchIds === []) {
+            return ['applied_amount' => 0.0, 'application_count' => 0, 'obligations' => []];
+        }
+
+        /** @var PDO $db */
+        $db = $this->app->get('db');
+        $repository = new SupplierRepository($this->app);
+        $accounting = new AccountingRepository($this->app);
+        $startedTransaction = ! $db->inTransaction();
+        if ($startedTransaction) {
+            $db->beginTransaction();
+        }
+
+        try {
+            $obligations = $repository->openObligationsForAdvanceReconciliation(
+                $branchIds,
+                $supplierId,
+                $currency
+            );
+            $appliedTotal = 0.0;
+            $applicationCount = 0;
+            $results = [];
+            $effectiveDate = $entryDate !== null && preg_match('/^\d{4}-\d{2}-\d{2}$/', $entryDate) === 1
+                ? $entryDate
+                : date('Y-m-d');
+
+            foreach ($obligations as $obligation) {
+                $result = $repository->autoApplyAvailableAdvanceToObligation(
+                    (int) ($obligation['id'] ?? 0),
+                    $actorUserId
+                );
+                $delta = round((float) ($result['applied_amount_delta'] ?? 0), 2);
+                if ($delta > 0.005) {
+                    $accounting->postSupplierAdvanceApplication([
+                        'branch_id' => (int) ($obligation['branch_id'] ?? 0),
+                        'booking_reference' => (string) ($obligation['booking_reference'] ?? ''),
+                        'source_reference' => 'SADV-AUTO-' . (int) ($obligation['id'] ?? 0),
+                        'service_line_reference' => (string) ($obligation['service_line_reference'] ?? '') !== ''
+                            ? (string) $obligation['service_line_reference']
+                            : null,
+                        'supplier_obligation_id' => (int) ($obligation['id'] ?? 0),
+                        'amount' => $delta,
+                        'entry_date' => $effectiveDate,
+                        'currency' => (string) ($obligation['currency'] ?? 'PKR'),
+                        'actor_user_id' => $actorUserId,
+                        'narration' => 'Existing supplier advance automatically applied to payable',
+                    ]);
+                    $appliedTotal = round($appliedTotal + $delta, 2);
+                    $applicationCount++;
+                } elseif ($delta < -0.005) {
+                    $accounting->postSupplierAdvanceApplicationAdjusted([
+                        'branch_id' => (int) ($obligation['branch_id'] ?? 0),
+                        'booking_reference' => (string) ($obligation['booking_reference'] ?? ''),
+                        'source_reference' => 'SADV-AUTO-ADJUST-' . (int) ($obligation['id'] ?? 0),
+                        'service_line_reference' => (string) ($obligation['service_line_reference'] ?? '') !== ''
+                            ? (string) $obligation['service_line_reference']
+                            : null,
+                        'supplier_obligation_id' => (int) ($obligation['id'] ?? 0),
+                        'adjustment_amount' => $delta,
+                        'entry_date' => $effectiveDate,
+                        'currency' => (string) ($obligation['currency'] ?? 'PKR'),
+                        'actor_user_id' => $actorUserId,
+                        'narration' => 'Supplier advance application automatically reconciled',
+                    ]);
+                    $appliedTotal = round($appliedTotal + $delta, 2);
+                    $applicationCount++;
+                }
+                if (abs($delta) > 0.005) {
+                    $results[] = [
+                        'supplier_obligation_id' => (int) ($obligation['id'] ?? 0),
+                        'booking_reference' => (string) ($obligation['booking_reference'] ?? ''),
+                        'currency' => (string) ($obligation['currency'] ?? ''),
+                        'applied_amount_delta' => $delta,
+                        'remaining_payable' => round((float) ($result['obligation']['net_payable_amount'] ?? 0), 2),
+                    ];
+                }
+            }
+
+            AuditLog::record($this->app, 'supplier.advance.auto_reconciled', [
+                'user_id' => $actorUserId,
+                'supplier_id' => $supplierId > 0 ? $supplierId : null,
+                'currency' => strtoupper(trim($currency)) !== '' ? strtoupper(trim($currency)) : null,
+                'branch_ids' => $branchIds,
+                'applied_amount' => $appliedTotal,
+                'application_count' => $applicationCount,
+            ]);
+
+            if ($startedTransaction && $db->inTransaction()) {
+                $db->commit();
+            }
+
+            return [
+                'applied_amount' => $appliedTotal,
+                'application_count' => $applicationCount,
+                'obligations' => $results,
+            ];
+        } catch (\Throwable $exception) {
+            if ($startedTransaction && $db->inTransaction()) {
+                $db->rollBack();
+            }
+            if ($exception instanceof RuntimeException) {
+                throw $exception;
+            }
+
+            throw new RuntimeException('Supplier advances could not be reconciled to open payables.', 0, $exception);
+        }
+    }
+
+    public function correctGlobalSupplierAdvance(array $input, int $actorUserId, array $accessibleBranchIds): array
+    {
+        $advanceId = (int) ($input['supplier_advance_id'] ?? 0);
+        $repository = new SupplierRepository($this->app);
+        $old = $repository->findAdvanceById($advanceId);
+        if ($old === null) {
+            throw new RuntimeException('Please select a valid prepaid supplier payment to edit.');
+        }
+        if ((int) ($old['source_supplier_payment_id'] ?? 0) > 0) {
+            throw new RuntimeException('This supplier credit came from a payment/refund workflow and must be corrected from that original transaction.');
+        }
+
+        $branchId = $this->resolveAccessibleBranchId((int) ($old['branch_id'] ?? 0), $accessibleBranchIds);
+        $currency = $this->normalizeCurrency((string) ($old['currency'] ?? 'PKR'));
+        $oldSupplierId = (int) ($old['supplier_id'] ?? 0);
+        $newSupplierId = (int) ($input['supplier_id'] ?? $oldSupplierId);
+        $newSupplier = $repository->findSupplierById($newSupplierId);
+        if ($newSupplier === null) {
+            throw new RuntimeException('Please select a valid supplier for this prepaid payment.');
+        }
+        $this->assertSupplierActive($newSupplier);
+        $paymentMethod = $this->normalizeMethod((string) ($input['advance_payment_method'] ?? 'cash'));
+        if (! in_array($paymentMethod, ['cash', 'bank_transfer'], true)) {
+            throw new RuntimeException('Prepaid supplier payments must use Cash or Bank Transfer.');
+        }
+
+        $newAmount = $this->positiveMoney($input['advance_amount'] ?? 0, 'Advance amount');
+        $usedAmount = round(
+            (float) ($old['deposit_amount'] ?? 0) - (float) ($old['available_amount'] ?? 0),
+            2
+        );
+        if ($newSupplierId !== $oldSupplierId && $usedAmount > 0.005) {
+            throw new RuntimeException(
+                'The supplier cannot be changed because '
+                . $currency . ' ' . number_format($usedAmount, 2)
+                . ' has already been applied to supplier invoices. Correct those allocations first.'
+            );
+        }
+        if ($newAmount + 0.005 < $usedAmount) {
+            throw new RuntimeException(
+                'The corrected amount cannot be less than the '
+                . $currency . ' ' . number_format($usedAmount, 2)
+                . ' already used against supplier invoices.'
+            );
+        }
+
+        $paymentDate = $this->normalizeDate((string) ($input['advance_date'] ?? ''), 'Payment date');
+        $reason = $this->optionalText($input['correction_reason'] ?? null, 1000);
+        if ($reason === null || trim($reason) === '') {
+            throw new RuntimeException('Please enter a short reason for this correction.');
+        }
+
+        $treasuryAccountId = (int) ($input['advance_treasury_account_id'] ?? 0);
+        $treasuryRepository = new TreasuryRepository($this->app);
+        $treasuryRepository->validatePaymentTreasuryAccount(
+            $treasuryAccountId,
+            $branchId,
+            $currency,
+            $paymentMethod
+        );
+        $availableBalance = $treasuryRepository->currentBalanceForAccountId($treasuryAccountId);
+        if ($treasuryAccountId === (int) ($old['treasury_account_id'] ?? 0)) {
+            $availableBalance += (float) ($old['deposit_amount'] ?? 0);
+        }
+        if (round($availableBalance + 0.005, 2) < $newAmount) {
+            throw new RuntimeException(
+                'Selected source account does not have enough balance after reversing the old entry. Available: '
+                . number_format($availableBalance, 2) . ' ' . $currency . '.'
+            );
+        }
+
+        /** @var PDO $db */
+        $db = $this->app->get('db');
+        $accounting = new AccountingRepository($this->app);
+        $startedTransaction = ! $db->inTransaction();
+        if ($startedTransaction) {
+            $db->beginTransaction();
+        }
+
+        try {
+            $oldJournalEntryId = (int) ($old['journal_entry_id'] ?? 0);
+            $reversalJournalEntryId = $oldJournalEntryId > 0
+                ? $accounting->reverseJournalEntry($oldJournalEntryId, [
+                    'branch_id' => $branchId,
+                    'source_type' => 'supplier_advance_correction_reversal',
+                    'source_reference' => 'SADV-CORR-REV-' . $advanceId,
+                    'entry_date' => $paymentDate,
+                    'currency' => $currency,
+                    'narration' => 'Reversal before prepaid supplier payment correction: ' . $reason,
+                    'actor_user_id' => $actorUserId,
+                ])
+                : null;
+
+            $newJournalEntryId = $accounting->postSupplierAdvanceDeposit([
+                'branch_id' => $branchId,
+                'booking_reference' => null,
+                'source_reference' => 'SADV-CORR-' . $advanceId,
+                'entry_date' => $paymentDate,
+                'currency' => $currency,
+                'amount' => $newAmount,
+                'payment_method' => $paymentMethod,
+                'treasury_account_id' => $treasuryAccountId,
+                'actor_user_id' => $actorUserId,
+                'narration' => 'Corrected prepaid supplier payment: ' . $reason,
+            ]);
+
+            $referenceNo = $this->optionalText($input['advance_reference_number'] ?? null, 100);
+            $remarks = $this->optionalText($input['advance_remarks'] ?? null, 4000);
+            $repository->correctAdvance([
+                'id' => $advanceId,
+                'supplier_id' => $newSupplierId,
+                'deposit_amount' => $newAmount,
+                'available_amount' => round($newAmount - $usedAmount, 2),
+                'received_at' => $paymentDate,
+                'payment_method' => $paymentMethod,
+                'treasury_account_id' => $treasuryAccountId,
+                'journal_entry_id' => $newJournalEntryId,
+                'reference_no' => $referenceNo,
+                'remarks' => $remarks,
+                'actor_user_id' => $actorUserId,
+            ]);
+            $repository->recordAdvanceCorrection([
+                'supplier_advance_id' => $advanceId,
+                'reason' => $reason,
+                'old_supplier_id' => $oldSupplierId,
+                'new_supplier_id' => $newSupplierId,
+                'old_payment_date' => $old['received_at'] ?? null,
+                'new_payment_date' => $paymentDate,
+                'old_amount' => $old['deposit_amount'] ?? 0,
+                'new_amount' => $newAmount,
+                'old_payment_method' => $old['payment_method'] ?? null,
+                'new_payment_method' => $paymentMethod,
+                'old_treasury_account_id' => $old['treasury_account_id'] ?? null,
+                'new_treasury_account_id' => $treasuryAccountId,
+                'old_reference_no' => $old['reference_no'] ?? null,
+                'new_reference_no' => $referenceNo,
+                'old_remarks' => $old['remarks'] ?? null,
+                'new_remarks' => $remarks,
+                'old_journal_entry_id' => $oldJournalEntryId > 0 ? $oldJournalEntryId : null,
+                'reversal_journal_entry_id' => $reversalJournalEntryId,
+                'new_journal_entry_id' => $newJournalEntryId,
+                'actor_user_id' => $actorUserId,
+            ]);
+
+            if ($startedTransaction && $db->inTransaction()) {
+                $db->commit();
+            }
+
+            return [
+                'advance_id' => $advanceId,
+                'supplier_id' => $newSupplierId,
+                'supplier_name' => (string) ($newSupplier['name'] ?? 'Supplier'),
+                'currency' => $currency,
+                'amount' => $newAmount,
+            ];
+        } catch (\Throwable $exception) {
+            if ($startedTransaction && $db->inTransaction()) {
+                $db->rollBack();
+            }
+            if ($exception instanceof RuntimeException) {
+                throw $exception;
+            }
+            throw new RuntimeException('Prepaid supplier payment could not be corrected.', 0, $exception);
         }
     }
 

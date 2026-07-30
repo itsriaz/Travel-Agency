@@ -105,6 +105,7 @@ final class ReportsController extends BaseController
         }
 
         return $this->view('reports/account_ledger_print', array_merge($state, [
+            'title' => 'Account Ledger',
             'user' => Auth::user(),
             'pageTitle' => 'Account Ledger Print',
         ]), 'layouts/print');
@@ -165,26 +166,92 @@ final class ReportsController extends BaseController
         $masterData = new MasterDataRepository($this->app);
 
         $branchOptions = $bookingRepository->branchOptions($accessibleBranchIds);
-        $selectedBranchId = (int) ($_GET['branch_id'] ?? ($branchOptions[0]['id'] ?? 0));
-        if ($selectedBranchId <= 0 || ! in_array($selectedBranchId, array_map('intval', $accessibleBranchIds), true)) {
+        $startNewPayment = (int) ($_GET['start_new_payment'] ?? 0) === 1;
+        $selectedBranchId = (int) ($_GET['branch_id'] ?? ($startNewPayment ? 0 : ($branchOptions[0]['id'] ?? 0)));
+        $recreateDraft = null;
+        $postedPaymentConfirmation = null;
+        $postedPaymentId = (int) ($_GET['posted_payment_id'] ?? 0);
+        if ($postedPaymentId > 0) {
+            $postedPaymentConfirmation = $supplierRepository->globalSupplierPaymentConfirmation(
+                $postedPaymentId,
+                $accessibleBranchIds
+            );
+            if ($postedPaymentConfirmation !== null) {
+                $selectedBranchId = (int) ($postedPaymentConfirmation['branch_id'] ?? $selectedBranchId);
+            }
+        }
+        $recreatePaymentId = (int) ($_GET['recreate_payment_id'] ?? 0);
+        if ($recreatePaymentId > 0) {
+            $candidateDraft = $supplierRepository->globalSupplierPaymentRecreateDraft($recreatePaymentId);
+            $candidateBranchId = (int) ($candidateDraft['branch_id'] ?? 0);
+            $candidateStatus = str_replace(' ', '_', mb_strtolower(trim((string) ($candidateDraft['status'] ?? ''))));
+            if ($candidateDraft !== null
+                && in_array($candidateBranchId, array_map('intval', $accessibleBranchIds), true)
+                && $candidateStatus === 'void') {
+                $recreateDraft = $candidateDraft;
+                $selectedBranchId = $candidateBranchId;
+            }
+        }
+        if ($selectedBranchId > 0 && ! in_array($selectedBranchId, array_map('intval', $accessibleBranchIds), true)) {
+            $selectedBranchId = 0;
+        }
+        if (! $startNewPayment && $selectedBranchId <= 0) {
             $selectedBranchId = (int) ($branchOptions[0]['id'] ?? 0);
         }
 
         $supplierOptions = $selectedBranchId > 0
             ? $supplierRepository->globalSettlementSupplierOptions($selectedBranchId)
             : [];
-        $selectedSupplierId = (int) ($_GET['supplier_id'] ?? 0);
+        $selectedSupplierId = $recreateDraft !== null
+            ? (int) ($recreateDraft['supplier_id'] ?? 0)
+            : ($postedPaymentConfirmation !== null
+                ? (int) ($postedPaymentConfirmation['supplier_id'] ?? 0)
+                : (int) ($_GET['supplier_id'] ?? 0));
+        if ($recreateDraft !== null || $postedPaymentConfirmation !== null) {
+            $selectedPaymentSupplier = $supplierRepository->findSupplierById($selectedSupplierId);
+            if ($selectedPaymentSupplier !== null && ! in_array($selectedSupplierId, array_map(static fn (array $row): int => (int) ($row['id'] ?? 0), $supplierOptions), true)) {
+                $supplierOptions[] = $selectedPaymentSupplier;
+            }
+        }
         $supplierOptionIds = array_map(static fn (array $row): int => (int) ($row['id'] ?? 0), $supplierOptions);
         if ($selectedSupplierId <= 0 || ! in_array($selectedSupplierId, $supplierOptionIds, true)) {
-            $selectedSupplierId = (int) ($supplierOptions[0]['id'] ?? 0);
+            $selectedSupplierId = $startNewPayment ? 0 : (int) ($supplierOptions[0]['id'] ?? 0);
         }
 
         $currencyOptions = $selectedSupplierId > 0
             ? $supplierRepository->globalSettlementCurrencies($selectedBranchId, $selectedSupplierId)
             : [];
+        if ($selectedSupplierId > 0) {
+            $selectedSupplier = $supplierRepository->findSupplierById($selectedSupplierId);
+            $currencyRowsByCode = [];
+            foreach ($currencyOptions as $currencyRow) {
+                $currencyRowsByCode[strtoupper((string) ($currencyRow['currency'] ?? ''))] = $currencyRow;
+            }
+            $defaultCurrency = strtoupper(trim((string) ($selectedSupplier['default_currency'] ?? '')));
+            foreach (array_values(array_unique(array_filter([$defaultCurrency, 'PKR', 'AED', 'USD']))) as $currencyCode) {
+                if (! isset($currencyRowsByCode[$currencyCode])) {
+                    $currencyRowsByCode[$currencyCode] = [
+                        'currency' => $currencyCode,
+                        'open_payable_count' => 0,
+                        'open_payable_amount' => 0,
+                    ];
+                }
+            }
+            $currencyOptions = array_values($currencyRowsByCode);
+        }
         $availableCurrencies = array_map(static fn (array $row): string => (string) ($row['currency'] ?? ''), $currencyOptions);
-        $currency = strtoupper(trim((string) ($_GET['currency'] ?? '')));
-        if (! in_array($currency, $availableCurrencies, true)) {
+        $currency = $recreateDraft !== null
+            ? strtoupper(trim((string) ($recreateDraft['currency'] ?? 'PKR')))
+            : ($postedPaymentConfirmation !== null
+                ? strtoupper(trim((string) ($postedPaymentConfirmation['currency'] ?? 'PKR')))
+                : strtoupper(trim((string) ($_GET['currency'] ?? ''))));
+        if (($recreateDraft !== null || $postedPaymentConfirmation !== null) && ! in_array($currency, $availableCurrencies, true)) {
+            $currencyOptions[] = ['currency' => $currency, 'open_payable_amount' => 0];
+            $availableCurrencies[] = $currency;
+        }
+        if ($selectedSupplierId <= 0) {
+            $currency = '';
+        } elseif (! in_array($currency, $availableCurrencies, true)) {
             $currency = (string) ($availableCurrencies[0] ?? 'PKR');
         }
 
@@ -217,9 +284,19 @@ final class ReportsController extends BaseController
             'credit_card' => 'Credit Card',
         ], array_flip(['cash', 'bank_transfer', 'debit_card', 'credit_card']));
 
+        $historyFilters = [
+            'query' => trim((string) ($_GET['history_query'] ?? '')),
+            'supplier_id' => (int) ($_GET['history_supplier_id'] ?? 0),
+            'date_from' => trim((string) ($_GET['history_date_from'] ?? '')),
+            'date_to' => trim((string) ($_GET['history_date_to'] ?? '')),
+            'branch_id' => (int) ($_GET['history_branch_id'] ?? $selectedBranchId),
+            'currency' => strtoupper(trim((string) ($_GET['history_currency'] ?? ''))),
+            'status' => strtolower(trim((string) ($_GET['history_status'] ?? ''))),
+        ];
+
         return $this->view('reports/global_supplier_settlement', [
             'user' => Auth::user(),
-            'title' => 'Global Supplier Settlement',
+            'title' => 'Supplier Payment',
             'branchOptions' => $branchOptions,
             'supplierOptions' => $supplierOptions,
             'selectedBranchId' => $selectedBranchId,
@@ -229,52 +306,260 @@ final class ReportsController extends BaseController
             'openObligations' => $openObligations,
             'sourceAccounts' => array_values($sourceAccounts),
             'paymentMethods' => $paymentMethods,
+            'globalPaymentHistory' => $supplierRepository->searchGlobalSupplierPayments(
+                $accessibleBranchIds,
+                $historyFilters,
+                100
+            ),
+            'historyFilters' => $historyFilters,
+            'historySupplierOptions' => $supplierRepository->globalSupplierPaymentSupplierOptions($accessibleBranchIds),
+            'paymentCorrectionSupplierOptions' => $supplierRepository->activeSuppliersForBranches($accessibleBranchIds),
+            'recreateDraft' => $recreateDraft,
+            'postedPaymentConfirmation' => $postedPaymentConfirmation,
+            'startNewPayment' => $startNewPayment,
+            'openAddSupplier' => (int) ($_GET['add_supplier'] ?? 0) === 1,
+            'canCorrectGlobalSupplierPayments' => Auth::isFinancialAdmin(),
         ]);
+    }
+
+    public function globalSupplierPaymentHistory(): never
+    {
+        $accessibleBranchIds = Authorization::accessibleBranchIds();
+        $supplierRepository = new SupplierRepository($this->app);
+        $filters = [
+            'query' => trim((string) ($_GET['q'] ?? '')),
+            'supplier_id' => (int) ($_GET['supplier_id'] ?? 0),
+            'date_from' => trim((string) ($_GET['date_from'] ?? '')),
+            'date_to' => trim((string) ($_GET['date_to'] ?? '')),
+            'branch_id' => (int) ($_GET['branch_id'] ?? 0),
+            'currency' => strtoupper(trim((string) ($_GET['currency'] ?? ''))),
+            'status' => strtolower(trim((string) ($_GET['status'] ?? ''))),
+        ];
+
+        $rows = $supplierRepository->searchGlobalSupplierPayments(
+            $accessibleBranchIds,
+            $filters,
+            100
+        );
+        $paymentMethods = (new MasterDataRepository($this->app))->activeCodeLabelMap('payment_methods');
+        if ($paymentMethods === []) {
+            $paymentMethods = [
+                'cash' => 'Cash',
+                'bank_transfer' => 'Bank Transfer',
+                'debit_card' => 'Debit Card',
+                'credit_card' => 'Credit Card',
+            ];
+        }
+        $treasuryAccounts = array_map(static fn (array $account): array => [
+            'id' => (int) ($account['id'] ?? 0),
+            'branch_id' => (int) ($account['branch_id'] ?? 0),
+            'account_name' => (string) ($account['account_name'] ?? ''),
+            'account_type' => (string) ($account['account_type'] ?? ''),
+            'currency' => (string) ($account['currency'] ?? ''),
+            'is_active' => (int) ($account['is_active'] ?? 0) === 1,
+            'current_balance' => round((float) ($account['current_balance'] ?? 0), 2),
+        ], (new TreasuryRepository($this->app))->accounts($accessibleBranchIds));
+
+        $this->jsonResponse([
+            'ok' => true,
+            'filters' => $filters,
+            'can_correct' => Auth::isFinancialAdmin(),
+            'suppliers' => $supplierRepository->globalSupplierPaymentSupplierOptions($accessibleBranchIds),
+            'correction_suppliers' => $supplierRepository->activeSuppliersForBranches($accessibleBranchIds),
+            'payment_methods' => $paymentMethods,
+            'treasury_accounts' => $treasuryAccounts,
+            'results' => array_map(static fn (array $row): array => [
+                'id' => (int) ($row['id'] ?? 0),
+                'supplier_id' => (int) ($row['supplier_id'] ?? 0),
+                'branch_id' => (int) ($row['branch_id'] ?? 0),
+                'booking_id' => (int) ($row['booking_id'] ?? 0),
+                'booking_reference' => (string) ($row['booking_reference'] ?? ''),
+                'payment_scope' => (string) ($row['payment_scope'] ?? 'booking'),
+                'open_url' => (int) ($row['booking_id'] ?? 0) > 0
+                    ? url('/workspace?booking_id=' . (int) $row['booking_id'] . '#dock-panel-suppliers')
+                    : '',
+                'payment_no' => (string) ($row['payment_no'] ?? ''),
+                'payment_date' => (string) ($row['payment_date'] ?? ''),
+                'payment_method' => (string) ($row['payment_method'] ?? 'cash'),
+                'treasury_account_id' => (int) ($row['treasury_account_id'] ?? 0),
+                'treasury_account_name' => (string) ($row['treasury_account_name'] ?? ''),
+                'reference_number' => (string) ($row['reference_number'] ?? ''),
+                'bank_card_detail' => (string) ($row['bank_card_detail'] ?? ''),
+                'remarks' => (string) ($row['remarks'] ?? ''),
+                'supplier_name' => (string) ($row['supplier_name'] ?? ''),
+                'supplier_code' => (string) ($row['supplier_code'] ?? ''),
+                'branch_name' => (string) ($row['branch_name'] ?? ''),
+                'currency' => (string) ($row['currency'] ?? ''),
+                'paid_amount' => round((float) ($row['paid_amount'] ?? 0), 2),
+                'allocated_amount' => round((float) ($row['allocated_amount'] ?? 0), 2),
+                'unallocated_amount' => round((float) ($row['converted_advance_amount'] ?? $row['unallocated_amount'] ?? 0), 2),
+                'allocation_count' => (int) ($row['allocation_count'] ?? 0),
+                'allocation_currencies' => array_values(array_filter(array_map(
+                    static fn (string $currency): string => strtoupper(trim($currency)),
+                    explode(',', (string) ($row['allocation_currencies'] ?? ''))
+                ), static fn (string $currency): bool => $currency !== '')),
+                'status' => str_replace(' ', '_', strtolower(trim((string) ($row['status'] ?? '')))) === 'void' ? 'Void' : 'Posted',
+                'void_reason' => (string) ($row['void_reason'] ?? ''),
+            ], $rows),
+            'message' => $rows === []
+                ? 'No supplier payment matched these filters.'
+                : count($rows) . ' supplier payment(s) found.',
+        ]);
+    }
+
+    public function correctSupplierPayment(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+        $isAjax = strtolower((string) ($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '')) === 'xmlhttprequest';
+
+        try {
+            $result = (new SupplierSettlementWorkspaceService($this->app))->correctSupplierPayment(
+                $_POST,
+                (int) Auth::id(),
+                Authorization::accessibleBranchIds()
+            );
+            $message = (string) ($result['mode'] ?? '') === 'metadata'
+                ? 'Supplier payment details updated.'
+                : 'Supplier payment corrected safely. The original posting and audit history were preserved.';
+            if ($isAjax) {
+                $this->jsonResponse([
+                    'ok' => true,
+                    'message' => $message,
+                    'result' => $result,
+                ]);
+            }
+            Flash::success($message);
+        } catch (RuntimeException $exception) {
+            if ($isAjax) {
+                $this->jsonResponse([
+                    'ok' => false,
+                    'message' => $exception->getMessage(),
+                ], 422);
+            }
+            Flash::error($exception->getMessage());
+        }
+
+        $this->redirect('/suppliers/settlements/global');
     }
 
     public function saveGlobalSupplierSettlement(): never
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);
 
+        $postedPaymentId = 0;
         try {
-            $result = (new SupplierSettlementWorkspaceService($this->app))->recordGlobalPostpaidSupplierPayment(
+            $result = (new SupplierSettlementWorkspaceService($this->app))->recordSupplierAccountPayment(
                 $_POST,
                 (int) Auth::id(),
                 Authorization::accessibleBranchIds()
             );
             $supplierCreditMessage = '';
-            if ((float) ($result['unallocated_amount'] ?? 0) > 0.005) {
-                $supplierCreditMessage = ' Supplier credit kept: '
+            if ((float) ($result['advance_amount'] ?? 0) > 0.005) {
+                $supplierCreditMessage = ' Supplier advance: '
                     . (string) ($result['currency'] ?? 'PKR')
                     . ' '
-                    . number_format((float) ($result['unallocated_amount'] ?? 0), 2)
+                    . number_format((float) ($result['advance_amount'] ?? 0), 2)
                     . '.';
             }
 
             Flash::success(
-                'Global supplier payment '
+                'Supplier payment '
                 . (string) ($result['payment_no'] ?? '')
                 . ' posted for '
                 . (string) ($result['supplier_name'] ?? 'Supplier')
-                . '. Allocated '
-                . (string) ($result['currency'] ?? 'PKR')
-                . ' '
-                . number_format((float) ($result['allocated_amount'] ?? 0), 2)
-                . ' across '
-                . (int) ($result['allocation_count'] ?? 0)
-                . ' payable item(s).'
+                . ' successfully.'
                 . $supplierCreditMessage
+            );
+            $postedPaymentId = (int) ($result['payment']['id'] ?? 0);
+        } catch (RuntimeException $exception) {
+            Flash::error($exception->getMessage());
+        }
+
+        $queryData = [
+            'branch_id' => (int) ($_POST['branch_id'] ?? 0),
+            'supplier_id' => (int) ($_POST['supplier_id'] ?? 0),
+            'currency' => (string) ($_POST['supplier_payment_currency'] ?? 'PKR'),
+        ];
+        if ($postedPaymentId > 0) {
+            $queryData['posted_payment_id'] = $postedPaymentId;
+        }
+        $this->redirect('/suppliers/settlements/global?' . http_build_query($queryData));
+    }
+
+    public function voidGlobalSupplierSettlement(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+        $action = strtolower(trim((string) ($_POST['correction_action'] ?? 'void')));
+        $result = null;
+
+        try {
+            $result = (new SupplierSettlementWorkspaceService($this->app))->voidGlobalSupplierPayment(
+                $_POST,
+                (int) Auth::id(),
+                Authorization::accessibleBranchIds()
+            );
+            Flash::success(
+                $action === 'edit'
+                    ? 'The original supplier payment was safely reversed. Review the prefilled correction and save it.'
+                    : 'Supplier payment ' . (string) ($result['payment_no'] ?? '') . ' was voided and its payables were reopened.'
             );
         } catch (RuntimeException $exception) {
             Flash::error($exception->getMessage());
         }
 
-        $query = http_build_query([
-            'branch_id' => (int) ($_POST['branch_id'] ?? 0),
-            'supplier_id' => (int) ($_POST['supplier_id'] ?? 0),
-            'currency' => (string) ($_POST['supplier_payment_currency'] ?? 'PKR'),
-        ]);
-        $this->redirect('/suppliers/settlements/global?' . $query);
+        $queryData = [
+            'branch_id' => (int) ($_POST['branch_id'] ?? ($result['branch_id'] ?? 0)),
+            'supplier_id' => (int) ($_POST['supplier_id'] ?? ($result['supplier_id'] ?? 0)),
+            'currency' => (string) ($_POST['currency'] ?? ($result['currency'] ?? 'PKR')),
+        ];
+        if ($result !== null && $action === 'edit') {
+            $queryData['recreate_payment_id'] = (int) ($result['supplier_payment_id'] ?? 0);
+        }
+
+        $this->redirect('/suppliers/settlements/global?' . http_build_query($queryData));
+    }
+
+    public function correctGlobalSupplierPaymentSupplier(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+        $isAjax = strtolower((string) ($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '')) === 'xmlhttprequest';
+
+        $result = null;
+        try {
+            $result = (new SupplierSettlementWorkspaceService($this->app))->correctSupplierPaymentSupplier(
+                $_POST,
+                (int) Auth::id(),
+                Authorization::accessibleBranchIds()
+            );
+            $message = 'Supplier payment ' . (string) ($result['payment_no'] ?? '')
+                . ' moved from ' . (string) ($result['old_supplier_name'] ?? 'the old supplier')
+                . ' to ' . (string) ($result['new_supplier_name'] ?? 'the correct supplier')
+                . ' successfully.';
+            if ($isAjax) {
+                $this->jsonResponse([
+                    'ok' => true,
+                    'message' => $message,
+                    'payment_id' => (int) ($result['supplier_payment_id'] ?? 0),
+                    'supplier_id' => (int) ($result['new_supplier_id'] ?? 0),
+                ]);
+            }
+            Flash::success($message);
+        } catch (RuntimeException $exception) {
+            if ($isAjax) {
+                $this->jsonResponse([
+                    'ok' => false,
+                    'message' => $exception->getMessage(),
+                ], 422);
+            }
+            Flash::error($exception->getMessage());
+        }
+
+        $this->redirect('/suppliers/settlements/global?' . http_build_query(array_filter([
+            'branch_id' => (int) ($_POST['branch_id'] ?? ($result['branch_id'] ?? 0)),
+            'supplier_id' => (int) ($_POST['replacement_supplier_id'] ?? ($result['new_supplier_id'] ?? 0)),
+            'currency' => (string) ($_POST['currency'] ?? ($result['currency'] ?? 'PKR')),
+            'history_supplier_id' => (int) ($_POST['replacement_supplier_id'] ?? ($result['new_supplier_id'] ?? 0)),
+        ], static fn ($value): bool => $value !== '' && $value !== 0)));
     }
 
     public function globalCustomerSettlement(): string
@@ -343,7 +628,7 @@ final class ReportsController extends BaseController
 
         return $this->view('reports/global_customer_settlement', [
             'user' => Auth::user(),
-            'title' => 'Global Customer Payment',
+            'title' => 'Lumpsum Customer Payment',
             'branchOptions' => $branchOptions,
             'customerOptions' => $customerOptions,
             'selectedBranchId' => $selectedBranchId,
@@ -433,6 +718,7 @@ final class ReportsController extends BaseController
                 'customer_receipt_id' => (int) ($result['receipt_id'] ?? 0),
                 'receipt_no' => (string) ($result['receipt_no'] ?? ''),
                 'traveler_id' => (int) ($_POST['traveler_id'] ?? 0),
+                'business_source_id' => (int) ($result['business_source_id'] ?? 0),
                 'currency' => (string) ($result['currency'] ?? 'PKR'),
                 'received_amount' => (float) ($result['received_amount'] ?? 0),
             ]);
@@ -441,10 +727,23 @@ final class ReportsController extends BaseController
                 . (string) ($result['receipt_no'] ?? '')
                 . ' recorded for '
                 . (string) ($result['customer_name'] ?? 'Customer')
+                . ' via ' . (string) ($result['business_source_name'] ?? 'Account Holder')
                 . ': '
                 . (string) ($result['currency'] ?? 'PKR')
                 . ' '
                 . number_format((float) ($result['received_amount'] ?? 0), 2)
+                . ((float) ($result['allocated_amount'] ?? 0) > 0.005
+                    ? '; '
+                        . number_format((float) ($result['allocated_amount'] ?? 0), 2)
+                        . ' applied to '
+                        . (int) ($result['allocation_count'] ?? 0)
+                        . ' outstanding invoice(s)'
+                    : '')
+                . ((float) ($result['unallocated_amount'] ?? 0) > 0.005
+                    ? '; '
+                        . number_format((float) ($result['unallocated_amount'] ?? 0), 2)
+                        . ' remains available'
+                    : '')
                 . '.'
             );
             if ((string) ($_POST['print_after_save'] ?? '0') === '1' && (int) ($result['receipt_id'] ?? 0) > 0) {
@@ -576,16 +875,24 @@ final class ReportsController extends BaseController
         $branchId = (int) ($_GET['branch_id'] ?? 0);
         $travelerId = (int) ($_GET['traveler_id'] ?? 0);
         $currency = strtoupper(trim((string) ($_GET['currency'] ?? 'PKR')));
+        $targetBookingReference = trim((string) ($_GET['target_booking_reference'] ?? ''));
         $accessibleBranchIds = array_values(array_unique(array_map('intval', Authorization::accessibleBranchIds())));
 
         if ($branchId <= 0 || $travelerId <= 0 || ! in_array($branchId, $accessibleBranchIds, true)) {
-            $this->jsonResponse(['ok' => true, 'advances' => []]);
+            $this->jsonResponse(['ok' => true, 'advances' => [], 'credits' => []]);
         }
 
-        $advances = (new CustomerPaymentRepository($this->app))->availableCustomerAdvances(
+        $repository = new CustomerPaymentRepository($this->app);
+        $advances = $repository->availableCustomerAdvances(
             $branchId,
             $travelerId,
             $currency
+        );
+        $credits = $repository->availableBookingCredits(
+            $branchId,
+            $travelerId,
+            $currency,
+            $targetBookingReference
         );
 
         $this->jsonResponse([
@@ -597,8 +904,20 @@ final class ReportsController extends BaseController
                     'receipt_date' => (string) ($advance['receipt_date'] ?? ''),
                     'currency' => (string) ($advance['currency'] ?? ''),
                     'unallocated_amount' => (float) ($advance['unallocated_amount'] ?? 0),
+                    'business_source_id' => (int) ($advance['business_source_id'] ?? 0),
+                    'business_source_name' => (string) ($advance['business_source_name'] ?? 'Unassigned Account'),
                 ];
             }, $advances),
+            'credits' => array_map(static function (array $credit): array {
+                return [
+                    'id' => (int) ($credit['id'] ?? 0),
+                    'booking_reference' => (string) ($credit['booking_reference'] ?? ''),
+                    'receipt_no' => (string) ($credit['receipt_no'] ?? ''),
+                    'receipt_date' => (string) ($credit['receipt_date'] ?? ''),
+                    'currency' => (string) ($credit['currency'] ?? ''),
+                    'unallocated_amount' => (float) ($credit['unallocated_amount'] ?? 0),
+                ];
+            }, $credits),
         ]);
     }
 

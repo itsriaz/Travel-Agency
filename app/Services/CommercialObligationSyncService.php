@@ -7,6 +7,7 @@ namespace App\Services;
 use App\Helpers\AuditLog;
 use App\Repositories\AccountingRepository;
 use App\Repositories\BookingRepository;
+use App\Repositories\BookingServiceEventRepository;
 use App\Repositories\BookingServiceRepository;
 use App\Repositories\CustomerPaymentRepository;
 use App\Repositories\SupplierRepository;
@@ -15,7 +16,7 @@ use Throwable;
 
 final class CommercialObligationSyncService extends Service
 {
-    public function syncForServiceId(int $serviceId, int $actorUserId): void
+    public function syncForServiceId(int $serviceId, int $actorUserId, array $postingContext = []): void
     {
         $traceId = $this->supplierAdvanceTraceId();
         /** @var \PDO $db */
@@ -36,8 +37,9 @@ final class CommercialObligationSyncService extends Service
             throw new RuntimeException('The booking linked to this service line could not be loaded.');
         }
 
-        $receivableAmount = $this->receivableAmount($service);
-        $payableAmount = $this->payableAmount($service);
+        $reissueMirrors = (new BookingServiceEventRepository($this->app))->separateReissueMirrorAdjustments($serviceId);
+        $receivableAmount = round(max($this->receivableAmount($service) - (float) ($reissueMirrors['customer_mirror_amount'] ?? 0), 0), 2);
+        $payableAmount = round(max($this->payableAmount($service) - (float) ($reissueMirrors['supplier_mirror_amount'] ?? 0), 0), 2);
         $invoiceCurrency = (string) ($service['currency'] ?? 'PKR');
         $costCurrency = (string) ($service['cost_currency'] ?? $invoiceCurrency);
         $this->supplierAdvanceTraceLog('syncForServiceId', 'commercial_sync_entry', [
@@ -118,12 +120,51 @@ final class CommercialObligationSyncService extends Service
             'status' => (string) ($obligationRecord['status'] ?? ''),
         ]);
 
-        $entryDate = (string) ($booking['booking_date'] ?? date('Y-m-d'));
+        $entryDate = (string) ($postingContext['entry_date'] ?? $booking['booking_date'] ?? date('Y-m-d'));
         $accountingRepository = new AccountingRepository($this->app);
 
         if ($receivableSync !== null) {
             $delta = round((float) ($receivableSync['delta_amount'] ?? 0), 2);
-            if ((string) ($receivableSync['action'] ?? '') === 'created' && $delta > 0) {
+            $priorInvoiceCurrency = strtoupper(trim((string) ($postingContext['prior_invoice_currency'] ?? $invoiceCurrency)));
+            $invoiceCurrencyChanged = (bool) ($postingContext['financial_correction'] ?? false)
+                && $priorInvoiceCurrency !== strtoupper(trim($invoiceCurrency))
+                && (string) ($receivableSync['action'] ?? '') === 'updated';
+
+            if ($invoiceCurrencyChanged) {
+                $priorAmount = round((float) ($receivableSync['prior_amount'] ?? 0), 2);
+                $newAmount = round((float) ($receivableSync['record']['due_amount'] ?? 0), 2);
+                $receivableId = $receivableSync['record']['id'] ?? null;
+
+                if ($priorAmount > 0) {
+                    $accountingRepository->postReceivableAdjusted([
+                        'branch_id' => (int) $service['branch_id'],
+                        'booking_reference' => (string) $booking['booking_reference'],
+                        'source_reference' => (string) $service['line_reference'] . '-CUR-OLD',
+                        'service_line_reference' => (string) $service['line_reference'],
+                        'customer_receivable_item_id' => $receivableId,
+                        'adjustment_amount' => -$priorAmount,
+                        'entry_date' => $entryDate,
+                        'currency' => $priorInvoiceCurrency,
+                        'narration' => 'Original-currency receivable reversed by service financial correction',
+                        'actor_user_id' => $actorUserId,
+                    ]);
+                }
+
+                if ($newAmount > 0) {
+                    $accountingRepository->postReceivableAdjusted([
+                        'branch_id' => (int) $service['branch_id'],
+                        'booking_reference' => (string) $booking['booking_reference'],
+                        'source_reference' => (string) $service['line_reference'] . '-CUR-NEW',
+                        'service_line_reference' => (string) $service['line_reference'],
+                        'customer_receivable_item_id' => $receivableId,
+                        'adjustment_amount' => $newAmount,
+                        'entry_date' => $entryDate,
+                        'currency' => $invoiceCurrency,
+                        'narration' => 'New-currency receivable recognized by service financial correction',
+                        'actor_user_id' => $actorUserId,
+                    ]);
+                }
+            } elseif ((string) ($receivableSync['action'] ?? '') === 'created' && $delta > 0) {
                 $accountingRepository->postReceivableCreated([
                     'branch_id' => (int) $service['branch_id'],
                     'booking_reference' => (string) $booking['booking_reference'],
@@ -150,7 +191,46 @@ final class CommercialObligationSyncService extends Service
 
         if ($obligationSync !== null) {
             $delta = round((float) ($obligationSync['delta_amount'] ?? 0), 2);
-            if ((string) ($obligationSync['action'] ?? '') === 'created' && $delta > 0) {
+            $priorCostCurrency = strtoupper(trim((string) ($postingContext['prior_cost_currency'] ?? $costCurrency)));
+            $costCurrencyChanged = (bool) ($postingContext['financial_correction'] ?? false)
+                && $priorCostCurrency !== strtoupper(trim($costCurrency))
+                && (string) ($obligationSync['action'] ?? '') === 'updated';
+
+            if ($costCurrencyChanged) {
+                $priorAmount = round((float) ($obligationSync['prior_amount'] ?? 0), 2);
+                $newAmount = round((float) ($obligationSync['record']['gross_amount'] ?? 0), 2);
+                $obligationIdForPosting = $obligationSync['record']['id'] ?? null;
+
+                if ($priorAmount > 0) {
+                    $accountingRepository->postPayableAdjusted([
+                        'branch_id' => (int) $service['branch_id'],
+                        'booking_reference' => (string) $booking['booking_reference'],
+                        'source_reference' => (string) $service['line_reference'] . '-CUR-OLD',
+                        'service_line_reference' => (string) $service['line_reference'],
+                        'supplier_obligation_id' => $obligationIdForPosting,
+                        'adjustment_amount' => -$priorAmount,
+                        'entry_date' => $entryDate,
+                        'currency' => $priorCostCurrency,
+                        'narration' => 'Original-currency payable reversed by service financial correction',
+                        'actor_user_id' => $actorUserId,
+                    ]);
+                }
+
+                if ($newAmount > 0) {
+                    $accountingRepository->postPayableAdjusted([
+                        'branch_id' => (int) $service['branch_id'],
+                        'booking_reference' => (string) $booking['booking_reference'],
+                        'source_reference' => (string) $service['line_reference'] . '-CUR-NEW',
+                        'service_line_reference' => (string) $service['line_reference'],
+                        'supplier_obligation_id' => $obligationIdForPosting,
+                        'adjustment_amount' => $newAmount,
+                        'entry_date' => $entryDate,
+                        'currency' => $costCurrency,
+                        'narration' => 'New-currency payable recognized by service financial correction',
+                        'actor_user_id' => $actorUserId,
+                    ]);
+                }
+            } elseif ((string) ($obligationSync['action'] ?? '') === 'created' && $delta > 0) {
                 $accountingRepository->postPayableCreated([
                     'branch_id' => (int) $service['branch_id'],
                     'booking_reference' => (string) $booking['booking_reference'],
@@ -198,6 +278,7 @@ final class CommercialObligationSyncService extends Service
             // This is supplier advance application against supplier payable, not a customer payment.
             $autoAdvanceApplication = $supplierRepository->autoApplyAvailableAdvanceToObligation($obligationId, $actorUserId);
             $appliedAmountDelta = round((float) ($autoAdvanceApplication['applied_amount_delta'] ?? 0), 2);
+            $supplierPaymentCreditAppliedAmount = round((float) ($autoAdvanceApplication['supplier_payment_credit_applied_amount'] ?? 0), 2);
             if ($appliedAmountDelta !== 0.0) {
                 $updatedObligation = is_array($autoAdvanceApplication['obligation'] ?? null)
                     ? $autoAdvanceApplication['obligation']
@@ -248,6 +329,25 @@ final class CommercialObligationSyncService extends Service
                         ? 'supplier_advance_application_posted'
                         : 'supplier_advance_reversal_posted',
                 ]);
+            }
+
+            if ($supplierPaymentCreditAppliedAmount > 0.005) {
+                $updatedObligation = is_array($autoAdvanceApplication['obligation'] ?? null)
+                    ? $autoAdvanceApplication['obligation']
+                    : $obligationRecord;
+                $accountingRepository->postSupplierAdvanceApplication([
+                    'branch_id' => (int) ($service['branch_id'] ?? 0),
+                    'booking_reference' => (string) ($booking['booking_reference'] ?? ''),
+                    'source_reference' => (string) ($service['line_reference'] ?? '') . '-PAY-CREDIT',
+                    'service_line_reference' => (string) ($service['line_reference'] ?? ''),
+                    'supplier_obligation_id' => $obligationId,
+                    'amount' => $supplierPaymentCreditAppliedAmount,
+                    'entry_date' => $entryDate,
+                    'currency' => (string) ($updatedObligation['currency'] ?? $costCurrency),
+                    'narration' => 'Existing supplier payment credit applied against corrected payable',
+                    'actor_user_id' => $actorUserId,
+                ]);
+                $obligationRecord = $updatedObligation;
             }
         }
 
@@ -377,6 +477,15 @@ final class CommercialObligationSyncService extends Service
                 ? 'advance_reconciled_on_current_save'
                 : $eligibilityReason,
         ]);
+
+        (new CounterpartyOffsetService($this->app))->autoSettleForFinancialContext(
+            (int) ($booking['business_source_id'] ?? 0),
+            $supplierId,
+            $branchId,
+            [$invoiceCurrency, $costCurrency],
+            $entryDate,
+            $actorUserId
+        );
 
         AuditLog::record($this->app, 'commercial.obligations.synced', [
             'user_id' => $actorUserId,

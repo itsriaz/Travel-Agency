@@ -6,6 +6,7 @@ $columns = $panel['columns'] ?? [];
 $fields = $panel['fields'] ?? [];
 $editRecord = $panel['editRecord'] ?? null;
 $isEditing = is_array($editRecord);
+$showRecordColumn = $register !== 'business_sources';
 $formValues = [];
 
 foreach ($fields as $field) {
@@ -14,7 +15,7 @@ foreach ($fields as $field) {
     $formValues[$name] = $editRecord[$name] ?? $default;
 }
 ?>
-<section class="panel compact-panel admin-register-panel" id="register-<?= e($register) ?>">
+<section class="panel compact-panel admin-register-panel admin-register-panel--<?= e((string) ($registerTone ?? 'blue')) ?> admin-register-panel--<?= e($register) ?>" id="register-<?= e($register) ?>">
     <div class="panel-header">
         <div>
             <h2><?= e((string) $panel['title']) ?></h2>
@@ -29,29 +30,33 @@ foreach ($fields as $field) {
                     <thead>
                     <tr>
                         <?php foreach ($columns as $column): ?>
-                            <th><?= e((string) $column['label']) ?></th>
+                            <th class="admin-register-column--<?= e((string) ($column['key'] ?? 'value')) ?>"><?= e((string) $column['label']) ?></th>
                         <?php endforeach; ?>
-                        <th>Record</th>
+                        <?php if ($showRecordColumn): ?>
+                            <th>Record</th>
+                        <?php endif; ?>
                         <th>Actions</th>
                     </tr>
                     </thead>
                     <tbody>
                     <?php if ($rows === []): ?>
                         <tr>
-                            <td class="empty-cell" colspan="<?= e((string) (count($columns) + 2)) ?>">No rows yet.</td>
+                            <td class="empty-cell" colspan="<?= e((string) (count($columns) + ($showRecordColumn ? 2 : 1))) ?>">No rows yet.</td>
                         </tr>
                     <?php else: ?>
                         <?php foreach ($rows as $row): ?>
                             <tr>
                                 <?php foreach ($columns as $column): ?>
                                     <?php $value = $row[$column['key']] ?? null; ?>
-                                    <td><?= e($value === null || $value === '' ? '—' : (string) $value) ?></td>
+                                    <td class="admin-register-column--<?= e((string) ($column['key'] ?? 'value')) ?>"><?= e($value === null || $value === '' ? '—' : (string) $value) ?></td>
                                 <?php endforeach; ?>
-                                <td>
-                                    <span class="admin-record-tag <?= ((int) ($row['is_system'] ?? 0) === 1) ? 'is-system' : 'is-custom' ?>">
-                                        <?= e((string) ($row['system_label'] ?? 'Custom')) ?>
-                                    </span>
-                                </td>
+                                <?php if ($showRecordColumn): ?>
+                                    <td>
+                                        <span class="admin-record-tag <?= ((int) ($row['is_system'] ?? 0) === 1) ? 'is-system' : 'is-custom' ?>">
+                                            <?= e((string) ($row['system_label'] ?? 'Custom')) ?>
+                                        </span>
+                                    </td>
+                                <?php endif; ?>
                                 <td>
                                     <div class="admin-row-actions">
                                         <a class="btn btn-sm" href="<?= e(url($pagePath . '?edit=' . $register . '&id=' . (int) $row['id'])) ?>#register-<?= e($register) ?>">Edit</a>

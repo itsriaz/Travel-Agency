@@ -1,22 +1,23 @@
 <?php
 $branchLabel = implode(', ', array_map('strval', $accessibleBranchIds ?? []));
-$totalRows = array_sum(array_map(static fn (array $panel): int => count($panel['rows'] ?? []), $panels ?? []));
+$visiblePanels = array_values(array_filter(
+    $panels ?? [],
+    static fn (array $panel): bool => (string) ($panel['register'] ?? '') !== 'supplier_modes'
+));
+$totalRows = array_sum(array_map(static fn (array $panel): int => count($panel['rows'] ?? []), $visiblePanels));
 $activeRows = array_sum(array_map(
     static fn (array $panel): int => count(array_filter($panel['rows'] ?? [], static fn (array $row): bool => ((int) ($row['is_active'] ?? 0)) === 1)),
-    $panels ?? []
+    $visiblePanels
 ));
 $systemRows = array_sum(array_map(
     static fn (array $panel): int => count(array_filter($panel['rows'] ?? [], static fn (array $row): bool => ((int) ($row['is_system'] ?? 0)) === 1)),
-    $panels ?? []
+    $visiblePanels
 ));
 ?>
-<section class="page-head">
+<section class="page-head master-data-head">
     <div>
         <h1>Master Data</h1>
-    </div>
-    <div class="page-actions">
-        <a class="btn btn-primary" href="<?= e(url('/workspace')) ?>">Open Booking Workspace</a>
-        <a class="btn" href="<?= e(url('/accounting-engine')) ?>">Open Accounting Engine</a>
+        <p>Maintain the registers and business records used throughout bookings and accounting.</p>
     </div>
 </section>
 
@@ -28,10 +29,10 @@ $systemRows = array_sum(array_map(
     <strong>Super Admin Register Control</strong>
 </div>
 
-<section class="stat-grid">
+<section class="stat-grid master-data-stats">
     <article class="stat-card">
         <div class="stat-label">Registers</div>
-        <div class="stat-value"><?= e((string) count($panels)) ?></div>
+        <div class="stat-value"><?= e((string) count($visiblePanels)) ?></div>
     </article>
     <article class="stat-card">
         <div class="stat-label">Active Rows</div>
@@ -43,20 +44,37 @@ $systemRows = array_sum(array_map(
     </article>
 </section>
 
-<section class="panel compact-panel admin-register-index">
+<section class="panel compact-panel admin-register-index master-data-navigator">
     <div class="panel-header">
-        <h2>Register Navigator</h2>
+        <div>
+            <h2>Register Navigator</h2>
+            <p>Open a management tool or jump directly to a register.</p>
+        </div>
         <div class="panel-meta"><?= e((string) $totalRows) ?> total setup rows</div>
     </div>
-    <div class="station-chip-row">
-        <?php foreach ($panels as $panel): ?>
-            <a class="station-chip" href="#register-<?= e((string) $panel['register']) ?>"><?= e((string) $panel['title']) ?></a>
+    <nav class="master-data-nav" aria-label="Master data tools and registers">
+        <div class="master-data-nav__group">
+            <span class="master-data-nav__label">Management</span>
+            <div class="master-data-nav__links">
+                <a class="master-data-nav-link" href="<?= e(url('/suppliers/settlements/global?start_new_payment=1&add_supplier=1')) ?>">Add Supplier</a>
+                <a class="master-data-nav-link" href="<?= e(url('/master-data/suppliers')) ?>">Manage Suppliers</a>
+                <a class="master-data-nav-link" href="<?= e(url('/master-data/account-supplier-links')) ?>">Account and Supplier Links</a>
+            </div>
+        </div>
+        <div class="master-data-nav__group">
+            <span class="master-data-nav__label">Registers</span>
+            <div class="master-data-nav__links">
+        <?php foreach ($visiblePanels as $panel): ?>
+                <a class="master-data-nav-link" href="#register-<?= e((string) $panel['register']) ?>"><?= e((string) $panel['title']) ?></a>
         <?php endforeach; ?>
-    </div>
+            </div>
+        </div>
+    </nav>
 </section>
 
-<?php foreach ($panels as $panel): ?>
+<?php foreach ($visiblePanels as $panelIndex => $panel): ?>
     <?php
+    $registerTone = ((int) $panelIndex % 2) === 0 ? 'blue' : 'teal';
     $pagePath = '/master-data';
     $saveAction = url('/master-data/save');
     $deleteAction = url('/master-data/delete');

@@ -122,6 +122,8 @@ $customerPaymentRepository = BASE_PATH . '/app/Repositories/CustomerPaymentRepos
 $treasuryRepository = BASE_PATH . '/app/Repositories/TreasuryRepository.php';
 $bookingRepository = BASE_PATH . '/app/Repositories/BookingRepository.php';
 $publicIndex = BASE_PATH . '/public/index.php';
+$receiptOutputView = BASE_PATH . '/app/Views/workspace/output.php';
+$nobleRouteSignature = BASE_PATH . '/public/assets/images/receipt-branches/noble-route-signature.png';
 
 foreach ([
     'Workspace view exists' => $workspaceView,
@@ -142,6 +144,53 @@ $check(
         'id="workspace-search-form"',
         'id="workspace-search"',
         'data-workspace-search-submit',
+    ])
+);
+$check(
+    'Operating branch selector is prominent and connected to the booking branch authority',
+    $containsAll($workspaceView, [
+        'data-operating-branch-control',
+        'data-operating-branch-radio',
+        'data-operating-branch-status',
+        'id="legacy-invoice-header-form"',
+        'name="branch_id"',
+    ])
+);
+$check(
+    'Operating branch selector synchronizes financial defaults and confirms existing-booking moves',
+    $containsAll($workspaceJs, [
+        'syncOperatingBranchControl',
+        'bookingBranchField.dispatchEvent(new Event(\'change\'',
+        'Move ${bookingReference} from ${previousName} to ${nextName}?',
+        'A conflicting cash/bank transaction will block the save.',
+        'currentBookingId() <= 0',
+    ])
+);
+$check(
+    'Branch currency changes preserve manual selections and reject raw amount relabelling',
+    $containsAll($workspaceJs, [
+        'markBranchCurrencyDefault',
+        'markBranchCurrencyManual',
+        'initializeBranchCurrencyModes',
+        'validateBranchCurrencyTransition',
+        'transitionBranchCurrencies',
+        "mode: 'branch-currency-transition'",
+        'remained identical or suspiciously close',
+        'Default currencies and entered amounts were converted safely; manually selected currencies were retained.',
+    ])
+        && $containsAll($workspaceView, [
+            'data-pricing-exchange-title',
+            'data-pricing-exchange-subtitle',
+            'data-pricing-exchange-currency-label',
+        ])
+);
+$check(
+    'Operating branch selector has compact active and branch-specific visual states',
+    $containsAll($appCss, [
+        '.workspace-operating-branch {',
+        '.workspace-operating-branch__option--noble',
+        '.workspace-operating-branch__option.is-active',
+        '.legacy-workspace.has-operating-branch-control .legacy-invoice-header__branch',
     ])
 );
 $check(
@@ -191,6 +240,16 @@ $check(
         ])
 );
 $check(
+    'Saved supplier changes autosave without a redundant action button',
+    ! str_contains((string) file_get_contents($workspaceView), 'data-service-supplier-save')
+        && $containsAll($workspaceJs, [
+            'const hasSupplierSettlement =',
+            'if (hasSupplierSettlement) {',
+            'await persistServiceAutosave();',
+            'Supplier updated to ${newSupplier}. Payables and financial reports were synchronized.',
+        ])
+);
+$check(
     'Workspace quick search script binds to the real form',
     $containsAll($workspaceJs, [
         "const quickSearchForm = station.querySelector('#workspace-search-form');",
@@ -221,6 +280,74 @@ $check(
         'allowManualRatePreview',
         'settlement_mode',
     ])
+);
+$check(
+    'Service pricing supports independent supplier, agency, and invoice currencies',
+    $containsAll($workspaceView, [
+        'name="cost_currency"',
+        'name="service_charge_currency"',
+        'name="currency"',
+        'data-pricing-exchange-modal',
+        'data-pricing-exchange-confirm',
+        'Confirm Rates &amp; Continue',
+    ])
+        && $containsAll($workspaceJs, [
+            'currentPricingExchangeRequirements',
+            'currentServiceChargeCurrencyCode',
+            'currentServiceChargeExchangeRate',
+            'initializePricingCurrencyTracking',
+            'convertEnteredAmountsForCurrencyChange',
+            'invoiceCurrencyChanged || costCurrencyChanged',
+            'Changing Cost',
+            '[airlinePayableFinancialField, ticketValueField]',
+            'formatMoney(convertedPayable)',
+            'currentFinancialSummaryCurrencyCode',
+            'data-financial-summary-currency',
+            'financialSummaryAmount',
+            'ensureFinancialSummaryExchangeRateReady',
+            'Confirm Financial Summary Exchange Rate',
+            'const resolvedRate = resolvePricingExchangeRateFromMap(',
+            'currentPricingRateEffectiveDate()',
+            'const pricingExchangeConfirmedPairs = new Set()',
+            'sourceToInvoiceConfirmedRate',
+            'pricingExchangeConfirmedPairs.add(pricingExchangePairKey(requirement))',
+            "event.key === 'Enter'",
+            "event.code === 'NumpadEnter'",
+            'void confirmPricingExchangeRates({ restoreOnFailure: true })',
+            'closePricingExchangeModal(true)',
+            'setPricingExchangeModalOpen(false)',
+            'restoreOnFailure: true',
+            "pricingExchangeModal?.addEventListener('keydown', confirmPricingExchangeOnEnter, true)",
+            'key: `amount-currency:${role}:${previousCurrency}->${selectedCurrency}`',
+            'roundToTwo(originalAmount * sourceToSelectedRate)',
+            "mode: 'pricing-amount-currency-transition'",
+            'A blank amount does not prove that two different currencies have a',
+            'supplier-cost-amount-entered',
+            'agency-amount-entered',
+            "reason: 'service-save'",
+            'allowPrompt: false',
+            'pricing-rate-missing-without-prompt',
+        ])
+        && $columnExists('booking_services', 'service_charge_currency')
+        && $columnExists('booking_services', 'service_charge_exchange_rate')
+        && $columnExists('booking_services', 'service_charge_rate_effective_date')
+);
+$check(
+    'Changing supplier cost currency preserves the nominal Mkt.Fare and refreshes the service-currency summary',
+    $containsAll($workspaceJs, [
+        'serviceChargeCurrencyChanged',
+        'invoiceCurrencyChanged || costCurrencyChanged',
+        'Mkt.Fare is the supplier\'s nominal amount',
+        'const currentFinancialSummaryCurrencyCode = () => currentServiceChargeCurrencyCode();',
+        'costCurrencyChanged || serviceChargeCurrencyChanged || supplierCostAmountChanged',
+        'formatMoney(convertedPayable)',
+        "refreshProfit('branch-context-updated')",
+        'syncFinancialSummaryCurrencyLabel();',
+    ])
+        && !str_contains(
+            $workspaceJs,
+            '(costCurrencyChanged || serviceChargeCurrencyChanged)\n                    && previousPricingCurrency !== selectedPricingCurrency'
+        )
 );
 $check(
     'Workspace restore flow is present',
@@ -278,7 +405,7 @@ $check(
     ])
 );
 $check(
-    'Receipt printing is guarded against duplicate opens in one click flow',
+    'Receipt printing avoids blank reservations and is guarded against duplicate opens',
     $containsAll($workspaceJs, [
         'const openCustomerReceiptWindowOnce =',
         'window.__travelReceiptOpenGuard',
@@ -288,9 +415,28 @@ $check(
         'print-receipt:blocked-duplicate-click',
         'event.stopImmediatePropagation();',
         "receipt-open:blocked-duplicate",
+        'Printing an existing receipt is strictly read-only.',
+        "openCustomerReceiptWindowOnce('print-existing')",
         "openCustomerReceiptWindowOnce('print-after-save')",
-        "openCustomerReceiptWindowOnce('save-payment')",
+        'print-receipt:save-before-open:cancelled-or-failed',
+        "typeof window.travelLauncher.config === 'function'",
+        'receipt-open:launcher-child-managed',
+        'window.location.assign(normalizedUrl)',
+        'autoOpenReceipt: true',
     ])
+        && ! str_contains($workspaceJs, "window.open('about:blank', '_blank')")
+);
+$check(
+    'Noble Route receipt signature is embedded and loaded before automatic printing',
+    is_file($nobleRouteSignature)
+        && filesize($nobleRouteSignature) > 0
+        && $containsAll($receiptOutputView, [
+            "str_contains(\$primaryBranchIdentity, 'noble route')",
+            "'data:image/png;base64,' . base64_encode",
+            'Array.from(document.images)',
+            'document.fonts.ready',
+            'window.print();',
+        ])
 );
 
 $check('Treasury accounts table exists', $tableExists('treasury_accounts'));

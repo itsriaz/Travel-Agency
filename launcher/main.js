@@ -3,6 +3,10 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
+// Hostinger advertises HTTP/3, but some office/ISP networks black-hole QUIC.
+// Force the reliable HTTPS/TCP path for this operational desktop client.
+app.commandLine.appendSwitch('disable-quic');
+
 const defaultConfig = {
   serverUrl: 'https://noble.gt.tc',
   windowTitle: 'Travel Agency Operations',
@@ -32,17 +36,52 @@ function readConfig() {
 }
 
 const config = readConfig();
+let lastConnectionFailure = null;
+
+async function prepareOnlineRetry() {
+  try {
+    await session.defaultSession.clearCache();
+  } catch {
+    // A cache cleanup failure must not block the connection attempt.
+  }
+
+  try {
+    if (typeof session.defaultSession.clearHostResolverCache === 'function') {
+      await session.defaultSession.clearHostResolverCache();
+    }
+  } catch {
+    // DNS cache cleanup is best-effort.
+  }
+}
+
+async function loadOnlineWindow(win) {
+  if (!win || win.isDestroyed()) {
+    return { ok: false, error: 'No active launcher window is available.' };
+  }
+
+  lastConnectionFailure = null;
+  await prepareOnlineRetry();
+  try {
+    await win.loadURL(config.serverUrl);
+    return { ok: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error || 'Connection failed.');
+    return { ok: false, error: message, failure: lastConnectionFailure };
+  }
+}
 
 async function hardRefreshWindow(win) {
   if (!win || win.isDestroyed()) {
     return;
   }
 
-  try {
-    await win.webContents.session.clearCache();
-  } catch {
-    // Cache clear should not block the reload path.
+  const currentUrl = String(win.webContents.getURL() || '');
+  if (currentUrl.startsWith('file:') && currentUrl.toLowerCase().includes('offline.html')) {
+    await loadOnlineWindow(win);
+    return;
   }
+
+  await prepareOnlineRetry();
 
   if (!win.isDestroyed()) {
     win.webContents.reloadIgnoringCache();
@@ -220,8 +259,14 @@ function createAppWindow(initialUrl, parentWindow = null) {
     return { action: 'deny' };
   });
 
-  win.webContents.on('did-fail-load', () => {
-    if (!parentWindow) {
+  win.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (!parentWindow && isMainFrame !== false && errorCode !== -3) {
+      lastConnectionFailure = {
+        errorCode,
+        errorDescription: String(errorDescription || 'Connection failed'),
+        url: String(validatedURL || initialUrl || config.serverUrl),
+        occurredAt: new Date().toISOString()
+      };
       win.loadFile(path.join(__dirname, 'offline.html'));
     }
   });
@@ -419,14 +464,13 @@ async function exportLedgerPdfToDocuments(payload = {}) {
 ipcMain.handle('launcher:config', async () => ({
   serverUrl: config.serverUrl,
   windowTitle: config.windowTitle,
-  sourceDevice: config.sourceDevice
+  sourceDevice: config.sourceDevice,
+  lastConnectionFailure
 }));
 
 ipcMain.handle('launcher:openOnline', async () => {
   const focused = BrowserWindow.getFocusedWindow();
-  if (focused) {
-    await focused.loadURL(config.serverUrl);
-  }
+  return loadOnlineWindow(focused);
 });
 
 ipcMain.handle('launcher:hardRefresh', async () => {

@@ -741,11 +741,14 @@ final class WorkspaceController extends BaseController
                 $paidAmount = round((float) ($row['total_paid_amount'] ?? 0), 2);
                 $balanceAmount = round((float) ($row['total_balance_amount'] ?? 0), 2);
                 $rowType = (string) ($row['row_type'] ?? 'booking_supplier');
+                $branchId = (int) ($row['branch_id'] ?? 0);
+                $supplierId = (int) ($row['supplier_id'] ?? 0);
+                $currency = strtoupper(trim((string) ($row['currency'] ?? 'PKR')));
                 $status = 'Recorded';
 
                 if ($rowType === 'supplier_advance') {
                     $status = $balanceAmount > 0.005 ? 'Prepaid Available' : 'Prepaid Used';
-                } elseif ($balanceAmount <= 0.005 && $paidAmount > 0.005) {
+                } elseif ($balanceAmount <= 0.005 && $grossAmount > 0.005) {
                     $status = 'Settled';
                 } elseif ($balanceAmount > 0.005 && $paidAmount > 0.005) {
                     $status = 'Partially Paid';
@@ -760,18 +763,33 @@ final class WorkspaceController extends BaseController
                         ? url('/workspace?booking_id=' . $bookingId)
                         : '#',
                     'booking_date' => (string) ($row['booking_date'] ?? ''),
+                    'branch_id' => $branchId,
                     'branch_name' => (string) ($row['branch_name'] ?? ''),
-                    'supplier_id' => (int) ($row['supplier_id'] ?? 0),
+                    'supplier_id' => $supplierId,
                     'supplier_name' => (string) ($row['supplier_name'] ?? ''),
                     'supplier_code' => (string) ($row['supplier_code'] ?? ''),
                     'passenger_name' => (string) ($row['passenger_name'] ?? ''),
                     'route' => (string) ($row['route'] ?? ''),
-                    'currency' => (string) ($row['currency'] ?? 'PKR'),
+                    'currency' => $currency,
                     'total_gross_amount' => $grossAmount,
                     'total_paid_amount' => $paidAmount,
                     'total_balance_amount' => $balanceAmount,
                     'due_date' => (string) ($row['due_date'] ?? ''),
                     'status' => $status,
+                    'row_type' => $rowType,
+                    'advance_id' => (int) ($row['advance_id'] ?? 0),
+                    'advance_count' => (int) ($row['advance_count'] ?? 0),
+                    'position_url' => $bookingId > 0
+                        ? url('/workspace?booking_id=' . $bookingId . '&supplier_position=1&return_to_supplier_payment=1#dock-panel-suppliers')
+                        : '#',
+                    'pay_url' => $bookingId > 0 && $balanceAmount > 0.005
+                        ? url('/suppliers/settlements/global?' . http_build_query([
+                            'start_new_payment' => 1,
+                            'branch_id' => $branchId,
+                            'supplier_id' => $supplierId,
+                            'currency' => $currency,
+                        ]))
+                        : '#',
                     'open_url' => $bookingId > 0
                         ? url('/workspace?booking_id=' . $bookingId . '#dock-panel-suppliers')
                         : ($rowType === 'supplier_advance' ? url('/reports?report=supplier_prepaid_payments') : '#'),
@@ -784,7 +802,7 @@ final class WorkspaceController extends BaseController
         if ($query !== '') {
             $message = $results === []
                 ? 'No supplier payment history matched this search.'
-                : 'Select Open History to jump into the booking supplier payment workspace.';
+                : 'Review a supplier position, edit prepaid money, or open the main Supplier Payment screen.';
         } else {
             $message = $results === []
                 ? 'No recent supplier payment history is available.'
@@ -1411,7 +1429,6 @@ final class WorkspaceController extends BaseController
             );
             $releasedCustomerCreditAmount = round((float) ($result['released_customer_credit_amount'] ?? 0), 2);
             $correctionCurrency = strtoupper(trim((string) ($result['currency'] ?? 'PKR')));
-            $focusMode = $releasedCustomerCreditAmount > 0.005 ? 'refund-customer' : 'payment-save';
             if ($releasedCustomerCreditAmount > 0.005) {
                 Flash::success(
                     sprintf(
@@ -1423,7 +1440,7 @@ final class WorkspaceController extends BaseController
             } else {
                 Flash::success('Service financial correction posted.');
             }
-            $this->redirect('/workspace?booking_id=' . (int) ($result['booking_id'] ?? 0) . '&focus=' . rawurlencode($focusMode) . '#dock-panel-payments');
+            $this->redirect('/workspace?booking_id=' . (int) ($result['booking_id'] ?? 0) . '#dock-panel-services');
         } catch (RuntimeException $exception) {
             Flash::error($exception->getMessage());
             $this->redirect('/workspace?booking_id=' . (int) ($_POST['booking_id'] ?? 0) . '#dock-panel-services');
@@ -1518,7 +1535,7 @@ final class WorkspaceController extends BaseController
                 (int) Auth::id(),
                 Authorization::accessibleBranchIds()
             );
-            Flash::success('Penalty and refund correction saved successfully.');
+            Flash::success('Refund correction saved successfully.');
             $this->redirect($this->buildServiceWorkflowRedirect($bookingId, $serviceId, 'penalty_refund_corrected'));
         } catch (RuntimeException $exception) {
             Flash::error($exception->getMessage());
@@ -1588,13 +1605,14 @@ final class WorkspaceController extends BaseController
         Csrf::verifyOrFail($_POST['_token'] ?? null);
 
         try {
-            $bookingId = (new ServiceWorkspaceService($this->app))->reissueService(
+            $result = (new ServiceWorkspaceService($this->app))->reissueService(
                 $_POST,
                 (int) Auth::id(),
                 Authorization::accessibleBranchIds()
             );
-            Flash::success('Service reissue recorded successfully.');
-            $this->redirect('/workspace?booking_id=' . $bookingId . '#dock-panel-services');
+            $bookingId = (int) ($result['booking_id'] ?? 0);
+            $eventId = (int) ($result['service_event_id'] ?? 0);
+            $this->redirect('/workspace/output?booking_id=' . $bookingId . '&doc=reissue_voucher&event_id=' . $eventId . '&auto_print=1');
         } catch (RuntimeException $exception) {
             Flash::error($exception->getMessage());
             $this->redirect('/workspace?booking_id=' . (int) ($_POST['booking_id'] ?? 0) . '#dock-panel-services');
@@ -1614,11 +1632,23 @@ final class WorkspaceController extends BaseController
             );
             $receiptAction = strtolower(trim((string) ($_POST['receipt_action'] ?? 'save')));
             $receiptId = (int) ($result['receipt']['id'] ?? 0);
-            if ($receiptAction !== 'no_receipt' && $receiptId <= 0) {
-                throw new RuntimeException('The receipt was saved but could not be reopened for printing.');
+            $creditAppliedAmount = round((float) ($result['customer_credit_applied']['allocated_amount'] ?? 0), 2);
+            $advanceAppliedAmount = round((float) ($result['advance_applied']['allocated_amount'] ?? 0), 2);
+            $usesNonCashSettlement = $creditAppliedAmount > 0.005 || $advanceAppliedAmount > 0.005;
+            $bookingId = (int) $result['booking_id'];
+            if ($receiptId > 0 && ! $usesNonCashSettlement) {
+                $printReceiptPath = '/workspace/output?booking_id=' . $bookingId . '&doc=customer_receipt&receipt_id=' . $receiptId;
+                $printReceiptKey = 'customer-receipt-' . $receiptId;
+            } elseif ($usesNonCashSettlement) {
+                $printReceiptPath = '/workspace/output?booking_id=' . $bookingId . '&doc=customer_settlement_receipt';
+                $printReceiptKey = 'customer-settlement-' . $bookingId;
+            } else {
+                $printReceiptPath = '/workspace/output?booking_id=' . $bookingId . '&doc=booking_summary_receipt';
+                $printReceiptKey = 'booking-summary-' . $bookingId;
             }
+            $printReceiptUrl = url($printReceiptPath);
 
-             if ($isAjax) {
+            if ($isAjax) {
                 $accessibleBranchIds = Authorization::accessibleBranchIds();
                 $snapshot = $this->workspaceAutosaveSnapshot((int) $result['booking_id'], $accessibleBranchIds);
                 $booking = $snapshot['booking'];
@@ -1639,14 +1669,20 @@ final class WorkspaceController extends BaseController
                     'receipts' => $snapshot['receipts'],
                     'allocations' => $snapshot['allocations'],
                     'daily_settlement_rates' => $snapshot['dailySettlementRates'],
-                    'message' => $receiptAction === 'no_receipt'
-                        ? 'Current passenger/service saved.'
-                        : 'Customer receipt recorded successfully.',
+                    'advance_applied' => $result['advance_applied'] ?? null,
+                    'customer_credit_applied' => $result['customer_credit_applied'] ?? null,
+                    'print_receipt_url' => $printReceiptUrl,
+                    'print_receipt_key' => $printReceiptKey,
+                    'message' => $creditAppliedAmount > 0.005
+                        ? 'Customer credit applied successfully.'
+                        : ($receiptAction === 'no_receipt'
+                            ? 'Current passenger/service saved.'
+                            : 'Customer receipt recorded successfully.'),
                 ]);
             }
 
             if ($receiptAction === 'print') {
-                $this->redirect('/workspace/output?booking_id=' . (int) $result['booking_id'] . '&doc=customer_receipt&receipt_id=' . $receiptId);
+                $this->redirect($printReceiptPath);
             }
 
             Flash::success($receiptAction === 'no_receipt'
@@ -1685,12 +1721,14 @@ final class WorkspaceController extends BaseController
                         'to_currency' => $result['rate_to_currency'],
                         'exchange_rate' => $result['exchange_rate'],
                         'effective_date' => $result['exchange_rate_effective_date'],
+                        'scope' => (int) ($result['booking_id'] ?? 0) > 0 ? 'booking' : 'daily',
                     ],
-                    'message' => 'Today\'s exchange rate saved.',
+                    'updated_services' => (int) ($result['updated_services'] ?? 0),
+                    'message' => 'Booking exchange rate saved.',
                 ]);
             }
 
-            Flash::success('Today\'s exchange rate saved.');
+            Flash::success('Booking exchange rate saved.');
             $this->redirect('/workspace?booking_id=' . (int) ($_POST['booking_id'] ?? 0) . '#dock-panel-payments');
         } catch (RuntimeException $exception) {
             if ($isAjax) {
@@ -1868,6 +1906,29 @@ final class WorkspaceController extends BaseController
         }
     }
 
+    public function correctSupplierPaymentSupplier(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+
+        try {
+            $result = (new SupplierSettlementWorkspaceService($this->app))->correctSupplierPaymentSupplier(
+                $_POST,
+                (int) Auth::id(),
+                Authorization::accessibleBranchIds()
+            );
+            Flash::success(
+                'Supplier payment ' . (string) ($result['payment_no'] ?? '')
+                . ' moved from ' . (string) ($result['old_supplier_name'] ?? 'the old supplier')
+                . ' to ' . (string) ($result['new_supplier_name'] ?? 'the correct supplier')
+                . '. No new cash or bank movement was posted.'
+            );
+            $this->redirect('/workspace?booking_id=' . (int) ($result['booking_id'] ?? 0) . '#dock-panel-suppliers');
+        } catch (RuntimeException $exception) {
+            Flash::error($exception->getMessage());
+            $this->redirect('/workspace?booking_id=' . (int) ($_POST['booking_id'] ?? 0) . '#dock-panel-suppliers');
+        }
+    }
+
     public function saveSupplierAdvance(): never
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);
@@ -1930,6 +1991,104 @@ final class WorkspaceController extends BaseController
             $this->redirect('/workspace');
         }
     }
+
+    public function correctGlobalSupplierAdvance(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+        $isAjax = strtolower((string) ($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '')) === 'xmlhttprequest';
+
+        try {
+            $result = (new SupplierSettlementWorkspaceService($this->app))->correctGlobalSupplierAdvance(
+                $_POST,
+                (int) Auth::id(),
+                Authorization::accessibleBranchIds()
+            );
+            $message = 'Prepaid supplier payment corrected successfully for '
+                . (string) ($result['supplier_name'] ?? 'Supplier')
+                . '.';
+            if ($isAjax) {
+                $this->jsonResponse([
+                    'ok' => true,
+                    'message' => $message,
+                    'advance_id' => (int) ($result['advance_id'] ?? 0),
+                ]);
+            }
+            Flash::success($message);
+        } catch (RuntimeException $exception) {
+            if ($isAjax) {
+                $this->jsonResponse([
+                    'ok' => false,
+                    'message' => $exception->getMessage(),
+                ], 422);
+            }
+            Flash::error($exception->getMessage());
+        }
+
+        $returnTo = trim((string) ($_POST['return_to'] ?? ''));
+        if ($returnTo === '' || ! str_starts_with($returnTo, '/') || str_starts_with($returnTo, '//')) {
+            $returnTo = '/reports?report=supplier_prepaid_payments';
+        }
+        $this->redirect($returnTo);
+    }
+
+    public function globalSupplierAdvanceHistory(): never
+    {
+        $accessibleBranchIds = Authorization::accessibleBranchIds();
+        $filters = [
+            'query' => trim((string) ($_GET['q'] ?? '')),
+            'supplier_id' => (int) ($_GET['supplier_id'] ?? 0),
+            'date_from' => trim((string) ($_GET['date_from'] ?? '')),
+            'date_to' => trim((string) ($_GET['date_to'] ?? '')),
+            'branch_id' => (int) ($_GET['branch_id'] ?? 0),
+            'currency' => strtoupper(trim((string) ($_GET['currency'] ?? ''))),
+            'status' => strtolower(trim((string) ($_GET['status'] ?? ''))),
+        ];
+        $repository = new SupplierRepository($this->app);
+        $rows = $repository->searchGlobalSupplierAdvances($accessibleBranchIds, $filters, 150);
+
+        $this->jsonResponse([
+            'ok' => true,
+            'filters' => $filters,
+            'suppliers' => $repository->activeSuppliersForBranches($accessibleBranchIds),
+            'results' => array_map(static function (array $row): array {
+                $usedAmount = round((float) ($row['used_amount'] ?? 0), 2);
+                $sourceSupplierPaymentId = (int) ($row['source_supplier_payment_id'] ?? 0);
+
+                return [
+                    'id' => (int) ($row['id'] ?? 0),
+                    'supplier_id' => (int) ($row['supplier_id'] ?? 0),
+                    'supplier_name' => (string) ($row['supplier_name'] ?? ''),
+                    'supplier_code' => (string) ($row['supplier_code'] ?? ''),
+                    'branch_id' => (int) ($row['branch_id'] ?? 0),
+                    'branch_name' => (string) ($row['branch_name'] ?? ''),
+                    'currency' => (string) ($row['currency'] ?? ''),
+                    'payment_date' => (string) ($row['payment_date'] ?? ''),
+                    'deposit_amount' => round((float) ($row['deposit_amount'] ?? 0), 2),
+                    'used_amount' => $usedAmount,
+                    'available_amount' => round((float) ($row['available_amount'] ?? 0), 2),
+                    'reference_no' => (string) ($row['reference_no'] ?? ''),
+                    'remarks' => (string) ($row['remarks'] ?? ''),
+                    'payment_method' => (string) ($row['payment_method'] ?? 'cash'),
+                    'treasury_account_id' => (int) ($row['treasury_account_id'] ?? 0),
+                    'treasury_account_name' => (string) ($row['treasury_account_name'] ?? ''),
+                    'source_supplier_payment_id' => $sourceSupplierPaymentId,
+                    'source_supplier_payment_no' => (string) ($row['source_supplier_payment_no'] ?? ''),
+                    'status' => (string) ($row['status'] ?? 'available'),
+                    'editable' => $sourceSupplierPaymentId <= 0,
+                    'supplier_editable' => $sourceSupplierPaymentId <= 0 && $usedAmount <= 0.005,
+                    'edit_note' => $sourceSupplierPaymentId > 0
+                        ? 'Correct this credit from its original supplier payment.'
+                        : ($usedAmount > 0.005
+                            ? 'Payment details can be edited; supplier is locked because part of this advance is already used.'
+                            : ''),
+                ];
+            }, $rows),
+            'message' => $rows === []
+                ? 'No prepaid supplier payment matched these filters.'
+                : count($rows) . ' prepaid supplier payment(s) found.',
+        ]);
+    }
+
     public function applySupplierAdvance(): never
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);
@@ -2137,6 +2296,7 @@ final class WorkspaceController extends BaseController
         $receiptId = isset($_GET['receipt_id']) ? (int) $_GET['receipt_id'] : null;
         $supplierPaymentId = isset($_GET['supplier_payment_id']) ? (int) $_GET['supplier_payment_id'] : null;
         $refundEventId = isset($_GET['refund_event_id']) ? (int) $_GET['refund_event_id'] : null;
+        $serviceEventId = isset($_GET['event_id']) ? (int) $_GET['event_id'] : null;
 
         try {
             $document = (new OperationalOutputService($this->app))->buildOutputDocument(
@@ -2146,8 +2306,10 @@ final class WorkspaceController extends BaseController
                 $receiptId,
                 $supplierPaymentId,
                 $refundEventId,
-                (int) Auth::id()
+                (int) Auth::id(),
+                $serviceEventId
             );
+            $document['autoPrint'] = (string) ($_GET['auto_print'] ?? '') === '1';
         } catch (RuntimeException $exception) {
             Flash::error($exception->getMessage());
             $suffix = $bookingId > 0 ? '?booking_id=' . $bookingId . '#dock-panel-print' : '';
@@ -2513,6 +2675,8 @@ final class WorkspaceController extends BaseController
             $invoiceCurrency = trim((string) ($serviceRow['currency'] ?? ''));
             $costCurrency = trim((string) ($serviceRow['cost_currency'] ?? $invoiceCurrency));
             $pricingExchangeRate = (float) ($serviceRow['pricing_exchange_rate'] ?? 1);
+            $serviceChargeCurrency = trim((string) ($serviceRow['service_charge_currency'] ?? $invoiceCurrency));
+            $serviceChargeExchangeRate = (float) ($serviceRow['service_charge_exchange_rate'] ?? 1);
             $serviceTaxTotal = (float) ($serviceRow['spyi_amount'] ?? 0)
                 + (float) ($serviceRow['aq_yr_pk_amount'] ?? 0)
                 + (float) ($serviceRow['yq_amount'] ?? 0)
@@ -2532,33 +2696,27 @@ final class WorkspaceController extends BaseController
             $convertedPayableAmount = $lineReference !== '' && array_key_exists($lineReference . '|' . $invoiceCurrency, $payableByLine)
                 ? (float) $payableByLine[$lineReference . '|' . $invoiceCurrency]
                 : $fallbackConvertedPayableAmount;
-            $convertedReceivableAmount = round(
+            $convertedAgencyAmount = round(
                 (
-                    $payableAmount
-                    + (float) ($serviceRow['service_charge'] ?? 0)
+                    (float) ($serviceRow['service_charge'] ?? 0)
                     + (float) ($serviceRow['vat'] ?? 0)
                     - (float) ($serviceRow['discount_amount'] ?? 0)
-                ) * ($invoiceCurrency === $costCurrency ? 1 : max($pricingExchangeRate, 0)),
+                ) * ($invoiceCurrency === $serviceChargeCurrency ? 1 : max($serviceChargeExchangeRate, 0)),
                 2
             );
+            $convertedReceivableAmount = round($fallbackConvertedPayableAmount + $convertedAgencyAmount, 2);
             $finalSalePrice = array_key_exists('final_sale_price', $serviceRow) && $serviceRow['final_sale_price'] !== null
                 ? (float) $serviceRow['final_sale_price']
                 : ($isAirTicket
                     ? $convertedReceivableAmount
-                    : round(
-                        (float) ($serviceRow['sale_price'] ?? 0)
-                        + (float) ($serviceRow['service_charge'] ?? 0)
-                        + (float) ($serviceRow['vat'] ?? 0)
-                        - (float) ($serviceRow['discount_amount'] ?? 0),
-                        2
-                    ));
+                    : $convertedReceivableAmount);
             $receivableAmount = $finalSalePrice;
 
             $totalFare += (float) (($serviceRow['fare'] ?? 0) !== null && (float) ($serviceRow['fare'] ?? 0) > 0
                 ? $serviceRow['fare']
                 : ($serviceRow['sale_price'] ?? 0));
             $totalTaxes += $serviceTaxTotal;
-            $totalOther += (float) ($serviceRow['service_charge'] ?? 0);
+            $totalOther += $convertedAgencyAmount;
             $totalReceivable += $receivableAmount;
             $totalPayable += $convertedPayableAmount;
             if ($isAirTicket) {
@@ -2657,6 +2815,8 @@ final class WorkspaceController extends BaseController
         $invoiceCurrency = (string) ($serviceRow['currency'] ?? 'PKR');
         $costCurrency = (string) ($serviceRow['cost_currency'] ?? $invoiceCurrency);
         $pricingExchangeRate = (float) ($serviceRow['pricing_exchange_rate'] ?? 1);
+        $serviceChargeCurrency = (string) ($serviceRow['service_charge_currency'] ?? $invoiceCurrency);
+        $serviceChargeExchangeRate = (float) ($serviceRow['service_charge_exchange_rate'] ?? 1);
         $payableAmount = $isAirTicket
             ? (float) ($serviceRow['purchase_cost'] ?? 0)
             : ((float) ($serviceRow['purchase_cost'] ?? 0) > 0.005 ? (float) ($serviceRow['purchase_cost'] ?? 0) : (float) ($serviceRow['sale_price'] ?? 0));
@@ -2664,18 +2824,16 @@ final class WorkspaceController extends BaseController
             $payableAmount * ($invoiceCurrency === $costCurrency ? 1 : max($pricingExchangeRate, 0)),
             2
         );
-        $convertedReceivableAmount = round(
+        $convertedAgencyAmount = round(
             (
-                $payableAmount
-                + (float) ($serviceRow['service_charge'] ?? 0)
+                (float) ($serviceRow['service_charge'] ?? 0)
                 + (float) ($serviceRow['vat'] ?? 0)
                 - (float) ($serviceRow['discount_amount'] ?? 0)
-            ) * ($invoiceCurrency === $costCurrency ? 1 : max($pricingExchangeRate, 0)),
+            ) * ($invoiceCurrency === $serviceChargeCurrency ? 1 : max($serviceChargeExchangeRate, 0)),
             2
         );
-        $derivedFinalSalePrice = $isAirTicket
-            ? $convertedReceivableAmount
-            : (float) ($serviceRow['sale_price'] ?? 0) + (float) ($serviceRow['service_charge'] ?? 0) + (float) ($serviceRow['vat'] ?? 0) - (float) ($serviceRow['discount_amount'] ?? 0);
+        $convertedReceivableAmount = round($convertedPurchaseCost + $convertedAgencyAmount, 2);
+        $derivedFinalSalePrice = $convertedReceivableAmount;
         $finalSalePrice = array_key_exists('final_sale_price', $serviceRow) && $serviceRow['final_sale_price'] !== null
             ? (float) $serviceRow['final_sale_price']
             : $derivedFinalSalePrice;
@@ -2714,6 +2872,9 @@ final class WorkspaceController extends BaseController
             'purchaseCost' => $payableAmount,
             'pricingExchangeRate' => $pricingExchangeRate > 0 ? round($pricingExchangeRate, 8) : 1.0,
             'pricingRateEffectiveDate' => (string) ($serviceRow['pricing_rate_effective_date'] ?? ''),
+            'serviceChargeCurrency' => $serviceChargeCurrency,
+            'serviceChargeExchangeRate' => $serviceChargeExchangeRate > 0 ? round($serviceChargeExchangeRate, 8) : 1.0,
+            'serviceChargeRateEffectiveDate' => (string) ($serviceRow['service_charge_rate_effective_date'] ?? ''),
             'taxes' => (float) ($serviceRow['taxes'] ?? 0),
             'otherFare' => (float) ($serviceRow['other_fare'] ?? 0),
             'sotoFare' => (float) ($serviceRow['soto_fare'] ?? 0),

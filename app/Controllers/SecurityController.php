@@ -76,11 +76,31 @@ final class SecurityController extends BaseController
 
     public function adminPanel(): string
     {
+        $legacySelectedUserId = (int) ($_GET['user_id'] ?? 0);
+        if ($legacySelectedUserId > 0) {
+            $this->redirect('/admin/security/users/edit?user_id=' . $legacySelectedUserId);
+        }
+
+        $service = new SecuritySettingsService($this->app);
+
+        return $this->view('security/admin_panel', [
+            'title' => 'Security Controls',
+            'editMode' => false,
+            'users' => [],
+            'roleBranchOptions' => $service->adminRoleBranchOptions(),
+            'selectedUserId' => 0,
+            'target' => null,
+        ]);
+    }
+
+    public function adminEditUsers(): string
+    {
         $service = new SecuritySettingsService($this->app);
         $selectedUserId = (int) ($_GET['user_id'] ?? 0);
 
         return $this->view('security/admin_panel', [
-            'title' => 'Security Controls',
+            'title' => 'Edit User',
+            'editMode' => true,
             'users' => $service->userOptions(),
             'roleBranchOptions' => $service->adminRoleBranchOptions(),
             'selectedUserId' => $selectedUserId,
@@ -95,11 +115,11 @@ final class SecurityController extends BaseController
         try {
             $targetUserId = (new SecuritySettingsService($this->app))->adminUpdateRoleAndBranchAccess((int) Auth::id(), $_POST);
             Flash::success('Role and branch access updated.');
-            $this->redirect('/admin/security?user_id=' . $targetUserId);
+            $this->redirect('/admin/security/users/edit?user_id=' . $targetUserId);
         } catch (\Throwable $exception) {
             Flash::error($exception->getMessage());
             $targetUserId = (int) ($_POST['target_user_id'] ?? 0);
-            $this->redirect('/admin/security' . ($targetUserId > 0 ? '?user_id=' . $targetUserId : ''));
+            $this->redirect('/admin/security/users/edit' . ($targetUserId > 0 ? '?user_id=' . $targetUserId : ''));
         }
     }
 
@@ -110,7 +130,7 @@ final class SecurityController extends BaseController
         try {
             $targetUserId = (new SecuritySettingsService($this->app))->adminCreateUser((int) Auth::id(), $_POST);
             Flash::success('User created successfully.');
-            $this->redirect('/admin/security?user_id=' . $targetUserId);
+            $this->redirect('/admin/security');
         } catch (\Throwable $exception) {
             Flash::error($exception->getMessage());
             $this->redirect('/admin/security');
@@ -124,11 +144,11 @@ final class SecurityController extends BaseController
         try {
             $targetUserId = (new SecuritySettingsService($this->app))->adminUpdateUserIdentity((int) Auth::id(), $_POST);
             Flash::success('User details updated.');
-            $this->redirect('/admin/security?user_id=' . $targetUserId);
+            $this->redirect('/admin/security/users/edit?user_id=' . $targetUserId);
         } catch (\Throwable $exception) {
             Flash::error($exception->getMessage());
             $targetUserId = (int) ($_POST['target_user_id'] ?? 0);
-            $this->redirect('/admin/security' . ($targetUserId > 0 ? '?user_id=' . $targetUserId : ''));
+            $this->redirect('/admin/security/users/edit' . ($targetUserId > 0 ? '?user_id=' . $targetUserId : ''));
         }
     }
 
@@ -143,11 +163,11 @@ final class SecurityController extends BaseController
                 ((string) ($_POST['is_active'] ?? '0')) === '1'
             );
             Flash::success('User status updated.');
-            $this->redirect('/admin/security?user_id=' . $targetUserId);
+            $this->redirect('/admin/security/users/edit?user_id=' . $targetUserId);
         } catch (\Throwable $exception) {
             Flash::error($exception->getMessage());
             $targetUserId = (int) ($_POST['target_user_id'] ?? 0);
-            $this->redirect('/admin/security' . ($targetUserId > 0 ? '?user_id=' . $targetUserId : ''));
+            $this->redirect('/admin/security/users/edit' . ($targetUserId > 0 ? '?user_id=' . $targetUserId : ''));
         }
     }
 
@@ -171,7 +191,7 @@ final class SecurityController extends BaseController
         ]);
 
         Flash::success('Password reset forced for the selected user.');
-        $this->redirect('/admin/security?user_id=' . $targetUserId);
+        $this->redirect('/admin/security/users/edit?user_id=' . $targetUserId);
     }
 
     public function adminResetTwoFactor(): never
@@ -192,7 +212,7 @@ final class SecurityController extends BaseController
         ]);
 
         Flash::success('2FA reset for the selected user.');
-        $this->redirect('/admin/security?user_id=' . $targetUserId);
+        $this->redirect('/admin/security/users/edit?user_id=' . $targetUserId);
     }
 
     public function adminRevokeTrustedDevices(): never
@@ -213,6 +233,6 @@ final class SecurityController extends BaseController
         ]);
 
         Flash::success('Trusted devices revoked for the selected user.');
-        $this->redirect('/admin/security?user_id=' . $targetUserId);
+        $this->redirect('/admin/security/users/edit?user_id=' . $targetUserId);
     }
 }

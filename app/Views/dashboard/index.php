@@ -7,15 +7,20 @@ $branchLocalPeriods = $analytics['branchLocalPeriods'] ?? [];
 $expenseByBranch = $analytics['expenseByBranch'] ?? [];
 $expenseByCategory = $analytics['expenseByCategory'] ?? [];
 $branchLocalChartRows = is_array($branchLocalPeriods['this_month']['branches'] ?? null) ? $branchLocalPeriods['this_month']['branches'] : [];
+$branchExpenseChartRows = is_array($analytics['allTimeBranchRows'] ?? null) ? $analytics['allTimeBranchRows'] : [];
 $branchLocalChartMax = max(1.0, ...array_map(static fn (array $row): float => max(
     abs((float) ($row['sales'] ?? 0)),
     abs((float) ($row['supplier_cost'] ?? 0)),
     abs((float) ($row['expenses'] ?? 0)),
     abs((float) ($row['net_profit'] ?? 0))
 ), $branchLocalChartRows ?: [['sales' => 0, 'supplier_cost' => 0, 'expenses' => 0, 'net_profit' => 0]]));
+$branchExpenseChartMax = max(1.0, ...array_map(
+    static fn (array $row): float => abs((float) ($row['expenses'] ?? 0)),
+    $branchExpenseChartRows ?: [['expenses' => 0]]
+));
 ?>
 
-<section class="page-head">
+<section class="page-head dashboard-page-head">
     <div>
         <h1>Super Admin Dashboard</h1>
     </div>
@@ -27,7 +32,7 @@ $branchLocalChartMax = max(1.0, ...array_map(static fn (array $row): float => ma
     </div>
 </section>
 
-<section class="stat-grid">
+<section class="stat-grid dashboard-summary-grid">
     <article class="stat-card">
         <div class="stat-label">Branches</div>
         <div class="stat-value">2</div>
@@ -79,19 +84,19 @@ $branchLocalChartMax = max(1.0, ...array_map(static fn (array $row): float => ma
 
     <article class="panel dashboard-chart-panel">
         <div class="panel-header">
-            <h2>Branch Expenses</h2>
+            <h2>Total Branch Expenses</h2>
         </div>
-        <?php if ($branchLocalChartRows === []): ?>
+        <?php if ($branchExpenseChartRows === []): ?>
             <div class="empty-cell">No expense chart data available yet.</div>
         <?php else: ?>
-            <div class="dashboard-expense-chart" aria-label="Branch local expense chart for this month">
-                <?php foreach ($branchLocalChartRows as $row): ?>
+            <div class="dashboard-expense-chart" aria-label="Total recorded branch expenses">
+                <?php foreach ($branchExpenseChartRows as $row): ?>
                     <div class="dashboard-expense-row">
                         <div>
                             <strong><?= e((string) ($row['branch_name'] ?? 'Branch')) ?></strong>
                             <span><?= e((string) ($row['base_currency'] ?? '')) ?></span>
                         </div>
-                        <div class="dashboard-expense-bar"><i style="width: <?= e((string) max(2, min(100, round((((float) ($row['expenses'] ?? 0)) / $branchLocalChartMax) * 100)))) ?>%;"></i></div>
+                        <div class="dashboard-expense-bar"><i style="width: <?= e((string) max(2, min(100, round((abs((float) ($row['expenses'] ?? 0)) / $branchExpenseChartMax) * 100)))) ?>%;"></i></div>
                         <em><?= e((string) ($row['expenses_label'] ?? '0.00')) ?></em>
                     </div>
                 <?php endforeach; ?>

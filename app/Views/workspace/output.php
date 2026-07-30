@@ -176,6 +176,22 @@ $primaryContactLogo = trim((string) ($primaryBranchContact['logo_path'] ?? ''));
 $primaryContactLogoSrc = $primaryContactLogo !== '' ? asset(ltrim($normalizeReceiptLogoAssetPath($primaryContactLogo), '/')) : '';
 $primaryContactLogoFallbackSrc = $primaryContactLogo !== '' ? url($normalizeReceiptLogoPublicPath($primaryContactLogo)) : '';
 $primaryBranchCode = mb_strtolower(trim((string) ($branchBranding['code'] ?? '')));
+$primaryBranchIdentity = mb_strtolower(trim(implode(' ', [
+    (string) ($branchBranding['receipt_name'] ?? ''),
+    (string) ($branchBranding['name'] ?? ''),
+])));
+$isNobleRouteReceipt = $primaryBranchCode === 'dubai'
+    || str_contains($primaryBranchIdentity, 'noble route');
+$nobleRouteSignatureSrc = '';
+if ($isNobleRouteReceipt) {
+    $nobleRouteSignaturePath = base_path('public/assets/images/receipt-branches/noble-route-signature.png');
+    $nobleRouteSignatureBytes = is_readable($nobleRouteSignaturePath)
+        ? file_get_contents($nobleRouteSignaturePath)
+        : false;
+    $nobleRouteSignatureSrc = is_string($nobleRouteSignatureBytes)
+        ? 'data:image/png;base64,' . base64_encode($nobleRouteSignatureBytes)
+        : asset('images/receipt-branches/noble-route-signature.png') . '?v=20260727-2';
+}
 $primaryContactBranchLabel = trim((string) ($primaryBranchContact['branch_label'] ?? ''));
 $primaryContactLocationLabel = trim((string) ($primaryBranchContact['location_label'] ?? ''));
 $primaryContactPerson = trim((string) ($primaryBranchContact['contact_person'] ?? ''));
@@ -203,7 +219,17 @@ $bookingDate = (string) ($booking['booking_date'] ?? '');
 $bookingDueDate = trim((string) ($booking['due_date'] ?? ''));
 $customerMobile = trim((string) ($booking['contact_mobile'] ?? ''));
 $customerPassport = trim((string) ($booking['passport_number'] ?? ''));
-$travelerCount = count($travelers);
+$servicePassengerKeys = [];
+foreach ($services as $servicePassengerRow) {
+    $serviceTravelerId = (int) ($servicePassengerRow['traveler_id'] ?? 0);
+    $servicePassengerName = mb_strtolower(trim((string) ($servicePassengerRow['passenger_name'] ?? $servicePassengerRow['passenger_name_snapshot'] ?? '')));
+    if ($serviceTravelerId > 0) {
+        $servicePassengerKeys['id:' . $serviceTravelerId] = true;
+    } elseif ($servicePassengerName !== '') {
+        $servicePassengerKeys['name:' . $servicePassengerName] = true;
+    }
+}
+$travelerCount = count($servicePassengerKeys);
 $serviceCount = count($services);
 $serviceTypeLabels = [];
 foreach ($services as $service) {
@@ -785,10 +811,24 @@ $getOriginalReceiptPaymentDisplay = static function (array $historyRow) use ($re
         ? 'Advance Applied: ' . $fallbackDisplay
         : $fallbackDisplay;
 };
+$settlementAllocationIds = array_fill_keys(array_map(
+    'intval',
+    is_array($selectedReceipt['allocationIds'] ?? null) ? $selectedReceipt['allocationIds'] : []
+), true);
+$receiptAllocationSource = $outputType === 'customer_settlement_receipt'
+    ? ($customerPaymentFoundation['invoicePaymentHistory'] ?? [])
+    : ($customerPaymentFoundation['allocations'] ?? []);
 $receiptAllocations = array_values(array_filter(
-    $customerPaymentFoundation['allocations'] ?? [],
-    static fn (array $allocation): bool => (int) ($allocation['receiptId'] ?? 0) === $selectedReceiptId
-        || ((string) ($allocation['receiptNo'] ?? '') !== '' && (string) ($allocation['receiptNo'] ?? '') === $selectedReceiptNo)
+    $receiptAllocationSource,
+    static function (array $allocation) use ($selectedReceiptId, $selectedReceiptNo, $settlementAllocationIds): bool {
+        $allocationId = (int) ($allocation['allocationId'] ?? 0);
+        if ($settlementAllocationIds !== []) {
+            return $allocationId > 0 && isset($settlementAllocationIds[$allocationId]);
+        }
+
+        return (int) ($allocation['receiptId'] ?? 0) === $selectedReceiptId
+            || ((string) ($allocation['receiptNo'] ?? '') !== '' && (string) ($allocation['receiptNo'] ?? '') === $selectedReceiptNo);
+    }
 ));
 $currentBookingReceiptAllocations = array_values(array_filter(
     $receiptAllocations,
@@ -1203,11 +1243,27 @@ $previousInvoicePaymentsLabel = $previousInvoicePaymentHasAdvance && ! $previous
     : ($previousInvoicePaymentHasAdvance ? 'Previous / Advance Payments' : 'Previous Payments');
 $currentInvoicePaymentHistoryDisplay = $nonZeroCurrencyTotals($currentInvoicePaymentHistoryTotals);
 $totalPaidAgainstInvoiceDisplay = $nonZeroCurrencyTotals($totalPaidAgainstInvoiceTotals);
+
+// The allocation history is the authoritative payment truth for settlement output.
+// This also includes credit transferred from a refund on another booking, even
+// though no new cash receipt belongs to the target booking.
+if ($totalPaidAgainstInvoiceDisplay !== []) {
+    foreach ($totalPaidAgainstInvoiceDisplay as $currency => $paidAmount) {
+        $invoiceReceivedTotals[(string) $currency] = round((float) $paidAmount, 2);
+    }
+    foreach ($invoiceReceivableTotals as $currency => $invoiceAmount) {
+        $invoiceOutstandingTotals[(string) $currency] = max(round(
+            (float) $invoiceAmount - (float) ($invoiceReceivedTotals[(string) $currency] ?? 0),
+            2
+        ), 0.0);
+    }
+}
+
 $openSupplierHistoryUrl = null;
 if ($outputType === 'supplier_voucher' && (int) ($booking['id'] ?? 0) > 0) {
     $openSupplierHistoryUrl = url('/workspace?booking_id=' . (int) $booking['id'] . '#dock-panel-suppliers');
 }
-$usesReceiptLayout = in_array($outputType, ['customer_receipt', 'service_refund_receipt'], true);
+$usesReceiptLayout = in_array($outputType, ['customer_receipt', 'customer_settlement_receipt', 'booking_summary_receipt', 'service_refund_receipt'], true);
 ?>
 <main class="output-page">
     <div class="output-toolbar no-print">
@@ -1258,9 +1314,11 @@ $usesReceiptLayout = in_array($outputType, ['customer_receipt', 'service_refund_
                     </div>
                 </div>
             </section>
-            <section class="output-note-bar">
-                <?= e($documentAudienceNote) ?>
-            </section>
+            <?php if ($outputType !== 'reissue_voucher'): ?>
+                <section class="output-note-bar">
+                    <?= e($documentAudienceNote) ?>
+                </section>
+            <?php endif; ?>
         <?php endif; ?>
 
         <?php if ($outputType === 'invoice'): ?>
@@ -1299,7 +1357,7 @@ $usesReceiptLayout = in_array($outputType, ['customer_receipt', 'service_refund_
             </section>
         <?php endif; ?>
 
-        <?php if ($outputType === 'booking_summary_receipt'): ?>
+        <?php if ($outputType === 'reissue_voucher'): ?>
             <?php
             $bookingSummaryPaymentRows = [];
 
@@ -1332,14 +1390,20 @@ $usesReceiptLayout = in_array($outputType, ['customer_receipt', 'service_refund_
             ?>
 
             <section class="output-block">
-                <h2>Booking Summary Receipt</h2>
+                <h2><?= e(match ($outputType) {
+                    'customer_settlement_receipt' => 'Customer Payment Receipt',
+                    'reissue_voucher' => 'Ticket Reissue Voucher',
+                    default => 'Booking Summary Receipt',
+                }) ?></h2>
                 <div class="output-summary-strip">
-                    <div><span>Booking / Invoice No.</span><strong><?= e($bookingReference) ?></strong></div>
-                    <div><span>Customer</span><strong><?= e($customerName) ?></strong></div>
+                    <?php if ($outputType !== 'reissue_voucher'): ?>
+                        <div><span>Booking / Invoice No.</span><strong><?= e($bookingReference) ?></strong></div>
+                        <div><span>Customer</span><strong><?= e($customerName) ?></strong></div>
+                    <?php endif; ?>
                     <div><span>Total Invoice Amount</span><strong><?= e($formatCurrencyTotals($invoiceReceivableTotals !== [] ? $invoiceReceivableTotals : ['PKR' => 0])) ?></strong></div>
                     <div><span>Total Paid</span><strong><?= e($formatCurrencyTotals($invoiceReceivedTotals !== [] ? $invoiceReceivedTotals : ['PKR' => 0])) ?></strong></div>
                     <div><span>Balance Due</span><strong><?= e($formatCurrencyTotals($invoiceOutstandingTotals !== [] ? $invoiceOutstandingTotals : ['PKR' => 0])) ?></strong></div>
-                    <?php if ($bookingDueDate !== ''): ?>
+                    <?php if ($outputType !== 'reissue_voucher' && $bookingDueDate !== ''): ?>
                         <div><span>Due Date</span><strong><?= e($bookingDueDate) ?></strong></div>
                     <?php endif; ?>
                 </div>
@@ -1395,9 +1459,7 @@ $usesReceiptLayout = in_array($outputType, ['customer_receipt', 'service_refund_
                             <th>Service Ref.</th>
                             <th>Old Ticket</th>
                             <th>New Ticket</th>
-                            <th>Fare Difference</th>
-                            <th>Reissue Fee</th>
-                            <th>Added to Invoice</th>
+                            <th>Reissue Charges</th>
                             <th>Reason</th>
                         </tr>
                         </thead>
@@ -1405,14 +1467,13 @@ $usesReceiptLayout = in_array($outputType, ['customer_receipt', 'service_refund_
                         <?php foreach ($reissueEvents as $reissueEvent): ?>
                             <?php
                             $reissueCurrency = (string) ($reissueEvent['currency'] ?? 'PKR');
-                            $reissueFareDifference = (float) ($reissueEvent['fare_difference_amount'] ?? 0);
+                            $reissuePayload = json_decode((string) ($reissueEvent['payload_json'] ?? ''), true);
+                            $reissuePayload = is_array($reissuePayload) ? $reissuePayload : [];
+                            $reissueFareDifference = (float) ($reissuePayload['supplier_cost_difference_amount'] ?? $reissueEvent['fare_difference_amount'] ?? 0);
                             $reissueServiceFee = (float) ($reissueEvent['service_fee_amount'] ?? 0);
                             $reissueCustomerDelta = round($reissueFareDifference + $reissueServiceFee, 2);
                             if (abs($reissueCustomerDelta) <= 0.005 && ! empty($reissueEvent['payload_json'])) {
-                                $reissuePayload = json_decode((string) $reissueEvent['payload_json'], true);
-                                if (is_array($reissuePayload)) {
-                                    $reissueCustomerDelta = round((float) ($reissuePayload['customer_delta'] ?? 0), 2);
-                                }
+                                $reissueCustomerDelta = round((float) ($reissuePayload['customer_delta'] ?? 0), 2);
                             }
                             ?>
                             <tr>
@@ -1420,8 +1481,6 @@ $usesReceiptLayout = in_array($outputType, ['customer_receipt', 'service_refund_
                                 <td><?= e((string) ($reissueEvent['service_line_reference'] ?? '')) ?></td>
                                 <td><?= e((string) (($reissueEvent['original_ticket_number'] ?? '') !== '' ? $reissueEvent['original_ticket_number'] : 'N/A')) ?></td>
                                 <td><?= e((string) (($reissueEvent['new_ticket_number'] ?? '') !== '' ? $reissueEvent['new_ticket_number'] : 'N/A')) ?></td>
-                                <td><?= e($reissueCurrency) ?> <?= e($formatMoney($reissueFareDifference)) ?></td>
-                                <td><?= e($reissueCurrency) ?> <?= e($formatMoney($reissueServiceFee)) ?></td>
                                 <td><strong><?= e($reissueCurrency) ?> <?= e($formatMoney($reissueCustomerDelta)) ?></strong></td>
                                 <td><?= e((string) (($reissueEvent['reason'] ?? '') !== '' ? $reissueEvent['reason'] : 'Reissue adjustment')) ?></td>
                             </tr>
@@ -1429,16 +1488,23 @@ $usesReceiptLayout = in_array($outputType, ['customer_receipt', 'service_refund_
                         </tbody>
                     </table>
                     <?php if ($reissueAdjustmentTotals !== []): ?>
-                        <div class="output-summary-strip" style="margin-top:12px;">
-                            <div><span>Total Reissue Adjustment Added</span><strong><?= e($formatCurrencyTotals($reissueAdjustmentTotals)) ?></strong></div>
+                        <div class="output-summary-strip<?= $outputType === 'reissue_voucher' ? ' output-summary-strip--reissue' : '' ?>" style="margin-top:12px;">
+                            <div><span>Reissue Charges</span><strong><?= e($formatCurrencyTotals($reissueAdjustmentTotals)) ?></strong></div>
+                            <?php if ($outputType === 'reissue_voucher' && isset($selectedReissueEvent)): ?>
+                                <?php $selectedReissuePayload = json_decode((string) ($selectedReissueEvent['payload_json'] ?? ''), true); $selectedReissuePayload = is_array($selectedReissuePayload) ? $selectedReissuePayload : []; ?>
+                                <div><span>Cash Received Now</span><strong><?= e((string) ($selectedReissuePayload['cash_received_currency'] ?? $selectedReissueEvent['currency'] ?? 'PKR')) ?> <?= e($formatMoney((float) ($selectedReissuePayload['cash_received'] ?? 0))) ?></strong></div>
+                                <div><span>Customer Credit Used</span><strong><?= e((string) ($selectedReissueEvent['currency'] ?? 'PKR')) ?> <?= e($formatMoney((float) ($selectedReissuePayload['customer_credit_applied'] ?? 0))) ?></strong></div>
+                                <div><span>Revised Outstanding</span><strong><?= e((string) ($selectedReissueEvent['currency'] ?? 'PKR')) ?> <?= e($formatMoney((float) ($selectedReissuePayload['customer_outstanding'] ?? 0))) ?></strong></div>
+                            <?php endif; ?>
                         </div>
                     <?php endif; ?>
                 </section>
             <?php endif; ?>
 
-            <section class="output-block">
-                <h2>Payments Applied to This Booking</h2>
-                <table class="output-table">
+            <?php if ($outputType !== 'reissue_voucher'): ?>
+                <section class="output-block">
+                    <h2>Payments Applied to This Booking</h2>
+                    <table class="output-table">
                     <thead>
                     <tr>
                         <th>Receipt No.</th>
@@ -1460,11 +1526,12 @@ $usesReceiptLayout = in_array($outputType, ['customer_receipt', 'service_refund_
                         </tr>
                     <?php endforeach; ?>
                     </tbody>
-                </table>
-            </section>
+                    </table>
+                </section>
+            <?php endif; ?>
         <?php endif; ?>
 
-        <?php if ($outputType === 'customer_receipt' && $selectedReceipt !== null): ?>
+        <?php if (in_array($outputType, ['customer_receipt', 'customer_settlement_receipt', 'booking_summary_receipt'], true) && $selectedReceipt !== null): ?>
             <section class="receipt-sheet">
                 <header class="receipt-sheet__head">
                     <div class="receipt-sheet__brand-block">
@@ -1523,12 +1590,16 @@ $usesReceiptLayout = in_array($outputType, ['customer_receipt', 'service_refund_
                     </div>
                     <div class="receipt-sheet__title-wrap">
                         <div class="receipt-sheet__title">
-                            Customer Payment Receipt
+                            <?= e($outputType === 'booking_summary_receipt' ? 'Booking Summary Receipt' : 'Customer Payment Receipt') ?>
                             <?php if ($selectedReceiptIsVoid): ?>
                                 <span style="display:inline-block;margin-left:10px;padding:4px 10px;border:1px solid #8b0000;border-radius:999px;background:#fff0f0;color:#8b0000;font-size:12px;font-weight:700;letter-spacing:0.08em;">VOID</span>
                             <?php endif; ?>
                         </div>
-                        <div class="receipt-sheet__subtitle">Official branch receipt generated for customer payment confirmation.</div>
+                        <div class="receipt-sheet__subtitle"><?= e(match ($outputType) {
+                            'booking_summary_receipt' => 'Official branch booking receipt. No payment was received with this booking.',
+                            'customer_settlement_receipt' => 'Official branch receipt for payment or customer credit applied to this invoice.',
+                            default => 'Official branch receipt generated for customer payment confirmation.',
+                        }) ?></div>
                         <?php if ($primaryContactServiceNote !== ''): ?>
                             <div class="receipt-sheet__service-note"><?= e($primaryContactServiceNote) ?></div>
                         <?php endif; ?>
@@ -1800,9 +1871,7 @@ openReceivables: <?= e(json_encode($receiptDebug['openReceivables'], JSON_PRETTY
                                 <th>Service Ref.</th>
                                 <th>Old Ticket</th>
                                 <th>New Ticket</th>
-                                <th>Fare Difference</th>
-                                <th>Reissue Fee</th>
-                                <th>Added to Invoice</th>
+                                <th>Reissue Charges</th>
                                 <th>Reason</th>
                             </tr>
                             </thead>
@@ -1825,8 +1894,6 @@ openReceivables: <?= e(json_encode($receiptDebug['openReceivables'], JSON_PRETTY
                                     <td><?= e((string) ($reissueEvent['service_line_reference'] ?? '')) ?></td>
                                     <td><?= e((string) (($reissueEvent['original_ticket_number'] ?? '') !== '' ? $reissueEvent['original_ticket_number'] : 'N/A')) ?></td>
                                     <td><?= e((string) (($reissueEvent['new_ticket_number'] ?? '') !== '' ? $reissueEvent['new_ticket_number'] : 'N/A')) ?></td>
-                                    <td><?= e($reissueCurrency) ?> <?= e($formatMoney($reissueFareDifference)) ?></td>
-                                    <td><?= e($reissueCurrency) ?> <?= e($formatMoney($reissueServiceFee)) ?></td>
                                     <td><strong><?= e($reissueCurrency) ?> <?= e($formatMoney($reissueCustomerDelta)) ?></strong></td>
                                     <td><?= e((string) (($reissueEvent['reason'] ?? '') !== '' ? $reissueEvent['reason'] : 'Reissue adjustment')) ?></td>
                                 </tr>
@@ -1835,7 +1902,7 @@ openReceivables: <?= e(json_encode($receiptDebug['openReceivables'], JSON_PRETTY
                         </table>
                         <?php if ($reissueAdjustmentTotals !== []): ?>
                             <div class="receipt-due-line" style="margin-top:12px;">
-                                <span>Total Reissue Adjustment Added</span>
+                                <span>Reissue Charges</span>
                                 <strong><?= e($formatCurrencyTotals($reissueAdjustmentTotals)) ?></strong>
                             </div>
                         <?php endif; ?>
@@ -1844,22 +1911,30 @@ openReceivables: <?= e(json_encode($receiptDebug['openReceivables'], JSON_PRETTY
 
                 <footer class="receipt-sheet__foot">
                     <div class="receipt-signatures">
-                        <div>
+                        <div class="receipt-signatures__identity">
                             <span>Received By</span>
                             <strong><?= e($receivedBy !== '' ? $receivedBy : 'Authorized Staff') ?></strong>
                         </div>
-                        <div>
-                            <span>Authorized By</span>
-                            <strong><?= e((string) ($branchBranding['name'] ?? 'Travel Agency')) ?></strong>
+                        <div class="receipt-sheet__note receipt-signatures__thank-you">Thank you for your business.</div>
+                        <?php if ($nobleRouteSignatureSrc !== ''): ?>
+                            <img
+                                class="receipt-signatures__image"
+                                src="<?= e($nobleRouteSignatureSrc) ?>"
+                                alt="Authorized signature"
+                            >
+                        <?php else: ?>
+                            <span class="receipt-signatures__image-placeholder" aria-hidden="true"></span>
+                        <?php endif; ?>
+                        <div class="receipt-sheet__note receipt-sheet__note--muted receipt-signatures__generated">
+                            This is a computer-generated receipt.
                         </div>
                     </div>
-                    <div class="receipt-sheet__note">Thank you for your business.</div>
-                    <div class="receipt-sheet__note receipt-sheet__note--muted">This is a computer-generated receipt.</div>
                     <?php if ($branchDirectory !== []): ?>
                         <div class="receipt-branches">
                             <span>Our branches</span>
                             <?php foreach (array_map($branchDirectoryContactLine, $branchDirectory) as $branchLine): ?>
-                                <div class="receipt-branches__row">
+                                <?php $isNobleRouteBranchLine = str_contains(mb_strtolower((string) ($branchLine['branch'] ?? '')), 'noble route'); ?>
+                                <div class="receipt-branches__row<?= $isNobleRouteBranchLine ? ' receipt-branches__row--right' : '' ?>">
                                     <strong class="receipt-branches__name"><?= e((string) ($branchLine['branch'] ?? 'Branch')) ?></strong>
                                     <?php if (trim((string) ($branchLine['contact'] ?? '')) !== ''): ?>
                                         <small class="receipt-branches__contact"><?= e((string) $branchLine['contact']) ?></small>
@@ -1964,7 +2039,8 @@ openReceivables: <?= e(json_encode($receiptDebug['openReceivables'], JSON_PRETTY
                         <div class="receipt-branches">
                             <span>Our branches</span>
                             <?php foreach (array_map($branchDirectoryContactLine, $branchDirectory) as $branchLine): ?>
-                                <div class="receipt-branches__row">
+                                <?php $isNobleRouteBranchLine = str_contains(mb_strtolower((string) ($branchLine['branch'] ?? '')), 'noble route'); ?>
+                                <div class="receipt-branches__row<?= $isNobleRouteBranchLine ? ' receipt-branches__row--right' : '' ?>">
                                     <strong class="receipt-branches__name"><?= e((string) ($branchLine['branch'] ?? 'Branch')) ?></strong>
                                     <?php if (trim((string) ($branchLine['contact'] ?? '')) !== ''): ?>
                                         <small class="receipt-branches__contact"><?= e((string) $branchLine['contact']) ?></small>
@@ -2248,3 +2324,26 @@ openReceivables: <?= e(json_encode($receiptDebug['openReceivables'], JSON_PRETTY
         </section>
     <?php endif; ?>
 </main>
+<?php if (! empty($autoPrint)): ?>
+    <script>
+        window.addEventListener('load', async function () {
+            const pendingImages = Array.from(document.images).filter(function (image) {
+                return !image.complete;
+            });
+            await Promise.all(pendingImages.map(function (image) {
+                return new Promise(function (resolve) {
+                    image.addEventListener('load', resolve, { once: true });
+                    image.addEventListener('error', resolve, { once: true });
+                });
+            }));
+            if (document.fonts && document.fonts.ready) {
+                await document.fonts.ready;
+            }
+            window.requestAnimationFrame(function () {
+                window.setTimeout(function () {
+                    window.print();
+                }, 60);
+            });
+        });
+    </script>
+<?php endif; ?>

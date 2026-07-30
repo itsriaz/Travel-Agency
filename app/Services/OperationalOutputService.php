@@ -18,6 +18,8 @@ final class OperationalOutputService extends Service
         'invoice' => 'Customer Invoice',
         'customer_receipt' => 'Customer Receipt',
         'booking_summary_receipt' => 'Booking Summary Receipt',
+        'customer_settlement_receipt' => 'Customer Payment Receipt',
+        'reissue_voucher' => 'Ticket Reissue Voucher',
         'service_refund_receipt' => 'Cancellation / Refund Receipt',
         'supplier_voucher' => 'Supplier Voucher / Payment Document',
         'account_statement' => 'Account Statement',
@@ -32,7 +34,8 @@ final class OperationalOutputService extends Service
         ?int $receiptId,
         ?int $supplierPaymentId,
         ?int $refundEventId,
-        int $actorUserId
+        int $actorUserId,
+        ?int $serviceEventId = null
     ): array {
         $type = $this->normalizeOutputType($outputType);
         $bookingRepository = new BookingRepository($this->app);
@@ -72,12 +75,50 @@ final class OperationalOutputService extends Service
         );
         $supplierFoundation = (new SupplierFoundationService($this->app))->buildWorkspacePreview($bookingReference);
 
-        $selectedReceipt = $this->resolveReceipt($type, $receiptId, $customerPaymentFoundation['receipts'] ?? []);
+        $selectedReceipt = $this->resolveReceipt(
+            $type,
+            $receiptId,
+            $customerPaymentFoundation['receipts'] ?? [],
+            $customerPaymentFoundation['invoicePaymentHistory'] ?? [],
+            $bookingReference
+        );
+        if ($type === 'booking_summary_receipt' && $selectedReceipt === null) {
+            $invoiceReceivableTotals = is_array($customerPaymentFoundation['summary']['invoiceReceivable'] ?? null)
+                ? $customerPaymentFoundation['summary']['invoiceReceivable']
+                : [];
+            $receiptCurrency = (string) (
+                array_key_first($invoiceReceivableTotals)
+                ?? ($booking['currency'] ?? '')
+                ?: 'PKR'
+            );
+            $selectedReceipt = [
+                'id' => null,
+                'receiptNo' => $bookingReference,
+                'receiptDate' => (string) ($booking['booking_date'] ?? ''),
+                'currency' => $receiptCurrency,
+                'tenderedAmount' => 0.0,
+                'receivedAmount' => 0.0,
+                'allocatedAmount' => 0.0,
+                'returnedAmount' => 0.0,
+                'paymentMethod' => 'No payment received',
+                'referenceNumber' => '',
+                'bankCardDetail' => '',
+                'remarks' => '',
+                'status' => 'Booking recorded',
+                'statusRaw' => 'booking_recorded',
+                'allocationIds' => [],
+                'isBookingSummary' => true,
+            ];
+        }
         $selectedSupplierPayment = $this->resolveSupplierPayment($type, $supplierPaymentId, $supplierFoundation['payments'] ?? []);
         $selectedRefundEvent = $this->resolveRefundEvent($type, $refundEventId, $services, $bookingId);
         $selectedRefundDetail = $selectedRefundEvent !== null
             ? (new BookingServiceRefundDetailRepository($this->app))->findByServiceEventId((int) ($selectedRefundEvent['id'] ?? 0))
             : null;
+        $selectedReissueEvent = $this->resolveReissueEvent($type, $serviceEventId, $serviceEvents, $bookingId);
+        if ($type === 'reissue_voucher' && $selectedReissueEvent !== null) {
+            $serviceEvents = [$selectedReissueEvent];
+        }
 
         AuditLog::record($this->app, 'output.viewed', [
             'user_id' => $actorUserId,
@@ -87,6 +128,7 @@ final class OperationalOutputService extends Service
             'customer_receipt_id' => $selectedReceipt['id'] ?? null,
             'supplier_payment_id' => $selectedSupplierPayment['id'] ?? null,
             'service_refund_event_id' => $selectedRefundEvent['id'] ?? null,
+            'service_reissue_event_id' => $selectedReissueEvent['id'] ?? null,
         ]);
 
         return [
@@ -103,6 +145,7 @@ final class OperationalOutputService extends Service
             'selectedSupplierPayment' => $selectedSupplierPayment,
             'selectedRefundEvent' => $selectedRefundEvent,
             'selectedRefundDetail' => $selectedRefundDetail,
+            'selectedReissueEvent' => $selectedReissueEvent,
             'branchBranding' => $this->branchBranding($booking),
             'branchDirectory' => array_map(
                 fn (array $branch): array => $this->withBranchContact($branch),
@@ -124,8 +167,18 @@ final class OperationalOutputService extends Service
         return $type;
     }
 
-    private function resolveReceipt(string $type, ?int $receiptId, array $receipts): ?array
+    private function resolveReceipt(
+        string $type,
+        ?int $receiptId,
+        array $receipts,
+        array $invoicePaymentHistory,
+        string $bookingReference
+    ): ?array
     {
+        if ($type === 'customer_settlement_receipt') {
+            return $this->resolveSettlementReceipt($receiptId, $invoicePaymentHistory, $bookingReference);
+        }
+
         if ($type !== 'customer_receipt') {
             return null;
         }
@@ -145,6 +198,117 @@ final class OperationalOutputService extends Service
         }
 
         throw new RuntimeException('The selected customer receipt could not be opened for this booking.');
+    }
+
+    /**
+     * Build a printable receipt identity for a non-cash settlement. Customer credit and
+     * customer advance are allocations of existing money, so they correctly have no new
+     * customer_receipts header. The printable voucher is therefore derived from the
+     * authoritative allocation rows instead of inventing a second cash receipt.
+     */
+    private function resolveSettlementReceipt(?int $receiptId, array $invoicePaymentHistory, string $bookingReference): array
+    {
+        $eligibleRows = array_values(array_filter(
+            $invoicePaymentHistory,
+            static function (array $row) use ($bookingReference, $receiptId): bool {
+                $status = str_replace(' ', '_', mb_strtolower(trim((string) ($row['receiptStatusRaw'] ?? ''))));
+                if ($status === 'void' || (string) ($row['bookingReference'] ?? '') !== $bookingReference) {
+                    return false;
+                }
+
+                return $receiptId === null || $receiptId <= 0 || (int) ($row['receiptId'] ?? 0) === $receiptId;
+            }
+        ));
+
+        if ($eligibleRows === []) {
+            throw new RuntimeException(
+                'No customer payment, advance, or credit application is recorded for this booking. Open the booking receipt instead.'
+            );
+        }
+
+        usort($eligibleRows, static fn (array $left, array $right): int =>
+            ((int) ($right['allocationId'] ?? 0)) <=> ((int) ($left['allocationId'] ?? 0))
+        );
+        $latestRow = $eligibleRows[0];
+        $latestAllocatedAt = trim((string) ($latestRow['allocatedAt'] ?? ''));
+        if ($latestAllocatedAt !== '') {
+            $eligibleRows = array_values(array_filter(
+                $eligibleRows,
+                static fn (array $row): bool => trim((string) ($row['allocatedAt'] ?? '')) === $latestAllocatedAt
+            ));
+        } elseif ($receiptId === null || $receiptId <= 0) {
+            $latestReceiptId = (int) ($latestRow['receiptId'] ?? 0);
+            $eligibleRows = array_values(array_filter(
+                $eligibleRows,
+                static fn (array $row): bool => (int) ($row['receiptId'] ?? 0) === $latestReceiptId
+            ));
+        }
+
+        $allocationIds = [];
+        $receiptNumbers = [];
+        $sourceBookings = [];
+        $purposes = [];
+        $currencies = [];
+        $allocatedTotal = 0.0;
+        foreach ($eligibleRows as $row) {
+            $allocationId = (int) ($row['allocationId'] ?? 0);
+            if ($allocationId > 0) {
+                $allocationIds[$allocationId] = true;
+            }
+            $receiptNo = trim((string) ($row['receiptNo'] ?? ''));
+            if ($receiptNo !== '') {
+                $receiptNumbers[$receiptNo] = true;
+            }
+            $sourceBooking = trim((string) ($row['receiptBookingReference'] ?? ''));
+            if ($sourceBooking !== '' && $sourceBooking !== $bookingReference) {
+                $sourceBookings[$sourceBooking] = true;
+            }
+            $purpose = str_replace(' ', '_', mb_strtolower(trim((string) ($row['receiptPurpose'] ?? 'booking_payment'))));
+            $purposes[$purpose !== '' ? $purpose : 'booking_payment'] = true;
+            $currency = trim((string) ($row['receivableCurrency'] ?? $row['currency'] ?? ''));
+            if ($currency !== '') {
+                $currencies[$currency] = true;
+            }
+            $allocatedTotal += (float) ($row['receivableAmountAllocated'] ?? $row['allocatedAmount'] ?? 0);
+        }
+
+        $allocationIdList = array_map('intval', array_keys($allocationIds));
+        sort($allocationIdList);
+        $receiptNumberList = array_keys($receiptNumbers);
+        $sourceBookingList = array_keys($sourceBookings);
+        $currency = (string) (array_key_first($currencies) ?? 'PKR');
+        $onlyPurpose = count($purposes) === 1 ? (string) array_key_first($purposes) : 'combined_settlement';
+        $paymentMethod = $sourceBookingList !== []
+            ? 'customer_credit'
+            : ($onlyPurpose === 'customer_advance' ? 'customer_advance' : 'customer_credit');
+        $reference = $receiptNumberList !== []
+            ? implode(' / ', $receiptNumberList)
+            : $bookingReference;
+        $receiptDate = $latestAllocatedAt !== '' ? substr($latestAllocatedAt, 0, 10) : (string) ($latestRow['receiptDate'] ?? date('Y-m-d'));
+        $remarks = $sourceBookingList !== []
+            ? 'Customer credit applied from ' . implode(', ', $sourceBookingList)
+            : ($onlyPurpose === 'customer_advance' ? 'Customer advance applied to this invoice' : 'Customer credit applied to this invoice');
+
+        return [
+            'id' => count($receiptNumbers) === 1 ? (int) ($latestRow['receiptId'] ?? 0) : 0,
+            'receiptNo' => $receiptNumberList !== [] ? implode(' / ', $receiptNumberList) : $bookingReference,
+            'receiptDate' => $receiptDate,
+            'receiptPurpose' => $onlyPurpose,
+            'currency' => $currency,
+            'tenderedAmount' => round($allocatedTotal, 2),
+            'receivedAmount' => round($allocatedTotal, 2),
+            'allocatedAmount' => round($allocatedTotal, 2),
+            'unallocatedAmount' => 0.0,
+            'returnedAmount' => 0.0,
+            'paymentMethod' => $paymentMethod,
+            'referenceNumber' => $reference,
+            'bankCardDetail' => '',
+            'chargesAmount' => 0.0,
+            'status' => 'Received',
+            'statusRaw' => 'received',
+            'remarks' => $remarks,
+            'allocationIds' => $allocationIdList,
+        ];
     }
 
     private function resolveSupplierPayment(string $type, ?int $supplierPaymentId, array $payments): ?array
@@ -197,6 +361,25 @@ final class OperationalOutputService extends Service
         }
 
         throw new RuntimeException('No posted service refund is available for this booking yet.');
+    }
+
+    private function resolveReissueEvent(string $type, ?int $eventId, array $events, int $bookingId): ?array
+    {
+        if ($type !== 'reissue_voucher') {
+            return null;
+        }
+
+        foreach (array_reverse($events) as $event) {
+            if ((string) ($event['event_type'] ?? '') !== 'reissue'
+                || (int) ($event['booking_id'] ?? 0) !== $bookingId) {
+                continue;
+            }
+            if ($eventId === null || $eventId <= 0 || (int) ($event['id'] ?? 0) === $eventId) {
+                return $event;
+            }
+        }
+
+        throw new RuntimeException('The selected ticket reissue could not be opened for this booking.');
     }
 
     private function branchBranding(array $booking): array

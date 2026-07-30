@@ -90,6 +90,19 @@ $columnExists = static function (string $table, string $column) use ($db): bool 
     return $statement->fetchColumn() !== false;
 };
 
+$tableExists = static function (string $table) use ($db): bool {
+    $statement = $db->prepare(
+        'SELECT 1
+         FROM information_schema.tables
+         WHERE table_schema = DATABASE()
+           AND table_name = :table_name
+         LIMIT 1'
+    );
+    $statement->execute(['table_name' => $table]);
+
+    return $statement->fetchColumn() !== false;
+};
+
 $httpGet = static function (string $url, int $timeoutSeconds): array {
     if (function_exists('curl_init')) {
         $ch = curl_init($url);
@@ -235,6 +248,16 @@ $scriptSuites = [
         'writes' => false,
     ],
     [
+        'label' => 'Account/supplier link foundation regression',
+        'path' => BASE_PATH . '/tests/account_supplier_link_foundation_regression.php',
+        'writes' => true,
+    ],
+    [
+        'label' => 'Linked-party settlement regression',
+        'path' => BASE_PATH . '/tests/counterparty_offset_regression.php',
+        'writes' => true,
+    ],
+    [
         'label' => 'Customer global settlement readiness',
         'path' => BASE_PATH . '/tests/customer_global_settlement_readiness.php',
         'writes' => false,
@@ -243,6 +266,11 @@ $scriptSuites = [
         'label' => 'Supplier global settlement readiness',
         'path' => BASE_PATH . '/tests/supplier_global_settlement_readiness.php',
         'writes' => false,
+    ],
+    [
+        'label' => 'Supplier payment supplier correction regression',
+        'path' => BASE_PATH . '/tests/supplier_payment_supplier_correction_regression.php',
+        'writes' => true,
     ],
     [
         'label' => 'Workspace payment readiness',
@@ -267,6 +295,11 @@ $scriptSuites = [
     [
         'label' => 'Service lifecycle regression',
         'path' => BASE_PATH . '/tests/service_lifecycle_regression.php',
+        'writes' => true,
+    ],
+    [
+        'label' => 'Independent service multi-currency pricing regression',
+        'path' => BASE_PATH . '/tests/service_multi_currency_pricing_regression.php',
         'writes' => true,
     ],
     [
@@ -367,12 +400,23 @@ $record(
     ['sample_rows' => $journalImbalances]
 );
 
-[$receiptMismatches, $receiptDurationMs] = $runTimed(static function () use ($db): array {
+$recognizedCustomerCreditExpression = $tableExists('customer_credit_income_recognitions')
+    ? '(SELECT COALESCE(SUM(ccir.amount), 0) FROM customer_credit_income_recognitions ccir WHERE ccir.customer_receipt_id = customer_receipts.id)'
+    : '0';
+
+[$receiptMismatches, $receiptDurationMs] = $runTimed(static function () use ($db, $recognizedCustomerCreditExpression): array {
     $statement = $db->query(
-        'SELECT id, booking_reference, receipt_no, currency, received_amount, allocated_amount, unallocated_amount
+        'SELECT id, booking_reference, receipt_no, currency, tendered_amount, received_amount, allocated_amount, unallocated_amount, returned_amount,
+                ' . $recognizedCustomerCreditExpression . ' AS recognized_income_amount
          FROM customer_receipts
          WHERE status <> "void"
-           AND ABS(received_amount - (allocated_amount + unallocated_amount)) > 0.005
+           AND NOT (
+                ABS(received_amount - (allocated_amount + unallocated_amount + returned_amount + ' . $recognizedCustomerCreditExpression . ')) <= 0.005
+                OR (
+                    ABS(received_amount - (allocated_amount + unallocated_amount + ' . $recognizedCustomerCreditExpression . ')) <= 0.005
+                    AND ABS(tendered_amount - (received_amount + returned_amount)) <= 0.005
+                )
+           )
          LIMIT 10'
     );
 
@@ -380,7 +424,7 @@ $record(
 });
 
 $record(
-    $receiptMismatches === [] ? 'pass' : 'warn',
+    $receiptMismatches === [] ? 'pass' : 'fail',
     'Customer receipt allocation totals are internally consistent',
     $receiptDurationMs,
     $receiptMismatches === [] ? 'No mismatches found' : json_encode($receiptMismatches, JSON_UNESCAPED_SLASHES),
@@ -393,14 +437,19 @@ $supplierPaymentConvertedAdvanceSelect = $columnExists('supplier_payments', 'con
 $supplierPaymentConvertedAdvanceValue = $columnExists('supplier_payments', 'converted_advance_amount')
     ? 'converted_advance_amount'
     : '0';
+$supplierPaymentReturnedAmountValue = $columnExists('supplier_payments', 'returned_amount')
+    ? 'returned_amount'
+    : '0';
 
-[$supplierPaymentMismatches, $supplierPaymentDurationMs] = $runTimed(static function () use ($db, $supplierPaymentConvertedAdvanceSelect, $supplierPaymentConvertedAdvanceValue): array {
+[$supplierPaymentMismatches, $supplierPaymentDurationMs] = $runTimed(static function () use ($db, $supplierPaymentConvertedAdvanceSelect, $supplierPaymentConvertedAdvanceValue, $supplierPaymentReturnedAmountValue): array {
     $statement = $db->query(
         'SELECT id, booking_reference, payment_no, currency, paid_amount, allocated_amount, unallocated_amount, '
             . $supplierPaymentConvertedAdvanceSelect . '
          FROM supplier_payments
          WHERE status <> "void"
-           AND ABS(paid_amount - (allocated_amount + unallocated_amount + ' . $supplierPaymentConvertedAdvanceValue . ')) > 0.005
+           AND ABS(paid_amount - (allocated_amount + unallocated_amount + '
+            . $supplierPaymentConvertedAdvanceValue . ' + '
+            . $supplierPaymentReturnedAmountValue . ')) > 0.005
          LIMIT 10'
     );
 

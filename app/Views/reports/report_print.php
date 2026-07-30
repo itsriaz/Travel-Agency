@@ -118,10 +118,13 @@ $formatLedgerBalance = static function (string $value, string $report): string {
         return number_format(0, 2);
     }
 
-    $isSupplierLedger = $report === 'supplier_ledger';
-    $suffix = $isSupplierLedger
-        ? ($amount > 0 ? 'Cr' : 'Dr')
-        : ($amount > 0 ? 'Dr' : 'Cr');
+    if ($report === 'supplier_ledger') {
+        $isAdvance = stripos($text, 'advance') !== false || ($amount < 0 && stripos($text, 'payable') === false);
+
+        return number_format(abs($amount), 2) . ($isAdvance ? ' Advance' : ' Payable');
+    }
+
+    $suffix = $amount > 0 ? 'Dr' : 'Cr';
 
     return number_format(abs($amount), 2) . ' ' . $suffix;
 };

@@ -118,6 +118,11 @@ final class BookingWorkspaceService extends Service
                 throw new RuntimeException('You cannot update a booking outside your accessible branches.');
             }
 
+            $priorBooking = $repository->findBookingById($bookingId);
+            if ($priorBooking === null) {
+                throw new RuntimeException('The booking could not be loaded for update.');
+            }
+
             $this->assertCanUseStatus($repository, $bookingId, (string) $payload['booking']['booking_status']);
 
             $repository->updateBooking(
@@ -145,7 +150,9 @@ final class BookingWorkspaceService extends Service
                 'user_id' => $actorUserId,
                 'booking_id' => $bookingId,
                 'booking_reference' => (string) $savedBooking['booking_reference'],
+                'prior_branch_id' => (int) $priorBooking['branch_id'],
                 'branch_id' => (int) $savedBooking['branch_id'],
+                'branch_changed' => (int) $priorBooking['branch_id'] !== (int) $savedBooking['branch_id'],
                 'booking_status' => (string) $savedBooking['booking_status'],
             ]);
 

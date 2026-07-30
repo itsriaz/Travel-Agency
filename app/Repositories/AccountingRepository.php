@@ -151,12 +151,20 @@ final class AccountingRepository extends BaseRepository
 
         $firstRow = $rows[0];
         $lines = [];
+        $lineDescriptionOverrides = is_array($options['line_description_overrides'] ?? null)
+            ? $options['line_description_overrides']
+            : [];
         foreach ($rows as $row) {
             $debitAmount = round((float) ($row['debit_amount'] ?? 0), 2);
             $creditAmount = round((float) ($row['credit_amount'] ?? 0), 2);
             if ($debitAmount <= 0 && $creditAmount <= 0) {
                 continue;
             }
+
+            $originalLineDescription = (string) ($row['line_description'] ?? '');
+            $lineDescription = array_key_exists($originalLineDescription, $lineDescriptionOverrides)
+                ? (string) $lineDescriptionOverrides[$originalLineDescription]
+                : (string) ($options['line_description_prefix'] ?? 'Reversal: ') . $originalLineDescription;
 
             $lines[] = [
                 'account_code' => (string) ($row['account_code'] ?? ''),
@@ -175,7 +183,7 @@ final class AccountingRepository extends BaseRepository
                 'customer_receipt_id' => isset($row['customer_receipt_id']) && (int) ($row['customer_receipt_id'] ?? 0) > 0
                     ? (int) $row['customer_receipt_id']
                     : null,
-                'line_description' => (string) ($options['line_description_prefix'] ?? 'Reversal: ') . (string) ($row['line_description'] ?? ''),
+                'line_description' => $lineDescription,
                 'debit_amount' => $creditAmount,
                 'credit_amount' => $debitAmount,
             ];
@@ -329,6 +337,8 @@ final class AccountingRepository extends BaseRepository
 
     public function postSupplierAdvanceDeposit(array $data): int
     {
+        $sourceAccount = $this->paymentMethodAssetAccount($data);
+
         return $this->postJournalEntry([
             'branch_id' => $data['branch_id'],
             'booking_reference' => $data['booking_reference'] ?? null,
@@ -346,7 +356,8 @@ final class AccountingRepository extends BaseRepository
                 'credit_amount' => 0,
             ],
             [
-                'account_code' => $data['cash_account_code'] ?? 'BANK_CLEARING',
+                'account_code' => $sourceAccount['account_code'],
+                'account_id' => $sourceAccount['account_id'],
                 'line_description' => 'Cash or bank outflow',
                 'debit_amount' => 0,
                 'credit_amount' => $data['amount'],
@@ -713,6 +724,76 @@ final class AccountingRepository extends BaseRepository
                 'line_description' => 'Accounts receivable reduced',
                 'debit_amount' => 0,
                 'credit_amount' => $data['allocated_amount'],
+            ],
+        ]);
+    }
+
+    public function postWrongCurrencyCustomerReceiptReversal(array $data): int
+    {
+        $amount = round((float) ($data['amount'] ?? 0), 2);
+        if ($amount <= 0) {
+            throw new RuntimeException('Wrong-currency receipt reversal amount must be greater than zero.');
+        }
+        $cashAccount = $this->customerReceiptAssetAccount($data);
+
+        return $this->postJournalEntry([
+            'branch_id' => $data['branch_id'],
+            'booking_reference' => $data['booking_reference'],
+            'source_type' => 'customer_receipt_wrong_currency_reversed',
+            'source_reference' => $data['source_reference'] ?? null,
+            'entry_date' => $data['entry_date'],
+            'currency' => $data['currency'],
+            'narration' => $data['narration'] ?? 'Wrong-currency customer receipt reversed',
+            'actor_user_id' => $data['actor_user_id'] ?? null,
+        ], [
+            [
+                'account_code' => 'CUSTOMER_CREDIT',
+                'customer_receipt_id' => $data['customer_receipt_id'] ?? null,
+                'line_description' => 'Wrong-currency customer credit removed',
+                'debit_amount' => $amount,
+                'credit_amount' => 0,
+            ],
+            [
+                'account_code' => $cashAccount['account_code'],
+                'account_id' => $cashAccount['account_id'],
+                'customer_receipt_id' => $data['customer_receipt_id'] ?? null,
+                'line_description' => 'Wrong-currency treasury receipt removed',
+                'debit_amount' => 0,
+                'credit_amount' => $amount,
+            ],
+        ]);
+    }
+
+    public function postCustomerCreditFxGain(array $data): int
+    {
+        $amount = round((float) ($data['amount'] ?? 0), 2);
+        if ($amount <= 0) {
+            throw new RuntimeException('FX gain amount must be greater than zero.');
+        }
+
+        return $this->postJournalEntry([
+            'branch_id' => $data['branch_id'],
+            'booking_reference' => $data['booking_reference'] ?? null,
+            'source_type' => 'customer_credit_fx_gain_recognized',
+            'source_reference' => $data['source_reference'] ?? null,
+            'entry_date' => $data['entry_date'],
+            'currency' => $data['currency'],
+            'narration' => $data['narration'] ?? 'Customer credit recognized as foreign exchange gain',
+            'actor_user_id' => $data['actor_user_id'] ?? null,
+        ], [
+            [
+                'account_code' => 'CUSTOMER_CREDIT',
+                'customer_receipt_id' => $data['customer_receipt_id'] ?? null,
+                'line_description' => 'Customer-credit liability released',
+                'debit_amount' => $amount,
+                'credit_amount' => 0,
+            ],
+            [
+                'account_code' => 'FX_GAIN',
+                'customer_receipt_id' => $data['customer_receipt_id'] ?? null,
+                'line_description' => 'Foreign exchange profit recognized',
+                'debit_amount' => 0,
+                'credit_amount' => $amount,
             ],
         ]);
     }

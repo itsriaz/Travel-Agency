@@ -1,0 +1,133 @@
+{
+    "marker": "QA-RIAZ-RELEASE-20260724",
+    "created_at": "2026-07-24T14:23:34+05:00",
+    "branch_id": 1,
+    "business_source": "Riaz",
+    "treasury_accounts": {
+        "PKR": 47,
+        "AED": 48,
+        "USD": 49
+    },
+    "bookings": {
+        "QA1": {
+            "booking_reference": "BK-000001",
+            "customer": "QA-RIAZ-ABC1",
+            "supplier": "QA XYZ PKR",
+            "cost_currency": "PKR",
+            "invoice_currency": "PKR",
+            "service_currency": "AED",
+            "planned_cost": 80000,
+            "planned_invoice": 88000
+        },
+        "QA2": {
+            "booking_reference": "BK-000002",
+            "customer": "QA-RIAZ-ABC2",
+            "supplier": "QA XYZ PKR",
+            "cost_currency": "PKR",
+            "invoice_currency": "PKR",
+            "service_currency": "PKR",
+            "planned_cost": 50000,
+            "planned_invoice": 53000
+        },
+        "QA3": {
+            "booking_reference": "BK-000003",
+            "customer": "QA-RIAZ-ABC3",
+            "supplier": "QA XYZ PKR",
+            "cost_currency": "PKR",
+            "invoice_currency": "AED",
+            "service_currency": "USD",
+            "planned_cost": 80000,
+            "planned_invoice": 1040
+        },
+        "QA4": {
+            "booking_reference": "BK-000004",
+            "customer": "QA-RIAZ-ABC4",
+            "supplier": "QA XYZ AED",
+            "cost_currency": "AED",
+            "invoice_currency": "AED",
+            "service_currency": "PKR",
+            "planned_cost": 1000,
+            "planned_invoice": 1100
+        },
+        "QA5": {
+            "booking_reference": "BK-000005",
+            "customer": "QA-RIAZ-CASH-REFUND",
+            "supplier": "QA REFUND AIR",
+            "cost_currency": "PKR",
+            "invoice_currency": "PKR",
+            "service_currency": "PKR",
+            "planned_cost": 50000,
+            "planned_invoice": 55000
+        },
+        "QA6": {
+            "booking_reference": "BK-000006",
+            "customer": "QA-RIAZ-CREDIT-CUSTOMER",
+            "supplier": "QA CREDIT AIR",
+            "cost_currency": "PKR",
+            "invoice_currency": "PKR",
+            "service_currency": "PKR",
+            "planned_cost": 50000,
+            "planned_invoice": 55000
+        },
+        "QA7": {
+            "booking_reference": "BK-000007",
+            "customer": "QA-RIAZ-CREDIT-CUSTOMER",
+            "supplier": "QA CREDIT AIR",
+            "cost_currency": "PKR",
+            "invoice_currency": "PKR",
+            "service_currency": "PKR",
+            "planned_cost": 60000,
+            "planned_invoice": 65000
+        },
+        "QA8": {
+            "booking_reference": "BK-000008",
+            "customer": "QA-RIAZ-WRONG-PAYMENT",
+            "supplier": "QA WRONG PAYMENT SUPPLIER",
+            "cost_currency": "PKR",
+            "invoice_currency": "PKR",
+            "service_currency": "PKR",
+            "planned_cost": 45000,
+            "planned_invoice": 50000
+        },
+        "QA9": {
+            "booking_reference": "BK-000009",
+            "customer": "QA-RIAZ-RIGHT-PAYMENT",
+            "supplier": "QA RIGHT PAYMENT SUPPLIER",
+            "cost_currency": "PKR",
+            "invoice_currency": "PKR",
+            "service_currency": "PKR",
+            "planned_cost": 45000,
+            "planned_invoice": 50000
+        },
+        "QA10": {
+            "booking_reference": "BK-000010",
+            "customer": "QA-RIAZ-OVERPAYMENT",
+            "supplier": "QA ADVANCE AIR",
+            "cost_currency": "PKR",
+            "invoice_currency": "PKR",
+            "service_currency": "PKR",
+            "planned_cost": 20000,
+            "planned_invoice": 22000
+        },
+        "QA12": {
+            "booking_reference": "BK-000011",
+            "customer": "QA-RIAZ-BOOKING-SUPPLIER-EDIT",
+            "supplier": "QA CORRECT BOOKING SUPPLIER",
+            "cost_currency": "PKR",
+            "invoice_currency": "PKR",
+            "service_currency": "PKR",
+            "planned_cost": 30000,
+            "planned_invoice": 33000
+        },
+        "QA11": {
+            "booking_reference": "BK-000012",
+            "customer": "QA-RIAZ-ADVANCE-NEXT",
+            "supplier": "QA ADVANCE AIR",
+            "cost_currency": "PKR",
+            "invoice_currency": "PKR",
+            "service_currency": "PKR",
+            "planned_cost": 8000,
+            "planned_invoice": 9000
+        }
+    }
+}

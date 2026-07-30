@@ -508,7 +508,13 @@ final class TreasuryRepository extends BaseRepository
         return count($eligible) === 1 ? $eligible[0] : null;
     }
 
-    public function validatePaymentTreasuryAccount(int $treasuryAccountId, int $branchId, string $currency, string $paymentMethod): array
+    public function validatePaymentTreasuryAccount(
+        int $treasuryAccountId,
+        int $branchId,
+        string $currency,
+        string $paymentMethod,
+        bool $allowBankSourceForCash = false
+    ): array
     {
         if ($treasuryAccountId <= 0) {
             throw new RuntimeException('Please configure/select a cash or bank account for this payment.');
@@ -554,6 +560,10 @@ final class TreasuryRepository extends BaseRepository
         }
 
         $compatibleTypes = $this->compatibleTreasuryTypesForPaymentMethod($paymentMethod);
+        if ($allowBankSourceForCash && str_replace(' ', '_', mb_strtolower(trim($paymentMethod))) === 'cash') {
+            $compatibleTypes[] = 'bank';
+            $compatibleTypes = array_values(array_unique($compatibleTypes));
+        }
         if (! in_array((string) ($account['account_type'] ?? ''), $compatibleTypes, true)) {
             throw new RuntimeException('Selected cash or bank account is not valid for this payment method.');
         }

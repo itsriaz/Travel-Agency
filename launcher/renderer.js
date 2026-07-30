@@ -38,6 +38,24 @@ function setConnection(label) {
   document.getElementById('connection-status').textContent = label;
 }
 
+function showConnectionFailure(failure, fallbackMessage = '') {
+  const detail = document.getElementById('connection-detail');
+  if (!detail) {
+    return;
+  }
+
+  const description = String(failure?.errorDescription || fallbackMessage || '').trim();
+  if (description === '') {
+    detail.classList.add('hidden');
+    detail.textContent = '';
+    return;
+  }
+
+  const code = Number.isFinite(Number(failure?.errorCode)) ? ` (${Number(failure.errorCode)})` : '';
+  detail.textContent = `Connection error${code}: ${description}. Server: ${failure?.url || config.serverUrl || 'unknown'}`;
+  detail.classList.remove('hidden');
+}
+
 function updateStatus() {
   const cached = snapshot();
   document.getElementById('cached-at').textContent = cached?.generated_at || 'Never';
@@ -186,7 +204,16 @@ async function syncDrafts() {
 async function init() {
   config = await window.travelLauncher.config();
   document.getElementById('server-label').textContent = 'Secure cloud connection';
-  document.getElementById('open-online').addEventListener('click', () => window.travelLauncher.openOnline());
+  showConnectionFailure(config.lastConnectionFailure);
+  document.getElementById('open-online').addEventListener('click', async () => {
+    setConnection('Checking');
+    showConnectionFailure(null);
+    const response = await window.travelLauncher.openOnline();
+    if (response && response.ok === false) {
+      setConnection('Offline');
+      showConnectionFailure(response.failure, response.error);
+    }
+  });
   document.getElementById('refresh-cache').addEventListener('click', refreshCache);
   document.getElementById('sync-drafts').addEventListener('click', syncDrafts);
   document.getElementById('cache-search').addEventListener('input', renderCache);

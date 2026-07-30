@@ -11,19 +11,101 @@ use App\Helpers\Flash;
 use App\Repositories\AccountingSetupRepository;
 use App\Repositories\BookingRepository;
 use App\Repositories\BookingServiceRepository;
+use App\Repositories\CounterpartyLinkRepository;
+use App\Repositories\CounterpartyOffsetRepository;
 use App\Repositories\ExpenseRepository;
 use App\Repositories\MasterDataRepository;
+use App\Repositories\SupplierRepository;
 use App\Repositories\TreasuryRepository;
 use App\Services\AccountingFoundationService;
 use App\Services\AccountingSetupService;
 use App\Services\CustomerPaymentFoundationService;
+use App\Services\CounterpartyLinkService;
+use App\Services\CounterpartyOffsetService;
 use App\Services\ExpenseAdminService;
 use App\Services\MasterDataAdminService;
+use App\Services\SupplierMasterService;
 use App\Services\SupplierFoundationService;
 use RuntimeException;
 
 final class ControlController extends BaseController
 {
+    public function manageSuppliers(): string
+    {
+        $accessibleBranchIds = array_map('intval', Authorization::accessibleBranchIds());
+        $repository = new SupplierRepository($this->app);
+        $suppliers = $repository->manageableSuppliers($accessibleBranchIds);
+        $search = trim((string) ($_GET['q'] ?? ''));
+        $branchFilter = (int) ($_GET['branch_id'] ?? 0);
+        $statusFilter = trim((string) ($_GET['status'] ?? 'all'));
+
+        $suppliers = array_values(array_filter($suppliers, static function (array $supplier) use ($search, $branchFilter, $statusFilter): bool {
+            if ($branchFilter > 0 && (int) ($supplier['branch_id'] ?? 0) !== $branchFilter) {
+                return false;
+            }
+            if ($statusFilter === 'active' && (int) ($supplier['is_active'] ?? 0) !== 1) {
+                return false;
+            }
+            if ($statusFilter === 'inactive' && (int) ($supplier['is_active'] ?? 0) === 1) {
+                return false;
+            }
+            if ($search === '') {
+                return true;
+            }
+
+            $haystack = mb_strtolower(implode(' ', [
+                (string) ($supplier['code'] ?? ''),
+                (string) ($supplier['name'] ?? ''),
+                (string) ($supplier['contact_person'] ?? ''),
+                (string) ($supplier['phone'] ?? ''),
+                (string) ($supplier['email'] ?? ''),
+            ]));
+
+            return str_contains($haystack, mb_strtolower($search));
+        }));
+
+        $masterRepository = new MasterDataRepository($this->app);
+        $branches = array_values(array_filter(
+            $masterRepository->rows('branches'),
+            static fn (array $branch): bool => in_array((int) ($branch['id'] ?? 0), $accessibleBranchIds, true)
+        ));
+        $editId = (int) ($_GET['edit'] ?? 0);
+
+        return $this->view('control/manage_suppliers', [
+            'title' => 'Manage Suppliers',
+            'suppliers' => $suppliers,
+            'branches' => $branches,
+            'editingSupplier' => $editId > 0
+                ? $repository->findManageableSupplier($editId, $accessibleBranchIds)
+                : null,
+            'filters' => [
+                'q' => $search,
+                'branch_id' => $branchFilter,
+                'status' => $statusFilter,
+            ],
+        ]);
+    }
+
+    public function updateSupplierMaster(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+        $supplierId = (int) ($_POST['supplier_id'] ?? 0);
+
+        try {
+            $supplier = (new SupplierMasterService($this->app))->update(
+                $supplierId,
+                $_POST,
+                (int) Auth::id(),
+                Authorization::accessibleBranchIds()
+            );
+            Flash::success('Supplier ' . (string) ($supplier['code'] ?? '') . ' updated without changing its financial identity.');
+            $this->redirect('/master-data/suppliers');
+        } catch (RuntimeException $exception) {
+            Flash::error($exception->getMessage());
+            $this->redirect('/master-data/suppliers?edit=' . $supplierId);
+        }
+    }
+
     public function masterData(): string
     {
         $repository = new MasterDataRepository($this->app);
@@ -230,6 +312,136 @@ final class ControlController extends BaseController
                 ),
             ],
         ]);
+    }
+
+    public function accountSupplierLinks(): string
+    {
+        $repository = new CounterpartyLinkRepository($this->app);
+        $links = $repository->listLinks();
+
+        return $this->view('control/account_supplier_links', [
+            'title' => 'Account and Supplier Links',
+            'links' => $links,
+            'availableAccounts' => $repository->availableBusinessSources(),
+            'availableSuppliers' => $repository->availableSuppliers(),
+            'recentHistory' => $repository->recentHistory(),
+            'pageScript' => 'assets/js/account-supplier-links.js',
+        ]);
+    }
+
+    public function saveAccountSupplierLink(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+
+        try {
+            $result = (new CounterpartyLinkService($this->app))->linkAccountToSupplier(
+                (int) ($_POST['business_source_id'] ?? 0),
+                (int) ($_POST['supplier_id'] ?? 0),
+                (int) Auth::id(),
+                (string) ($_POST['reason'] ?? '')
+            );
+            $automaticSettlements = (array) ($result['automatic_settlements'] ?? []);
+            $adjustedAmount = array_reduce(
+                $automaticSettlements,
+                static fn (float $total, array $row): float => $total + (float) ($row['amount'] ?? 0),
+                0.0
+            );
+            Flash::success(
+                $automaticSettlements !== []
+                    ? 'Account holder linked and matching balances adjusted automatically ('
+                        . number_format($adjustedAmount, 2) . ').'
+                    : (($result['action'] ?? '') === 'unchanged'
+                    ? 'This account holder and supplier are already linked.'
+                    : 'Account holder linked to supplier successfully.')
+            );
+        } catch (RuntimeException $exception) {
+            Flash::error($exception->getMessage());
+        }
+
+        $this->redirect('/master-data/account-supplier-links');
+    }
+
+    public function linkedPartySettlements(): string
+    {
+        $branchIds = Authorization::accessibleBranchIds();
+        $repository = new CounterpartyOffsetRepository($this->app);
+        $selectedOffset = null;
+        $selectedAccountAllocations = [];
+        $selectedPayableAllocations = [];
+        $selectedOffsetId = (int) ($_GET['offset_id'] ?? 0);
+
+        if ($selectedOffsetId > 0) {
+            $candidate = $repository->find($selectedOffsetId);
+            if ($candidate !== null
+                && ($branchIds === [] || in_array((int) $candidate['branch_id'], $branchIds, true))
+            ) {
+                $selectedOffset = $candidate;
+                $selectedAccountAllocations = $repository->allocations($selectedOffsetId, 'account');
+                if ($selectedAccountAllocations === []) {
+                    $selectedAccountAllocations = $repository->allocations($selectedOffsetId, 'receivable');
+                }
+                $selectedPayableAllocations = $repository->allocations($selectedOffsetId, 'payable');
+            }
+        }
+
+        return $this->view('control/linked_party_settlements', [
+            'title' => 'Linked Party Settlements',
+            'recentOffsets' => $repository->recent($branchIds),
+            'selectedOffset' => $selectedOffset,
+            'selectedAccountAllocations' => $selectedAccountAllocations,
+            'selectedPayableAllocations' => $selectedPayableAllocations,
+        ]);
+    }
+
+    public function saveLinkedPartySettlement(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+        try {
+            $offset = (new CounterpartyOffsetService($this->app))->settle(
+                $_POST,
+                (int) Auth::id(),
+                Authorization::accessibleBranchIds()
+            );
+            Flash::success((string) ($offset['offset_no'] ?? 'Settlement') . ' posted successfully. No cash or bank balance was changed.');
+        } catch (RuntimeException $exception) {
+            Flash::error($exception->getMessage());
+        }
+        $this->redirect('/linked-party-settlements');
+    }
+
+    public function voidLinkedPartySettlement(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+        try {
+            (new CounterpartyOffsetService($this->app))->void(
+                (int) ($_POST['offset_id'] ?? 0),
+                (string) ($_POST['reason'] ?? ''),
+                (int) Auth::id(),
+                Authorization::accessibleBranchIds()
+            );
+            Flash::success('Linked-party settlement reversed and both balances restored.');
+        } catch (RuntimeException $exception) {
+            Flash::error($exception->getMessage());
+        }
+        $this->redirect('/linked-party-settlements');
+    }
+
+    public function unlinkAccountSupplierLink(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+
+        try {
+            (new CounterpartyLinkService($this->app))->unlinkAccountFromSupplier(
+                (int) ($_POST['link_id'] ?? 0),
+                (int) Auth::id(),
+                (string) ($_POST['reason'] ?? '')
+            );
+            Flash::success('Account holder and supplier unlinked successfully.');
+        } catch (RuntimeException $exception) {
+            Flash::error($exception->getMessage());
+        }
+
+        $this->redirect('/master-data/account-supplier-links');
     }
 
     public function saveMasterData(): never
@@ -554,6 +766,10 @@ final class ControlController extends BaseController
             $this->redirectToRegister('/expenses', $register);
         } catch (RuntimeException $exception) {
             Flash::error($exception->getMessage());
+            if ($editId <= 0 && $register === 'business_expenses') {
+                header('Location: ' . url('/expenses') . '?add=business_expenses#register-business_expenses');
+                exit;
+            }
             $this->redirectToRegister('/expenses', $register, $editId > 0 ? $editId : null);
         }
     }

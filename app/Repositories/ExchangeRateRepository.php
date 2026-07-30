@@ -9,6 +9,133 @@ use RuntimeException;
 
 final class ExchangeRateRepository extends BaseRepository
 {
+    public function ratesForBooking(int $bookingId): array
+    {
+        if ($bookingId <= 0) {
+            return [];
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT booking_id, branch_id, from_currency, to_currency, rate_value, effective_date
+             FROM booking_exchange_rates
+             WHERE booking_id = :booking_id
+             ORDER BY id ASC'
+        );
+        $statement->execute(['booking_id' => $bookingId]);
+
+        return $statement->fetchAll() ?: [];
+    }
+
+    public function getBookingRate(int $bookingId, string $fromCurrency, string $toCurrency): ?array
+    {
+        $fromCurrency = strtoupper(trim($fromCurrency));
+        $toCurrency = strtoupper(trim($toCurrency));
+        if ($bookingId <= 0 || $fromCurrency === '' || $toCurrency === '') {
+            return null;
+        }
+
+        if ($fromCurrency === $toCurrency) {
+            return [
+                'booking_id' => $bookingId,
+                'from_currency' => $fromCurrency,
+                'to_currency' => $toCurrency,
+                'exchange_rate' => 1.0,
+                'effective_date' => date('Y-m-d'),
+                'is_derived' => false,
+            ];
+        }
+
+        foreach ($this->ratesForBooking($bookingId) as $row) {
+            $storedFrom = strtoupper((string) ($row['from_currency'] ?? ''));
+            $storedTo = strtoupper((string) ($row['to_currency'] ?? ''));
+            $storedRate = (float) ($row['rate_value'] ?? 0);
+            if ($storedRate <= 0) {
+                continue;
+            }
+
+            if ($storedFrom === $fromCurrency && $storedTo === $toCurrency) {
+                return [
+                    'booking_id' => $bookingId,
+                    'from_currency' => $fromCurrency,
+                    'to_currency' => $toCurrency,
+                    'exchange_rate' => round($storedRate, 8),
+                    'effective_date' => (string) ($row['effective_date'] ?? ''),
+                    'is_derived' => false,
+                ];
+            }
+            if ($storedFrom === $toCurrency && $storedTo === $fromCurrency) {
+                return [
+                    'booking_id' => $bookingId,
+                    'from_currency' => $fromCurrency,
+                    'to_currency' => $toCurrency,
+                    'exchange_rate' => round(1 / $storedRate, 8),
+                    'effective_date' => (string) ($row['effective_date'] ?? ''),
+                    'is_derived' => true,
+                ];
+            }
+        }
+
+        return null;
+    }
+
+    public function upsertBookingRate(
+        int $bookingId,
+        int $branchId,
+        string $fromCurrency,
+        string $toCurrency,
+        string $effectiveDate,
+        float $rate,
+        ?int $userId = null
+    ): void {
+        $fromCurrency = strtoupper(trim($fromCurrency));
+        $toCurrency = strtoupper(trim($toCurrency));
+        $effectiveDate = trim($effectiveDate);
+        if ($bookingId <= 0 || $branchId <= 0) {
+            throw new RuntimeException('A saved booking and branch are required for its exchange rate.');
+        }
+        if ($fromCurrency === '' || $toCurrency === '' || $fromCurrency === $toCurrency || $effectiveDate === '') {
+            throw new RuntimeException('Two different currencies and an effective date are required.');
+        }
+        if ($rate <= 0) {
+            throw new RuntimeException('Exchange rate must be greater than zero.');
+        }
+
+        $statement = $this->db->prepare(
+            'INSERT INTO booking_exchange_rates (
+                booking_id, branch_id, from_currency, to_currency, rate_value,
+                effective_date, created_by_user_id, updated_by_user_id
+             ) VALUES (
+                :booking_id, :branch_id, :from_currency, :to_currency, :rate_value,
+                :effective_date, :created_by_user_id, :updated_by_user_id
+             )
+             ON DUPLICATE KEY UPDATE
+                branch_id = VALUES(branch_id),
+                rate_value = VALUES(rate_value),
+                effective_date = VALUES(effective_date),
+                updated_by_user_id = VALUES(updated_by_user_id)'
+        );
+        $statement->execute([
+            'booking_id' => $bookingId,
+            'branch_id' => $branchId,
+            'from_currency' => $fromCurrency,
+            'to_currency' => $toCurrency,
+            'rate_value' => round($rate, 8),
+            'effective_date' => $effectiveDate,
+            'created_by_user_id' => $userId,
+            'updated_by_user_id' => $userId,
+        ]);
+
+        AuditLog::record($this->app, 'booking.exchange_rate_upserted', [
+            'user_id' => $userId,
+            'booking_id' => $bookingId,
+            'branch_id' => $branchId,
+            'from_currency' => $fromCurrency,
+            'to_currency' => $toCurrency,
+            'exchange_rate' => round($rate, 8),
+            'effective_date' => $effectiveDate,
+        ]);
+    }
+
     public function getExactRate(string $fromCurrency, string $toCurrency, string $effectiveDate): ?array
     {
         $fromCurrency = strtoupper(trim($fromCurrency));

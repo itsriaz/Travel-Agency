@@ -227,6 +227,11 @@ final class MasterDataRepository extends BaseRepository
 
     private function businessSourceDeleteBlockedReason(int $businessSourceId): ?string
     {
+        if ($this->tableExists('business_source_supplier_links')
+            && $this->countByValue('business_source_supplier_links', 'business_source_id', $businessSourceId) > 0) {
+            return 'This account holder is linked to a supplier. Unlink it before deleting the account.';
+        }
+
         return $this->countByValue('bookings', 'business_source_id', $businessSourceId) > 0
             ? 'This account is already used by one or more invoices.'
             : null;

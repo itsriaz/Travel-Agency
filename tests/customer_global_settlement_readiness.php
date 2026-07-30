@@ -59,13 +59,13 @@ $check(
 );
 $check(
     'Receivable aging links to global customer payment',
-    str_contains($reportView, 'Global Customer Payment')
+    str_contains($reportView, 'Lumpsum Customer Payment')
         && str_contains($reportView, "/customers/settlements/global")
 );
 $check(
-    'Customer dues finder links to global customer payment',
+    'Customer dues finder links to lump-sum customer payment',
     str_contains($workspaceStationView, 'data-customer-dues-modal')
-        && str_contains($workspaceStationView, 'Global Customer Payment')
+        && str_contains($workspaceStationView, 'Lump-Sum Customer Payment')
         && str_contains($workspaceStationView, "/customers/settlements/global")
 );
 $check(
@@ -94,6 +94,12 @@ $check(
         && str_contains($globalView, 'treasury_account_id')
 );
 $check(
+    'Lumpsum customer payment report uses the simplified user-facing name',
+    str_contains($globalView, 'Lumpsum Customer Payment')
+        && str_contains($globalView, 'Post Lumpsum Customer Payment')
+        && ! str_contains($globalView, 'Global Customer Payment')
+);
+$check(
     'Global customer payment filters auto-load without a manual Load button',
     str_contains($globalView, 'data-global-customer-filter-form')
         && str_contains($globalView, "filterForm.submit()")
@@ -113,6 +119,19 @@ $check(
         && str_contains($repository, 'globalOpenReceivables')
         && str_contains($repository, 'openGlobalReceivablesForSettlement')
         && str_contains($repository, 'FOR UPDATE')
+);
+$customerOptionMethodStart = strpos($repository, 'public function globalSettlementCustomerOptions');
+$customerOptionMethodEnd = strpos($repository, 'public function globalSettlementCurrencies', $customerOptionMethodStart !== false ? $customerOptionMethodStart : 0);
+$customerOptionMethod = $customerOptionMethodStart !== false && $customerOptionMethodEnd !== false
+    ? substr($repository, $customerOptionMethodStart, $customerOptionMethodEnd - $customerOptionMethodStart)
+    : '';
+$check(
+    'Lumpsum customer dropdown includes only customers with open receivables',
+    str_contains($customerOptionMethod, 'FROM customer_receivable_items cri')
+        && str_contains($customerOptionMethod, 'cri.status IN ("open", "partially_paid")')
+        && str_contains($customerOptionMethod, 'cri.outstanding_amount > 0')
+        && ! str_contains($customerOptionMethod, 'cr.unallocated_amount > 0')
+        && ! str_contains($customerOptionMethod, 'LEFT JOIN customer_receivable_items cri')
 );
 $check(
     'Service records one global customer receipt and allocates it',
@@ -164,6 +183,12 @@ $check(
         && str_contains($reportView, 'data-advance-correction-modal')
         && str_contains($reportView, '/customers/advances/correct')
         && str_contains($reportView, '/customers/advances/refund/correct')
+);
+
+$check(
+    'Customer advance ledger correction modal uses the available CSRF input helper',
+    str_contains($reportView, '\\App\\Helpers\\Csrf::input()')
+        && ! str_contains($reportView, '\\App\\Helpers\\Csrf::field()')
 );
 $check(
     'Receipt save applies selected customer advance without duplicate zero receipt',

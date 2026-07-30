@@ -59,10 +59,15 @@ final class ServiceWorkspaceService extends Service
                     continue;
                 }
 
+                $postedServiceEvents = $eventRepository->postedEventsForService($serviceId);
+                $serviceRow['reissue_events'] = array_values(array_filter(
+                    $postedServiceEvents,
+                    static fn (array $event): bool => (string) ($event['event_type'] ?? '') === 'reissue'
+                ));
                 $latestRefundEvent = $eventRepository->latestPostedEvent($serviceId, 'refund');
                 $latestCustomerRefundEvent = null;
                 $latestSupplierRefundEvent = null;
-                foreach (array_reverse($eventRepository->postedEventsForService($serviceId)) as $serviceEventRow) {
+                foreach (array_reverse($postedServiceEvents) as $serviceEventRow) {
                     if ((string) ($serviceEventRow['event_type'] ?? '') !== 'refund') {
                         continue;
                     }
@@ -84,6 +89,34 @@ final class ServiceWorkspaceService extends Service
                 $serviceRow['latest_customer_refund_amount_only'] = (float) ($latestCustomerRefundEvent['customer_refund_amount'] ?? 0);
                 $serviceRow['latest_supplier_refund_event_id'] = (int) ($latestSupplierRefundEvent['id'] ?? 0);
                 $serviceRow['latest_supplier_refund_amount_only'] = (float) ($latestSupplierRefundEvent['supplier_refund_amount'] ?? 0);
+                $latestCustomerRefundPayload = json_decode((string) ($latestCustomerRefundEvent['payload_json'] ?? ''), true);
+                if (! is_array($latestCustomerRefundPayload)) {
+                    $latestCustomerRefundPayload = [];
+                }
+                $latestSupplierRefundPayload = json_decode((string) ($latestSupplierRefundEvent['payload_json'] ?? ''), true);
+                if (! is_array($latestSupplierRefundPayload)) {
+                    $latestSupplierRefundPayload = [];
+                }
+                $serviceRow['latest_customer_refund_detail'] = (array) (
+                    $latestCustomerRefundPayload['customer_refund_detail']
+                    ?? $latestCustomerRefundPayload['refund_detail']
+                    ?? []
+                );
+                $serviceRow['latest_supplier_refund_detail'] = (array) (
+                    $latestSupplierRefundPayload['supplier_refund_detail']
+                    ?? $latestSupplierRefundPayload['refund_detail']
+                    ?? []
+                );
+                $serviceRow['latest_customer_refund_payment_method'] = (string) (
+                    $latestCustomerRefundPayload['payment_method']
+                    ?? $serviceRow['latest_customer_refund_detail']['refund_payment_method']
+                    ?? 'cash'
+                );
+                $serviceRow['latest_supplier_refund_payment_method'] = (string) (
+                    $latestSupplierRefundPayload['supplier_refund_payment_method']
+                    ?? $serviceRow['latest_supplier_refund_detail']['refund_payment_method']
+                    ?? 'cash'
+                );
                 $latestCancelEvent = $eventRepository->latestPostedEvent($serviceId, 'cancel');
                 $latestCancelPayload = json_decode((string) ($latestCancelEvent['payload_json'] ?? ''), true);
                 if (! is_array($latestCancelPayload)) {
@@ -97,6 +130,7 @@ final class ServiceWorkspaceService extends Service
                 );
                 $serviceRow['latest_cancel_event_id'] = (int) ($latestCancelEvent['id'] ?? 0);
                 $serviceRow['latest_cancel_customer_penalty_amount'] = (float) ($latestCancelPayload['customer_penalty_amount'] ?? $latestCancelEvent['penalty_amount'] ?? 0);
+                $serviceRow['latest_cancel_agency_fee_refund_amount'] = (float) ($latestCancelPayload['agency_fee_refund_amount'] ?? 0);
                 $serviceRow['latest_cancel_supplier_penalty_amount'] = (float) ($latestCancelPayload['supplier_penalty_amount'] ?? 0);
                 $serviceRow['latest_cancel_expected_supplier_refund_amount'] = (float) (
                     $latestCancelPayload['expected_supplier_refund_amount']
@@ -105,6 +139,8 @@ final class ServiceWorkspaceService extends Service
                     ?? 0
                 );
                 $serviceRow['latest_cancel_customer_final_charge_amount'] = (float) ($latestCancelPayload['customer_final_charge_amount'] ?? 0);
+                $serviceRow['latest_cancel_customer_refund_basis_amount'] = (float) ($latestCancelPayload['customer_received_amount'] ?? 0);
+                $serviceRow['latest_cancel_prior_customer_due_amount'] = (float) ($latestCancelPayload['prior_customer_due_amount'] ?? 0);
                 $serviceRow['latest_cancel_released_customer_credit_amount'] = (float) (
                     $latestCancelPayload['available_customer_refund_credit']
                     ?? $latestCancelPayload['released_customer_credit']
@@ -116,6 +152,15 @@ final class ServiceWorkspaceService extends Service
                 $serviceRow['latest_cancel_notes'] = (string) ($latestCancelEvent['notes'] ?? '');
                 $serviceRow['latest_cancel_event_date'] = (string) ($latestCancelEvent['event_date'] ?? '');
                 $serviceLineReference = (string) ($serviceRow['line_reference'] ?? '');
+                $serviceReceivable = $customerRepository->findReceivableByServiceLine($bookingReference, $serviceLineReference);
+                $serviceRow['current_customer_invoice_amount'] = (float) ($serviceReceivable['due_amount'] ?? 0);
+                $serviceRow['current_customer_received_amount'] = (float) ($serviceReceivable['allocated_amount'] ?? 0);
+                if (! array_key_exists('customer_received_amount', $latestCancelPayload)) {
+                    $serviceRow['latest_cancel_customer_refund_basis_amount'] = $serviceRow['latest_cancel_financially_settled']
+                        ? (float) ($latestCancelPayload['released_customer_credit'] ?? 0)
+                            + (float) ($serviceReceivable['allocated_amount'] ?? 0)
+                        : (float) ($serviceReceivable['allocated_amount'] ?? 0);
+                }
                 $serviceObligation = $supplierRepository->findObligationByServiceLine($bookingReference, $serviceLineReference);
                 $supplierRefundState = $this->supplierRecoveryStateForService(
                     $serviceId,
@@ -178,22 +223,66 @@ final class ServiceWorkspaceService extends Service
 
             $this->assertNoProtectedFinancialChangeOnSavedService($input, $existingService);
 
-            $repository->updateService(
-                $serviceId,
-                array_merge($payload['master'], ['actor_user_id' => $actorUserId]),
-                $payload['subtype']
-            );
-            (new CommercialObligationSyncService($this->app))->syncForServiceId($serviceId, $actorUserId);
-            $savedService = $repository->findServiceById($serviceId);
+            /** @var \PDO $db */
+            $db = $this->app->get('db');
+            $startedTransaction = ! $db->inTransaction();
+            if ($startedTransaction) {
+                $db->beginTransaction();
+            }
 
-            AuditLog::record($this->app, 'service.updated', [
-                'user_id' => $actorUserId,
-                'booking_id' => $bookingId,
-                'booking_reference' => (string) $booking['booking_reference'],
-                'service_id' => $serviceId,
-                'service_type' => $payload['master']['service_type'],
-                'currency' => $payload['master']['currency'],
-            ]);
+            try {
+                $supplierCorrection = $this->prepareSupplierCorrection(
+                    $existingService,
+                    $payload['master'],
+                    $booking,
+                    $actorUserId
+                );
+
+                $repository->updateService(
+                    $serviceId,
+                    array_merge($payload['master'], ['actor_user_id' => $actorUserId]),
+                    $payload['subtype']
+                );
+                (new CommercialObligationSyncService($this->app))->syncForServiceId($serviceId, $actorUserId);
+                $savedService = $repository->findServiceById($serviceId);
+
+                AuditLog::record($this->app, 'service.updated', [
+                    'user_id' => $actorUserId,
+                    'booking_id' => $bookingId,
+                    'booking_reference' => (string) $booking['booking_reference'],
+                    'service_id' => $serviceId,
+                    'service_type' => $payload['master']['service_type'],
+                    'currency' => $payload['master']['currency'],
+                    'supplier_correction' => $supplierCorrection,
+                ]);
+
+                if (($supplierCorrection['changed'] ?? false) === true) {
+                    AuditLog::record($this->app, 'service.supplier_corrected', [
+                        'user_id' => $actorUserId,
+                        'booking_id' => $bookingId,
+                        'booking_reference' => (string) $booking['booking_reference'],
+                        'service_id' => $serviceId,
+                        'service_line_reference' => (string) ($existingService['line_reference'] ?? ''),
+                        'prior_supplier_id' => $supplierCorrection['prior_supplier_id'] ?? null,
+                        'prior_supplier_name' => $supplierCorrection['prior_supplier_name'] ?? null,
+                        'new_supplier_id' => $supplierCorrection['new_supplier_id'] ?? null,
+                        'new_supplier_name' => $supplierCorrection['new_supplier_name'] ?? null,
+                        'released_settlement_amount' => $supplierCorrection['released_settlement_amount'] ?? 0,
+                        'released_payment_amount' => $supplierCorrection['released_payment_amount'] ?? 0,
+                        'released_advance_amount' => $supplierCorrection['released_advance_amount'] ?? 0,
+                    ]);
+                }
+
+                if ($startedTransaction && $db->inTransaction()) {
+                    $db->commit();
+                }
+            } catch (Throwable $exception) {
+                if ($startedTransaction && $db->inTransaction()) {
+                    $db->rollBack();
+                }
+
+                throw $exception;
+            }
 
             return [
                 'service' => $savedService,
@@ -202,6 +291,7 @@ final class ServiceWorkspaceService extends Service
                 'debug' => [
                     'resolvedPayload' => $payload,
                     'savedService' => $savedService,
+                    'supplierCorrection' => $supplierCorrection,
                 ],
             ];
         }
@@ -389,7 +479,13 @@ final class ServiceWorkspaceService extends Service
                 ])
             );
 
-            (new CommercialObligationSyncService($this->app))->syncForServiceId($serviceId, $actorUserId);
+            (new CommercialObligationSyncService($this->app))->syncForServiceId($serviceId, $actorUserId, [
+                'financial_correction' => true,
+                'entry_date' => $correction['correction_date'],
+                'prior_invoice_currency' => $invoiceCurrency,
+                'prior_cost_currency' => $costCurrency,
+            ]);
+
 
             $correctionId = (new ServiceFinancialCorrectionRepository($this->app))->recordCorrection([
                 'booking_service_id' => $serviceId,
@@ -409,6 +505,12 @@ final class ServiceWorkspaceService extends Service
                 'new_pricing_exchange_rate' => $correction['financial']['pricing_exchange_rate'],
                 'prior_pricing_rate_effective_date' => $currentSnapshot['pricing_rate_effective_date'] !== '' ? $currentSnapshot['pricing_rate_effective_date'] : null,
                 'new_pricing_rate_effective_date' => $correction['financial']['pricing_rate_effective_date'],
+                'prior_service_charge_currency' => $currentSnapshot['service_charge_currency'],
+                'new_service_charge_currency' => $correction['financial']['service_charge_currency'],
+                'prior_service_charge_exchange_rate' => $currentSnapshot['service_charge_exchange_rate'],
+                'new_service_charge_exchange_rate' => $correction['financial']['service_charge_exchange_rate'],
+                'prior_service_charge_rate_effective_date' => $currentSnapshot['service_charge_rate_effective_date'] !== '' ? $currentSnapshot['service_charge_rate_effective_date'] : null,
+                'new_service_charge_rate_effective_date' => $correction['financial']['service_charge_rate_effective_date'],
                 'prior_sale_price' => $currentSnapshot['sale_price'],
                 'new_sale_price' => $correction['financial']['sale_price'],
                 'prior_purchase_cost' => $currentSnapshot['purchase_cost'],
@@ -451,6 +553,10 @@ final class ServiceWorkspaceService extends Service
                 'new_pricing_exchange_rate' => $correction['financial']['pricing_exchange_rate'],
                 'prior_pricing_rate_effective_date' => $currentSnapshot['pricing_rate_effective_date'],
                 'new_pricing_rate_effective_date' => $correction['financial']['pricing_rate_effective_date'],
+                'prior_service_charge_currency' => $currentSnapshot['service_charge_currency'],
+                'new_service_charge_currency' => $correction['financial']['service_charge_currency'],
+                'prior_service_charge_exchange_rate' => $currentSnapshot['service_charge_exchange_rate'],
+                'new_service_charge_exchange_rate' => $correction['financial']['service_charge_exchange_rate'],
                 'prior_final_sale_price' => $currentSnapshot['final_sale_price'],
                 'new_final_sale_price' => $correction['financial']['final_sale_price'],
             ]);
@@ -476,6 +582,133 @@ final class ServiceWorkspaceService extends Service
 
             throw $exception;
         }
+    }
+
+    public function synchronizeBookingExchangeRate(
+        int $bookingId,
+        string $fromCurrency,
+        string $toCurrency,
+        int $actorUserId,
+        array $accessibleBranchIds
+    ): array {
+        if ($bookingId <= 0) {
+            return ['updated_services' => 0];
+        }
+
+        $bookingRepository = new BookingRepository($this->app);
+        if (! $bookingRepository->bookingExistsInBranches($bookingId, $accessibleBranchIds)) {
+            throw new RuntimeException('You cannot change exchange rates for a booking outside your accessible branches.');
+        }
+
+        $services = (new BookingServiceRepository($this->app))->servicesForBooking($bookingId);
+        if ($services === []) {
+            return ['updated_services' => 0];
+        }
+
+        $fromCurrency = $this->normalizeCurrency($fromCurrency);
+        $toCurrency = $this->normalizeCurrency($toCurrency);
+        $exchangeRateRepository = new ExchangeRateRepository($this->app);
+        $editedRate = $exchangeRateRepository->getBookingRate($bookingId, $fromCurrency, $toCurrency);
+        if ($editedRate === null || (float) ($editedRate['exchange_rate'] ?? 0) <= 0) {
+            throw new RuntimeException('The saved booking exchange rate could not be resolved.');
+        }
+        $pairMatches = static function (
+            string $leftCurrency,
+            string $rightCurrency,
+            string $storedFrom,
+            string $storedTo
+        ): bool {
+            return ($leftCurrency === $storedFrom && $rightCurrency === $storedTo)
+                || ($leftCurrency === $storedTo && $rightCurrency === $storedFrom);
+        };
+        $updatedServices = 0;
+
+        foreach ($services as $service) {
+            if ((int) ($service['is_active'] ?? 1) !== 1) {
+                continue;
+            }
+
+            $invoiceCurrency = $this->normalizeCurrency((string) ($service['currency'] ?? 'PKR'));
+            $costCurrency = $this->normalizeCurrency((string) ($service['cost_currency'] ?? $invoiceCurrency));
+            $serviceChargeCurrency = $this->normalizeCurrency((string) ($service['service_charge_currency'] ?? $invoiceCurrency));
+            $costPairRelevant = $costCurrency !== $invoiceCurrency
+                && $pairMatches($costCurrency, $invoiceCurrency, $fromCurrency, $toCurrency);
+            $serviceChargePairRelevant = $serviceChargeCurrency !== $invoiceCurrency
+                && $pairMatches($serviceChargeCurrency, $invoiceCurrency, $fromCurrency, $toCurrency);
+            if (! $costPairRelevant && ! $serviceChargePairRelevant) {
+                continue;
+            }
+
+            $costRate = $costPairRelevant
+                ? $exchangeRateRepository->getBookingRate($bookingId, $costCurrency, $invoiceCurrency)
+                : null;
+            $serviceChargeRate = $serviceChargePairRelevant
+                ? $exchangeRateRepository->getBookingRate($bookingId, $serviceChargeCurrency, $invoiceCurrency)
+                : null;
+
+            $newCostRate = $costRate !== null ? round((float) ($costRate['exchange_rate'] ?? 0), 8) : 0.0;
+            $newServiceChargeRate = $serviceChargeRate !== null ? round((float) ($serviceChargeRate['exchange_rate'] ?? 0), 8) : 0.0;
+            $costPairChanged = $costCurrency !== $invoiceCurrency
+                && $newCostRate > 0
+                && abs($newCostRate - (float) ($service['pricing_exchange_rate'] ?? 0)) > 0.00000001;
+            $serviceChargePairChanged = $serviceChargeCurrency !== $invoiceCurrency
+                && $newServiceChargeRate > 0
+                && abs($newServiceChargeRate - (float) ($service['service_charge_exchange_rate'] ?? 0)) > 0.00000001;
+
+            if (! $costPairChanged && ! $serviceChargePairChanged) {
+                continue;
+            }
+
+            $this->assertFinancialAdminActor(
+                $actorUserId,
+                'Only super admin or branch admin can change a saved booking exchange rate.'
+            );
+
+            $serviceType = (string) ($service['service_type'] ?? 'air ticket');
+            $costBasis = $serviceType === 'air ticket'
+                ? (float) ($service['sale_price'] ?? 0)
+                : (float) ($service['purchase_cost'] ?? 0);
+            $rateDate = (string) (
+                ($costPairChanged ? ($costRate['effective_date'] ?? null) : null)
+                ?? ($serviceChargeRate['effective_date'] ?? null)
+                ?? date('Y-m-d')
+            );
+            $correctionInput = [
+                'booking_id' => $bookingId,
+                'service_id' => (int) ($service['id'] ?? 0),
+                'financial_correction_date' => date('Y-m-d'),
+                'financial_correction_reason' => sprintf(
+                    'Booking exchange rate corrected: 1 %s = %s %s.',
+                    $fromCurrency,
+                    rtrim(rtrim(number_format(
+                        (float) ($editedRate['exchange_rate'] ?? 0),
+                        8,
+                        '.',
+                        ''
+                    ), '0'), '.'),
+                    $toCurrency
+                ),
+                'corrected_invoice_currency' => $invoiceCurrency,
+                'corrected_cost_currency' => $costCurrency,
+                'corrected_service_charge_currency' => $serviceChargeCurrency,
+                'corrected_cost_basis' => $costBasis,
+                'corrected_service_charge' => (float) ($service['service_charge'] ?? 0),
+                'corrected_discount_amount' => (float) ($service['discount_amount'] ?? 0),
+            ];
+            if ($costPairChanged) {
+                $correctionInput['corrected_pricing_exchange_rate'] = $newCostRate;
+                $correctionInput['corrected_pricing_rate_effective_date'] = $rateDate;
+            }
+            if ($serviceChargePairChanged) {
+                $correctionInput['corrected_service_charge_exchange_rate'] = $newServiceChargeRate;
+                $correctionInput['corrected_service_charge_rate_effective_date'] = $rateDate;
+            }
+
+            $this->correctFinancials($correctionInput, $actorUserId, $accessibleBranchIds);
+            $updatedServices++;
+        }
+
+        return ['updated_services' => $updatedServices];
     }
 
     public function deactivateService(array $input, int $actorUserId, array $accessibleBranchIds): int
@@ -626,7 +859,12 @@ final class ServiceWorkspaceService extends Service
         return $bookingId;
     }
 
-    public function refundService(array $input, int $actorUserId, array $accessibleBranchIds): int
+    public function refundService(
+        array $input,
+        int $actorUserId,
+        array $accessibleBranchIds,
+        bool $trustedExistingRefundCorrection = false
+    ): int
     {
         $this->assertCanPostServiceEvent($actorUserId);
 
@@ -635,15 +873,23 @@ final class ServiceWorkspaceService extends Service
         $reason = $this->requiredText($input['refund_reason'] ?? null, 1000, 'Refund reason is required.');
         $eventDate = $this->normalizeOptionalDate((string) ($input['refund_event_date'] ?? date('Y-m-d'))) ?? date('Y-m-d');
         $paymentMethod = $this->normalizePaymentMethod((string) ($input['refund_payment_method'] ?? 'bank_transfer'));
-        $supplierRefundPaymentMethod = $this->normalizePaymentMethod((string) (
+        $supplierRefundPaymentMethod = $this->normalizeSupplierRefundPaymentMethod((string) (
             $input['supplier_refund_payment_method']
             ?? $input['refund_payment_method']
             ?? 'bank_transfer'
         ));
+        $supplierRefundRetainedAsCredit = $supplierRefundPaymentMethod === 'supplier_credit';
         $customerRefundAmount = $this->moneyValue($input['customer_refund_amount'] ?? 0);
         $supplierRefundAmount = $this->moneyValue($input['supplier_refund_amount'] ?? 0);
         $refundEditScope = strtolower(trim((string) ($input['refund_edit_scope'] ?? '')));
         $refundEditMode = in_array($refundEditScope, ['customer', 'supplier'], true);
+
+        if (! $refundEditMode && ! $trustedExistingRefundCorrection && $customerRefundAmount > 0.005) {
+            $customerRefundTreatment = strtolower(trim((string) ($input['customer_refund_treatment'] ?? '')));
+            if ($customerRefundTreatment !== 'pay_now') {
+                throw new RuntimeException('Select Pay Customer Now before posting money as returned to the customer. Otherwise keep it as available customer credit.');
+            }
+        }
 
         if ($refundEditMode) {
             if ($refundEditScope === 'customer') {
@@ -673,6 +919,22 @@ final class ServiceWorkspaceService extends Service
         $existingService = $serviceRepository->findServiceById($serviceId);
         if ($existingService === null || (int) $existingService['booking_id'] !== $bookingId) {
             throw new RuntimeException('The selected service line does not belong to this booking.');
+        }
+
+        $eventRepository = new BookingServiceEventRepository($this->app);
+        $cancelEvent = $eventRepository->latestPostedEvent($serviceId, 'cancel');
+        $cancelPayload = json_decode((string) ($cancelEvent['payload_json'] ?? ''), true);
+        if (! is_array($cancelPayload)) {
+            $cancelPayload = [];
+        }
+        $cancellationFinanciallySettled = $cancelEvent !== null && (
+            (string) ($cancelPayload['mode'] ?? '') === 'cancellation_financial_adjustment'
+            || array_key_exists('customer_final_charge_amount', $cancelPayload)
+            || array_key_exists('expected_supplier_refund_amount', $cancelPayload)
+            || array_key_exists('supplier_penalty_amount', $cancelPayload)
+        );
+        if (! $this->isCancelledStatus((string) ($existingService['service_status'] ?? '')) || ! $cancellationFinanciallySettled) {
+            throw new RuntimeException('Settle the service cancellation before posting a customer or supplier refund.');
         }
 
         $bookingReference = (string) $booking['booking_reference'];
@@ -713,7 +975,6 @@ final class ServiceWorkspaceService extends Service
         $accountingRepository = new AccountingRepository($this->app);
 
         try {
-            $eventRepository = new BookingServiceEventRepository($this->app);
             if ($refundEditMode) {
                 $targetRefundEvent = $this->latestRefundEventForScope($eventRepository, $serviceId, $refundEditScope);
                 if ($targetRefundEvent === null) {
@@ -867,21 +1128,71 @@ final class ServiceWorkspaceService extends Service
                     $supplierRefundDetailPayload,
                     ['actor_user_id' => $actorUserId]
                 ));
-                $supplierJournalEntryId = $accountingRepository->postServiceRefund([
-                    'branch_id' => (int) $existingService['branch_id'],
-                    'booking_reference' => $bookingReference,
-                    'service_line_reference' => (string) $existingService['line_reference'],
-                    'source_reference' => 'REFUND-EVT-' . $supplierEventId,
-                    'entry_date' => $eventDate,
-                    'currency' => $currency,
-                    'payment_method' => $supplierRefundPaymentMethod,
-                    'treasury_account_id' => $supplierRefundDetailPayload['treasury_account_id'] ?? null,
-                    'customer_refund_amount' => 0,
-                    'supplier_refund_amount' => $supplierRefundAmount,
-                    'narration' => 'Supplier refund received posted for ' . (string) $existingService['line_reference'],
-                    'actor_user_id' => $actorUserId,
-                ]);
-                $eventRepository->attachJournalEntry($supplierEventId, $supplierJournalEntryId);
+                $supplierJournalEntryId = null;
+                if (! $supplierRefundRetainedAsCredit) {
+                    $supplierJournalEntryId = $accountingRepository->postServiceRefund([
+                        'branch_id' => (int) $existingService['branch_id'],
+                        'booking_reference' => $bookingReference,
+                        'service_line_reference' => (string) $existingService['line_reference'],
+                        'source_reference' => 'REFUND-EVT-' . $supplierEventId,
+                        'entry_date' => $eventDate,
+                        'currency' => $currency,
+                        'payment_method' => $supplierRefundPaymentMethod,
+                        'treasury_account_id' => $supplierRefundDetailPayload['treasury_account_id'] ?? null,
+                        'customer_refund_amount' => 0,
+                        'supplier_refund_amount' => $supplierRefundAmount,
+                        'narration' => 'Supplier refund received posted for ' . (string) $existingService['line_reference'],
+                        'actor_user_id' => $actorUserId,
+                    ]);
+                    $eventRepository->attachJournalEntry($supplierEventId, $supplierJournalEntryId);
+                    $cashRefundCreditConsumption = $supplierRepository->consumeRefundableCreditForService(
+                        $supplierId,
+                        $bookingReference,
+                        $currency,
+                        $supplierRefundAmount,
+                        $actorUserId,
+                        $reason,
+                        (array) ($cancelPayload['released_supplier_payment_ids'] ?? [])
+                    );
+                    $eventRepository->updateRefundFinancials($supplierEventId, [
+                        'payload_patch' => [
+                            'cash_refund_credit_consumption' => $cashRefundCreditConsumption,
+                        ],
+                    ]);
+                } else {
+                    $retainedCreditConversion = $supplierRepository->convertRefundablePaymentCreditToAdvance(
+                        $supplierId,
+                        (int) ($existingService['branch_id'] ?? 0),
+                        $bookingReference,
+                        $currency,
+                        $supplierRefundAmount,
+                        $eventDate,
+                        'REFUND-EVT-' . $supplierEventId,
+                        $actorUserId,
+                        $reason,
+                        (array) ($cancelPayload['released_supplier_payment_ids'] ?? [])
+                    );
+                    $retainedCreditApplications = $this->applyRetainedSupplierCreditToOpenObligations(
+                        $supplierRepository,
+                        $accountingRepository,
+                        (array) ($retainedCreditConversion['supplier_advance_ids'] ?? []),
+                        $supplierId,
+                        $currency,
+                        $accessibleBranchIds,
+                        $bookingReference,
+                        $eventDate,
+                        $supplierEventId,
+                        $actorUserId
+                    );
+                    $retainedCreditConversion['automatic_applications'] = $retainedCreditApplications;
+                    $retainedCreditConversion['automatic_applied_amount'] = round(array_sum(array_map(
+                        static fn (array $row): float => (float) ($row['applied_amount'] ?? 0),
+                        $retainedCreditApplications
+                    )), 2);
+                    $eventRepository->updateRefundFinancials($supplierEventId, [
+                        'payload_patch' => ['retained_credit_conversion' => $retainedCreditConversion],
+                    ]);
+                }
                 $createdRefundEvents[] = ['id' => $supplierEventId, 'journal_entry_id' => $supplierJournalEntryId, 'scope' => 'supplier'];
             }
 
@@ -925,6 +1236,7 @@ final class ServiceWorkspaceService extends Service
                 'supplier_refund_amount' => $supplierRefundAmount,
                 'payment_method' => $paymentMethod,
                 'supplier_refund_payment_method' => $supplierRefundPaymentMethod,
+                'supplier_refund_retained_as_credit' => $supplierRefundRetainedAsCredit,
                 'treasury_account_id' => $customerRefundDetailPayload['treasury_account_id'] ?? null,
                 'supplier_refund_treasury_account_id' => $supplierRefundDetailPayload['treasury_account_id'] ?? null,
                 'customer_refund_detail' => $customerRefundDetailPayload,
@@ -997,6 +1309,16 @@ final class ServiceWorkspaceService extends Service
         $supplierRefundAmount = round((float) ($refundEvent['supplier_refund_amount'] ?? 0), 2);
         $hasCustomerRefund = $customerRefundAmount > 0.005;
         $hasSupplierRefund = $supplierRefundAmount > 0.005;
+        $refundPayload = json_decode((string) ($refundEvent['payload_json'] ?? ''), true);
+        if (! is_array($refundPayload)) {
+            $refundPayload = [];
+        }
+        $supplierRefundMethod = (string) (
+            $refundPayload['supplier_refund_payment_method']
+            ?? $refundPayload['refund_detail']['refund_payment_method']
+            ?? ''
+        );
+        $supplierRefundRetainedAsCredit = $hasSupplierRefund && $supplierRefundMethod === 'supplier_credit';
 
         if ($refundScope === 'customer' && ! $hasCustomerRefund) {
             throw new RuntimeException('The selected refund event does not contain a posted customer refund.');
@@ -1021,9 +1343,27 @@ final class ServiceWorkspaceService extends Service
             'affected_receipt_ids' => [],
         ];
 
+        if ($refundScope === 'supplier' && $supplierRefundRetainedAsCredit) {
+            (new SupplierRepository($this->app))->reverseRetainedRefundAdvanceConversion(
+                (array) ($refundPayload['retained_credit_conversion']['supplier_advance_ids'] ?? []),
+                $actorUserId,
+                $reason
+            );
+        } elseif ($refundScope === 'supplier' && $hasSupplierRefund) {
+            $cashRefundConsumption = (array) ($refundPayload['cash_refund_credit_consumption'] ?? []);
+            (new SupplierRepository($this->app))->restoreConsumedRefundableCredit(
+                (array) ($cashRefundConsumption['payment_consumptions'] ?? []),
+                (array) ($cashRefundConsumption['advance_consumptions'] ?? []),
+                $actorUserId,
+                $reason
+            );
+        }
+
         if ($hasCustomerRefund && $hasSupplierRefund) {
             $selectedCustomerRefundAmount = $refundScope === 'customer' ? $customerRefundAmount : 0.0;
-            $selectedSupplierRefundAmount = $refundScope === 'supplier' ? $supplierRefundAmount : 0.0;
+            $selectedSupplierRefundAmount = $refundScope === 'supplier' && ! $supplierRefundRetainedAsCredit
+                ? $supplierRefundAmount
+                : 0.0;
 
             if ($selectedCustomerRefundAmount > 0) {
                 $restoredCustomerCredit = $customerPaymentRepository->restoreRefundToBookingReceiptCredit(
@@ -1035,10 +1375,7 @@ final class ServiceWorkspaceService extends Service
                 );
             }
 
-            $payload = json_decode((string) ($refundEvent['payload_json'] ?? ''), true);
-            if (! is_array($payload)) {
-                $payload = [];
-            }
+            $payload = $refundPayload;
 
             $reversalReference = 'REV-REFUND-EVT-' . $refundEventId . '-' . strtoupper($refundScope);
             $reversalJournalEntryId = $accountingRepository->postServiceRefundComponentReversal([
@@ -1310,6 +1647,7 @@ final class ServiceWorkspaceService extends Service
         try {
             $bookingReference = (string) ($booking['booking_reference'] ?? '');
             $oldCustomerPenaltyAmount = $this->moneyValue($cancelPayload['customer_penalty_amount'] ?? $cancelEvent['penalty_amount'] ?? 0);
+            $oldAgencyFeeRefundAmount = $this->moneyValue($cancelPayload['agency_fee_refund_amount'] ?? 0);
             $oldExpectedSupplierRefundAmount = $this->moneyValue(
                 $cancelPayload['expected_supplier_refund_amount']
                 ?? $cancelPayload['expected_supplier_refund_credit']
@@ -1324,12 +1662,20 @@ final class ServiceWorkspaceService extends Service
                 ), 2);
             }
             $newCustomerPenaltyAmount = $this->moneyValue($input['customer_penalty_amount'] ?? 0);
+            $newAgencyFeeRefundAmount = $this->moneyValue($input['agency_fee_refund_amount'] ?? 0);
             $newExpectedSupplierRefundAmount = $this->moneyValue($input['expected_supplier_refund_amount'] ?? 0);
             $settlementValuesChanged = abs($oldCustomerPenaltyAmount - $newCustomerPenaltyAmount) > 0.005
+                || abs($oldAgencyFeeRefundAmount - $newAgencyFeeRefundAmount) > 0.005
                 || abs($oldExpectedSupplierRefundAmount - $newExpectedSupplierRefundAmount) > 0.005;
 
             $latestCustomerRefundEvent = $this->latestRefundEventForScope($eventRepository, $serviceId, 'customer');
             $latestSupplierRefundEvent = $this->latestRefundEventForScope($eventRepository, $serviceId, 'supplier');
+            if ($latestCustomerRefundEvent === null && $customerRefundAmount > 0.005) {
+                throw new RuntimeException('Customer refund has not been paid yet. Use Pay Customer Refund to record the payment first.');
+            }
+            if ($latestSupplierRefundEvent === null && $supplierRefundAmount > 0.005) {
+                throw new RuntimeException('Supplier refund has not been received yet. Use Record Supplier Refund to post it first.');
+            }
             $oldCustomerRefundAmount = $this->moneyValue($latestCustomerRefundEvent['customer_refund_amount'] ?? 0);
             $oldSupplierRefundAmount = $this->moneyValue($latestSupplierRefundEvent['supplier_refund_amount'] ?? 0);
             $refundValuesChanged = abs($oldCustomerRefundAmount - $customerRefundAmount) > 0.005
@@ -1390,6 +1736,7 @@ final class ServiceWorkspaceService extends Service
                     'settlement_event_date' => $eventDate,
                     'customer_penalty_amount' => $input['customer_penalty_amount'] ?? 0,
                     'expected_supplier_refund_amount' => $input['expected_supplier_refund_amount'] ?? 0,
+                    'agency_fee_refund_amount' => $input['agency_fee_refund_amount'] ?? 0,
                     'settlement_reason' => $reason,
                     'settlement_notes' => 'Penalty/refund correction saved by user.',
                 ], $actorUserId, $accessibleBranchIds);
@@ -1402,6 +1749,7 @@ final class ServiceWorkspaceService extends Service
                     'service_line_reference' => (string) ($existingService['line_reference'] ?? ''),
                     'currency' => (string) ($existingService['currency'] ?? 'PKR'),
                     'customer_penalty_amount' => $oldCustomerPenaltyAmount,
+                    'agency_fee_refund_amount' => $oldAgencyFeeRefundAmount,
                     'expected_supplier_refund_amount' => $oldExpectedSupplierRefundAmount,
                     'reason' => $reason,
                 ]);
@@ -1412,7 +1760,7 @@ final class ServiceWorkspaceService extends Service
                 $refundInput['refund_event_date'] = $eventDate;
                 $refundInput['refund_reason'] = $reason;
                 $refundInput['refund_notes'] = 'Penalty/refund correction saved by user.';
-                $this->refundService($refundInput, $actorUserId, $accessibleBranchIds);
+                $this->refundService($refundInput, $actorUserId, $accessibleBranchIds, true);
             }
 
             AuditLog::record($this->app, 'service.penalty_refund.corrected', [
@@ -1423,6 +1771,7 @@ final class ServiceWorkspaceService extends Service
                 'service_line_reference' => (string) ($existingService['line_reference'] ?? ''),
                 'currency' => (string) ($existingService['currency'] ?? 'PKR'),
                 'customer_penalty_amount' => $this->moneyValue($input['customer_penalty_amount'] ?? 0),
+                'agency_fee_refund_amount' => $this->moneyValue($input['agency_fee_refund_amount'] ?? 0),
                 'expected_supplier_refund_amount' => $this->moneyValue($input['expected_supplier_refund_amount'] ?? 0),
                 'customer_refund_amount' => $customerRefundAmount,
                 'supplier_refund_amount' => $supplierRefundAmount,
@@ -1869,6 +2218,7 @@ final class ServiceWorkspaceService extends Service
         $reason = $this->requiredText($input['settlement_reason'] ?? null, 1000, 'Cancellation settlement reason is required.');
         $eventDate = $this->normalizeOptionalDate((string) ($input['settlement_event_date'] ?? date('Y-m-d'))) ?? date('Y-m-d');
         $customerPenaltyAmount = $this->moneyValue($input['customer_penalty_amount'] ?? 0);
+        $agencyFeeRefundAmount = $this->moneyValue($input['agency_fee_refund_amount'] ?? 0);
         $editMode = (int) ($input['settlement_edit_mode'] ?? 0) === 1;
         $hasExpectedSupplierRefundInput = array_key_exists('expected_supplier_refund_amount', $input)
             && trim((string) $input['expected_supplier_refund_amount']) !== '';
@@ -1900,6 +2250,10 @@ final class ServiceWorkspaceService extends Service
         $bookingReference = (string) $booking['booking_reference'];
         $lineReference = (string) $existingService['line_reference'];
         $currency = (string) ($existingService['currency'] ?? 'PKR');
+        $agencyFeeChargedAmount = round(max((float) ($existingService['service_charge'] ?? 0), 0.0), 2);
+        if ($agencyFeeRefundAmount > $agencyFeeChargedAmount + 0.005) {
+            throw new RuntimeException('Agency fee refund cannot exceed the agency service fee charged on this service.');
+        }
         $customerRepository = new CustomerPaymentRepository($this->app);
         $supplierRepository = new SupplierRepository($this->app);
         $receivable = $customerRepository->findReceivableByServiceLine($bookingReference, $lineReference);
@@ -1972,7 +2326,10 @@ final class ServiceWorkspaceService extends Service
                     max($supplierCostBasis, 0.0)
                 );
                 $supplierPenaltyAmount = round(max($supplierCostBasis - $expectedSupplierRefundAmount, 0), 2);
-                $targetCustomerRefundCredit = round(max($expectedSupplierRefundAmount - $customerPenaltyAmount, 0), 2);
+                $targetCustomerRefundCredit = round(max(
+                    $expectedSupplierRefundAmount - $customerPenaltyAmount + $agencyFeeRefundAmount,
+                    0
+                ), 2);
                 $customerFinalChargeAmount = round(max($customerRefundBasis - $targetCustomerRefundCredit, 0), 2);
             } else {
                 $supplierPenaltyAmount = $this->moneyValue($input['supplier_penalty_amount'] ?? 0);
@@ -2180,6 +2537,9 @@ final class ServiceWorkspaceService extends Service
                 'notes' => $this->optionalText($input['settlement_notes'] ?? null, 4000),
                 'payload_json' => [
                     'customer_penalty_amount' => $customerPenaltyAmount,
+                    'agency_fee_charged_amount' => $agencyFeeChargedAmount,
+                    'agency_fee_refund_amount' => $agencyFeeRefundAmount,
+                    'agency_fee_retained_amount' => round(max($agencyFeeChargedAmount - $agencyFeeRefundAmount, 0), 2),
                     'supplier_penalty_amount' => $supplierPenaltyAmount,
                     'expected_supplier_refund_amount' => $expectedSupplierRefundAmount,
                     'customer_final_charge_amount' => $customerFinalChargeAmount,
@@ -2190,13 +2550,17 @@ final class ServiceWorkspaceService extends Service
                     'supplier_booking_payment_credit' => $supplierBookingPaymentCredit,
                     'supplier_cost_basis' => $supplierCostBasis,
                     'customer_refund_basis' => $customerRefundBasis,
+                    'customer_received_amount' => $allocatedCustomerAmount,
                     'target_customer_refund_credit' => $targetCustomerRefundCredit,
                     'customer_delta' => $customerDelta,
                     'supplier_delta' => $supplierDelta,
                     'prior_customer_due_amount' => $currentCustomerDueAmount,
                     'prior_supplier_obligation_gross_amount' => (float) ($obligation['gross_amount'] ?? 0),
+                    'released_customer_receipt_ids' => array_values(array_map('intval', (array) ($customerReleaseResult['affected_receipt_ids'] ?? []))),
                     'released_supplier_payment_credit' => (float) ($supplierReleaseResult['released_payment_amount'] ?? 0),
                     'released_supplier_advance_credit' => (float) ($supplierReleaseResult['released_advance_amount'] ?? 0),
+                    'released_supplier_payment_ids' => array_values(array_map('intval', (array) ($supplierReleaseResult['affected_payment_ids'] ?? []))),
+                    'released_supplier_advance_ids' => array_values(array_map('intval', (array) ($supplierReleaseResult['affected_advance_ids'] ?? []))),
                     'journal_entry_ids' => $journalIds,
                     'mode' => 'cancellation_financial_adjustment',
                 ],
@@ -2211,6 +2575,9 @@ final class ServiceWorkspaceService extends Service
                 'service_line_reference' => $lineReference,
                 'currency' => $currency,
                 'customer_penalty_amount' => $customerPenaltyAmount,
+                'agency_fee_charged_amount' => $agencyFeeChargedAmount,
+                'agency_fee_refund_amount' => $agencyFeeRefundAmount,
+                'agency_fee_retained_amount' => round(max($agencyFeeChargedAmount - $agencyFeeRefundAmount, 0), 2),
                 'supplier_penalty_amount' => $supplierPenaltyAmount,
                 'expected_supplier_refund_amount' => $expectedSupplierRefundAmount,
                 'customer_final_charge_amount' => $customerFinalChargeAmount,
@@ -2222,6 +2589,7 @@ final class ServiceWorkspaceService extends Service
                 'supplier_booking_payment_credit' => $supplierBookingPaymentCredit,
                 'supplier_cost_basis' => $supplierCostBasis,
                 'customer_refund_basis' => $customerRefundBasis,
+                'customer_received_amount' => $allocatedCustomerAmount,
                 'target_customer_refund_credit' => $targetCustomerRefundCredit,
                 'customer_delta' => $customerDelta,
                 'supplier_delta' => $supplierDelta,
@@ -2245,7 +2613,7 @@ final class ServiceWorkspaceService extends Service
         return $bookingId;
     }
 
-    public function reissueService(array $input, int $actorUserId, array $accessibleBranchIds): int
+    public function reissueService(array $input, int $actorUserId, array $accessibleBranchIds): array
     {
         $this->assertCanPostServiceEvent($actorUserId);
 
@@ -2255,9 +2623,17 @@ final class ServiceWorkspaceService extends Service
         $eventDate = $this->normalizeOptionalDate((string) ($input['reissue_event_date'] ?? date('Y-m-d'))) ?? date('Y-m-d');
         $newTicketNumber = $this->requiredText($input['new_ticket_number'] ?? null, 50, 'New ticket number is required.');
         $newPnr = $this->optionalText($input['new_pnr'] ?? null, 50);
-        $fareDifferenceAmount = $this->moneyValue($input['fare_difference_amount'] ?? 0);
         $serviceFeeAmount = $this->moneyValue($input['reissue_service_fee_amount'] ?? 0);
         $supplierCostDifferenceAmount = $this->moneyValue($input['supplier_cost_difference_amount'] ?? 0);
+        $simplifiedPricing = (string) ($input['reissue_pricing_mode'] ?? '') === 'supplier_plus_service';
+        $fareDifferenceAmount = $simplifiedPricing
+            ? $supplierCostDifferenceAmount
+            : $this->moneyValue($input['fare_difference_amount'] ?? 0);
+        $receivedAmount = $this->moneyValue($input['reissue_received_amount'] ?? 0);
+        $customerCreditReceiptId = max(0, (int) ($input['reissue_customer_credit_receipt_id'] ?? 0));
+        $customerCreditApplyAmount = $this->moneyValue($input['reissue_customer_credit_apply_amount'] ?? 0);
+        $paymentDueDate = $this->normalizeOptionalDate((string) ($input['reissue_due_date'] ?? ''));
+        $rateEffectiveDate = $this->normalizeOptionalDate((string) ($input['reissue_rate_effective_date'] ?? $eventDate)) ?? $eventDate;
 
         $bookingRepository = new BookingRepository($this->app);
         if (! $bookingRepository->bookingExistsInBranches($bookingId, $accessibleBranchIds)) {
@@ -2279,6 +2655,26 @@ final class ServiceWorkspaceService extends Service
             throw new RuntimeException('Only air ticket service lines can be reissued.');
         }
 
+        $invoiceCurrency = $this->normalizeCurrency((string) ($existingService['currency'] ?? 'PKR'));
+        $costCurrency = $this->normalizeCurrency((string) ($existingService['cost_currency'] ?? $invoiceCurrency));
+        $serviceChargeCurrency = $this->normalizeCurrency((string) ($existingService['service_charge_currency'] ?? $invoiceCurrency));
+        $supplierCurrency = $this->normalizeCurrency((string) ($input['reissue_supplier_currency'] ?? $costCurrency));
+        $agencyFeeCurrency = $this->normalizeCurrency((string) ($input['reissue_agency_fee_currency'] ?? $serviceChargeCurrency));
+        $customerCurrency = $this->normalizeCurrency((string) ($input['reissue_customer_currency'] ?? $invoiceCurrency));
+        $receivedCurrency = $this->normalizeCurrency((string) ($input['reissue_received_currency'] ?? $customerCurrency));
+        $supplierToCustomerRate = $this->reissueExchangeRate($supplierCurrency, $customerCurrency, $rateEffectiveDate, $supplierCostDifferenceAmount);
+        $agencyToCustomerRate = $this->reissueExchangeRate($agencyFeeCurrency, $customerCurrency, $rateEffectiveDate, $serviceFeeAmount);
+        $supplierCustomerComponent = round($supplierCostDifferenceAmount * $supplierToCustomerRate, 2);
+        $agencyCustomerComponent = round($serviceFeeAmount * $agencyToCustomerRate, 2);
+        $customerDelta = round($supplierCustomerComponent + $agencyCustomerComponent, 2);
+        $submittedCustomerAmount = $this->moneyValue($input['reissue_customer_amount'] ?? $customerDelta);
+        if (abs($submittedCustomerAmount - $customerDelta) > 0.01) {
+            throw new RuntimeException('The reissue customer amount changed after exchange conversion. Review the currencies and confirm the rates again.');
+        }
+        $supplierMirrorIncrement = round($supplierCostDifferenceAmount * $this->reissueExchangeRate($supplierCurrency, $costCurrency, $rateEffectiveDate, $supplierCostDifferenceAmount), 2);
+        $agencyMirrorIncrement = round($serviceFeeAmount * $this->reissueExchangeRate($agencyFeeCurrency, $serviceChargeCurrency, $rateEffectiveDate, $serviceFeeAmount), 2);
+        $customerMirrorIncrement = round($customerDelta * $this->reissueExchangeRate($customerCurrency, $invoiceCurrency, $rateEffectiveDate, $customerDelta), 2);
+
         /** @var \PDO $db */
         $db = $this->app->get('db');
         $startedTransaction = ! $db->inTransaction();
@@ -2289,8 +2685,6 @@ final class ServiceWorkspaceService extends Service
         try {
             $bookingReference = (string) $booking['booking_reference'];
             $lineReference = (string) $existingService['line_reference'];
-            $currency = (string) ($existingService['currency'] ?? 'PKR');
-            $customerDelta = round($fareDifferenceAmount + $serviceFeeAmount, 2);
             $supplierDelta = $supplierCostDifferenceAmount;
             $accountingRepository = new AccountingRepository($this->app);
             $customerRepository = new CustomerPaymentRepository($this->app);
@@ -2306,32 +2700,54 @@ final class ServiceWorkspaceService extends Service
                 'event_type' => 'reissue',
                 'event_status' => 'posted',
                 'event_date' => $eventDate,
-                'currency' => $currency,
+                'currency' => $customerCurrency,
                 'original_ticket_number' => $existingService['ticket_number'] ?? null,
                 'new_ticket_number' => $newTicketNumber,
                 'original_pnr' => $existingService['pnr'] ?? null,
                 'new_pnr' => $newPnr,
-                'fare_difference_amount' => $fareDifferenceAmount,
-                'service_fee_amount' => $serviceFeeAmount,
+                'fare_difference_amount' => $supplierCustomerComponent,
+                'service_fee_amount' => $agencyCustomerComponent,
                 'reason' => $reason,
                 'notes' => $this->optionalText($input['reissue_notes'] ?? null, 4000),
                 'payload_json' => [
                     'customer_delta' => $customerDelta,
                     'supplier_delta' => $supplierDelta,
                     'supplier_cost_difference_amount' => $supplierCostDifferenceAmount,
+                    'supplier_currency' => $supplierCurrency,
+                    'agency_service_fee_amount' => $serviceFeeAmount,
+                    'agency_service_fee_currency' => $agencyFeeCurrency,
+                    'customer_currency' => $customerCurrency,
+                    'received_currency' => $receivedCurrency,
+                    'rate_effective_date' => $rateEffectiveDate,
+                    'supplier_to_customer_rate' => $supplierToCustomerRate,
+                    'agency_to_customer_rate' => $agencyToCustomerRate,
+                    'supplier_mirror_increment' => $supplierMirrorIncrement,
+                    'agency_mirror_increment' => $agencyMirrorIncrement,
+                    'customer_mirror_increment' => $customerMirrorIncrement,
+                    'customer_uses_separate_receivable' => $customerCurrency !== $invoiceCurrency,
+                    'supplier_uses_separate_obligation' => $supplierCurrency !== $costCurrency,
+                    'pricing_mode' => $simplifiedPricing ? 'supplier_plus_service' : 'legacy_customer_extra',
+                    'previous_invoice_amount' => round((float) ($existingService['final_sale_price'] ?? 0), 2),
+                    'revised_invoice_amount' => round((float) ($existingService['final_sale_price'] ?? 0) + $customerMirrorIncrement, 2),
+                    'previous_supplier_cost' => round((float) ($existingService['purchase_cost'] ?? 0), 2),
+                    'revised_supplier_cost' => round((float) ($existingService['purchase_cost'] ?? 0) + $supplierMirrorIncrement, 2),
                 ],
                 'actor_user_id' => $actorUserId,
             ]);
 
             $journalIds = [];
+            $customerDueGroup = $customerCurrency === $invoiceCurrency ? 'service_sale' : 'reissue_customer_' . $eventId;
+            $supplierObligationGroup = $supplierCurrency === $costCurrency ? 'service_cost' : 'reissue_supplier_' . $eventId;
             if ($customerDelta > 0) {
                 $receivable = $customerRepository->syncReceivableItem([
                     'branch_id' => (int) $existingService['branch_id'],
                     'booking_reference' => $bookingReference,
                     'service_line_reference' => $lineReference,
-                    'due_group' => 'service_sale',
-                    'currency' => $currency,
-                    'due_amount' => round((float) ($existingService['final_sale_price'] ?? 0) + $customerDelta, 2),
+                    'due_group' => $customerDueGroup,
+                    'currency' => $customerCurrency,
+                    'due_amount' => $customerCurrency === $invoiceCurrency
+                        ? round((float) ($existingService['final_sale_price'] ?? 0) + $customerMirrorIncrement, 2)
+                        : $customerDelta,
                     'due_date' => $existingService['due_date'] ?? null,
                     'status' => 'open',
                     'remarks' => 'Reissue customer difference [' . $lineReference . ']',
@@ -2346,7 +2762,7 @@ final class ServiceWorkspaceService extends Service
                         'customer_receivable_item_id' => $receivable['record']['id'] ?? null,
                         'adjustment_amount' => $delta,
                         'entry_date' => $eventDate,
-                        'currency' => $currency,
+                        'currency' => $customerCurrency,
                         'narration' => 'Reissue customer difference for ' . $lineReference,
                         'actor_user_id' => $actorUserId,
                     ]);
@@ -2363,9 +2779,11 @@ final class ServiceWorkspaceService extends Service
                     'branch_id' => (int) $existingService['branch_id'],
                     'booking_reference' => $bookingReference,
                     'service_line_reference' => $lineReference,
-                    'obligation_group' => 'service_cost',
-                    'currency' => $currency,
-                    'gross_amount' => round((float) ($existingService['purchase_cost'] ?? 0) + $supplierDelta, 2),
+                    'obligation_group' => $supplierObligationGroup,
+                    'currency' => $supplierCurrency,
+                    'gross_amount' => $supplierCurrency === $costCurrency
+                        ? round((float) ($existingService['purchase_cost'] ?? 0) + $supplierMirrorIncrement, 2)
+                        : $supplierDelta,
                     'due_date' => $existingService['due_date'] ?? null,
                     'remarks' => 'Reissue supplier difference [' . $lineReference . ']',
                     'actor_user_id' => $actorUserId,
@@ -2379,7 +2797,7 @@ final class ServiceWorkspaceService extends Service
                         'supplier_obligation_id' => $obligation['record']['id'] ?? null,
                         'adjustment_amount' => $delta,
                         'entry_date' => $eventDate,
-                        'currency' => $currency,
+                        'currency' => $supplierCurrency,
                         'narration' => 'Reissue supplier difference for ' . $lineReference,
                         'actor_user_id' => $actorUserId,
                     ]);
@@ -2390,7 +2808,94 @@ final class ServiceWorkspaceService extends Service
                 $eventRepository->attachJournalEntry($eventId, (int) $journalIds[0]);
             }
 
-            $serviceRepository->updateAirTicketReissueDetails($serviceId, $newTicketNumber, $newPnr, $actorUserId);
+            $serviceRepository->updateAirTicketReissueDetails(
+                $serviceId,
+                $newTicketNumber,
+                $newPnr,
+                $actorUserId,
+                $supplierMirrorIncrement,
+                $agencyMirrorIncrement,
+                $customerMirrorIncrement
+            );
+
+            $receiptResult = ['receipt' => null, 'customer_credit_applied' => []];
+            if ($receivedAmount > 0.005 || $customerCreditApplyAmount > 0.005 || $paymentDueDate !== null) {
+                $currentReceivable = $customerRepository->findReceivableByServiceLine($bookingReference, $lineReference, $customerDueGroup);
+                if ($currentReceivable === null) {
+                    throw new RuntimeException('The revised customer invoice could not be loaded for payment allocation.');
+                }
+
+                $receiptService = new CustomerReceiptWorkspaceService($this->app);
+                $baseReceiptInput = [
+                    'booking_id' => $bookingId,
+                    'receipt_date' => $eventDate,
+                    'due_date' => $paymentDueDate,
+                    'payment_method' => (string) ($input['reissue_payment_method'] ?? 'cash'),
+                    'treasury_account_id' => (int) ($input['reissue_treasury_account_id'] ?? 0),
+                    'reference_number' => $this->optionalText($input['reissue_payment_reference'] ?? null, 190),
+                    'charges_amount' => 0,
+                    'receipt_status' => 'received',
+                    'receipt_remarks' => 'Payment recorded with reissue of ' . $lineReference,
+                    'receipt_scope' => 'passenger_specific',
+                    'target_receivable_item_id' => (int) $currentReceivable['id'],
+                ];
+
+                if ($customerCreditApplyAmount > 0.005 || ($paymentDueDate !== null && $receivedAmount <= 0.005)) {
+                    $creditResult = $receiptService->saveReceipt(array_merge($baseReceiptInput, [
+                        'receipt_action' => 'no_receipt',
+                        'receipt_currency' => $customerCurrency,
+                        'received_amount' => 0,
+                        'customer_credit_receipt_id' => $customerCreditReceiptId,
+                        'customer_credit_apply_amount' => $customerCreditApplyAmount,
+                    ]), $actorUserId, $accessibleBranchIds);
+                    $receiptResult['customer_credit_applied'] = $creditResult['customer_credit_applied'] ?? [];
+                    $currentReceivable = $customerRepository->findReceivableByServiceLine($bookingReference, $lineReference, $customerDueGroup) ?? $currentReceivable;
+                }
+
+                if ($receivedAmount > 0.005) {
+                    $cashInput = array_merge($baseReceiptInput, [
+                        'receipt_action' => 'save',
+                        'receipt_currency' => $receivedCurrency,
+                        'received_amount' => $receivedAmount,
+                    ]);
+                    if ($receivedCurrency !== $customerCurrency) {
+                        $receiveToCustomerRate = $this->reissueExchangeRate($receivedCurrency, $customerCurrency, $rateEffectiveDate, $receivedAmount);
+                        $customerToReceiveRate = $this->reissueExchangeRate($customerCurrency, $receivedCurrency, $rateEffectiveDate, $receivedAmount);
+                        $outstanding = round((float) ($currentReceivable['outstanding_amount'] ?? 0), 2);
+                        $targetAmount = round(min($outstanding, $receivedAmount * $receiveToCustomerRate), 2);
+                        $paymentConsumed = $targetAmount >= $outstanding - 0.005
+                            ? round(min($receivedAmount, $targetAmount * $customerToReceiveRate), 2)
+                            : $receivedAmount;
+                        $cashInput = array_merge($cashInput, [
+                            'settlement_mode' => 'exchange',
+                            'settlement_target_receivable_id' => (int) $currentReceivable['id'],
+                            'settlement_target_currency' => $customerCurrency,
+                            'settlement_target_receivable_amount' => $targetAmount,
+                            'settlement_target_payment_amount' => $paymentConsumed,
+                            'settlement_rate_from_currency' => $customerCurrency,
+                            'settlement_rate_to_currency' => $receivedCurrency,
+                            'settlement_exchange_rate' => $customerToReceiveRate,
+                            'settlement_exchange_rate_effective_date' => $rateEffectiveDate,
+                        ]);
+                    }
+                    $cashResult = $receiptService->saveReceipt($cashInput, $actorUserId, $accessibleBranchIds);
+                    $receiptResult['receipt'] = $cashResult['receipt'] ?? null;
+                }
+            }
+
+            $revisedReceivable = $customerRepository->findReceivableByServiceLine($bookingReference, $lineReference, $customerDueGroup);
+            $revisedObligation = $supplierRepository->findObligationByServiceLine($bookingReference, $lineReference, $supplierObligationGroup);
+            $eventRepository->mergePayload($eventId, [
+                'cash_received' => round((float) ($receiptResult['receipt']['received_amount'] ?? 0), 2),
+                'cash_received_currency' => $receivedCurrency,
+                'receipt_id' => (int) ($receiptResult['receipt']['id'] ?? 0),
+                'receipt_no' => (string) ($receiptResult['receipt']['receipt_no'] ?? ''),
+                'customer_credit_applied' => round((float) ($receiptResult['customer_credit_applied']['allocated_amount'] ?? 0), 2),
+                'customer_paid_total' => round((float) ($revisedReceivable['allocated_amount'] ?? 0), 2),
+                'customer_outstanding' => round((float) ($revisedReceivable['outstanding_amount'] ?? 0), 2),
+                'supplier_paid_total' => round(max(0.0, (float) ($revisedObligation['gross_amount'] ?? 0) - (float) ($revisedObligation['net_payable_amount'] ?? 0)), 2),
+                'supplier_outstanding' => round((float) ($revisedObligation['net_payable_amount'] ?? 0), 2),
+            ]);
 
             AuditLog::record($this->app, 'service.reissued', [
                 'user_id' => $actorUserId,
@@ -2406,6 +2911,9 @@ final class ServiceWorkspaceService extends Service
                 'customer_delta' => $customerDelta,
                 'supplier_delta' => $supplierDelta,
                 'journal_entry_ids' => $journalIds,
+                'receipt_id' => (int) ($receiptResult['receipt']['id'] ?? 0),
+                'cash_received' => round((float) ($receiptResult['receipt']['received_amount'] ?? 0), 2),
+                'customer_credit_applied' => round((float) ($receiptResult['customer_credit_applied']['allocated_amount'] ?? 0), 2),
                 'reason' => $reason,
             ]);
 
@@ -2420,7 +2928,14 @@ final class ServiceWorkspaceService extends Service
             throw $exception;
         }
 
-        return $bookingId;
+        return [
+            'booking_id' => $bookingId,
+            'service_event_id' => $eventId,
+            'receipt' => $receiptResult['receipt'] ?? null,
+            'customer_credit_applied' => $receiptResult['customer_credit_applied'] ?? [],
+            'receivable' => $revisedReceivable ?? null,
+            'obligation' => $revisedObligation ?? null,
+        ];
     }
 
     private function validatedPayload(array $input, array $accessibleBranchIds, int $defaultBranchId, int $bookingId, int $actorUserId, BookingServiceRepository $repository): array
@@ -2428,6 +2943,10 @@ final class ServiceWorkspaceService extends Service
         $serviceType = $this->normalizeServiceType((string) ($input['service_type'] ?? 'air ticket'));
         $currency = $this->normalizeCurrency((string) ($input['currency'] ?? 'PKR'));
         $costCurrency = $this->normalizeCurrency((string) ($input['cost_currency'] ?? $currency));
+        $serviceChargeCurrency = $this->normalizeCurrency((string) (
+            $input['service_charge_currency']
+            ?? ($serviceType === 'air ticket' ? $costCurrency : $currency)
+        ));
         $status = $this->normalizeStatus((string) ($input['service_status'] ?? 'Open'));
         $supplier = $this->resolveSupplier(
             (string) ($input['supplier_name'] ?? ''),
@@ -2447,6 +2966,7 @@ final class ServiceWorkspaceService extends Service
             'passenger_name_snapshot' => $passenger['passenger_name_snapshot'],
             'currency' => $currency,
             'cost_currency' => $costCurrency,
+            'service_charge_currency' => $serviceChargeCurrency,
             'sale_price' => $this->moneyValue($input['sale_price'] ?? 0),
             'purchase_cost' => $this->moneyValue($input['purchase_cost'] ?? 0),
             'taxes' => $this->moneyValue($input['taxes'] ?? 0),
@@ -2474,6 +2994,8 @@ final class ServiceWorkspaceService extends Service
 
         $master['pricing_rate_effective_date'] = $this->resolvePricingRateEffectiveDate($input, $master['due_date']);
         $master['pricing_exchange_rate'] = $this->resolvePricingExchangeRate($master, $input);
+        $master['service_charge_rate_effective_date'] = $this->resolveServiceChargeRateEffectiveDate($input, $master['pricing_rate_effective_date']);
+        $master['service_charge_exchange_rate'] = $this->resolveServiceChargeExchangeRate($master, $input);
         $master['final_sale_price'] = $this->finalSalePriceAmount($master, $input);
         $master['net_profit_loss'] = $this->profitAmount($master);
 
@@ -2496,6 +3018,7 @@ final class ServiceWorkspaceService extends Service
                 'passenger_name_snapshot' => $master['passenger_name_snapshot'],
                 'currency' => $master['currency'],
                 'cost_currency' => $master['cost_currency'],
+                'service_charge_currency' => $master['service_charge_currency'],
                 'sale_price' => $master['sale_price'],
                 'purchase_cost' => $master['purchase_cost'],
                 'pricing_exchange_rate' => $master['pricing_exchange_rate'],
@@ -2511,6 +3034,8 @@ final class ServiceWorkspaceService extends Service
                 'vat' => $master['vat'],
                 'commission' => $master['commission'],
                 'service_charge' => $master['service_charge'],
+                'service_charge_exchange_rate' => $master['service_charge_exchange_rate'],
+                'service_charge_rate_effective_date' => $master['service_charge_rate_effective_date'],
                 'discount_amount' => $master['discount_amount'],
                 'final_sale_price' => $master['final_sale_price'],
                 'net_profit_loss' => $master['net_profit_loss'],
@@ -2566,7 +3091,7 @@ final class ServiceWorkspaceService extends Service
             }
         }
 
-        foreach (['currency', 'cost_currency'] as $field) {
+        foreach (['currency', 'cost_currency', 'service_charge_currency'] as $field) {
             if (! array_key_exists($field, $input)) {
                 continue;
             }
@@ -2585,6 +3110,118 @@ final class ServiceWorkspaceService extends Service
                 throw new RuntimeException('Saved service financial values must be changed through Quick Financial Edit with a reason.');
             }
         }
+    }
+
+    /**
+     * Move the commercial payable to a corrected supplier without rewriting
+     * historical cash. Any amount already settled with the prior supplier is
+     * released back to that supplier's reusable credit before ownership moves.
+     * The caller owns the surrounding database transaction.
+     */
+    private function prepareSupplierCorrection(
+        array $existingService,
+        array $newMasterData,
+        array $booking,
+        int $actorUserId
+    ): array {
+        $priorSupplierId = (int) ($existingService['supplier_id'] ?? 0);
+        $newSupplierId = (int) ($newMasterData['supplier_id'] ?? 0);
+        $priorSupplierName = trim((string) ($existingService['supplier_name_snapshot'] ?? $existingService['supplier_name'] ?? ''));
+        $newSupplierName = trim((string) ($newMasterData['supplier_name_snapshot'] ?? ''));
+
+        $result = [
+            'changed' => $priorSupplierId !== $newSupplierId,
+            'prior_supplier_id' => $priorSupplierId > 0 ? $priorSupplierId : null,
+            'prior_supplier_name' => $priorSupplierName !== '' ? $priorSupplierName : null,
+            'new_supplier_id' => $newSupplierId > 0 ? $newSupplierId : null,
+            'new_supplier_name' => $newSupplierName !== '' ? $newSupplierName : null,
+            'released_settlement_amount' => 0.0,
+            'released_payment_amount' => 0.0,
+            'released_advance_amount' => 0.0,
+        ];
+
+        if (! $result['changed']) {
+            return $result;
+        }
+
+        if ($priorSupplierId > 0 && $newSupplierId <= 0) {
+            throw new RuntimeException('Select the replacement supplier before saving this existing invoice.');
+        }
+
+        $bookingReference = trim((string) ($booking['booking_reference'] ?? ''));
+        $lineReference = trim((string) ($existingService['line_reference'] ?? ''));
+        if ($bookingReference === '' || $lineReference === '') {
+            throw new RuntimeException('The saved service could not be identified for supplier correction.');
+        }
+
+        $supplierRepository = new SupplierRepository($this->app);
+        $obligation = $supplierRepository->findObligationByServiceLine($bookingReference, $lineReference);
+        if ($obligation === null) {
+            return $result;
+        }
+
+        $obligationSupplierId = (int) ($obligation['supplier_id'] ?? 0);
+        if ($obligationSupplierId !== $priorSupplierId && $obligationSupplierId !== $newSupplierId) {
+            throw new RuntimeException('The saved supplier payable is inconsistent. No data was changed; run the financial audit before correcting this supplier.');
+        }
+
+        // A previous interrupted correction may already have moved the payable.
+        if ($obligationSupplierId === $newSupplierId) {
+            return $result;
+        }
+
+        $grossAmount = round((float) ($obligation['gross_amount'] ?? 0), 2);
+        $netPayableAmount = round((float) ($obligation['net_payable_amount'] ?? 0), 2);
+        $settledAmount = round(max($grossAmount - $netPayableAmount, 0), 2);
+        if ($settledAmount <= 0.005) {
+            return $result;
+        }
+
+        $release = $supplierRepository->releaseSettledCreditForObligation(
+            (int) $obligation['id'],
+            0.0,
+            $actorUserId,
+            sprintf(
+                'Supplier corrected from %s to %s for %s',
+                $priorSupplierName !== '' ? $priorSupplierName : ('supplier #' . $priorSupplierId),
+                $newSupplierName !== '' ? $newSupplierName : ('supplier #' . $newSupplierId),
+                $lineReference
+            )
+        );
+
+        $releasedAmount = round((float) ($release['released_amount'] ?? 0), 2);
+        if ($releasedAmount > 0.005) {
+            (new AccountingRepository($this->app))->postSupplierSettlementRelease([
+                'branch_id' => (int) ($existingService['branch_id'] ?? $booking['branch_id'] ?? 0),
+                'booking_reference' => $bookingReference,
+                'source_reference' => sprintf(
+                    '%s-SUP-%d-%d-%s',
+                    $lineReference,
+                    $priorSupplierId,
+                    $newSupplierId,
+                    date('YmdHis')
+                ),
+                'service_line_reference' => $lineReference,
+                'supplier_obligation_id' => (int) $obligation['id'],
+                'released_amount' => $releasedAmount,
+                'entry_date' => date('Y-m-d'),
+                'currency' => (string) ($obligation['currency'] ?? $existingService['cost_currency'] ?? $existingService['currency'] ?? 'PKR'),
+                'narration' => sprintf(
+                    'Supplier correction: prior settlement retained as credit with %s; payable moved to %s',
+                    $priorSupplierName !== '' ? $priorSupplierName : ('supplier #' . $priorSupplierId),
+                    $newSupplierName !== '' ? $newSupplierName : ('supplier #' . $newSupplierId)
+                ),
+                'actor_user_id' => $actorUserId,
+            ]);
+        }
+
+        $result['released_settlement_amount'] = $releasedAmount;
+        $result['released_payment_amount'] = round((float) ($release['released_payment_amount'] ?? 0), 2);
+        $result['released_advance_amount'] = round((float) ($release['released_advance_amount'] ?? 0), 2);
+        $result['affected_payment_ids'] = array_values(array_map('intval', (array) ($release['affected_payment_ids'] ?? [])));
+        $result['affected_advance_ids'] = array_values(array_map('intval', (array) ($release['affected_advance_ids'] ?? [])));
+
+        return $result;
     }
 
     private function serviceHasProtectedFinancialActivity(array $existingService): bool
@@ -2631,6 +3268,9 @@ final class ServiceWorkspaceService extends Service
             'pricing_exchange_rate' => $this->normalizePricingExchangeRate((float) ($service['pricing_exchange_rate'] ?? 1)),
             'pricing_rate_effective_date' => (string) ($service['pricing_rate_effective_date'] ?? ''),
             'service_charge' => round((float) ($service['service_charge'] ?? 0), 2),
+            'service_charge_currency' => (string) ($service['service_charge_currency'] ?? $service['currency'] ?? 'PKR'),
+            'service_charge_exchange_rate' => $this->normalizePricingExchangeRate((float) ($service['service_charge_exchange_rate'] ?? 1)),
+            'service_charge_rate_effective_date' => (string) ($service['service_charge_rate_effective_date'] ?? ''),
             'discount_amount' => round((float) ($service['discount_amount'] ?? 0), 2),
             'vat' => round((float) ($service['vat'] ?? 0), 2),
             'final_sale_price' => round((float) ($service['final_sale_price'] ?? 0), 2),
@@ -2672,6 +3312,13 @@ final class ServiceWorkspaceService extends Service
                 : $correctionDate,
             'commission' => round((float) ($existingService['commission'] ?? 0), 2),
             'service_charge' => $currentSnapshot['service_charge'],
+            'service_charge_currency' => array_key_exists('corrected_service_charge_currency', $input)
+                ? $this->normalizeCurrency((string) $input['corrected_service_charge_currency'])
+                : $currentSnapshot['service_charge_currency'],
+            'service_charge_exchange_rate' => $currentSnapshot['service_charge_exchange_rate'],
+            'service_charge_rate_effective_date' => $currentSnapshot['service_charge_rate_effective_date'] !== ''
+                ? $currentSnapshot['service_charge_rate_effective_date']
+                : $correctionDate,
             'discount_amount' => $currentSnapshot['discount_amount'],
             'vat' => $currentSnapshot['vat'],
             'final_sale_price' => $currentSnapshot['final_sale_price'],
@@ -2681,6 +3328,12 @@ final class ServiceWorkspaceService extends Service
         }
         if (array_key_exists('corrected_pricing_rate_effective_date', $input) && trim((string) $input['corrected_pricing_rate_effective_date']) !== '') {
             $financial['pricing_rate_effective_date'] = $this->normalizeOptionalDate((string) $input['corrected_pricing_rate_effective_date']) ?? $correctionDate;
+        }
+        if (array_key_exists('corrected_service_charge_exchange_rate', $input) && trim((string) $input['corrected_service_charge_exchange_rate']) !== '') {
+            $financial['service_charge_exchange_rate'] = $this->normalizePricingExchangeRate((float) $input['corrected_service_charge_exchange_rate']);
+        }
+        if (array_key_exists('corrected_service_charge_rate_effective_date', $input) && trim((string) $input['corrected_service_charge_rate_effective_date']) !== '') {
+            $financial['service_charge_rate_effective_date'] = $this->normalizeOptionalDate((string) $input['corrected_service_charge_rate_effective_date']) ?? $correctionDate;
         }
 
         if ($serviceType === 'air ticket') {
@@ -2696,6 +3349,10 @@ final class ServiceWorkspaceService extends Service
                 2
             );
         } else {
+            // Non-air service entry uses sale_price as the legacy cost-input mirror.
+            // Keep it synchronized so later corrections do not leave conflicting
+            // service values while purchase_cost remains the accounting cost truth.
+            $financial['sale_price'] = $newCostBasis;
             $financial['purchase_cost'] = $newCostBasis;
         }
 
@@ -2708,22 +3365,22 @@ final class ServiceWorkspaceService extends Service
             }
 
             $customerBase = $this->customerPricingBaseAmount($financial);
-            $financial['final_sale_price'] = round(
-                $customerBase
-                + $financial['service_charge']
-                + $financial['vat']
-                - $financial['discount_amount'],
-                2
-            );
+            $financial['service_charge_exchange_rate'] = $this->resolveCorrectionServiceChargeExchangeRate($financial);
+            $financial['final_sale_price'] = round($customerBase + $this->customerAgencyComponentAmount($financial), 2);
         } else {
             $newFinalSalePrice = array_key_exists('corrected_final_sale_price', $input) && trim((string) $input['corrected_final_sale_price']) !== ''
                 ? $this->moneyValue($input['corrected_final_sale_price'])
                 : $currentSnapshot['final_sale_price'];
             $financial['final_sale_price'] = $newFinalSalePrice;
             $financial['pricing_exchange_rate'] = $this->resolveCorrectionPricingExchangeRate($financial);
+            $financial['service_charge_exchange_rate'] = $this->resolveCorrectionServiceChargeExchangeRate($financial);
             $customerBase = $this->customerPricingBaseAmount($financial);
+            $invoiceCurrencyAgencyAmount = round($newFinalSalePrice - $customerBase, 2);
+            $agencyRate = $financial['currency'] === $financial['service_charge_currency']
+                ? 1.0
+                : $financial['service_charge_exchange_rate'];
             $calculatedServiceCharge = round(
-                $newFinalSalePrice - $customerBase - $financial['vat'] + $financial['discount_amount'],
+                ($invoiceCurrencyAgencyAmount / $agencyRate) - $financial['vat'] + $financial['discount_amount'],
                 2
             );
             $financial['service_charge'] = $calculatedServiceCharge >= 0 ? $calculatedServiceCharge : 0.0;
@@ -2743,8 +3400,11 @@ final class ServiceWorkspaceService extends Service
             || abs($financial['final_sale_price'] - $currentSnapshot['final_sale_price']) > 0.005
             || $financial['currency'] !== $currentSnapshot['currency']
             || $financial['cost_currency'] !== $currentSnapshot['cost_currency']
+            || $financial['service_charge_currency'] !== $currentSnapshot['service_charge_currency']
             || abs($financial['pricing_exchange_rate'] - $currentSnapshot['pricing_exchange_rate']) > 0.00000001
-            || (string) $financial['pricing_rate_effective_date'] !== (string) $currentSnapshot['pricing_rate_effective_date'];
+            || (string) $financial['pricing_rate_effective_date'] !== (string) $currentSnapshot['pricing_rate_effective_date']
+            || abs($financial['service_charge_exchange_rate'] - $currentSnapshot['service_charge_exchange_rate']) > 0.00000001
+            || (string) $financial['service_charge_rate_effective_date'] !== (string) $currentSnapshot['service_charge_rate_effective_date'];
 
         return [
             'reason' => $reason,
@@ -2895,6 +3555,53 @@ final class ServiceWorkspaceService extends Service
         ));
     }
 
+    private function resolveServiceChargeRateEffectiveDate(array $input, string $fallbackDate): string
+    {
+        $postedDate = $this->normalizeOptionalDate((string) ($input['service_charge_rate_effective_date'] ?? ''));
+
+        return $postedDate ?? $fallbackDate;
+    }
+
+    private function resolveServiceChargeExchangeRate(array $master, array $input): float
+    {
+        $invoiceCurrency = (string) ($master['currency'] ?? 'PKR');
+        $serviceChargeCurrency = (string) ($master['service_charge_currency'] ?? $invoiceCurrency);
+        if ($invoiceCurrency === $serviceChargeCurrency) {
+            return 1.0;
+        }
+
+        $agencyComponentAmount = round(
+            (float) ($master['service_charge'] ?? 0)
+            + (float) ($master['vat'] ?? 0)
+            - (float) ($master['discount_amount'] ?? 0),
+            2
+        );
+        if (abs($agencyComponentAmount) <= 0.005) {
+            return 1.0;
+        }
+
+        $postedRate = (float) ($input['service_charge_exchange_rate'] ?? 0);
+        if ($postedRate > 0) {
+            return $this->normalizePricingExchangeRate($postedRate);
+        }
+
+        $effectiveDate = (string) ($master['service_charge_rate_effective_date'] ?? date('Y-m-d'));
+        $rate = (new ExchangeRateRepository($this->app))->getExactRate(
+            $serviceChargeCurrency,
+            $invoiceCurrency,
+            $effectiveDate
+        );
+        if ($rate !== null && (float) ($rate['exchange_rate'] ?? 0) > 0) {
+            return $this->normalizePricingExchangeRate((float) $rate['exchange_rate']);
+        }
+
+        throw new RuntimeException(sprintf(
+            'Set today\'s %s to %s exchange rate for the agency service amount.',
+            $serviceChargeCurrency,
+            $invoiceCurrency
+        ));
+    }
+
     private function resolveCorrectionPricingExchangeRate(array $financial): float
     {
         $invoiceCurrency = (string) ($financial['currency'] ?? 'PKR');
@@ -2911,6 +3618,27 @@ final class ServiceWorkspaceService extends Service
         return $this->normalizePricingExchangeRate((float) ($financial['pricing_exchange_rate'] ?? 1));
     }
 
+    private function resolveCorrectionServiceChargeExchangeRate(array $financial): float
+    {
+        $invoiceCurrency = (string) ($financial['currency'] ?? 'PKR');
+        $serviceChargeCurrency = (string) ($financial['service_charge_currency'] ?? $invoiceCurrency);
+        if ($invoiceCurrency === $serviceChargeCurrency) {
+            return 1.0;
+        }
+
+        $agencyComponentAmount = round(
+            (float) ($financial['service_charge'] ?? 0)
+            + (float) ($financial['vat'] ?? 0)
+            - (float) ($financial['discount_amount'] ?? 0),
+            2
+        );
+        if (abs($agencyComponentAmount) <= 0.005) {
+            return 1.0;
+        }
+
+        return $this->normalizePricingExchangeRate((float) ($financial['service_charge_exchange_rate'] ?? 0));
+    }
+
     private function normalizePricingExchangeRate(float $rate): float
     {
         if ($rate <= 0) {
@@ -2918,6 +3646,21 @@ final class ServiceWorkspaceService extends Service
         }
 
         return round($rate, 8);
+    }
+
+    private function reissueExchangeRate(string $fromCurrency, string $toCurrency, string $effectiveDate, float $amount): float
+    {
+        if ($amount <= 0.005 || $fromCurrency === $toCurrency) {
+            return 1.0;
+        }
+
+        $rate = (new ExchangeRateRepository($this->app))->getExactRate($fromCurrency, $toCurrency, $effectiveDate);
+        $value = round((float) ($rate['exchange_rate'] ?? 0), 8);
+        if ($value <= 0) {
+            throw new RuntimeException(sprintf('FX_RATE_REQUIRED: Confirm today\'s %s to %s exchange rate before saving this reissue.', $fromCurrency, $toCurrency));
+        }
+
+        return $value;
     }
 
     private function customerPricingBaseAmount(array $master): float
@@ -2934,6 +3677,25 @@ final class ServiceWorkspaceService extends Service
         return round($purchaseCost * $pricingExchangeRate, 0);
     }
 
+    private function customerAgencyComponentAmount(array $master): float
+    {
+        $invoiceCurrency = (string) ($master['currency'] ?? 'PKR');
+        $serviceChargeCurrency = (string) ($master['service_charge_currency'] ?? $invoiceCurrency);
+        $amount = round(
+            (float) ($master['service_charge'] ?? 0)
+            + (float) ($master['vat'] ?? 0)
+            - (float) ($master['discount_amount'] ?? 0),
+            2
+        );
+        if ($invoiceCurrency === $serviceChargeCurrency) {
+            return $amount;
+        }
+
+        $rate = $this->normalizePricingExchangeRate((float) ($master['service_charge_exchange_rate'] ?? 1));
+
+        return round($amount * $rate, 0);
+    }
+
     private function finalSalePriceAmount(array $master, array $input): float
     {
         $rawFinalSalePrice = $input['final_sale_price'] ?? null;
@@ -2941,34 +3703,9 @@ final class ServiceWorkspaceService extends Service
             return $this->moneyValue($rawFinalSalePrice);
         }
 
-        if (($master['service_type'] ?? '') === 'air ticket') {
-            $invoiceCurrency = (string) ($master['currency'] ?? 'PKR');
-            $costCurrency = (string) ($master['cost_currency'] ?? $invoiceCurrency);
-            $costCurrencyReceivable = round(
-                (float) ($master['purchase_cost'] ?? 0)
-                + (float) ($master['service_charge'] ?? 0)
-                + (float) ($master['vat'] ?? 0)
-                - (float) ($master['discount_amount'] ?? 0),
-                2
-            );
-
-            if ($invoiceCurrency !== $costCurrency) {
-                $pricingExchangeRate = $this->normalizePricingExchangeRate((float) ($master['pricing_exchange_rate'] ?? 1));
-
-                return round($costCurrencyReceivable * $pricingExchangeRate, 0);
-            }
-
-            return round(
-                $costCurrencyReceivable,
-                0
-            );
-        }
-
         return round(
             $this->customerPricingBaseAmount($master)
-            + (float) ($master['service_charge'] ?? 0)
-            + (float) ($master['vat'] ?? 0)
-            - (float) ($master['discount_amount'] ?? 0),
+            + $this->customerAgencyComponentAmount($master),
             2
         );
     }
@@ -3125,6 +3862,104 @@ final class ServiceWorkspaceService extends Service
         ];
     }
 
+    private function applyRetainedSupplierCreditToOpenObligations(
+        SupplierRepository $supplierRepository,
+        AccountingRepository $accountingRepository,
+        array $advanceIds,
+        int $supplierId,
+        string $currency,
+        array $accessibleBranchIds,
+        string $sourceBookingReference,
+        string $eventDate,
+        int $supplierRefundEventId,
+        int $actorUserId
+    ): array {
+        $advanceIds = array_values(array_unique(array_filter(
+            array_map('intval', $advanceIds),
+            static fn (int $id): bool => $id > 0
+        )));
+        if ($advanceIds === [] || $supplierId <= 0) {
+            return [];
+        }
+
+        $obligations = $supplierRepository->openObligationsForSupplierCreditApplication(
+            $supplierId,
+            $currency,
+            $accessibleBranchIds,
+            $sourceBookingReference
+        );
+        $applications = [];
+
+        foreach ($advanceIds as $advanceId) {
+            foreach ($obligations as $obligationRow) {
+                $advance = $supplierRepository->findAdvanceById($advanceId);
+                $availableAmount = round((float) ($advance['available_amount'] ?? 0), 2);
+                if ($availableAmount <= 0.005) {
+                    break;
+                }
+
+                $obligationId = (int) ($obligationRow['id'] ?? 0);
+                $obligation = $supplierRepository->findObligationById($obligationId);
+                $outstandingAmount = round((float) ($obligation['net_payable_amount'] ?? 0), 2);
+                if ($obligationId <= 0 || $outstandingAmount <= 0.005) {
+                    continue;
+                }
+
+                $appliedAmount = $supplierRepository->applyAdvanceToObligationWithType(
+                    $advanceId,
+                    $obligationId,
+                    min($availableAmount, $outstandingAmount),
+                    'same_currency_auto',
+                    $actorUserId
+                );
+                if ($appliedAmount <= 0.005) {
+                    continue;
+                }
+
+                $accountingRepository->postSupplierAdvanceApplication([
+                    'branch_id' => (int) ($obligation['branch_id'] ?? 0),
+                    'booking_reference' => (string) ($obligation['booking_reference'] ?? ''),
+                    'source_reference' => 'REFUND-EVT-' . $supplierRefundEventId . '-ADV-' . $advanceId . '-OBL-' . $obligationId,
+                    'service_line_reference' => (string) ($obligation['service_line_reference'] ?? '') !== ''
+                        ? (string) $obligation['service_line_reference']
+                        : null,
+                    'supplier_obligation_id' => $obligationId,
+                    'amount' => $appliedAmount,
+                    'entry_date' => $eventDate,
+                    'currency' => $currency,
+                    'narration' => 'Supplier refund credit automatically applied to existing payable',
+                    'actor_user_id' => $actorUserId,
+                ]);
+
+                $applications[] = [
+                    'supplier_advance_id' => $advanceId,
+                    'supplier_obligation_id' => $obligationId,
+                    'booking_reference' => (string) ($obligation['booking_reference'] ?? ''),
+                    'service_line_reference' => (string) ($obligation['service_line_reference'] ?? ''),
+                    'currency' => $currency,
+                    'applied_amount' => round($appliedAmount, 2),
+                ];
+            }
+        }
+
+        AuditLog::record($this->app, 'supplier.refund.retained_credit_auto_applied', [
+            'user_id' => $actorUserId,
+            'supplier_id' => $supplierId,
+            'source_booking_reference' => $sourceBookingReference,
+            'supplier_refund_event_id' => $supplierRefundEventId,
+            'currency' => $currency,
+            'supplier_advance_ids' => $advanceIds,
+            'application_count' => count($applications),
+            'applied_amount' => round(array_sum(array_map(
+                static fn (array $row): float => (float) ($row['applied_amount'] ?? 0),
+                $applications
+            )), 2),
+            'applications' => $applications,
+        ]);
+
+        return $applications;
+    }
+
     private function normalizeServiceType(string $value): string
     {
         $type = mb_strtolower(trim($value));
@@ -3155,6 +3990,16 @@ final class ServiceWorkspaceService extends Service
         }
 
         return $method;
+    }
+
+    private function normalizeSupplierRefundPaymentMethod(string $value): string
+    {
+        $method = str_replace(' ', '_', mb_strtolower(trim($value)));
+        if ($method === 'supplier_credit') {
+            return $method;
+        }
+
+        return $this->normalizePaymentMethod($method);
     }
 
     private function activeServiceTypeMap(): array
@@ -3227,13 +4072,14 @@ final class ServiceWorkspaceService extends Service
         $treasuryAccountId = 0;
         $treasurySnapshot = null;
 
-        if (in_array($paymentMethod, ['cash', 'bank_transfer'], true)) {
+        if ($refundAmount > 0.005 && in_array($paymentMethod, ['cash', 'bank_transfer'], true)) {
             $treasuryAccountId = (int) ($input[$treasuryAccountField] ?? 0);
             $treasurySnapshot = (new TreasuryRepository($this->app))->validatePaymentTreasuryAccount(
                 $treasuryAccountId,
                 $branchId,
                 $currency,
-                $paymentMethod
+                $paymentMethod,
+                $requireCustomerBankDestination && $paymentMethod === 'cash'
             );
         }
 
@@ -3421,10 +4267,20 @@ final class ServiceWorkspaceService extends Service
             );
         }
 
+        // The cancellation payload is historical evidence of what was released.
+        // The receipt header is the current truth after cash refunds, transfers to
+        // another booking, or later reallocation. Never continue advertising
+        // credit that is no longer unallocated on its source booking.
+        $currentBookingCredit = max(
+            $customerRepository->bookingUnallocatedCreditTotal($bookingReference, $currency),
+            0.0
+        );
+        $unsettledReleasedCredit = round(max($releasedCustomerCredit - $customerRefundReceivedAmount, 0), 2);
+
         return [
             'released_customer_credit' => $releasedCustomerCredit,
             'customer_refund_received_amount' => $customerRefundReceivedAmount,
-            'remaining_customer_refund_credit' => round(max($releasedCustomerCredit - $customerRefundReceivedAmount, 0), 2),
+            'remaining_customer_refund_credit' => round(min($unsettledReleasedCredit, $currentBookingCredit), 2),
         ];
     }
 

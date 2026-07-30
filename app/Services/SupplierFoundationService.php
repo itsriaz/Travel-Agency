@@ -115,12 +115,31 @@ final class SupplierFoundationService extends Service
             ];
         }
 
+        // Booking supplier truth follows allocation rows, including allocations
+        // from lump-sum payments whose payment header uses the internal GLOBAL scope.
+        foreach ($suppliers as &$supplier) {
+            $supplier['totalPaid'] = 0.0;
+            $supplier['allocatedPaid'] = 0.0;
+        }
+        unset($supplier);
+        foreach ($obligations as $obligation) {
+            $key = $supplierKey((int) ($obligation['supplierId'] ?? 0), (string) ($obligation['currency'] ?? ''));
+            if (! isset($supplierDirectory[$key])) {
+                continue;
+            }
+            $index = $supplierDirectory[$key];
+            $allocatedPaid = (float) ($obligation['paymentAllocatedAmount'] ?? 0);
+            $suppliers[$index]['totalPaid'] += $allocatedPaid;
+            $suppliers[$index]['allocatedPaid'] += $allocatedPaid;
+        }
+
         $paymentRows = $repository->supplierPaymentHistory($bookingReference);
         $payments = array_map(
             static function (array $row): array {
                 $statusRaw = (string) ($row['status'] ?? 'paid');
                 return [
                     'id' => (int) $row['id'],
+                    'supplierId' => (int) ($row['supplier_id'] ?? 0),
                     'paymentNo' => (string) $row['payment_no'],
                     'paymentDate' => (string) $row['payment_date'],
                     'supplier' => (string) $row['supplier_name'],
@@ -211,7 +230,7 @@ final class SupplierFoundationService extends Service
             'totalSupplierCost' => array_sum(array_map(static fn (array $obligation): float => (float) $obligation['grossAmount'], $obligations)),
             'totalAdvanceApplied' => array_sum(array_map(static fn (array $obligation): float => (float) $obligation['advanceAppliedAmount'], $obligations)),
             'totalSupplierOutstanding' => array_sum(array_map(static fn (array $obligation): float => (float) $obligation['netPayableAmount'], $obligations)),
-            'totalSupplierPaid' => array_sum(array_map(static fn (array $payment): float => (float) $payment['paidAmount'], $payments)),
+            'totalSupplierPaid' => array_sum(array_map(static fn (array $obligation): float => (float) $obligation['paymentAllocatedAmount'], $obligations)),
             'totalAdvanceBalance' => array_sum(array_map(static fn (array $advance): float => (float) $advance['availableAmount'], $advances)),
         ];
 

@@ -39,6 +39,14 @@ $columnExists = static function (string $table, string $column) use ($db): bool 
 
     return $statement->fetchColumn() !== false;
 };
+$tableExists = static function (string $table) use ($db): bool {
+    $statement = $db->prepare(
+        'SELECT 1 FROM information_schema.tables
+         WHERE table_schema = DATABASE() AND table_name = :table_name LIMIT 1'
+    );
+    $statement->execute(['table_name' => $table]);
+    return $statement->fetchColumn() !== false;
+};
 
 $fetchAll = static function (string $sql) use ($db): array {
     $statement = $db->query($sql);
@@ -55,14 +63,18 @@ $receivableAllocationAmountColumn = $columnExists('customer_receipt_allocations'
     ? 'receivable_amount_allocated'
     : 'allocated_amount';
 
+$recognizedCustomerCreditExpression = $tableExists('customer_credit_income_recognitions')
+    ? '(SELECT COALESCE(SUM(ccir.amount), 0) FROM customer_credit_income_recognitions ccir WHERE ccir.customer_receipt_id = customer_receipts.id)'
+    : '0';
 $receiptConservationBreaks = $fetchAll(
-    'SELECT id, booking_reference, receipt_no, currency, tendered_amount, received_amount, allocated_amount, unallocated_amount, returned_amount, status
+    'SELECT id, booking_reference, receipt_no, currency, tendered_amount, received_amount, allocated_amount, unallocated_amount, returned_amount, status,
+            ' . $recognizedCustomerCreditExpression . ' AS recognized_income_amount
      FROM customer_receipts
      WHERE status <> "void"
        AND NOT (
-            ABS(received_amount - (allocated_amount + unallocated_amount + returned_amount)) <= 0.005
+            ABS(received_amount - (allocated_amount + unallocated_amount + returned_amount + ' . $recognizedCustomerCreditExpression . ')) <= 0.005
             OR (
-                ABS(received_amount - (allocated_amount + unallocated_amount)) <= 0.005
+                ABS(received_amount - (allocated_amount + unallocated_amount + ' . $recognizedCustomerCreditExpression . ')) <= 0.005
                 AND ABS(tendered_amount - (received_amount + returned_amount)) <= 0.005
             )
        )
@@ -102,15 +114,54 @@ $receivableHeaderVsAllocations = $fetchAll(
             ROUND(cri.due_amount, 2) AS due_amount,
             ROUND(cri.allocated_amount, 2) AS header_allocated_amount,
             ROUND(cri.outstanding_amount, 2) AS outstanding_amount,
-            ROUND(COALESCE(SUM(CASE WHEN cr.id IS NOT NULL THEN cra.' . $receivableAllocationAmountColumn . ' ELSE 0 END), 0), 2) AS allocation_total
+            ROUND(COALESCE(receipt_allocations.allocated_amount, 0), 2) AS allocation_total
      FROM customer_receivable_items cri
-     LEFT JOIN customer_receipt_allocations cra ON cra.customer_receivable_item_id = cri.id
-     LEFT JOIN customer_receipts cr ON cr.id = cra.customer_receipt_id AND cr.status <> "void"
-     GROUP BY cri.id, cri.booking_reference, cri.service_line_reference, cri.currency, cri.due_amount, cri.allocated_amount, cri.outstanding_amount
+     LEFT JOIN (
+        SELECT cra.customer_receivable_item_id, SUM(cra.' . $receivableAllocationAmountColumn . ') AS allocated_amount
+        FROM customer_receipt_allocations cra
+        INNER JOIN customer_receipts cr ON cr.id = cra.customer_receipt_id AND cr.status <> "void"
+        GROUP BY cra.customer_receivable_item_id
+     ) receipt_allocations ON receipt_allocations.customer_receivable_item_id = cri.id
      HAVING ABS(header_allocated_amount - allocation_total) > 0.005
         OR ABS(due_amount - (header_allocated_amount + outstanding_amount)) > 0.005
      LIMIT 10'
 );
+
+if ($tableExists('counterparty_offsets')) {
+    $brokenCounterpartyOffsets = $fetchAll(
+        'SELECT o.id, o.offset_no, o.branch_id, o.currency, o.amount,
+                ROUND(COALESCE(a.account_total, 0), 2) AS account_total,
+                ROUND(COALESCE(p.payable_total, 0), 2) AS payable_total
+         FROM counterparty_offsets o
+         LEFT JOIN (SELECT counterparty_offset_id, SUM(allocated_amount) AS account_total FROM counterparty_offset_account_allocations GROUP BY counterparty_offset_id) a ON a.counterparty_offset_id = o.id
+         LEFT JOIN (SELECT counterparty_offset_id, SUM(allocated_amount) AS payable_total FROM counterparty_offset_payable_allocations GROUP BY counterparty_offset_id) p ON p.counterparty_offset_id = o.id
+         WHERE o.status = "posted"
+           AND (ABS(o.amount - COALESCE(a.account_total, 0)) > 0.005 OR ABS(o.amount - COALESCE(p.payable_total, 0)) > 0.005)
+         LIMIT 10'
+    );
+    $check(
+        'Linked-party offsets allocate equal account-holder and supplier value',
+        $brokenCounterpartyOffsets === [],
+        $brokenCounterpartyOffsets === [] ? 'Every posted linked-party offset is conserved' : json_encode($brokenCounterpartyOffsets, JSON_UNESCAPED_SLASHES)
+    );
+
+    $crossDimensionOffsets = $fetchAll(
+        'SELECT DISTINCT o.id, o.offset_no, o.branch_id, o.currency
+         FROM counterparty_offsets o
+         LEFT JOIN counterparty_offset_account_allocations ra ON ra.counterparty_offset_id = o.id
+         LEFT JOIN customer_receivable_items cri ON cri.id = ra.customer_receivable_item_id
+         LEFT JOIN counterparty_offset_payable_allocations pa ON pa.counterparty_offset_id = o.id
+         LEFT JOIN supplier_obligations so ON so.id = pa.supplier_obligation_id
+         WHERE o.status = "posted"
+           AND (cri.branch_id <> o.branch_id OR cri.currency <> o.currency OR so.branch_id <> o.branch_id OR so.currency <> o.currency)
+         LIMIT 10'
+    );
+    $check(
+        'Linked-party offsets remain in one branch and currency',
+        $crossDimensionOffsets === [],
+        $crossDimensionOffsets === [] ? 'No cross-branch or cross-currency offset found' : json_encode($crossDimensionOffsets, JSON_UNESCAPED_SLASHES)
+    );
+}
 $check(
     'Customer receivable rows match allocation rows and due equation',
     $receivableHeaderVsAllocations === [],
@@ -137,13 +188,20 @@ $supplierPaymentConvertedAdvanceSelect = $columnExists('supplier_payments', 'con
 $supplierPaymentConvertedAdvanceValue = $columnExists('supplier_payments', 'converted_advance_amount')
     ? 'converted_advance_amount'
     : '0';
+$supplierPaymentReturnedSelect = $columnExists('supplier_payments', 'returned_amount')
+    ? 'returned_amount'
+    : '0 AS returned_amount';
+$supplierPaymentReturnedValue = $columnExists('supplier_payments', 'returned_amount')
+    ? 'returned_amount'
+    : '0';
 
 $supplierPaymentConservationBreaks = $fetchAll(
     'SELECT id, booking_reference, payment_no, currency, paid_amount, allocated_amount, unallocated_amount, '
-        . $supplierPaymentConvertedAdvanceSelect . ', status
+        . $supplierPaymentConvertedAdvanceSelect . ', ' . $supplierPaymentReturnedSelect . ', status
      FROM supplier_payments
      WHERE status <> "void"
-       AND ABS(paid_amount - (allocated_amount + unallocated_amount + ' . $supplierPaymentConvertedAdvanceValue . ')) > 0.005
+       AND ABS(paid_amount - (allocated_amount + unallocated_amount + '
+        . $supplierPaymentConvertedAdvanceValue . ' + ' . $supplierPaymentReturnedValue . ')) > 0.005
      LIMIT 10'
 );
 $check(
@@ -154,12 +212,13 @@ $check(
 
 $negativeSupplierPaymentValues = $fetchAll(
     'SELECT id, booking_reference, payment_no, currency, paid_amount, allocated_amount, unallocated_amount, '
-        . $supplierPaymentConvertedAdvanceSelect . '
+        . $supplierPaymentConvertedAdvanceSelect . ', ' . $supplierPaymentReturnedSelect . '
      FROM supplier_payments
      WHERE paid_amount < -0.005
         OR allocated_amount < -0.005
         OR unallocated_amount < -0.005
         OR ' . $supplierPaymentConvertedAdvanceValue . ' < -0.005
+        OR ' . $supplierPaymentReturnedValue . ' < -0.005
      LIMIT 10'
 );
 $check(
@@ -180,6 +239,143 @@ $check(
     'Supplier obligations have no negative impossible values',
     $negativeSupplierObligations === [],
     $negativeSupplierObligations === [] ? 'No invalid supplier obligation negatives found' : json_encode($negativeSupplierObligations, JSON_UNESCAPED_SLASHES)
+);
+
+if ($columnExists('booking_services', 'service_charge_currency')) {
+    $invalidServiceCurrencySnapshots = $fetchAll(
+        'SELECT id, booking_id, line_reference, currency, cost_currency,
+                service_charge_currency, pricing_exchange_rate,
+                service_charge_exchange_rate, service_charge,
+                vat, discount_amount
+         FROM booking_services
+         WHERE is_active = 1
+           AND (
+                UPPER(TRIM(currency)) NOT IN ("PKR", "AED", "USD")
+                OR UPPER(TRIM(cost_currency)) NOT IN ("PKR", "AED", "USD")
+                OR UPPER(TRIM(service_charge_currency)) NOT IN ("PKR", "AED", "USD")
+                OR (
+                    UPPER(TRIM(currency)) <> UPPER(TRIM(cost_currency))
+                    AND purchase_cost > 0.005
+                    AND pricing_exchange_rate <= 0
+                )
+                OR (
+                    UPPER(TRIM(currency)) <> UPPER(TRIM(service_charge_currency))
+                    AND ABS(service_charge + vat - discount_amount) > 0.005
+                    AND service_charge_exchange_rate <= 0
+                )
+           )
+         LIMIT 10'
+    );
+    $check(
+        'Service supplier, agency, and invoice currency snapshots remain valid',
+        $invalidServiceCurrencySnapshots === [],
+        $invalidServiceCurrencySnapshots === []
+            ? 'No invalid multi-currency service snapshot found'
+            : json_encode($invalidServiceCurrencySnapshots, JSON_UNESCAPED_SLASHES)
+    );
+}
+
+$activeBookingBranchMismatches = $fetchAll(
+    'SELECT mismatch_type, booking_reference, booking_branch_id, financial_branch_id
+     FROM (
+        SELECT "service" AS mismatch_type,
+               b.booking_reference,
+               b.branch_id AS booking_branch_id,
+               bs.branch_id AS financial_branch_id
+        FROM booking_services bs
+        INNER JOIN bookings b ON b.id = bs.booking_id
+        WHERE bs.branch_id <> b.branch_id
+        UNION ALL
+        SELECT "receivable",
+               b.booking_reference,
+               b.branch_id,
+               cri.branch_id
+        FROM customer_receivable_items cri
+        INNER JOIN bookings b ON b.booking_reference = cri.booking_reference
+        WHERE cri.branch_id <> b.branch_id
+        UNION ALL
+        SELECT "supplier_obligation",
+               b.booking_reference,
+               b.branch_id,
+               so.branch_id
+        FROM supplier_obligations so
+        INNER JOIN bookings b ON b.booking_reference = so.booking_reference
+        WHERE so.branch_id <> b.branch_id
+     ) branch_mismatches
+     LIMIT 10'
+);
+$check(
+    'Current booking services and subledgers belong to the booking branch',
+    $activeBookingBranchMismatches === [],
+    $activeBookingBranchMismatches === [] ? 'No current booking branch split found' : json_encode($activeBookingBranchMismatches, JSON_UNESCAPED_SLASHES)
+);
+
+$activeMoneyBranchMismatches = $fetchAll(
+    'SELECT mismatch_type, booking_reference, source_reference, money_branch_id, target_branch_id
+     FROM (
+        SELECT "customer_receipt_treasury" AS mismatch_type,
+               cr.booking_reference,
+               cr.receipt_no AS source_reference,
+               cr.branch_id AS money_branch_id,
+               ta.branch_id AS target_branch_id
+        FROM customer_receipts cr
+        INNER JOIN treasury_accounts ta ON ta.id = cr.treasury_account_id
+        WHERE cr.status <> "void"
+          AND cr.branch_id <> ta.branch_id
+        UNION ALL
+        SELECT "customer_allocation",
+               cri.booking_reference,
+               cr.receipt_no,
+               cr.branch_id,
+               cri.branch_id
+        FROM customer_receipt_allocations cra
+        INNER JOIN customer_receipts cr ON cr.id = cra.customer_receipt_id
+        INNER JOIN customer_receivable_items cri ON cri.id = cra.customer_receivable_item_id
+        WHERE cr.status <> "void"
+          AND cr.branch_id <> cri.branch_id
+        UNION ALL
+        SELECT "supplier_allocation",
+               so.booking_reference,
+               sp.payment_no,
+               sp.branch_id,
+               so.branch_id
+        FROM supplier_payment_allocations spa
+        INNER JOIN supplier_payments sp ON sp.id = spa.supplier_payment_id
+        INNER JOIN supplier_obligations so ON so.id = spa.supplier_obligation_id
+        WHERE sp.status <> "void"
+          AND sp.branch_id <> so.branch_id
+     ) money_branch_mismatches
+     LIMIT 10'
+);
+$check(
+    'Active money and allocations remain within their financial branch',
+    $activeMoneyBranchMismatches === [],
+    $activeMoneyBranchMismatches === [] ? 'No active cross-branch money allocation found' : json_encode($activeMoneyBranchMismatches, JSON_UNESCAPED_SLASHES)
+);
+
+$currentCurrencyJournalBranchMismatches = $fetchAll(
+    'SELECT DISTINCT je.id,
+            je.booking_reference,
+            je.currency,
+            b.branch_id AS booking_branch_id,
+            je.branch_id AS journal_branch_id,
+            je.source_type,
+            je.source_reference
+     FROM journal_entries je
+     INNER JOIN bookings b ON b.booking_reference = je.booking_reference
+     WHERE je.branch_id <> b.branch_id
+       AND EXISTS (
+            SELECT 1
+            FROM booking_services bs
+            WHERE bs.booking_id = b.id
+              AND (bs.currency = je.currency OR bs.cost_currency = je.currency)
+       )
+     LIMIT 10'
+);
+$check(
+    'Current-currency booking journals belong to the booking branch',
+    $currentCurrencyJournalBranchMismatches === [],
+    $currentCurrencyJournalBranchMismatches === [] ? 'No current-currency journal branch split found' : json_encode($currentCurrencyJournalBranchMismatches, JSON_UNESCAPED_SLASHES)
 );
 
 $journalImbalances = $fetchAll(
@@ -238,44 +434,67 @@ if ($columnExists('service_financial_corrections', 'new_final_sale_price')) {
                 new_final_sale_price,
                 ROUND(
                     CASE
-                        WHEN LOWER(TRIM(service_type)) = "air ticket" THEN new_purchase_cost
-                        ELSE new_sale_price
+                        WHEN UPPER(TRIM(new_invoice_currency)) = UPPER(TRIM(new_cost_currency))
+                            THEN new_purchase_cost
+                        ELSE ROUND(new_purchase_cost * new_pricing_exchange_rate, 0)
                     END
-                    + new_vat_amount
-                    - new_discount_amount,
+                    + (
+                        new_vat_amount - new_discount_amount
+                      ) * CASE
+                            WHEN UPPER(TRIM(new_invoice_currency)) = UPPER(TRIM(new_service_charge_currency))
+                                THEN 1
+                            ELSE new_service_charge_exchange_rate
+                          END,
                     2
                 ) AS price_floor_without_service_charge
          FROM service_financial_corrections
          WHERE (
                 new_final_sale_price >= ROUND(
                     CASE
-                        WHEN LOWER(TRIM(service_type)) = "air ticket" THEN new_purchase_cost
-                        ELSE new_sale_price
+                        WHEN UPPER(TRIM(new_invoice_currency)) = UPPER(TRIM(new_cost_currency))
+                            THEN new_purchase_cost
+                        ELSE ROUND(new_purchase_cost * new_pricing_exchange_rate, 0)
                     END
-                    + new_vat_amount
-                    - new_discount_amount,
+                    + (
+                        new_vat_amount - new_discount_amount
+                      ) * CASE
+                            WHEN UPPER(TRIM(new_invoice_currency)) = UPPER(TRIM(new_service_charge_currency))
+                                THEN 1
+                            ELSE new_service_charge_exchange_rate
+                          END,
                     2
                 )
                 AND ABS(
                     new_final_sale_price - (
                         CASE
-                            WHEN LOWER(TRIM(service_type)) = "air ticket" THEN new_purchase_cost
-                            ELSE new_sale_price
+                            WHEN UPPER(TRIM(new_invoice_currency)) = UPPER(TRIM(new_cost_currency))
+                                THEN new_purchase_cost
+                            ELSE ROUND(new_purchase_cost * new_pricing_exchange_rate, 0)
                         END
-                        + new_service_charge
-                        + new_vat_amount
-                        - new_discount_amount
+                        + (
+                            new_service_charge + new_vat_amount - new_discount_amount
+                          ) * CASE
+                                WHEN UPPER(TRIM(new_invoice_currency)) = UPPER(TRIM(new_service_charge_currency))
+                                    THEN 1
+                                ELSE new_service_charge_exchange_rate
+                              END
                     )
                 ) > 0.005
               )
             OR (
                 new_final_sale_price < ROUND(
                     CASE
-                        WHEN LOWER(TRIM(service_type)) = "air ticket" THEN new_purchase_cost
-                        ELSE new_sale_price
-                    END
-                    + new_vat_amount
-                    - new_discount_amount,
+                        WHEN UPPER(TRIM(new_invoice_currency)) = UPPER(TRIM(new_cost_currency))
+                            THEN new_purchase_cost
+                        ELSE ROUND(new_purchase_cost * new_pricing_exchange_rate, 0)
+                        END
+                        + (
+                            new_vat_amount - new_discount_amount
+                          ) * CASE
+                                WHEN UPPER(TRIM(new_invoice_currency)) = UPPER(TRIM(new_service_charge_currency))
+                                    THEN 1
+                                ELSE new_service_charge_exchange_rate
+                              END,
                     2
                 )
                 AND ABS(new_service_charge) > 0.005
@@ -312,8 +531,8 @@ if ($failures !== []) {
     foreach ($failures as $failure) {
         echo ' - ' . $failure . PHP_EOL;
     }
-    return 1;
+    exit(1);
 }
 
 echo PHP_EOL . 'Financial invariants audit passed.' . PHP_EOL;
-return 0;
+exit(0);

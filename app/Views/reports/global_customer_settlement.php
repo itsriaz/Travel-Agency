@@ -21,7 +21,7 @@ $totalOutstanding = array_sum(array_map(static fn (array $row): float => (float)
 
 <section class="page-head global-settlement-head">
     <div>
-        <h1>Global Customer Payment</h1>
+        <h1>Lumpsum Customer Payment</h1>
     </div>
     <div class="toolbar">
         <a class="btn btn-sm" href="<?= e(url('/reports?report=receivable_aging')) ?>">Receivable Aging</a>
@@ -187,7 +187,7 @@ $totalOutstanding = array_sum(array_map(static fn (array $row): float => (float)
         </div>
         <div class="workspace-feedback workspace-feedback--inline top-gap" data-global-customer-feedback hidden></div>
         <div class="station-command-buttons top-gap">
-            <button class="btn btn-primary btn-sm" type="submit" <?= $openReceivables === [] ? 'disabled' : '' ?>>Post Global Customer Payment</button>
+            <button class="btn btn-primary btn-sm" type="submit" <?= $openReceivables === [] ? 'disabled' : '' ?>>Post Lumpsum Customer Payment</button>
         </div>
     </form>
 </section>

@@ -164,6 +164,24 @@ final class BookingServiceEventRepository extends BaseRepository
         ]);
     }
 
+    public function mergePayload(int $eventId, array $values): void
+    {
+        $statement = $this->db->prepare('SELECT payload_json FROM booking_service_events WHERE id = :id LIMIT 1');
+        $statement->execute(['id' => $eventId]);
+        $payload = json_decode((string) ($statement->fetchColumn() ?: ''), true);
+        if (! is_array($payload)) {
+            $payload = [];
+        }
+
+        $update = $this->db->prepare(
+            'UPDATE booking_service_events SET payload_json = :payload_json WHERE id = :id'
+        );
+        $update->execute([
+            'id' => $eventId,
+            'payload_json' => json_encode(array_replace_recursive($payload, $values), JSON_UNESCAPED_SLASHES),
+        ]);
+    }
+
     public function latestPostedEvent(int $bookingServiceId, string $eventType): ?array
     {
         $statement = $this->db->prepare(
@@ -281,6 +299,38 @@ final class BookingServiceEventRepository extends BaseRepository
         $statement->execute(['booking_service_id' => $bookingServiceId]);
 
         return $statement->fetchAll() ?: [];
+    }
+
+    public function separateReissueMirrorAdjustments(int $bookingServiceId): array
+    {
+        $statement = $this->db->prepare(
+            'SELECT payload_json
+             FROM booking_service_events
+             WHERE booking_service_id = :booking_service_id
+               AND event_type = "reissue"
+               AND event_status = "posted"'
+        );
+        $statement->execute(['booking_service_id' => $bookingServiceId]);
+
+        $customerMirror = 0.0;
+        $supplierMirror = 0.0;
+        foreach (($statement->fetchAll() ?: []) as $row) {
+            $payload = json_decode((string) ($row['payload_json'] ?? ''), true);
+            if (! is_array($payload)) {
+                continue;
+            }
+            if (($payload['customer_uses_separate_receivable'] ?? false) === true) {
+                $customerMirror += (float) ($payload['customer_mirror_increment'] ?? 0);
+            }
+            if (($payload['supplier_uses_separate_obligation'] ?? false) === true) {
+                $supplierMirror += (float) ($payload['supplier_mirror_increment'] ?? 0);
+            }
+        }
+
+        return [
+            'customer_mirror_amount' => round($customerMirror, 2),
+            'supplier_mirror_amount' => round($supplierMirror, 2),
+        ];
     }
 
     public function voidEvent(

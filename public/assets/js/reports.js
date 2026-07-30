@@ -6,6 +6,7 @@
 
     const immediateFilters = form.querySelectorAll('[data-report-filter="immediate"]');
     const debouncedFilters = form.querySelectorAll('[data-report-filter="debounced"]');
+    const amountFilters = form.querySelectorAll('[data-report-filter="debounced-amount"]');
     const exportLink = document.getElementById('reports-export-link');
     const status = document.getElementById('reports-auto-status');
     const runButton = document.getElementById('reports-run-button');
@@ -65,11 +66,11 @@
         form.submit();
     };
 
-    const scheduleSubmit = () => {
+    const scheduleSubmit = (delay = 650) => {
         window.clearTimeout(debounceTimer);
         debounceTimer = window.setTimeout(() => {
             submitReport();
-        }, 650);
+        }, delay);
     };
 
     immediateFilters.forEach((field) => {
@@ -93,6 +94,22 @@
 
         field.addEventListener('input', handlePotentialUpdate);
         field.addEventListener('change', handlePotentialUpdate);
+    });
+
+    amountFilters.forEach((field) => {
+        const handleAmountUpdate = () => {
+            syncExportUrl();
+
+            const value = String(field.value || '').trim();
+            if (value !== '' && (!field.validity.valid || Number(value) <= 0)) {
+                return;
+            }
+
+            scheduleSubmit(350);
+        };
+
+        field.addEventListener('input', handleAmountUpdate);
+        field.addEventListener('change', handleAmountUpdate);
     });
 
     form.addEventListener('submit', () => {

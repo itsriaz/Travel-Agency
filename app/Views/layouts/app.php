@@ -71,7 +71,7 @@ $isCurrentPath = static function (string $path) use ($requestPath): bool {
             <div class="nav-section">
                 <div class="nav-label">Workspace</div>
                 <a class="nav-link<?= $isCurrentPath('/workspace') ? ' is-current' : '' ?>" href="<?= e(url('/workspace')) ?>">Search / New Booking</a>
-                <a class="nav-link<?= $isCurrentPath('/reports') ? ' is-current' : '' ?>" href="<?= e(url('/reports')) ?>">Reports</a>
+                <a class="nav-link<?= $isCurrentPath('/reports') || $isCurrentPath('/suppliers/settlements') ? ' is-current' : '' ?>" href="<?= e(url('/reports')) ?>">Reports</a>
             </div>
             <div class="nav-section">
                 <div class="nav-label">Control</div>
@@ -79,8 +79,14 @@ $isCurrentPath = static function (string $path) use ($requestPath): bool {
                 <a class="nav-link<?= $isCurrentPath('/security') ? ' is-current' : '' ?>" href="<?= e(url('/security')) ?>">Security</a>
                 <?php if (\App\Helpers\Auth::isSuperAdmin()): ?>
                     <a class="nav-link<?= $isCurrentPath('/admin/security') ? ' is-current' : '' ?>" href="<?= e(url('/admin/security')) ?>">Admin Security</a>
-                    <a class="nav-link<?= $isCurrentPath('/master-data') ? ' is-current' : '' ?>" href="<?= e(url('/master-data')) ?>">Master Data</a>
-                    <a class="nav-link<?= $isCurrentPath('/accounting-engine') ? ' is-current' : '' ?>" href="<?= e(url('/accounting-engine')) ?>">Accounting Engine</a>
+                    <div class="nav-link-group">
+                        <a class="nav-link<?= $isCurrentPath('/master-data') ? ' is-current' : '' ?>" href="<?= e(url('/master-data')) ?>">Master Data</a>
+                        <div class="nav-submenu" aria-label="Master data quick links">
+                            <a href="<?= e(url('/master-data/suppliers')) ?>">Manage Suppliers</a>
+                        </div>
+                    </div>
+                    <a class="nav-link" href="<?= e(url('/suppliers/settlements/global?start_new_payment=1&add_supplier=1')) ?>">Add Supplier</a>
+                    <a class="nav-link<?= $isCurrentPath('/linked-party-settlements') ? ' is-current' : '' ?>" href="<?= e(url('/linked-party-settlements')) ?>">Account and Supplier Links</a>
                     <div class="nav-link-group">
                         <a class="nav-link<?= $isCurrentPath('/treasury/accounts') ? ' is-current' : '' ?>" href="<?= e(url('/treasury/accounts')) ?>">Treasury Accounts</a>
                         <div class="nav-submenu" aria-label="Treasury quick links">

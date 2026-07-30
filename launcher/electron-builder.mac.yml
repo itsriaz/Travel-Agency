@@ -1,0 +1,51 @@
+appId: com.imdadnobleroute.travelops
+productName: Travel Agency Operations
+artifactName: ImdadInt Travel Agency Operations Launcher ${version}-${arch}.${ext}
+copyright: Copyright 2026 Imdad International Travel Agency / Noble Route Travel And Tours LLC
+
+directories:
+  output: dist-mac
+
+asar: true
+
+files:
+  - main.js
+  - preload.js
+  - offline.html
+  - loading.html
+  - renderer.js
+  - styles.css
+  - launcher_gate_private.pem
+  - assets/**/*
+  - package.json
+  - from: launcher-config.mac.json
+    to: launcher-config.json
+
+mac:
+  category: public.app-category.business
+  icon: assets/app-icon.icns
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  target:
+    - target: dmg
+      arch:
+        - universal
+  extendInfo:
+    NSHighResolutionCapable: true
+    NSRequiresAquaSystemAppearance: false
+
+dmg:
+  title: Travel Agency Operations ${version}
+  icon: assets/app-icon.icns
+  backgroundColor: "#eef5fb"
+  window:
+    width: 540
+    height: 380
+  contents:
+    - x: 150
+      y: 185
+      type: file
+    - x: 390
+      y: 185
+      type: link
+      path: /Applications

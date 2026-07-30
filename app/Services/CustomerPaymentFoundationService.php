@@ -172,11 +172,19 @@ final class CustomerPaymentFoundationService extends Service
         }
         $accountingRepository = new AccountingRepository($this->app);
         foreach (array_keys($creditCurrencies) as $currency) {
-            $customerCredit[$currency] = $accountingRepository->accountNetBalanceForBooking(
+            $journalCredit = $accountingRepository->accountNetBalanceForBooking(
                 $bookingReference,
                 $currency,
                 'CUSTOMER_CREDIT'
             );
+            // Booking-attributed control-account history can retain the original
+            // cancellation release after that receipt credit is transferred to
+            // another booking. The receipt's current unallocated amount is the
+            // spendable truth shown in the payment workspace.
+            $customerCredit[$currency] = round(min(
+                max($journalCredit, 0.0),
+                max($repository->bookingUnallocatedCreditTotal($bookingReference, $currency), 0.0)
+            ), 2);
         }
         foreach ($this->cancellationCustomerCreditOverstatementByCurrency($bookingServices) as $currency => $overstatedAmount) {
             $currency = trim((string) $currency);
@@ -328,6 +336,8 @@ final class CustomerPaymentFoundationService extends Service
 
                 return [
                     'allocationId' => (int) ($row['allocation_id'] ?? 0),
+                    'allocatedAt' => (string) ($row['allocated_at'] ?? ''),
+                    'allocationTrail' => (string) ($row['allocation_note'] ?? ''),
                     'receiptId' => (int) ($row['receipt_id'] ?? 0),
                     'receiptNo' => (string) ($row['receipt_no'] ?? ''),
                     'receiptDate' => (string) ($row['receipt_date'] ?? ''),
@@ -357,6 +367,7 @@ final class CustomerPaymentFoundationService extends Service
         $invoicePaymentHistory = $this->annotateInternalSettlementAllocations($invoicePaymentHistory, $internalSettlementReceipts);
 
         $dailySettlementRates = [];
+        $exchangeRateRepository = new ExchangeRateRepository($this->app);
         $settlementDate = date('Y-m-d');
         foreach (['PKR', 'AED', 'USD'] as $fromCurrency) {
             foreach (['PKR', 'AED', 'USD'] as $toCurrency) {
@@ -364,7 +375,7 @@ final class CustomerPaymentFoundationService extends Service
                     continue;
                 }
 
-                $rate = (new ExchangeRateRepository($this->app))->getExactRate($fromCurrency, $toCurrency, $settlementDate);
+                $rate = $exchangeRateRepository->getExactRate($fromCurrency, $toCurrency, $settlementDate);
                 if ($rate === null) {
                     continue;
                 }
@@ -375,8 +386,37 @@ final class CustomerPaymentFoundationService extends Service
                     'exchangeRate' => (float) ($rate['exchange_rate'] ?? 0),
                     'effectiveDate' => (string) ($rate['effective_date'] ?? $settlementDate),
                     'isDerived' => (bool) ($rate['is_derived'] ?? false),
+                    'scope' => 'daily',
                 ];
             }
+        }
+
+        $bookingId = (int) ($currentBookingContext['booking_id'] ?? 0);
+        foreach ($exchangeRateRepository->ratesForBooking($bookingId) as $rate) {
+            $fromCurrency = strtoupper(trim((string) ($rate['from_currency'] ?? '')));
+            $toCurrency = strtoupper(trim((string) ($rate['to_currency'] ?? '')));
+            $exchangeRate = round((float) ($rate['rate_value'] ?? 0), 8);
+            if ($fromCurrency === '' || $toCurrency === '' || $exchangeRate <= 0) {
+                continue;
+            }
+
+            $effectiveDate = (string) ($rate['effective_date'] ?? $settlementDate);
+            $dailySettlementRates[$fromCurrency . '->' . $toCurrency] = [
+                'fromCurrency' => $fromCurrency,
+                'toCurrency' => $toCurrency,
+                'exchangeRate' => $exchangeRate,
+                'effectiveDate' => $effectiveDate,
+                'isDerived' => false,
+                'scope' => 'booking',
+            ];
+            $dailySettlementRates[$toCurrency . '->' . $fromCurrency] = [
+                'fromCurrency' => $toCurrency,
+                'toCurrency' => $fromCurrency,
+                'exchangeRate' => round(1 / $exchangeRate, 8),
+                'effectiveDate' => $effectiveDate,
+                'isDerived' => true,
+                'scope' => 'booking',
+            ];
         }
 
         $allocatableReceipts = array_values(array_filter(

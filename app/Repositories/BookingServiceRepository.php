@@ -47,6 +47,9 @@ final class BookingServiceRepository extends BaseRepository
                 bs.vat,
                 bs.commission,
                 bs.service_charge,
+                bs.service_charge_currency,
+                bs.service_charge_exchange_rate,
+                bs.service_charge_rate_effective_date,
                 bs.discount_amount,
                 bs.final_sale_price,
                 bs.net_profit_loss,
@@ -163,6 +166,9 @@ final class BookingServiceRepository extends BaseRepository
                 bs.vat,
                 bs.commission,
                 bs.service_charge,
+                bs.service_charge_currency,
+                bs.service_charge_exchange_rate,
+                bs.service_charge_rate_effective_date,
                 bs.discount_amount,
                 bs.final_sale_price,
                 bs.net_profit_loss,
@@ -253,6 +259,9 @@ final class BookingServiceRepository extends BaseRepository
                 bs.vat,
                 bs.commission,
                 bs.service_charge,
+                bs.service_charge_currency,
+                bs.service_charge_exchange_rate,
+                bs.service_charge_rate_effective_date,
                 bs.discount_amount,
                 bs.final_sale_price,
                 bs.net_profit_loss,
@@ -346,11 +355,11 @@ final class BookingServiceRepository extends BaseRepository
             $statement = $this->db->prepare(
                 'INSERT INTO booking_services (
                     booking_id, branch_id, line_reference, display_order, service_type, supplier_id, supplier_name_snapshot, traveler_id, passenger_name_snapshot,
-                    currency, cost_currency, sale_price, purchase_cost, pricing_exchange_rate, pricing_rate_effective_date, taxes, other_fare, soto_fare, spyi_amount, aq_yr_pk_amount, yq_amount, oth_amount, vat_input, vat, commission, service_charge, discount_amount, final_sale_price, net_profit_loss, due_date, service_status,
+                    currency, cost_currency, sale_price, purchase_cost, pricing_exchange_rate, pricing_rate_effective_date, taxes, other_fare, soto_fare, spyi_amount, aq_yr_pk_amount, yq_amount, oth_amount, vat_input, vat, commission, service_charge, service_charge_currency, service_charge_exchange_rate, service_charge_rate_effective_date, discount_amount, final_sale_price, net_profit_loss, due_date, service_status,
                     remarks, loss_reason, loss_reason_recorded_at, is_active, created_by_user_id, updated_by_user_id
                  ) VALUES (
                     :booking_id, :branch_id, :line_reference, :display_order, :service_type, :supplier_id, :supplier_name_snapshot, :traveler_id, :passenger_name_snapshot,
-                    :currency, :cost_currency, :sale_price, :purchase_cost, :pricing_exchange_rate, :pricing_rate_effective_date, :taxes, :other_fare, :soto_fare, :spyi_amount, :aq_yr_pk_amount, :yq_amount, :oth_amount, :vat_input, :vat, :commission, :service_charge, :discount_amount, :final_sale_price, :net_profit_loss, :due_date, :service_status,
+                    :currency, :cost_currency, :sale_price, :purchase_cost, :pricing_exchange_rate, :pricing_rate_effective_date, :taxes, :other_fare, :soto_fare, :spyi_amount, :aq_yr_pk_amount, :yq_amount, :oth_amount, :vat_input, :vat, :commission, :service_charge, :service_charge_currency, :service_charge_exchange_rate, :service_charge_rate_effective_date, :discount_amount, :final_sale_price, :net_profit_loss, :due_date, :service_status,
                     :remarks, :loss_reason, :loss_reason_recorded_at, 1, :created_by_user_id, :updated_by_user_id
                  )'
             );
@@ -381,6 +390,9 @@ final class BookingServiceRepository extends BaseRepository
                 'vat' => $masterData['vat'],
                 'commission' => $masterData['commission'],
                 'service_charge' => $masterData['service_charge'],
+                'service_charge_currency' => $masterData['service_charge_currency'],
+                'service_charge_exchange_rate' => $masterData['service_charge_exchange_rate'],
+                'service_charge_rate_effective_date' => $masterData['service_charge_rate_effective_date'],
                 'discount_amount' => $masterData['discount_amount'],
                 'final_sale_price' => $masterData['final_sale_price'],
                 'net_profit_loss' => $masterData['net_profit_loss'],
@@ -425,9 +437,12 @@ final class BookingServiceRepository extends BaseRepository
                      oth_amount = :oth_amount,
                      vat_input = :vat_input,
                      vat = :vat,
-                     commission = :commission,
-                     service_charge = :service_charge,
-                     discount_amount = :discount_amount,
+                      commission = :commission,
+                      service_charge = :service_charge,
+                      service_charge_currency = :service_charge_currency,
+                      service_charge_exchange_rate = :service_charge_exchange_rate,
+                      service_charge_rate_effective_date = :service_charge_rate_effective_date,
+                      discount_amount = :discount_amount,
                      final_sale_price = :final_sale_price,
                      net_profit_loss = :net_profit_loss,
                      due_date = :due_date,
@@ -462,6 +477,9 @@ final class BookingServiceRepository extends BaseRepository
                 'vat' => $masterData['vat'],
                 'commission' => $masterData['commission'],
                 'service_charge' => $masterData['service_charge'],
+                'service_charge_currency' => $masterData['service_charge_currency'],
+                'service_charge_exchange_rate' => $masterData['service_charge_exchange_rate'],
+                'service_charge_rate_effective_date' => $masterData['service_charge_rate_effective_date'],
                 'discount_amount' => $masterData['discount_amount'],
                 'final_sale_price' => $masterData['final_sale_price'],
                 'net_profit_loss' => $masterData['net_profit_loss'],
@@ -488,9 +506,12 @@ final class BookingServiceRepository extends BaseRepository
                      purchase_cost = :purchase_cost,
                      pricing_exchange_rate = :pricing_exchange_rate,
                      pricing_rate_effective_date = :pricing_rate_effective_date,
-                     commission = :commission,
-                     service_charge = :service_charge,
-                     discount_amount = :discount_amount,
+                      commission = :commission,
+                      service_charge = :service_charge,
+                      service_charge_currency = :service_charge_currency,
+                      service_charge_exchange_rate = :service_charge_exchange_rate,
+                      service_charge_rate_effective_date = :service_charge_rate_effective_date,
+                      discount_amount = :discount_amount,
                      final_sale_price = :final_sale_price,
                      net_profit_loss = :net_profit_loss,
                      remarks = :remarks,
@@ -509,6 +530,9 @@ final class BookingServiceRepository extends BaseRepository
                 'pricing_rate_effective_date' => $financialData['pricing_rate_effective_date'],
                 'commission' => $financialData['commission'] ?? 0,
                 'service_charge' => $financialData['service_charge'] ?? 0,
+                'service_charge_currency' => $financialData['service_charge_currency'] ?? $financialData['currency'],
+                'service_charge_exchange_rate' => $financialData['service_charge_exchange_rate'] ?? 1,
+                'service_charge_rate_effective_date' => $financialData['service_charge_rate_effective_date'] ?? $financialData['pricing_rate_effective_date'],
                 'discount_amount' => $financialData['discount_amount'] ?? 0,
                 'final_sale_price' => $financialData['final_sale_price'],
                 'net_profit_loss' => $financialData['net_profit_loss'],
@@ -563,29 +587,62 @@ final class BookingServiceRepository extends BaseRepository
         ]);
     }
 
-    public function updateAirTicketReissueDetails(int $serviceId, ?string $ticketNumber, ?string $pnr, int $actorUserId): void
+    public function updateAirTicketReissueDetails(
+        int $serviceId,
+        ?string $ticketNumber,
+        ?string $pnr,
+        int $actorUserId,
+        float $supplierReissueCharge = 0.0,
+        float $agencyServiceFee = 0.0,
+        ?float $customerAdjustment = null
+    ): void
     {
-        $this->transaction(function () use ($serviceId, $ticketNumber, $pnr, $actorUserId): void {
+        $this->transaction(function () use (
+            $serviceId,
+            $ticketNumber,
+            $pnr,
+            $actorUserId,
+            $supplierReissueCharge,
+            $agencyServiceFee,
+            $customerAdjustment
+        ): void {
+            $supplierReissueCharge = round(max($supplierReissueCharge, 0.0), 2);
+            $agencyServiceFee = round(max($agencyServiceFee, 0.0), 2);
+            $customerAdjustment = round(max($customerAdjustment ?? ($supplierReissueCharge + $agencyServiceFee), 0.0), 2);
             $statement = $this->db->prepare(
                 'UPDATE service_air_ticket
                  SET ticket_number = :ticket_number,
-                     pnr = :pnr
+                     pnr = :pnr,
+                     supplier_cost = COALESCE(supplier_cost, 0) + :supplier_reissue_charge,
+                     sale_amount = COALESCE(sale_amount, 0) + :customer_adjustment
                  WHERE booking_service_id = :service_id'
             );
             $statement->execute([
                 'service_id' => $serviceId,
                 'ticket_number' => $ticketNumber,
                 'pnr' => $pnr,
+                'supplier_reissue_charge' => $supplierReissueCharge,
+                'customer_adjustment' => $customerAdjustment,
             ]);
 
             $updateService = $this->db->prepare(
                 'UPDATE booking_services
                  SET service_status = "Booked",
+                     sale_price = COALESCE(sale_price, 0) + :sale_supplier_reissue_charge,
+                     purchase_cost = COALESCE(purchase_cost, 0) + :cost_supplier_reissue_charge,
+                     service_charge = COALESCE(service_charge, 0) + :service_charge_increment,
+                     final_sale_price = COALESCE(final_sale_price, 0) + :customer_adjustment,
+                     net_profit_loss = COALESCE(net_profit_loss, 0) + :profit_increment,
                      updated_by_user_id = :updated_by_user_id
                  WHERE id = :id'
             );
             $updateService->execute([
                 'id' => $serviceId,
+                'sale_supplier_reissue_charge' => $supplierReissueCharge,
+                'cost_supplier_reissue_charge' => $supplierReissueCharge,
+                'service_charge_increment' => $agencyServiceFee,
+                'profit_increment' => $agencyServiceFee,
+                'customer_adjustment' => $customerAdjustment,
                 'updated_by_user_id' => $actorUserId,
             ]);
         });

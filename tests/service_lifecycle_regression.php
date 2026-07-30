@@ -91,13 +91,25 @@ echo 'Started: ' . date(DATE_ATOM) . PHP_EOL . PHP_EOL;
 $db->beginTransaction();
 
 try {
+    $regressionCustomer = $db->query(
+        'SELECT id, full_name, mobile
+         FROM travelers
+         WHERE branch_id = 1
+         ORDER BY id ASC
+         LIMIT 1'
+    )->fetch(PDO::FETCH_ASSOC);
+    if ($regressionCustomer === false || (int) ($regressionCustomer['id'] ?? 0) <= 0) {
+        throw new RuntimeException('An existing branch-1 customer is required for the mixed-currency receipt assertion.');
+    }
+
     $bookingResult = $bookingService->saveBooking([
         'branch_id' => 1,
         'booking_status' => 'draft',
         'booking_date' => $today,
         'party_label' => 'Lead Traveler / Booking Party',
-        'lead_traveler_name' => 'Regression Lifecycle Customer',
-        'contact_mobile' => '03001234567',
+        'selected_customer_id' => (int) $regressionCustomer['id'],
+        'lead_traveler_name' => (string) ($regressionCustomer['full_name'] ?? 'Regression Lifecycle Customer'),
+        'contact_mobile' => (string) ($regressionCustomer['mobile'] ?? '03001234567'),
         'passport_number' => 'RG1234567',
         'remarks' => 'Automated service lifecycle regression',
     ], $actorUserId, $accessibleBranchIds);
@@ -136,6 +148,30 @@ try {
         'Two temporary air-ticket services created',
         $cancelServiceId > 0 && $reissueServiceId > 0 && $cancelLineReference !== '' && $reissueLineReference !== '',
         $cancelLineReference . ' / ' . $reissueLineReference
+    );
+
+    $refundBeforeSettlementBlocked = false;
+    try {
+        $serviceWorkspace->refundService([
+            'booking_id' => $bookingId,
+            'service_id' => $cancelServiceId,
+            'refund_reason' => 'Regression premature refund attempt',
+            'refund_event_date' => $today,
+            'refund_payment_method' => 'cash',
+            'supplier_refund_payment_method' => 'cash',
+            'customer_refund_amount' => '1.00',
+            'customer_refund_treatment' => 'pay_now',
+            'supplier_refund_amount' => '0.00',
+        ], $actorUserId, $accessibleBranchIds);
+    } catch (\RuntimeException $exception) {
+        $refundBeforeSettlementBlocked = str_contains(
+            $exception->getMessage(),
+            'Settle the service cancellation before posting a customer or supplier refund.'
+        );
+    }
+    $check(
+        'Refund is blocked until cancellation settlement is posted',
+        $refundBeforeSettlementBlocked
     );
 
     $initialCancelReceivable = $receivableRepository->findReceivableByServiceLine($bookingReference, $cancelLineReference);
@@ -278,6 +314,7 @@ try {
         'settlement_event_date' => $today,
         'customer_penalty_amount' => '40.00',
         'expected_supplier_refund_amount' => '90.00',
+        'agency_fee_refund_amount' => '5.00',
         'settlement_notes' => 'Regression settlement event',
     ], $actorUserId, $accessibleBranchIds);
 
@@ -287,16 +324,85 @@ try {
     $check(
         'Cancellation settlement releases customer credit and resyncs receivable truth',
         $settledReceivable !== null
-            && round((float) ($settledReceivable['due_amount'] ?? 0), 2) === 60.00
-            && round((float) ($settledReceivable['allocated_amount'] ?? 0), 2) === 60.00
+            && round((float) ($settledReceivable['due_amount'] ?? 0), 2) === 55.00
+            && round((float) ($settledReceivable['allocated_amount'] ?? 0), 2) === 55.00
             && round((float) ($settledReceivable['outstanding_amount'] ?? 0), 2) === 0.00
-            && round($customerCreditAfterSettlement, 2) === 50.00
-            && round((float) ($latestCancelEvent['customer_credit_amount'] ?? 0), 2) === 50.00,
+            && round($customerCreditAfterSettlement, 2) === 55.00
+            && round((float) ($latestCancelEvent['customer_credit_amount'] ?? 0), 2) === 55.00,
         json_encode([
             'receivable' => $settledReceivable,
             'customer_credit_balance' => $customerCreditAfterSettlement,
             'event_customer_credit_amount' => $latestCancelEvent['customer_credit_amount'] ?? null,
         ], JSON_UNESCAPED_SLASHES)
+    );
+
+    $latestCancelPayload = json_decode((string) ($latestCancelEvent['payload_json'] ?? '{}'), true) ?: [];
+    $check(
+        'Partial agency fee refund is disclosed in settlement truth and reduces retained agency fee',
+        round((float) ($latestCancelPayload['agency_fee_charged_amount'] ?? 0), 2) === 10.00
+            && round((float) ($latestCancelPayload['agency_fee_refund_amount'] ?? 0), 2) === 5.00
+            && round((float) ($latestCancelPayload['agency_fee_retained_amount'] ?? 0), 2) === 5.00
+            && round((float) ($latestCancelPayload['customer_final_charge_amount'] ?? 0), 2) === 55.00,
+        json_encode($latestCancelPayload, JSON_UNESCAPED_SLASHES)
+    );
+
+    $serviceWorkspace->settleCancellationFinancials([
+        'booking_id' => $bookingId,
+        'service_id' => $cancelServiceId,
+        'settlement_edit_mode' => 1,
+        'settlement_reason' => 'Regression full agency fee refund',
+        'settlement_event_date' => $today,
+        'customer_penalty_amount' => '40.00',
+        'expected_supplier_refund_amount' => '90.00',
+        'agency_fee_refund_amount' => '10.00',
+    ], $actorUserId, $accessibleBranchIds);
+    $fullFeeRefundReceivable = $receivableRepository->findReceivableByServiceLine($bookingReference, $cancelLineReference);
+    $fullFeeRefundCancelEvent = $eventRepository->latestPostedEvent($cancelServiceId, 'cancel');
+    $fullFeeRefundPayload = json_decode((string) ($fullFeeRefundCancelEvent['payload_json'] ?? '{}'), true) ?: [];
+    $check(
+        'Full agency fee refund is allowed and retains no agency fee',
+        round((float) ($fullFeeRefundReceivable['due_amount'] ?? 0), 2) === 50.00
+            && round((float) ($fullFeeRefundCancelEvent['customer_credit_amount'] ?? 0), 2) === 60.00
+            && round((float) ($fullFeeRefundPayload['agency_fee_refund_amount'] ?? 0), 2) === 10.00
+            && round((float) ($fullFeeRefundPayload['agency_fee_retained_amount'] ?? 0), 2) === 0.00,
+        json_encode(['receivable' => $fullFeeRefundReceivable, 'payload' => $fullFeeRefundPayload], JSON_UNESCAPED_SLASHES)
+    );
+
+    $serviceWorkspace->settleCancellationFinancials([
+        'booking_id' => $bookingId,
+        'service_id' => $cancelServiceId,
+        'settlement_edit_mode' => 1,
+        'settlement_reason' => 'Regression restore partial agency fee refund',
+        'settlement_event_date' => $today,
+        'customer_penalty_amount' => '40.00',
+        'expected_supplier_refund_amount' => '90.00',
+        'agency_fee_refund_amount' => '5.00',
+    ], $actorUserId, $accessibleBranchIds);
+
+    $overLimitAgencyFeeBlocked = false;
+    try {
+        $serviceWorkspace->settleCancellationFinancials([
+            'booking_id' => $bookingId,
+            'service_id' => $cancelServiceId,
+            'settlement_edit_mode' => 1,
+            'settlement_reason' => 'Regression invalid agency fee refund',
+            'settlement_event_date' => $today,
+            'customer_penalty_amount' => '40.00',
+            'expected_supplier_refund_amount' => '90.00',
+            'agency_fee_refund_amount' => '11.00',
+        ], $actorUserId, $accessibleBranchIds);
+    } catch (Throwable $exception) {
+        $overLimitAgencyFeeBlocked = str_contains($exception->getMessage(), 'cannot exceed');
+    }
+    $receivableAfterOverLimitAttempt = $receivableRepository->findReceivableByServiceLine($bookingReference, $cancelLineReference);
+    $cancelEventAfterOverLimitAttempt = $eventRepository->latestPostedEvent($cancelServiceId, 'cancel');
+    $payloadAfterOverLimitAttempt = json_decode((string) ($cancelEventAfterOverLimitAttempt['payload_json'] ?? '{}'), true) ?: [];
+    $check(
+        'Agency fee refund above the charged fee is rejected and transaction rolls back cleanly',
+        $overLimitAgencyFeeBlocked
+            && round((float) ($receivableAfterOverLimitAttempt['due_amount'] ?? 0), 2) === 55.00
+            && round((float) ($payloadAfterOverLimitAttempt['agency_fee_refund_amount'] ?? 0), 2) === 5.00,
+        json_encode(['receivable' => $receivableAfterOverLimitAttempt, 'payload' => $payloadAfterOverLimitAttempt], JSON_UNESCAPED_SLASHES)
     );
 
     $check(
@@ -338,14 +444,46 @@ try {
         json_encode($matchingSupplierReceivableBeforeRefund, JSON_UNESCAPED_SLASHES)
     );
 
+    $bankRefundSources = $treasuryRepository->eligiblePaymentTreasuryAccounts(1, 'PKR', 'bank_transfer');
+    $customerCashRefundBankSource = $bankRefundSources[0] ?? null;
+    $check(
+        'Cash-to-customer refund regression has a bank funding source',
+        $customerCashRefundBankSource !== null
+    );
+
+    $customerRefundWithoutPayNowBlocked = false;
+    try {
+        $serviceWorkspace->refundService([
+            'booking_id' => $bookingId,
+            'service_id' => $cancelServiceId,
+            'refund_reason' => 'Regression customer refund without pay-now selection',
+            'refund_event_date' => $today,
+            'refund_payment_method' => 'cash',
+            'refund_treasury_account_id' => (int) ($customerCashRefundBankSource['id'] ?? 0),
+            'customer_refund_amount' => '1.00',
+            'supplier_refund_amount' => '0.00',
+        ], $actorUserId, $accessibleBranchIds);
+    } catch (\RuntimeException $exception) {
+        $customerRefundWithoutPayNowBlocked = str_contains(
+            $exception->getMessage(),
+            'Select Pay Customer Now before posting money as returned to the customer.'
+        );
+    }
+    $check(
+        'Customer money cannot be marked refunded without selecting Pay Customer Now',
+        $customerRefundWithoutPayNowBlocked
+    );
+
     $serviceWorkspace->refundService([
         'booking_id' => $bookingId,
         'service_id' => $cancelServiceId,
         'refund_reason' => 'Regression refund',
         'refund_event_date' => $today,
         'refund_payment_method' => 'cash',
-        'refund_treasury_account_id' => (int) (($treasuryRepository->defaultTreasuryAccountForPayment(1, 'PKR', 'cash') ?? [])['id'] ?? 0),
+        'refund_treasury_account_id' => (int) ($customerCashRefundBankSource['id'] ?? 0),
+        'supplier_refund_payment_method' => 'supplier_credit',
         'customer_refund_amount' => '30.00',
+        'customer_refund_treatment' => 'pay_now',
         'supplier_refund_amount' => '30.00',
         'refund_notes' => 'Regression refund event',
     ], $actorUserId, $accessibleBranchIds);
@@ -366,26 +504,72 @@ try {
             $supplierRefundEvent = $refundEventRow;
         }
     }
+    $customerRefundDetail = $customerRefundEvent !== null
+        ? $refundDetailRepository->findByServiceEventId((int) ($customerRefundEvent['id'] ?? 0))
+        : null;
     $refundDetail = $supplierRefundEvent !== null
         ? $refundDetailRepository->findByServiceEventId((int) ($supplierRefundEvent['id'] ?? 0))
         : null;
 
     $check(
-        'Refund reduces customer credit, records supplier refund received, and stores treasury source',
+        'Refund reduces customer credit and records supplier-retained refund without false treasury movement',
         $customerRefundEvent !== null
             && $supplierRefundEvent !== null
             && round((float) ($customerRefundEvent['customer_refund_amount'] ?? 0), 2) === 30.00
             && round((float) ($supplierRefundEvent['supplier_refund_amount'] ?? 0), 2) === 30.00
             && (int) ($customerRefundEvent['journal_entry_id'] ?? 0) > 0
-            && (int) ($supplierRefundEvent['journal_entry_id'] ?? 0) > 0
-            && round($customerCreditAfterRefund, 2) === 20.00
+            && (int) ($supplierRefundEvent['journal_entry_id'] ?? 0) === 0
+            && round($customerCreditAfterRefund, 2) === 25.00
             && $refundDetail !== null
-            && (int) ($refundDetail['treasury_account_id'] ?? 0) > 0,
+            && (string) ($refundDetail['refund_payment_method'] ?? '') === 'supplier_credit'
+            && (int) ($refundDetail['treasury_account_id'] ?? 0) === 0,
         json_encode([
             'customer_credit_after_refund' => $customerCreditAfterRefund,
             'customer_refund_event' => $customerRefundEvent,
             'supplier_refund_event' => $supplierRefundEvent,
             'refund_detail' => $refundDetail,
+        ], JSON_UNESCAPED_SLASHES)
+    );
+    $customerRefundPayload = json_decode((string) ($customerRefundEvent['payload_json'] ?? '{}'), true) ?: [];
+    $check(
+        'Cash paid to customer may be funded from a bank account without customer bank details',
+        $customerRefundDetail !== null
+            && (string) ($customerRefundDetail['refund_payment_method'] ?? '') === 'cash'
+            && (int) ($customerRefundDetail['treasury_account_id'] ?? 0) === (int) ($customerCashRefundBankSource['id'] ?? 0)
+            && ($customerRefundDetail['customer_bank_name'] ?? null) === null
+            && ($customerRefundDetail['customer_bank_account_title'] ?? null) === null
+            && ($customerRefundDetail['customer_bank_account_no'] ?? null) === null
+            && ($customerRefundDetail['customer_bank_iban'] ?? null) === null
+            && (string) ($customerRefundPayload['refund_detail']['treasury_account_snapshot']['account_type'] ?? '') === 'bank',
+        json_encode(['detail' => $customerRefundDetail, 'payload' => $customerRefundPayload], JSON_UNESCAPED_SLASHES)
+    );
+
+    $retainedCreditAccountLedger = (new \App\Services\AccountLedgerService($app))->report([
+        'dateFrom' => '', 'dateTo' => '', 'currency' => 'PKR', 'businessSourceId' => 0,
+        'customerName' => '', 'bookingReference' => $bookingReference,
+    ], $accessibleBranchIds);
+    $retainedCreditAccountRows = array_values(array_filter(
+        (array) ($retainedCreditAccountLedger['rows'] ?? []),
+        static fn (array $row): bool => (string) ($row['ledger_entry'] ?? '') === 'Supplier refund retained as supplier credit'
+    ));
+    $check(
+        'Account ledger identifies retained supplier credit without fabricating cash or bank movement',
+        count($retainedCreditAccountRows) === 1
+            && round((float) ($retainedCreditAccountRows[0]['raw_debit_amount'] ?? 0), 2) === 0.00
+            && round((float) ($retainedCreditAccountRows[0]['raw_credit_amount'] ?? 0), 2) === 0.00
+            && (string) ($retainedCreditAccountRows[0]['settlement_status'] ?? '') === 'Non-cash Credit',
+        json_encode($retainedCreditAccountRows, JSON_UNESCAPED_SLASHES)
+    );
+    $retainedSourcePayment = $supplierRepository->findSupplierPaymentById($cancelSupplierPaymentId);
+    $retainedAdvanceBalance = $supplierRepository->availableAdvanceBalanceForSupplier($cancelSupplierId, 1, 'PKR');
+    $check(
+        'Supplier-retained refund becomes reusable advance while pending refund remains booking-bound',
+        round((float) ($retainedSourcePayment['converted_advance_amount'] ?? 0), 2) === 30.00
+            && round((float) ($retainedSourcePayment['unallocated_amount'] ?? 0), 2) === 60.00
+            && round($retainedAdvanceBalance, 2) === 30.00,
+        json_encode([
+            'source_payment' => $retainedSourcePayment,
+            'available_supplier_advance' => $retainedAdvanceBalance,
         ], JSON_UNESCAPED_SLASHES)
     );
 
@@ -456,7 +640,7 @@ try {
         if (
             (string) ($row['booking_reference'] ?? '') === $bookingReference
             && (string) ($row['service_line_reference'] ?? '') === $cancelLineReference
-            && (string) ($row['entry_type'] ?? '') === 'Supplier Refund Received'
+            && (string) ($row['entry_type'] ?? '') === 'Supplier Refund Retained as Credit'
         ) {
             $matchingSupplierRefundLedgerRow = $row;
             break;
@@ -499,7 +683,7 @@ try {
         ! $hasSyntheticSupplierTotal
             && ($supplierLedgerCardValues['Supplier Debit / PKR'] ?? '') === 'PKR 100.00'
             && ($supplierLedgerCardValues['Supplier Credit / PKR'] ?? '') === 'PKR 100.00'
-            && ($supplierLedgerCardValues['Supplier Balance / PKR'] ?? '') === 'PKR -60.00',
+            && ($supplierLedgerCardValues['Supplier Balance / PKR'] ?? '') === 'PKR 60.00 Advance',
         json_encode([
             'has_synthetic_total' => $hasSyntheticSupplierTotal,
             'cards' => $supplierLedgerCards,
@@ -521,7 +705,7 @@ try {
     );
 
     $check(
-        'Supplier ledger shows supplier refund received as credit against supplier receivable',
+        'Supplier ledger shows supplier-retained refund as credit against supplier receivable',
         $matchingSupplierRefundLedgerRow !== null
             && round((float) ($matchingSupplierRefundLedgerRow['debit_amount'] ?? 0), 2) === 0.00
             && round((float) ($matchingSupplierRefundLedgerRow['credit_amount'] ?? 0), 2) === 30.00,
@@ -588,12 +772,17 @@ try {
         }
     }
     $latestRefundEventAfterReverse = $eventRepository->latestPostedEvent($cancelServiceId, 'refund');
+    $retainedSourcePaymentAfterReverse = $supplierRepository->findSupplierPaymentById($cancelSupplierPaymentId);
+    $retainedAdvanceAfterReverse = $supplierRepository->availableAdvanceBalanceForSupplier($cancelSupplierId, 1, 'PKR');
     $check(
         'Refund reversal restores customer credit and restores supplier receivable follow-up',
-        round($customerCreditAfterRefundReverse, 2) === 50.00
+        round($customerCreditAfterRefundReverse, 2) === 55.00
             && $latestRefundEventAfterReverse === null
             && $matchingSupplierReceivableAfterRefundReverse !== null
-            && round((float) ($matchingSupplierReceivableAfterRefundReverse['supplier_receivable_balance'] ?? 0), 2) === 90.00,
+            && round((float) ($matchingSupplierReceivableAfterRefundReverse['supplier_receivable_balance'] ?? 0), 2) === 90.00
+            && round((float) ($retainedSourcePaymentAfterReverse['converted_advance_amount'] ?? 0), 2) === 0.00
+            && round((float) ($retainedSourcePaymentAfterReverse['unallocated_amount'] ?? 0), 2) === 90.00
+            && round($retainedAdvanceAfterReverse, 2) === 0.00,
         json_encode([
             'customer_credit_after_refund_reverse' => $customerCreditAfterRefundReverse,
             'supplier_receivable_after_refund_reverse' => $matchingSupplierReceivableAfterRefundReverse,
@@ -827,6 +1016,7 @@ try {
         'refund_reason' => 'Regression later supplier refund received',
         'refund_event_date' => $today,
         'customer_refund_amount' => '600.00',
+        'customer_refund_treatment' => 'pay_now',
         'supplier_refund_amount' => '653.00',
         'refund_payment_method' => 'cash',
         'refund_treasury_account_id' => (int) (($treasuryRepository->defaultTreasuryAccountForPayment(1, 'PKR', 'cash') ?? [])['id'] ?? 0),
@@ -849,6 +1039,16 @@ try {
         'PKR',
         'CUSTOMER_CREDIT'
     );
+    $lossAvailableCreditsAfterRefund = $receivableRepository->availableBookingCredits(
+        1,
+        (int) ($lossBooking['lead_traveler_id'] ?? 0),
+        'PKR'
+    );
+    $lossCreditStillAvailable = array_filter(
+        $lossAvailableCreditsAfterRefund,
+        static fn (array $row): bool => (string) ($row['booking_reference'] ?? '') === $lossBookingReference
+    ) !== [];
+    $lossSupplierPaymentAfterCashRefund = $supplierRepository->findSupplierPaymentById($lossSupplierPaymentId);
     $check(
         'Later supplier refund received clears expected supplier receivable without requiring advance credit',
         round((float) $lossCustomerCreditAfterRefund, 2) === 0.00
@@ -859,7 +1059,21 @@ try {
         json_encode([
             'customer_credit_after_refund' => $lossCustomerCreditAfterRefund,
             'supplier_receivable_after_refund' => $lossSupplierReceivableAfterRefund,
+            'supplier_payment_after_refund' => $lossSupplierPaymentAfterCashRefund,
         ], JSON_UNESCAPED_SLASHES)
+    );
+    $check(
+        'Cash supplier refund is recorded as returned and cannot be reused as supplier advance',
+        round((float) ($lossSupplierPaymentAfterCashRefund['paid_amount'] ?? 0), 2) === 1188.00
+            && round((float) ($lossSupplierPaymentAfterCashRefund['allocated_amount'] ?? 0), 2) === 535.00
+            && round((float) ($lossSupplierPaymentAfterCashRefund['unallocated_amount'] ?? 0), 2) === 0.00
+            && round((float) ($lossSupplierPaymentAfterCashRefund['returned_amount'] ?? 0), 2) === 653.00,
+        json_encode($lossSupplierPaymentAfterCashRefund, JSON_UNESCAPED_SLASHES)
+    );
+    $check(
+        'A customer refund paid in cash is no longer offered as available customer credit',
+        ! $lossCreditStillAvailable,
+        json_encode($lossAvailableCreditsAfterRefund, JSON_UNESCAPED_SLASHES)
     );
 
     $serviceWorkspace->reissueService([
@@ -869,14 +1083,18 @@ try {
         'reissue_event_date' => $today,
         'new_ticket_number' => 'RG-REISSUE-002',
         'new_pnr' => 'RGREI2',
-        'fare_difference_amount' => '15.00',
+        'reissue_pricing_mode' => 'supplier_plus_service',
         'reissue_service_fee_amount' => '5.00',
-        'supplier_cost_difference_amount' => '0.00',
+        'supplier_cost_difference_amount' => '15.00',
+        'reissue_received_amount' => '10.00',
+        'reissue_payment_method' => 'cash',
+        'reissue_treasury_account_id' => (int) (($treasuryRepository->defaultTreasuryAccountForPayment(1, 'PKR', 'cash') ?? [])['id'] ?? 0),
         'reissue_notes' => 'Regression reissue event',
     ], $actorUserId, $accessibleBranchIds);
 
     $reissuedService = $serviceRepository->findServiceById($reissueServiceId);
     $reissuedReceivable = $receivableRepository->findReceivableByServiceLine($bookingReference, $reissueLineReference);
+    $reissuedObligation = $supplierRepository->findObligationByServiceLine($bookingReference, $reissueLineReference);
     $reissueEvents = array_values(array_filter(
         $eventRepository->postedEventsForService($reissueServiceId),
         static fn (array $row): bool => (string) ($row['event_type'] ?? '') === 'reissue'
@@ -890,15 +1108,59 @@ try {
             && (string) ($reissuedService['pnr'] ?? '') === 'RGREI2'
             && $reissuedReceivable !== null
             && round((float) ($reissuedReceivable['due_amount'] ?? 0), 2) === 240.00
+            && round((float) ($reissuedReceivable['allocated_amount'] ?? 0), 2) === 10.00
+            && round((float) ($reissuedReceivable['outstanding_amount'] ?? 0), 2) === 230.00
+            && $reissuedObligation !== null
+            && round((float) ($reissuedObligation['gross_amount'] ?? 0), 2) === 215.00
             && $latestReissueEvent !== null
             && round((float) ($latestReissueEvent['fare_difference_amount'] ?? 0), 2) === 15.00
-            && round((float) ($latestReissueEvent['service_fee_amount'] ?? 0), 2) === 5.00,
+            && round((float) ($latestReissueEvent['service_fee_amount'] ?? 0), 2) === 5.00
+            && round((float) ($reissuedService['final_sale_price'] ?? 0), 2) === 240.00
+            && round((float) ($reissuedService['purchase_cost'] ?? 0), 2) === 215.00
+            && round((float) ($reissuedService['service_charge'] ?? 0), 2) === 25.00
+            && round((float) ($reissuedService['net_profit_loss'] ?? 0), 2) === 25.00,
         json_encode([
             'service_ticket_number' => $reissuedService['ticket_number'] ?? null,
             'service_pnr' => $reissuedService['pnr'] ?? null,
             'receivable_due' => $reissuedReceivable['due_amount'] ?? null,
+            'supplier_payable' => $reissuedObligation['gross_amount'] ?? null,
             'reissue_event' => $latestReissueEvent,
         ], JSON_UNESCAPED_SLASHES)
+    );
+
+    $reissueOutput = (new \App\Services\OperationalOutputService($app))->buildOutputDocument(
+        $bookingId,
+        'reissue_voucher',
+        $accessibleBranchIds,
+        null,
+        null,
+        null,
+        $actorUserId,
+        (int) ($latestReissueEvent['id'] ?? 0)
+    );
+    $accountLedger = (new \App\Services\AccountLedgerService($app))->report([
+        'dateFrom' => '', 'dateTo' => '', 'currency' => 'PKR', 'businessSourceId' => 0,
+        'customerName' => '', 'bookingReference' => $bookingReference,
+    ], $accessibleBranchIds);
+    $reissueLedgerRows = array_values(array_filter(
+        (array) ($accountLedger['rows'] ?? []),
+        static fn (array $row): bool => str_starts_with((string) ($row['transaction_reference'] ?? ''), 'REISSUE-EVT-')
+    ));
+    $renderedReissueVoucher = (string) $app->get('view')->render('workspace/output', $reissueOutput, 'layouts/print');
+    $check(
+        'Reissue voucher and Account Ledger expose the revised invoice without fabricating cash',
+        (string) ($reissueOutput['outputType'] ?? '') === 'reissue_voucher'
+            && (int) ($reissueOutput['selectedReissueEvent']['id'] ?? 0) === (int) ($latestReissueEvent['id'] ?? 0)
+            && count($reissueLedgerRows) === 1
+            && round((float) ($reissueLedgerRows[0]['raw_debit_amount'] ?? 0), 2) === 0.00
+            && round((float) ($reissueLedgerRows[0]['raw_credit_amount'] ?? 0), 2) === 0.00
+            && str_contains($renderedReissueVoucher, 'Ticket Reissue Voucher')
+            && str_contains($renderedReissueVoucher, 'Reissue Charges')
+            && ! str_contains($renderedReissueVoucher, 'Agency Service Fee')
+            && ! str_contains($renderedReissueVoucher, 'Payments Applied to This Booking')
+            && ! str_contains($renderedReissueVoucher, 'Operational output generated from the current saved booking record.')
+            && str_contains($renderedReissueVoucher, 'Cash Received Now'),
+        json_encode(['output' => $reissueOutput['outputType'] ?? null, 'ledger_rows' => $reissueLedgerRows], JSON_UNESCAPED_SLASHES)
     );
 
     $registerRows = $reportRepository->issueReissueRefundRegister([1], $today, $today);
@@ -924,8 +1186,101 @@ try {
             'rows' => $bookingRows,
         ], JSON_UNESCAPED_SLASHES)
     );
+
+    $exchangeRates = new \App\Repositories\ExchangeRateRepository($app);
+    $exchangeRates->upsertDailyRate('AED', 'PKR', $today, 75.00, 1, $actorUserId);
+    $exchangeRates->upsertDailyRate('USD', 'PKR', $today, 280.00, 1, $actorUserId);
+    $aedTreasury = $treasuryRepository->defaultTreasuryAccountForPayment(1, 'AED', 'cash');
+    if ($aedTreasury === null) {
+        $baseTreasury = $db->query(
+            'SELECT linked_account_id
+             FROM treasury_accounts
+             WHERE branch_id = 1 AND is_active = 1 AND linked_account_id IS NOT NULL
+             ORDER BY is_default DESC, id ASC
+             LIMIT 1'
+        )->fetch(PDO::FETCH_ASSOC);
+        if ($baseTreasury === false || (int) ($baseTreasury['linked_account_id'] ?? 0) <= 0) {
+            throw new RuntimeException('No branch-1 cash account is available for the rollback-only AED receipt fixture.');
+        }
+
+        $insertAedTreasury = $db->prepare(
+            'INSERT INTO treasury_accounts (
+                branch_id, linked_account_id, account_type, account_name, account_code, currency,
+                opening_balance, opening_balance_date, is_default, is_active, notes, created_by_user_id
+             ) VALUES (
+                1, :linked_account_id, "cash", "Regression AED Cash", :account_code, "AED",
+                0.00, :opening_balance_date, 0, 1, :notes, :created_by_user_id
+             )'
+        );
+        $insertAedTreasury->execute([
+            'linked_account_id' => (int) $baseTreasury['linked_account_id'],
+            'account_code' => 'REG-AED-CASH-' . bin2hex(random_bytes(5)),
+            'opening_balance_date' => $today,
+            'notes' => 'Rollback-only treasury fixture for mixed-currency reissue regression',
+            'created_by_user_id' => $actorUserId,
+        ]);
+        $aedTreasury = $treasuryRepository->findAccount((int) $db->lastInsertId(), [1]);
+    }
+    $mixedReissue = $serviceWorkspace->reissueService([
+        'booking_id' => $bookingId,
+        'service_id' => $reissueServiceId,
+        'reissue_reason' => 'Regression multi-currency reissue',
+        'reissue_event_date' => $today,
+        'new_ticket_number' => 'RG-REISSUE-003',
+        'new_pnr' => 'RGREI3',
+        'reissue_pricing_mode' => 'supplier_plus_service',
+        'supplier_cost_difference_amount' => '10.00',
+        'reissue_supplier_currency' => 'AED',
+        'reissue_service_fee_amount' => '2.00',
+        'reissue_agency_fee_currency' => 'USD',
+        'reissue_customer_amount' => '1310.00',
+        'reissue_customer_currency' => 'PKR',
+        'reissue_received_amount' => '5.00',
+        'reissue_received_currency' => 'AED',
+        'reissue_rate_effective_date' => $today,
+        'reissue_payment_method' => 'cash',
+        'reissue_treasury_account_id' => (int) ($aedTreasury['id'] ?? 0),
+    ], $actorUserId, $accessibleBranchIds);
+    $mixedEventId = (int) ($mixedReissue['service_event_id'] ?? 0);
+    $mixedEvent = $eventRepository->findPostedEventById($mixedEventId, 'reissue');
+    $mixedPayload = json_decode((string) ($mixedEvent['payload_json'] ?? ''), true);
+    $mixedPayload = is_array($mixedPayload) ? $mixedPayload : [];
+    $mixedReceivable = $receivableRepository->findReceivableByServiceLine($bookingReference, $reissueLineReference, 'service_sale');
+    $mixedSupplierObligation = $supplierRepository->findObligationByServiceLine($bookingReference, $reissueLineReference, 'reissue_supplier_' . $mixedEventId);
+    $mixedReceipt = $receivableRepository->findReceiptById((int) ($mixedReissue['receipt']['id'] ?? 0));
+    (new \App\Services\CommercialObligationSyncService($app))->syncForServiceId($reissueServiceId, $actorUserId, ['entry_date' => $today]);
+    $mainSupplierAfterResync = $supplierRepository->findObligationByServiceLine($bookingReference, $reissueLineReference, 'service_cost');
+    $check(
+        'Multi-currency reissue preserves native charges, converts the customer total, and allocates foreign cash exactly',
+        $mixedEventId > 0
+            && (string) ($mixedEvent['currency'] ?? '') === 'PKR'
+            && round((float) ($mixedPayload['customer_delta'] ?? 0), 2) === 1310.00
+            && (string) ($mixedPayload['supplier_currency'] ?? '') === 'AED'
+            && (string) ($mixedPayload['agency_service_fee_currency'] ?? '') === 'USD'
+            && (string) ($mixedPayload['cash_received_currency'] ?? '') === 'AED'
+            && round((float) ($mixedReceivable['due_amount'] ?? 0), 2) === 1550.00
+            && round((float) ($mixedReceivable['allocated_amount'] ?? 0), 2) === 385.00
+            && (string) ($mixedSupplierObligation['currency'] ?? '') === 'AED'
+            && round((float) ($mixedSupplierObligation['gross_amount'] ?? 0), 2) === 10.00
+            && (string) ($mixedReceipt['currency'] ?? '') === 'AED'
+            && round((float) ($mixedReceipt['received_amount'] ?? 0), 2) === 5.00
+            && round((float) ($mainSupplierAfterResync['gross_amount'] ?? 0), 2) === 215.00,
+        json_encode([
+            'event' => $mixedEvent,
+            'receivable' => $mixedReceivable,
+            'separate_supplier_obligation' => $mixedSupplierObligation,
+            'receipt' => $mixedReceipt,
+            'main_supplier_after_resync' => $mainSupplierAfterResync,
+        ], JSON_UNESCAPED_SLASHES)
+    );
 } catch (\Throwable $exception) {
-    $check('Service lifecycle regression completed without unexpected exception', false, $exception::class . ': ' . $exception->getMessage());
+    $errorDetail = $exception::class . ': ' . $exception->getMessage();
+    $previous = $exception->getPrevious();
+    while ($previous !== null) {
+        $errorDetail .= ' <- ' . $previous::class . ': ' . $previous->getMessage();
+        $previous = $previous->getPrevious();
+    }
+    $check('Service lifecycle regression completed without unexpected exception', false, $errorDetail);
 } finally {
     if ($db->inTransaction()) {
         $db->rollBack();

@@ -27,14 +27,58 @@ final class CustomerReceiptWorkspaceService extends Service
         $payload = $this->validatedSettlementRatePayload($input, $accessibleBranchIds);
         $exchangeRateRepository = new ExchangeRateRepository($this->app);
 
-        $exchangeRateRepository->upsertDailyRate(
-            $payload['rate_from_currency'],
-            $payload['rate_to_currency'],
-            $payload['exchange_rate_effective_date'],
-            $payload['exchange_rate'],
-            $payload['branch_id'],
-            $actorUserId
-        );
+        /** @var PDO $db */
+        $db = $this->app->get('db');
+        $startedTransaction = ! $db->inTransaction();
+        if ($startedTransaction) {
+            $db->beginTransaction();
+        }
+
+        try {
+            if ($payload['booking_id'] > 0) {
+                $exchangeRateRepository->upsertBookingRate(
+                    $payload['booking_id'],
+                    $payload['branch_id'],
+                    $payload['rate_from_currency'],
+                    $payload['rate_to_currency'],
+                    $payload['exchange_rate_effective_date'],
+                    $payload['exchange_rate'],
+                    $actorUserId
+                );
+            }
+            // Allocation validation intentionally verifies the dated market quote.
+            // The booking copy controls reuse; the daily copy validates any
+            // cross-currency receipt/allocation posted with the same quote.
+            $exchangeRateRepository->upsertDailyRate(
+                $payload['rate_from_currency'],
+                $payload['rate_to_currency'],
+                $payload['exchange_rate_effective_date'],
+                $payload['exchange_rate'],
+                $payload['branch_id'],
+                $actorUserId
+            );
+
+            $payload['updated_services'] = 0;
+            if ($payload['booking_id'] > 0 && (int) ($input['synchronize_booking_pricing'] ?? 0) === 1) {
+                $syncResult = (new ServiceWorkspaceService($this->app))->synchronizeBookingExchangeRate(
+                    $payload['booking_id'],
+                    $payload['rate_from_currency'],
+                    $payload['rate_to_currency'],
+                    $actorUserId,
+                    $accessibleBranchIds
+                );
+                $payload['updated_services'] = (int) ($syncResult['updated_services'] ?? 0);
+            }
+
+            if ($startedTransaction && $db->inTransaction()) {
+                $db->commit();
+            }
+        } catch (\Throwable $exception) {
+            if ($startedTransaction && $db->inTransaction()) {
+                $db->rollBack();
+            }
+            throw $exception;
+        }
 
         return $payload;
     }
@@ -189,6 +233,15 @@ final class CustomerReceiptWorkspaceService extends Service
                 $repository,
                 $accountingRepository
             );
+            $customerCreditApplyResult = $this->applyBookingCreditToCurrentInvoice(
+                $input,
+                $booking,
+                (string) $payload['currency'],
+                (string) $payload['receipt_date'],
+                $actorUserId,
+                $repository,
+                $accountingRepository
+            );
 
             if ($skipReceiptCreation) {
                 app_write_log('workspace.receipt.save_result', 'Customer receipt workflow saved current invoice/service without creating a receipt.', array_merge(app_request_log_context(), [
@@ -203,6 +256,8 @@ final class CustomerReceiptWorkspaceService extends Service
                     'stored_status' => 'no_receipt',
                     'advance_allocated_amount' => round((float) ($advanceApplyResult['allocated_amount'] ?? 0), 2),
                     'advance_allocation_count' => (int) ($advanceApplyResult['allocation_count'] ?? 0),
+                    'customer_credit_allocated_amount' => round((float) ($customerCreditApplyResult['allocated_amount'] ?? 0), 2),
+                    'customer_credit_allocation_count' => (int) ($customerCreditApplyResult['allocation_count'] ?? 0),
                 ]));
             } else {
                 $savedReceiptTrace = $repository->findReceiptById($receiptId);
@@ -219,6 +274,8 @@ final class CustomerReceiptWorkspaceService extends Service
                     'stored_status' => (string) ($savedReceiptTrace['status'] ?? ''),
                     'advance_allocated_amount' => round((float) ($advanceApplyResult['allocated_amount'] ?? 0), 2),
                     'advance_allocation_count' => (int) ($advanceApplyResult['allocation_count'] ?? 0),
+                    'customer_credit_allocated_amount' => round((float) ($customerCreditApplyResult['allocated_amount'] ?? 0), 2),
+                    'customer_credit_allocation_count' => (int) ($customerCreditApplyResult['allocation_count'] ?? 0),
                 ]));
             }
 
@@ -244,6 +301,7 @@ final class CustomerReceiptWorkspaceService extends Service
                 'booking_id' => $bookingId,
                 'returned_amount' => (float) $payload['returned_amount'],
                 'advance_applied' => $advanceApplyResult,
+                'customer_credit_applied' => $customerCreditApplyResult,
             ];
         } catch (\Throwable $exception) {
             if ($startedTransaction && $db->inTransaction()) {
@@ -491,7 +549,6 @@ final class CustomerReceiptWorkspaceService extends Service
         if ($travelerId <= 0) {
             throw new RuntimeException('Please select a valid customer.');
         }
-
         $selectedReceivableIds = $this->normalizedSelectedReceivableIds($input['global_customer_receivable_id'] ?? []);
         if ($selectedReceivableIds === []) {
             throw new RuntimeException('Please select at least one customer receivable.');
@@ -651,6 +708,13 @@ final class CustomerReceiptWorkspaceService extends Service
         if ($travelerId <= 0) {
             throw new RuntimeException('Please select a valid customer.');
         }
+        $businessSourceId = (int) ($input['business_source_id'] ?? 0);
+        $businessSource = $businessSourceId > 0
+            ? (new MasterDataRepository($this->app))->find('business_sources', $businessSourceId)
+            : null;
+        if ($businessSource === null || (int) ($businessSource['is_active'] ?? 0) !== 1) {
+            throw new RuntimeException('Please select a valid Account Holder for this customer advance.');
+        }
 
         $payload = $this->validatedReceiptPayload($input);
         if ((float) ($payload['received_amount'] ?? 0) <= 0) {
@@ -673,6 +737,7 @@ final class CustomerReceiptWorkspaceService extends Service
             $receiptId = $repository->createReceipt(array_merge($payload, [
                 'branch_id' => $branchId,
                 'traveler_id' => $travelerId,
+                'business_source_id' => $businessSourceId,
                 'receipt_purpose' => 'customer_advance',
                 'booking_reference' => 'ADVANCE',
                 'receipt_no' => $receiptNo,
@@ -696,6 +761,27 @@ final class CustomerReceiptWorkspaceService extends Service
                 'narration' => 'Customer advance received',
             ]);
 
+            $openReceivables = $repository->openCustomerReceivablesForAdvance(
+                $branchId,
+                $travelerId,
+                $businessSourceId,
+                $currency
+            );
+            $advanceApplication = [
+                'allocated_amount' => 0.0,
+                'allocation_count' => 0,
+            ];
+            if ($openReceivables !== []) {
+                $advanceApplication = $this->applyCustomerAdvance([
+                    'branch_id' => $branchId,
+                    'traveler_id' => $travelerId,
+                    'receipt_currency' => $currency,
+                    'advance_receipt_id' => $receiptId,
+                    'global_customer_receivable_id' => array_column($openReceivables, 'id'),
+                    'allocation_date' => (string) $payload['receipt_date'],
+                ], $actorUserId, $accessibleBranchIds);
+            }
+
             if ($startedTransaction && $db->inTransaction()) {
                 $db->commit();
             }
@@ -706,6 +792,14 @@ final class CustomerReceiptWorkspaceService extends Service
                 'customer_name' => $repository->customerNameByTraveler($travelerId),
                 'currency' => $currency,
                 'received_amount' => (float) $payload['received_amount'],
+                'allocated_amount' => (float) ($advanceApplication['allocated_amount'] ?? 0),
+                'allocation_count' => (int) ($advanceApplication['allocation_count'] ?? 0),
+                'unallocated_amount' => round(
+                    (float) $payload['received_amount'] - (float) ($advanceApplication['allocated_amount'] ?? 0),
+                    2
+                ),
+                'business_source_id' => $businessSourceId,
+                'business_source_name' => (string) ($businessSource['name'] ?? 'Account Holder'),
             ];
         } catch (\Throwable $exception) {
             if ($startedTransaction && $db->inTransaction()) {
@@ -764,7 +858,8 @@ final class CustomerReceiptWorkspaceService extends Service
                 $selectedReceivableIds,
                 $branchId,
                 $travelerId,
-                $currency
+                $currency,
+                (int) ($advance['business_source_id'] ?? 0)
             );
             if (count($receivables) !== count($selectedReceivableIds)) {
                 throw new RuntimeException('One or more selected customer receivable rows are no longer available.');
@@ -774,6 +869,7 @@ final class CustomerReceiptWorkspaceService extends Service
             $allocatedAmount = 0.0;
             $allocationCount = 0;
 
+            $allocationDate = $this->normalizeOptionalDate((string) ($input['allocation_date'] ?? '')) ?? date('Y-m-d');
             foreach ($receivables as $receivable) {
                 if ($remainingAmount <= 0.005) {
                     break;
@@ -793,7 +889,7 @@ final class CustomerReceiptWorkspaceService extends Service
                     'rate_from_currency' => $currency,
                     'rate_to_currency' => $currency,
                     'exchange_rate' => 1.0,
-                    'exchange_rate_effective_date' => date('Y-m-d'),
+                    'exchange_rate_effective_date' => $allocationDate,
                     'allocation_note' => 'Customer advance applied to receivable',
                     'actor_user_id' => $actorUserId,
                 ]);
@@ -811,7 +907,7 @@ final class CustomerReceiptWorkspaceService extends Service
                     'customer_receivable_item_id' => (int) $receivable['id'],
                     'customer_receipt_id' => $advanceReceiptId,
                     'allocated_amount' => $allocatedReceiptAmount,
-                    'entry_date' => date('Y-m-d'),
+                    'entry_date' => $allocationDate,
                     'currency' => $currency,
                     'actor_user_id' => $actorUserId,
                     'narration' => 'Customer advance applied to invoice',
@@ -1104,9 +1200,6 @@ final class CustomerReceiptWorkspaceService extends Service
         $currency = $this->normalizeCurrency((string) ($input['receipt_currency'] ?? $input['currency'] ?? 'PKR'));
         $paymentMethod = $this->normalizeMethod((string) ($input['advance_refund_method'] ?? $input['payment_method'] ?? 'cash'));
         $amount = $this->nonNegativeMoneyValue($input['advance_refund_amount'] ?? $input['amount'] ?? 0, 'Returned advance amount');
-        if ($amount <= 0) {
-            throw new RuntimeException('Returned advance amount must be greater than zero.');
-        }
 
         $reason = $this->optionalText($input['correction_reason'] ?? $input['reason'] ?? null, 1000);
         if ($reason === null || trim($reason) === '') {
@@ -1144,6 +1237,10 @@ final class CustomerReceiptWorkspaceService extends Service
 
             $receiptId = (int) ($refund['customer_receipt_id'] ?? 0);
             $oldJournalId = $repository->latestCustomerAdvanceRefundJournalId($refundId);
+            $restoredAccountName = trim((string) ($refund['treasury_account_name'] ?? ''));
+            if ($restoredAccountName === '') {
+                $restoredAccountName = 'Cash/Bank';
+            }
             $reversalJournalId = $oldJournalId !== null
                 ? $accountingRepository->reverseJournalEntry($oldJournalId, [
                     'branch_id' => $branchId,
@@ -1155,6 +1252,9 @@ final class CustomerReceiptWorkspaceService extends Service
                     'narration' => 'Customer advance return correction reversal',
                     'actor_user_id' => $actorUserId,
                     'line_description_prefix' => 'Correction reversal: ',
+                    'line_description_overrides' => [
+                        'Cash or bank returned to customer' => 'Correction reversal: Funds restored to ' . $restoredAccountName,
+                    ],
                 ])
                 : null;
 
@@ -1163,7 +1263,7 @@ final class CustomerReceiptWorkspaceService extends Service
                 'customer_receipt_id' => $receiptId,
                 'branch_id' => $branchId,
                 'traveler_id' => $travelerId,
-                'refund_date' => $entryDate,
+                'entry_date' => $entryDate,
                 'currency' => $currency,
                 'amount' => $amount,
                 'payment_method' => $paymentMethod,
@@ -1173,18 +1273,21 @@ final class CustomerReceiptWorkspaceService extends Service
                 'remarks' => $this->optionalText($input['remarks'] ?? $input['advance_refund_remarks'] ?? null, 4000),
             ]);
 
-            $newJournalId = $accountingRepository->postCustomerAdvanceRefund([
-                'branch_id' => $branchId,
-                'customer_receipt_id' => $receiptId,
-                'source_reference' => (string) ($refund['receipt_no'] ?? 'ADVANCE') . '-REFUND-CORR-' . $refundId . '-' . date('YmdHis'),
-                'entry_date' => $entryDate,
-                'currency' => $currency,
-                'amount' => $amount,
-                'payment_method' => $paymentMethod,
-                'treasury_account_id' => $treasuryAccountId,
-                'actor_user_id' => $actorUserId,
-                'narration' => 'Customer advance return corrected',
-            ]);
+            $newJournalId = null;
+            if ($amount > 0) {
+                $newJournalId = $accountingRepository->postCustomerAdvanceRefund([
+                    'branch_id' => $branchId,
+                    'customer_receipt_id' => $receiptId,
+                    'source_reference' => (string) ($refund['receipt_no'] ?? 'ADVANCE') . '-REFUND-CORR-' . $refundId . '-' . date('YmdHis'),
+                    'entry_date' => $entryDate,
+                    'currency' => $currency,
+                    'amount' => $amount,
+                    'payment_method' => $paymentMethod,
+                    'treasury_account_id' => $treasuryAccountId,
+                    'actor_user_id' => $actorUserId,
+                    'narration' => 'Customer advance return corrected',
+                ]);
+            }
             $repository->attachCustomerAdvanceRefundJournalEntry($refundId, $newJournalId);
 
             $old = (array) ($corrected['old'] ?? $refund);
@@ -1545,6 +1648,178 @@ final class CustomerReceiptWorkspaceService extends Service
         $chargesAmount = round((float) ($payload['charges_amount'] ?? 0), 2);
 
         return ($receivedAmount + $chargesAmount) > 0;
+    }
+
+    private function applyBookingCreditToCurrentInvoice(
+        array $input,
+        array $booking,
+        string $currency,
+        string $entryDate,
+        int $actorUserId,
+        CustomerPaymentRepository $paymentRepository,
+        AccountingRepository $accountingRepository
+    ): array {
+        $creditReceiptId = max(0, (int) ($input['customer_credit_receipt_id'] ?? 0));
+        $requestedAmount = $this->nonNegativeMoneyValue(
+            $input['customer_credit_apply_amount'] ?? 0,
+            'Customer credit used'
+        );
+
+        if ($creditReceiptId <= 0 || $requestedAmount <= 0.005) {
+            return [
+                'receipt_id' => $creditReceiptId,
+                'source_booking_reference' => '',
+                'target_booking_reference' => (string) ($booking['booking_reference'] ?? ''),
+                'allocated_amount' => 0.00,
+                'allocation_count' => 0,
+                'allocation_ids' => [],
+            ];
+        }
+
+        $targetBookingReference = trim((string) ($booking['booking_reference'] ?? ''));
+        $branchId = (int) ($booking['branch_id'] ?? 0);
+        $travelerId = (int) ($booking['lead_traveler_id'] ?? 0);
+        $normalizedCurrency = $this->normalizeCurrency($currency);
+        $creditReceipt = $paymentRepository->findReceiptById($creditReceiptId);
+
+        if ($creditReceipt === null) {
+            throw new RuntimeException('The selected customer credit could not be found.');
+        }
+
+        $sourceBookingReference = trim((string) ($creditReceipt['booking_reference'] ?? ''));
+        $receiptPurpose = strtolower(trim((string) ($creditReceipt['receipt_purpose'] ?? 'booking_payment')));
+        $receiptStatus = strtolower(str_replace(' ', '_', trim((string) ($creditReceipt['status'] ?? ''))));
+        if ($receiptPurpose === 'customer_advance') {
+            throw new RuntimeException('Use the Customer Advance field for formal customer advances.');
+        }
+        if ($sourceBookingReference === '' || strcasecmp($sourceBookingReference, $targetBookingReference) === 0) {
+            throw new RuntimeException('Select unused customer credit from another booking.');
+        }
+        if ($receiptStatus === 'void') {
+            throw new RuntimeException('The selected customer credit receipt is void.');
+        }
+        if ((int) ($creditReceipt['branch_id'] ?? 0) !== $branchId
+            || (int) ($creditReceipt['traveler_id'] ?? 0) !== $travelerId
+            || strtoupper((string) ($creditReceipt['currency'] ?? '')) !== $normalizedCurrency
+        ) {
+            throw new RuntimeException('The selected credit does not match this booking customer, branch, and currency.');
+        }
+
+        $availableCredit = round((float) ($creditReceipt['unallocated_amount'] ?? 0), 2);
+        if ($availableCredit <= 0.005) {
+            throw new RuntimeException('The selected customer credit has already been used or returned.');
+        }
+        if ($requestedAmount > $availableCredit + 0.005) {
+            throw new RuntimeException('Customer credit used cannot exceed its available balance.');
+        }
+
+        $receiptScope = $this->normalizeReceiptScope((string) ($input['receipt_scope'] ?? 'whole_invoice'));
+        $targetReceivableId = $this->resolveReceiptAllocationTargetId(
+            $input,
+            $paymentRepository,
+            $booking,
+            $normalizedCurrency,
+            $receiptScope
+        );
+        $openReceivables = $this->sameCurrencyBookingReceivables(
+            $paymentRepository,
+            $booking,
+            $normalizedCurrency,
+            [],
+            $targetReceivableId !== null ? [$targetReceivableId] : null
+        );
+        $openTotal = round(array_sum(array_map(
+            static fn (array $receivable): float => max(0.0, (float) ($receivable['outstanding_amount'] ?? 0)),
+            $openReceivables
+        )), 2);
+        if ($openTotal <= 0.005) {
+            throw new RuntimeException('There is no open current invoice balance for this customer credit.');
+        }
+        if ($requestedAmount > $openTotal + 0.005) {
+            throw new RuntimeException('Customer credit used cannot exceed the current invoice balance.');
+        }
+
+        $remainingToApply = $requestedAmount;
+        $allocatedTotal = 0.00;
+        $allocationIds = [];
+
+        foreach ($openReceivables as $receivable) {
+            if ($remainingToApply <= 0.005) {
+                break;
+            }
+
+            $creditReceipt = $paymentRepository->findReceiptById($creditReceiptId);
+            if ($creditReceipt === null) {
+                throw new RuntimeException('The selected customer credit could not be reloaded.');
+            }
+
+            $remainingCredit = round((float) ($creditReceipt['unallocated_amount'] ?? 0), 2);
+            $remainingReceivable = round((float) ($receivable['outstanding_amount'] ?? 0), 2);
+            $allocationAmount = round(min($remainingToApply, $remainingCredit, $remainingReceivable), 2);
+            if ($allocationAmount <= 0.005) {
+                continue;
+            }
+
+            $allocationResult = $paymentRepository->allocateReceiptExplicit([
+                'receipt_id' => $creditReceiptId,
+                'receivable_item_id' => (int) $receivable['id'],
+                'receivable_amount_to_settle' => $allocationAmount,
+                'payment_currency' => $normalizedCurrency,
+                'rate_from_currency' => $normalizedCurrency,
+                'rate_to_currency' => $normalizedCurrency,
+                'exchange_rate' => 1.0,
+                'exchange_rate_effective_date' => $entryDate,
+                'allocation_note' => 'Customer credit transferred from ' . $sourceBookingReference
+                    . ' to ' . $targetBookingReference . '.',
+                'actor_user_id' => $actorUserId,
+            ]);
+
+            $allocationId = (int) ($allocationResult['allocation_id'] ?? 0);
+            $allocatedAmount = round((float) ($allocationResult['allocated_amount'] ?? 0), 2);
+            if ($allocationId <= 0 || $allocatedAmount <= 0.005) {
+                throw new RuntimeException('Customer credit could not be applied to the invoice.');
+            }
+
+            $accountingRepository->postCustomerReceiptAllocation([
+                'branch_id' => (int) ($receivable['branch_id'] ?? $branchId),
+                'booking_reference' => (string) ($receivable['booking_reference'] ?? $targetBookingReference),
+                'source_reference' => (string) ($creditReceipt['receipt_no'] ?? 'CREDIT') . '-XFER-' . $allocationId,
+                'service_line_reference' => (string) ($receivable['service_line_reference'] ?? '') !== ''
+                    ? (string) $receivable['service_line_reference']
+                    : null,
+                'customer_receivable_item_id' => (int) $receivable['id'],
+                'customer_receipt_id' => $creditReceiptId,
+                'allocated_amount' => $allocatedAmount,
+                'entry_date' => $entryDate,
+                'currency' => $normalizedCurrency,
+                'narration' => 'Customer credit transferred from ' . $sourceBookingReference
+                    . ' to ' . $targetBookingReference,
+                'actor_user_id' => $actorUserId,
+            ]);
+
+            $remainingToApply = round(max(0, $remainingToApply - $allocatedAmount), 2);
+            $allocatedTotal = round($allocatedTotal + $allocatedAmount, 2);
+            $allocationIds[] = $allocationId;
+        }
+
+        AuditLog::record($this->app, 'customer.booking_credit.transferred', [
+            'user_id' => $actorUserId,
+            'customer_receipt_id' => $creditReceiptId,
+            'source_booking_reference' => $sourceBookingReference,
+            'target_booking_reference' => $targetBookingReference,
+            'currency' => $normalizedCurrency,
+            'allocated_amount' => $allocatedTotal,
+            'allocation_ids' => $allocationIds,
+        ]);
+
+        return [
+            'receipt_id' => $creditReceiptId,
+            'source_booking_reference' => $sourceBookingReference,
+            'target_booking_reference' => $targetBookingReference,
+            'allocated_amount' => $allocatedTotal,
+            'allocation_count' => count($allocationIds),
+            'allocation_ids' => $allocationIds,
+        ];
     }
 
     private function applyCustomerAdvanceToCurrentInvoice(
@@ -1961,7 +2236,12 @@ final class CustomerReceiptWorkspaceService extends Service
 
             if ($settlement['payment_currency'] !== $settlement['target_currency']) {
                 if ($settlement['exchange_rate'] === null) {
-                    $exactRate = $exchangeRateRepository->getExactRate(
+                    $exactRate = $exchangeRateRepository->getBookingRate(
+                        $bookingId,
+                        $settlement['rate_from_currency'],
+                        $settlement['rate_to_currency']
+                    );
+                    $exactRate ??= $exchangeRateRepository->getExactRate(
                         $settlement['rate_from_currency'],
                         $settlement['rate_to_currency'],
                         $settlement['exchange_rate_effective_date']
@@ -1973,6 +2253,15 @@ final class CustomerReceiptWorkspaceService extends Service
                     $settlement['exchange_rate'] = (float) ($exactRate['exchange_rate'] ?? 0);
                 }
 
+                $exchangeRateRepository->upsertBookingRate(
+                    $bookingId,
+                    (int) $booking['branch_id'],
+                    $settlement['rate_from_currency'],
+                    $settlement['rate_to_currency'],
+                    $settlement['exchange_rate_effective_date'],
+                    $settlement['exchange_rate'],
+                    $actorUserId
+                );
                 $exchangeRateRepository->upsertDailyRate(
                     $settlement['rate_from_currency'],
                     $settlement['rate_to_currency'],
@@ -2061,6 +2350,25 @@ final class CustomerReceiptWorkspaceService extends Service
                     $accountingRepository,
                     [(int) $targetReceivable['id']]
                 );
+
+                if ($settlement['payment_currency'] !== $settlement['target_currency']) {
+                    $settledReceipt = $repository->findReceiptById($receiptId);
+                    $fxSurplusAmount = round((float) ($settledReceipt['unallocated_amount'] ?? 0), 2);
+                    if ($fxSurplusAmount > 0.005) {
+                        (new CustomerReceiptCurrencyCorrectionService($this->app))->recognizeFxGain(
+                            $receiptId,
+                            $fxSurplusAmount,
+                            sprintf(
+                                'Automatic foreign-exchange surplus from %s to %s settlement.',
+                                $settlement['payment_currency'],
+                                $settlement['target_currency']
+                            ),
+                            $actorUserId,
+                            $payload['receipt_date'],
+                            true
+                        );
+                    }
+                }
             }
 
             if ($payload['due_date'] !== null) {
@@ -2172,6 +2480,7 @@ final class CustomerReceiptWorkspaceService extends Service
         }
 
         return [
+            'booking_id' => $bookingId,
             'branch_id' => $branchId,
             'rate_from_currency' => $rateFromCurrency,
             'rate_to_currency' => $rateToCurrency,

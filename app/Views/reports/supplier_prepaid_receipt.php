@@ -38,7 +38,7 @@ $advanceNo = 'SADV-' . str_pad((string) ((int) ($receipt['id'] ?? 0)), 3, '0', S
     <header class="receipt-head">
         <div>
             <div class="receipt-title">Prepaid Supplier Payment Receipt</div>
-            <div class="receipt-subtitle">Global supplier advance / prepaid payment document</div>
+            <div class="receipt-subtitle">Supplier advance / prepaid payment document</div>
         </div>
         <div class="receipt-actions">
             <a class="btn btn-sm" href="<?= e(url('/reports?report=supplier_prepaid_payments')) ?>">Back to Report</a>
@@ -52,6 +52,8 @@ $advanceNo = 'SADV-' . str_pad((string) ((int) ($receipt['id'] ?? 0)), 3, '0', S
         <div><span>Branch</span><strong><?= e((string) ($receipt['branch_name'] ?? '')) ?></strong></div>
         <div><span>Supplier</span><strong><?= e((string) ($receipt['supplier_name'] ?? 'Supplier')) ?></strong></div>
         <div><span>Currency</span><strong><?= e((string) ($receipt['currency'] ?? 'PKR')) ?></strong></div>
+        <div><span>Payment Method</span><strong><?= e(ucwords(str_replace('_', ' ', (string) (($receipt['payment_method'] ?? '') !== '' ? $receipt['payment_method'] : 'Legacy / not recorded')))) ?></strong></div>
+        <div><span>Paid From</span><strong><?= e((string) (($receipt['treasury_account_name'] ?? '') !== '' ? $receipt['treasury_account_name'] : 'Legacy / not recorded')) ?></strong></div>
         <div><span>Status</span><strong><?= e($statusLabel) ?></strong></div>
         <div><span>Advance Paid</span><strong><?= e($formatMoney((float) ($receipt['deposit_amount'] ?? 0))) ?></strong></div>
         <div><span>Advance Used</span><strong><?= e($formatMoney((float) ($receipt['used_amount'] ?? 0))) ?></strong></div>

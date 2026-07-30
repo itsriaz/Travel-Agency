@@ -26,7 +26,7 @@ $check(
     'Dashboard renders a visual chart section before the financial tables',
     str_contains($dashboardView, 'dashboard-chart-grid')
         && str_contains($dashboardView, 'Branch Local Profit')
-        && str_contains($dashboardView, 'Branch Expenses')
+        && str_contains($dashboardView, 'Total Branch Expenses')
 );
 
 $check(
@@ -51,6 +51,15 @@ $check(
 );
 
 $check(
+    'Dashboard heading and summary cards use compact operational sizing',
+    str_contains($dashboardView, 'dashboard-page-head')
+        && str_contains($dashboardView, 'dashboard-summary-grid')
+        && str_contains($appCss, '.admin-page-shell .dashboard-page-head h1')
+        && str_contains($appCss, '.admin-page-shell .dashboard-summary-grid .stat-card')
+        && str_contains($appCss, 'min-height: 58px')
+);
+
+$check(
     'Chart implementation does not introduce an external charting dependency',
     ! str_contains($dashboardView, 'chart.js')
         && ! str_contains($dashboardView, 'Chart(')
@@ -71,12 +80,27 @@ $check(
 );
 
 $check(
-    'Branch-local dashboard repository uses stored allocation FX instead of closing-rate conversion',
+    'Branch-local dashboard uses saved service pricing truth instead of payment allocations',
     str_contains($reportRepository, 'branchLocalDashboard')
-        && str_contains($reportRepository, 'customer_receipt_allocations')
-        && str_contains($reportRepository, 'supplier_payment_allocations')
-        && str_contains($reportRepository, 'exchange_rate_used')
-        && ! str_contains($reportRepository, 'latestRatesToTarget(')
+        && str_contains($reportRepository, 'servicePayableInInvoiceCurrencyFormula')
+        && str_contains($reportRepository, 'pricing_exchange_rate')
+        && ! str_contains(
+            substr(
+                $reportRepository,
+                (int) strpos($reportRepository, 'public function branchLocalDashboard'),
+                (int) strpos($reportRepository, 'public function supplierPostpaidPayments')
+                    - (int) strpos($reportRepository, 'public function branchLocalDashboard')
+            ),
+            'customer_receipt_allocations'
+        )
+);
+
+$check(
+    'Dashboard expense chart includes all recorded valid expenses',
+    str_contains($reportRepository, 'be.expense_status IN ("active", "posted")')
+        && str_contains($reportService, "'allTimeBranchRows'")
+        && str_contains($dashboardView, '$branchExpenseChartRows')
+        && str_contains($dashboardView, 'Total recorded branch expenses')
 );
 
 if ($failures !== []) {

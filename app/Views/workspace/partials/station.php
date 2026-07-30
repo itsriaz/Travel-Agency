@@ -128,6 +128,32 @@ $receiptNo = is_array($latestReceipt) ? (string) ($latestReceipt['receiptNo'] ??
 $latestReceiptUrl = $latestReceiptId > 0 && (int) ($workspaceBooking['id'] ?? 0) > 0
     ? url('/workspace/output?booking_id=' . (int) $workspaceBooking['id'] . '&doc=customer_receipt&receipt_id=' . $latestReceiptId)
     : '';
+$latestSettlementAllocationId = 0;
+foreach (($customerPaymentFoundation['invoicePaymentHistory'] ?? []) as $allocationRow) {
+    $targetBookingReference = trim((string) ($allocationRow['bookingReference'] ?? ''));
+    $sourceBookingReference = trim((string) ($allocationRow['receiptBookingReference'] ?? ''));
+    $receiptPurpose = str_replace(' ', '_', mb_strtolower(trim((string) ($allocationRow['receiptPurpose'] ?? 'booking_payment'))));
+    $allocationId = (int) ($allocationRow['allocationId'] ?? 0);
+    $allocatedAmount = (float) ($allocationRow['receivableAmountAllocated'] ?? $allocationRow['allocatedAmount'] ?? 0);
+    if ($targetBookingReference !== (string) ($workspaceBooking['number'] ?? '')
+        || (($sourceBookingReference === '' || $sourceBookingReference === $targetBookingReference) && $receiptPurpose !== 'customer_advance')
+        || $allocationId <= 0
+        || $allocatedAmount <= 0.005
+    ) {
+        continue;
+    }
+
+    $latestSettlementAllocationId = max($latestSettlementAllocationId, $allocationId);
+}
+$latestPrintTargetKey = $latestReceiptId > 0 ? 'customer-receipt-' . $latestReceiptId : '';
+if ($latestSettlementAllocationId > 0 && (int) ($workspaceBooking['id'] ?? 0) > 0) {
+    $latestReceiptUrl = url('/workspace/output?booking_id=' . (int) $workspaceBooking['id'] . '&doc=customer_settlement_receipt');
+    $latestPrintTargetKey = 'customer-settlement-' . (int) $workspaceBooking['id'];
+}
+if ($latestReceiptUrl === '' && (int) ($workspaceBooking['id'] ?? 0) > 0) {
+    $latestReceiptUrl = url('/workspace/output?booking_id=' . (int) $workspaceBooking['id'] . '&doc=booking_summary_receipt');
+    $latestPrintTargetKey = 'booking-summary-' . (int) $workspaceBooking['id'];
+}
 $invoiceCurrency = (string) ($activeService['currency'] ?? '');
 if ($invoiceCurrency === '') {
     $invoiceCurrency = (string) array_key_first($receivableTotals ?? []);
@@ -150,8 +176,23 @@ if ($globalPrepaidDefaultBranchId <= 0) {
 }
 $globalCustomerPaymentUrl = url('/customers/settlements/global')
     . ($globalPrepaidDefaultBranchId > 0 ? '?' . http_build_query(['branch_id' => $globalPrepaidDefaultBranchId]) : '');
+$supplierPaymentQuery = $globalPrepaidDefaultBranchId > 0 ? ['branch_id' => $globalPrepaidDefaultBranchId] : [];
+$bookingOpenSupplierIds = array_values(array_unique(array_filter(array_map(
+    static fn (array $row): int => (int) ($row['supplierId'] ?? 0),
+    (array) ($supplierFoundation['openObligations'] ?? [])
+))));
+$bookingOpenSupplierCurrencies = array_values(array_unique(array_filter(array_map(
+    static fn (array $row): string => strtoupper(trim((string) ($row['currency'] ?? ''))),
+    (array) ($supplierFoundation['openObligations'] ?? [])
+))));
+if (count($bookingOpenSupplierIds) === 1) {
+    $supplierPaymentQuery['supplier_id'] = $bookingOpenSupplierIds[0];
+}
+if (count($bookingOpenSupplierCurrencies) === 1) {
+    $supplierPaymentQuery['currency'] = $bookingOpenSupplierCurrencies[0];
+}
 $globalSupplierPaymentUrl = url('/suppliers/settlements/global')
-    . ($globalPrepaidDefaultBranchId > 0 ? '?' . http_build_query(['branch_id' => $globalPrepaidDefaultBranchId]) : '');
+    . ($supplierPaymentQuery !== [] ? '?' . http_build_query($supplierPaymentQuery) : '');
 $supplierPaymentFinderPrintUrl = url('/reports/print?' . http_build_query(array_filter([
     'report' => 'supplier_outstanding',
     'branch_id' => $globalPrepaidDefaultBranchId > 0 ? $globalPrepaidDefaultBranchId : null,
@@ -177,6 +218,12 @@ $activeServiceConvertedPurchaseCost = round(
     * (((string) ($activeService['currency'] ?? $invoiceCurrency) === $activeServiceCostCurrency) ? 1 : max($activeServicePricingExchangeRate, 0)),
     2
 );
+$activeServiceFinancialCurrency = strtoupper(trim((string) ($activeService['serviceChargeCurrency'] ?? $invoiceCurrency))) ?: $invoiceCurrency;
+$activeServiceFinancialPayable = $activeServiceFinancialCurrency === $activeServiceCostCurrency
+    ? (float) ($activeService['purchaseCost'] ?? 0)
+    : ($activeServiceFinancialCurrency === (string) ($activeService['currency'] ?? $invoiceCurrency)
+        ? $activeServiceConvertedPurchaseCost
+        : 0.0);
 $activeServiceFinalSalePrice = (float) ($activeService['finalSalePrice'] ?? 0);
 $activeServiceAutoFinalSalePrice = (($activeService['type'] ?? 'air ticket') === 'air ticket'
     ? $activeServiceConvertedPurchaseCost
@@ -315,7 +362,19 @@ $sameCurrencyServiceCustomerRefundDisplay = $invoiceCurrency . ' ' . number_form
 $sameCurrencySupplierRefundableAmount = (float) ($activeService['supplierRefundableCreditAmount'] ?? 0.0);
 $sameCurrencySupplierRefundableDisplay = $invoiceCurrency . ' ' . number_format(round($sameCurrencySupplierRefundableAmount, 0), 0);
 $settlementPaidHintAmount = (float) ($bookingReceivedTotals[$invoiceCurrency] ?? 0.0);
-$settlementPaidHintDisplay = $invoiceCurrency . ' ' . number_format(round($settlementPaidHintAmount, 0), 0);
+$settlementInvoiceHintAmount = $currentInvoiceAmountValue;
+if ((bool) ($activeService['hasCancellationEvent'] ?? false)) {
+    $savedCancellationInvoiceAmount = $activeServiceCancellationSettled
+        ? (float) ($activeService['latestCancelPriorCustomerDueAmount'] ?? 0)
+        : (float) ($activeService['currentCustomerInvoiceAmount'] ?? 0);
+    $savedCancellationReceivedAmount = $activeServiceCancellationSettled
+        ? (float) ($activeService['latestCancelCustomerRefundBasisAmount'] ?? 0)
+        : (float) ($activeService['currentCustomerReceivedAmount'] ?? 0);
+    if ($savedCancellationInvoiceAmount > 0.005) {
+        $settlementInvoiceHintAmount = $savedCancellationInvoiceAmount;
+    }
+    $settlementPaidHintAmount = max($savedCancellationReceivedAmount, 0);
+}
 $paidOnCurrentInvoiceDisplay = $invoiceCurrency . ' ' . number_format(round($currentReceivedPersistedAmount, 0), 0);
 $hasCurrentInvoiceAmount = $currentInvoiceAmountValue > 0.005 || $currentReceivedPersistedAmount > 0.005 || $effectiveCurrentInvoiceDueValue > 0.005;
 $paymentCurrency = $invoiceCurrency;
@@ -480,6 +539,9 @@ if ($refundPaymentMethodOptions === []) {
         'credit_card' => 'Credit Card',
     ];
 }
+$supplierRefundMethodOptions = $refundPaymentMethodOptions + [
+    'supplier_credit' => 'Refund to Supplier Account',
+];
 $customerOpenReceivablesJson = json_encode(
     $customerPaymentFoundation['customerOpenReceivables'] ?? [],
     JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
@@ -564,7 +626,23 @@ foreach ($branchOptions as $branchOption) {
 }
 $duesFinderUrl = url('/workspace/customers/dues-finder');
 $supplierHistoryFinderUrl = url('/workspace/suppliers/history-finder');
+$globalSupplierPaymentHistoryUrl = url('/suppliers/settlements/global/history');
+$globalSupplierPaymentCorrectionUrl = url('/suppliers/settlements/global/void');
+$globalSupplierPaymentSupplierCorrectionUrl = url('/suppliers/settlements/global/supplier-correct');
+$supplierPaymentUnifiedCorrectionUrl = url('/suppliers/payments/correct');
+$canCorrectGlobalSupplierPayments = \App\Helpers\Auth::isFinancialAdmin();
 $invoiceNoLabel = $workspaceBooking['id'] > 0 ? $workspaceBooking['number'] : 'Draft';
+$selectedOperatingBranchId = (int) ($workspaceBooking['branchId'] ?? 0);
+$selectedOperatingBranch = null;
+foreach ($branchOptions as $branchOption) {
+    if ((int) ($branchOption['id'] ?? 0) === $selectedOperatingBranchId) {
+        $selectedOperatingBranch = $branchOption;
+        break;
+    }
+}
+$selectedOperatingBranchName = trim((string) ($selectedOperatingBranch['name'] ?? 'Select Branch'));
+$selectedOperatingBranchCurrency = strtoupper(trim((string) ($selectedOperatingBranch['base_currency'] ?? $workspaceBooking['defaultCurrency'] ?? 'PKR')));
+$selectedOperatingBranchCurrency = $selectedOperatingBranchCurrency !== '' ? $selectedOperatingBranchCurrency : 'PKR';
 $showWorkspaceDebug = app_debug_tools_enabled() && (string) ($_GET['debug_ui'] ?? '') === '1';
 $canPostServiceEvents = in_array((string) ($user['roleCode'] ?? $user['role_code'] ?? ''), ['super_admin', 'branch_admin'], true);
 $invoiceOutstandingAmount = $effectiveCurrentInvoiceDueValue;
@@ -607,9 +685,15 @@ if ($workspaceBooking['id'] <= 0) {
 
 $supplierGrossTotals = $sumByCurrency($supplierFoundation['obligations'] ?? [], 'currency', static fn (array $row): float => (float) ($row['grossAmount'] ?? 0));
 $supplierAdvanceAppliedTotals = $sumByCurrency($supplierFoundation['obligations'] ?? [], 'currency', static fn (array $row): float => (float) ($row['advanceAppliedAmount'] ?? 0));
-$supplierPaidTotals = $sumByCurrency($supplierFoundation['payments'] ?? [], 'currency', static fn (array $row): float => (float) ($row['paidAmount'] ?? 0));
+$supplierPaidTotals = $sumByCurrency($supplierFoundation['obligations'] ?? [], 'currency', static fn (array $row): float => (float) ($row['paymentAllocatedAmount'] ?? 0));
 $supplierOutstandingTotals = $sumByCurrency($supplierFoundation['obligations'] ?? [], 'currency', static fn (array $row): float => (float) ($row['balanceDueAmount'] ?? $row['netPayableAmount'] ?? 0));
 $supplierAdvanceBalanceTotals = $sumByCurrency($supplierFoundation['advances'] ?? [], 'currency', static fn (array $row): float => (float) ($row['availableAmount'] ?? 0));
+$supplierHasOutstandingBalance = count((array) ($supplierFoundation['openObligations'] ?? [])) > 0;
+$supplierPositionReadOnly = (int) ($_GET['supplier_position'] ?? 0) === 1;
+$showSupplierPaymentCorrectionActions = $canCorrectGlobalSupplierPayments && ! $supplierPositionReadOnly;
+// Supplier money is entered only through the unified supplier-account screen.
+// The booking modal remains a read-only position/history view.
+$showSupplierPaymentOperationalActions = false;
 $latestRefundPrintUrl = (int) ($workspaceBooking['id'] ?? 0) > 0 && (int) ($activeService['latestRefundEventId'] ?? 0) > 0
     ? url('/workspace/output?booking_id=' . (int) $workspaceBooking['id'] . '&doc=service_refund_receipt&refund_event_id=' . (int) ($activeService['latestRefundEventId'] ?? 0))
     : '';
@@ -629,8 +713,7 @@ $latestRefundPrintUrl = (int) ($workspaceBooking['id'] ?? 0) > 0 && (int) ($acti
                 <button class="btn btn-sm" type="button" data-workspace-action="add-traveler" onclick="return window.workspaceOpenStandaloneCustomerModal && window.workspaceOpenStandaloneCustomerModal(event)">Find Customer</button>
                 <button class="btn btn-sm" type="button" data-workspace-action="new-customer" onclick="return window.workspaceOpenStandaloneNewCustomerModal && window.workspaceOpenStandaloneNewCustomerModal(event)">New Customer</button>
                 <button class="btn btn-sm" type="button" data-workspace-action="customer-dues-finder">Receive Customer Payment</button>
-                <button class="btn btn-sm" type="button" data-workspace-action="supplier-history-finder">Find Supplier Payment</button>
-                <button class="btn btn-sm" type="button" data-global-prepaid-supplier-open>Prepaid Supplier Payment</button>
+                <button class="btn btn-sm" type="button" data-workspace-action="supplier-history-finder">Supplier Payment</button>
                 <button class="btn btn-sm" type="button" data-workspace-action="add-service" data-workflow-control="add-service" <?= $hasActiveServices ? '' : 'disabled' ?>>Add Service</button>
                 <button class="btn btn-sm" type="button" data-workspace-action="add-reminder">Reminders</button>
                 <button class="btn btn-sm" type="button" data-workspace-action="recent-bookings">Recent Invoices</button>
@@ -639,7 +722,7 @@ $latestRefundPrintUrl = (int) ($workspaceBooking['id'] ?? 0) > 0 && (int) ($acti
         <div class="legacy-command-row legacy-command-row--secondary">
             <div class="legacy-command-group legacy-command-group--secondary">
                 <button class="btn btn-sm" type="button" data-workspace-action="service-edit-booking" disabled>Edit Booking</button>
-                <button class="btn btn-sm" type="button" data-workspace-action="service-penalty-refund" disabled>Edit Penalty / Refund</button>
+                <button class="btn btn-sm" type="button" data-workspace-action="service-penalty-refund" disabled>Edit Refund</button>
                 <button class="btn btn-sm" type="button" data-offline-action="snapshot">Offline Snapshot</button>
                 <button class="btn btn-sm" type="button" data-offline-action="sync">Sync Offline</button>
             </div>
@@ -650,6 +733,51 @@ $latestRefundPrintUrl = (int) ($workspaceBooking['id'] ?? 0) > 0 && (int) ($acti
             </form>
         </div>
     </div>
+    <section
+        class="workspace-operating-branch"
+        data-operating-branch-control
+        data-persisted-branch-id="<?= e((string) $selectedOperatingBranchId) ?>"
+        aria-labelledby="workspace-operating-branch-title"
+    >
+        <div class="workspace-operating-branch__identity">
+            <span class="workspace-operating-branch__eyebrow">Operating Branch</span>
+            <strong id="workspace-operating-branch-title" data-operating-branch-status><?= e($selectedOperatingBranchName) ?></strong>
+        </div>
+        <div class="workspace-operating-branch__options" role="radiogroup" aria-label="Operating branch">
+            <?php foreach ($branchOptions as $branchRow): ?>
+                <?php
+                $branchId = (int) ($branchRow['id'] ?? 0);
+                $branchName = trim((string) ($branchRow['name'] ?? ('Branch ' . $branchId)));
+                $branchCode = strtoupper(trim((string) ($branchRow['code'] ?? '')));
+                $branchCity = trim((string) ($branchRow['city'] ?? ''));
+                $branchCountry = strtoupper(trim((string) ($branchRow['country_code'] ?? '')));
+                $branchCurrency = strtoupper(trim((string) ($branchRow['base_currency'] ?? 'PKR'))) ?: 'PKR';
+                $branchTheme = str_contains(mb_strtolower($branchName . ' ' . $branchCode), 'noble') ? 'noble' : 'imdad';
+                $branchLocation = implode(' · ', array_values(array_filter([$branchCity, $branchCountry, $branchCurrency])));
+                ?>
+                <label class="workspace-operating-branch__option workspace-operating-branch__option--<?= e($branchTheme) ?><?= $branchId === $selectedOperatingBranchId ? ' is-active' : '' ?>" data-operating-branch-option>
+                    <input
+                        type="radio"
+                        name="operating_branch_selector"
+                        value="<?= e((string) $branchId) ?>"
+                        <?= $branchId === $selectedOperatingBranchId ? 'checked' : '' ?>
+                        <?= count($branchOptions) <= 1 ? 'disabled' : '' ?>
+                        data-operating-branch-radio
+                        data-branch-name="<?= e($branchName) ?>"
+                        data-branch-currency="<?= e($branchCurrency) ?>"
+                    >
+                    <span class="workspace-operating-branch__option-copy">
+                        <strong><?= e($branchName) ?></strong>
+                        <small><?= e($branchLocation !== '' ? $branchLocation : $branchCurrency) ?></small>
+                    </span>
+                </label>
+            <?php endforeach; ?>
+        </div>
+        <div class="workspace-operating-branch__badge" data-operating-branch-badge>
+            <span>Active</span>
+            <strong><?= e($selectedOperatingBranchCurrency) ?></strong>
+        </div>
+    </section>
     <section id="workspace-recent-bookings" class="legacy-band legacy-search-results" hidden>
         <div class="legacy-service-context legacy-search-results__header">
             <strong>Recent Invoices</strong>
@@ -800,7 +928,7 @@ $latestRefundPrintUrl = (int) ($workspaceBooking['id'] ?? 0) > 0 && (int) ($acti
         </section>
     <?php endif; ?>
 
-    <form class="legacy-band legacy-invoice-header legacy-invoice-header--repaired" method="post" action="<?= e(url('/workspace/save')) ?>">
+    <form id="legacy-invoice-header-form" class="legacy-band legacy-invoice-header legacy-invoice-header--repaired" method="post" action="<?= e(url('/workspace/save')) ?>">
         <?= \App\Helpers\Csrf::input() ?>
         <?php
         $selectedBusinessSourceId = (int) ($workspaceBooking['businessSourceId'] ?? 0);
@@ -885,7 +1013,7 @@ $latestRefundPrintUrl = (int) ($workspaceBooking['id'] ?? 0) > 0 && (int) ($acti
         <label class="legacy-field legacy-field--service-type"><span>Service Type</span><select name="service_type" data-service-field="type"><?php foreach ($serviceTypeOptions as $serviceTypeValue => $serviceTypeLabel): ?><option value="<?= e((string) $serviceTypeValue) ?>" <?= (string) $serviceTypeValue === (string) ($activeService['type'] ?? 'air ticket') ? 'selected' : '' ?>><?= e((string) $serviceTypeLabel) ?></option><?php endforeach; ?></select></label>
         <label class="legacy-field legacy-field--ticket-ref"><span data-service-ref-label>Ticket No. / Ref No.</span><input type="text" name="ticket_number" data-ticket-field="ticket_number" value="<?= e($serviceReference) ?>"></label>
         <label class="legacy-field legacy-field--pnr"><span data-service-second-ref-label>PNR.#</span><input type="text" name="ticket_pnr" data-ticket-field="pnr" value="<?= e((string) ($activeService['pnr'] ?? '')) ?>"></label>
-        <label class="legacy-field legacy-field--supplier"><span data-service-supplier-label>Tkt.Purchase From</span><select name="supplier_name" data-service-field="supplier" data-service-supplier-input>
+        <label class="legacy-field legacy-field--supplier"><span data-service-supplier-label>Tkt.Purchase From</span><span class="legacy-supplier-edit-control"><select name="supplier_name" data-service-field="supplier" data-service-supplier-input>
             <?php $activeSupplierName = trim((string) ($activeService['supplier'] ?? '')); ?>
             <?php $supplierOptionNames = array_map(static fn (array $row): string => trim((string) ($row['name'] ?? '')), $serviceSupplierOptions); ?>
             <option value="" <?= $activeSupplierName === '' ? 'selected' : '' ?>>Select supplier</option>
@@ -899,7 +1027,7 @@ $latestRefundPrintUrl = (int) ($workspaceBooking['id'] ?? 0) > 0 && (int) ($acti
                 <option value="<?= e($activeSupplierName) ?>" selected><?= e($activeSupplierName) ?></option>
             <?php endif; ?>
             <option value="__add_supplier__">+ Add new supplier...</option>
-        </select></label>
+        </select></span></label>
         <label class="legacy-field legacy-field--ticket-type" data-air-only>
             <span>Ticket Type</span>
             <select name="ticket_type" data-ticket-field="ticket_type">
@@ -1044,6 +1172,8 @@ Kept here in case manual service save is needed again later.
         $financialCorrectionLossAmount = max(0, round($financialCorrectionPayableAmount - $financialCorrectionCustomerValue, 2));
         $financialCorrectionHasLoss = $financialCorrectionLossAmount > 0.005;
         $settlementCustomerPenaltyValue = (float) ($activeService['latestCancelCustomerPenaltyAmount'] ?? 0);
+        $settlementAgencyFeeChargedValue = max((float) ($activeService['serviceCharge'] ?? 0), 0);
+        $settlementAgencyFeeRefundValue = (float) ($activeService['latestCancelAgencyFeeRefundAmount'] ?? 0);
         $settlementFinanciallySettled = (bool) ($activeService['latestCancelFinanciallySettled'] ?? false);
         $settlementSupplierPenaltyValue = (float) ($activeService['latestCancelSupplierPenaltyAmount'] ?? 0);
         $settlementExpectedSupplierRefundSavedValue = (float) ($activeService['latestCancelExpectedSupplierRefundAmount'] ?? 0);
@@ -1085,9 +1215,10 @@ Kept here in case manual service save is needed again later.
                 || $settlementReleasedSupplierCreditValue > 0.005
             );
         $settlementSummaryText = sprintf(
-            'Customer penalty: %s. Expected supplier refund: %s. Supplier penalty: %s. Customer refund released: %s.',
+            'Customer penalty: %s. Expected supplier refund: %s. Agency fee refunded: %s. Supplier penalty: %s. Customer refund released: %s.',
             $formatSettlementAmount($settlementCustomerPenaltyValue),
             $formatSettlementAmount($settlementExpectedSupplierRefundValue),
+            $formatSettlementAmount($settlementAgencyFeeRefundValue),
             $formatSettlementAmount($settlementSupplierPenaltyValue),
             $formatSettlementAmount($settlementDisplayCustomerReleasedCreditValue)
         );
@@ -1112,6 +1243,12 @@ Kept here in case manual service save is needed again later.
         }
         $latestCustomerRefundEventId = (int) ($activeService['latestCustomerRefundEventId'] ?? 0);
         $latestSupplierRefundEventId = (int) ($activeService['latestSupplierRefundEventId'] ?? 0);
+        $customerRefundWasPosted = $latestCustomerRefundEventId > 0;
+        $supplierRefundWasPosted = $latestSupplierRefundEventId > 0;
+        $latestCustomerRefundDetail = (array) ($activeService['latestCustomerRefundDetail'] ?? []);
+        $latestSupplierRefundDetail = (array) ($activeService['latestSupplierRefundDetail'] ?? []);
+        $latestCustomerRefundMethod = (string) ($activeService['latestCustomerRefundPaymentMethod'] ?? 'cash');
+        $latestSupplierRefundMethod = (string) ($activeService['latestSupplierRefundPaymentMethod'] ?? 'cash');
         $showRefundReverseForm = $latestCustomerRefundEventId > 0 || $latestSupplierRefundEventId > 0;
         $hasPostedRefundActivity = $latestCustomerRefundAmountOnlyValue > 0.005 || $latestSupplierRefundAmountOnlyValue > 0.005;
         $cancellationCustomerRefundPending = $settlementRemainingCustomerRefundCreditValue > 0.005;
@@ -1127,54 +1264,82 @@ Kept here in case manual service save is needed again later.
         $showSettlementReverseForm = false;
         $showSettlementCorrectionForm = $settlementSummaryVisible && ! $showRefundReverseForm;
         $showSettlementCorrectionReverseForm = $settlementSummaryVisible && ! $showRefundReverseForm;
-        $showRefundForm = $showRefundAction && (
-            ! $activeServiceIsCancelled
-            || $cancellationCustomerRefundPending
+        $showRefundForm = $showRefundAction
+            && $activeServiceIsCancelled
+            && $settlementFinanciallySettled
+            && (
+            $cancellationCustomerRefundPending
             || $cancellationSupplierRefundPending
             || (
                 ! $hasPostedRefundActivity
-                && ($settlementFinanciallySettled || $settlementSummaryVisible)
+                && $settlementSummaryVisible
             )
         );
         $showReopenCancelForm = $showSettlementAction && ! $settlementSummaryVisible && ! $showRefundReverseForm;
+        $initialServiceWorkflowTab = ($showSettlementForm || $showReopenCancelForm)
+            ? 'settlement'
+            : (($activeServiceIsCancelled && $showRefundForm)
+                ? 'refund'
+                : ($showCancelAction
+                    ? 'cancel'
+                    : ($showReissueAction ? 'reissue' : 'edit')));
+        $serviceWorkflowHelpText = [
+            'cancel' => 'Cancel the selected service operationally. Financial settlement is recorded separately afterward.',
+            'settlement' => 'Record customer penalty, expected supplier refund, and supplier penalty for a cancelled service.',
+            'refund' => 'Post actual money returned to the customer or received back from the supplier.',
+            'reissue' => 'Exchange the selected air ticket without cancelling it. Record only the new ticket and financial differences.',
+            'edit' => 'Correct saved invoice and supplier values while preserving the financial audit trail.',
+        ];
         if ($cancellationFinancialFollowUpComplete) {
             $cancelledServiceNotice = $showRefundReverseForm
                 ? 'This service is already cancelled and refunded.'
                 : 'This service is already cancelled and settled. Refund follow-up is complete.';
         } else {
             $cancelledServiceNotice = $settlementSummaryVisible
-                ? 'This service is already cancelled. Settlement is already recorded. Continue with refund follow-up below.'
+                ? ''
                 : 'This service is already cancelled. Use settlement or refund only if financial follow-up is still needed.';
         }
     ?>
-    <section class="customer-picker-modal" data-service-edit-booking-modal hidden aria-hidden="true">
+    <section class="customer-picker-modal" data-service-edit-booking-modal data-service-workflow-active-tab="<?= e($initialServiceWorkflowTab) ?>" hidden aria-hidden="true">
         <div class="customer-picker-modal__backdrop" data-service-edit-booking-close></div>
         <div class="customer-picker-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="service-edit-booking-title" style="max-width:1380px;">
             <header class="customer-picker-modal__header">
                 <div>
                     <strong id="service-edit-booking-title">Edit Booking</strong>
-                    <span>Use this popup for the full booking workflow: cancel, settlement, refund, reissue, and booking financial edits.</span>
                 </div>
                 <button class="btn btn-sm" type="button" data-service-edit-booking-close>Close</button>
             </header>
             <div class="customer-picker-modal__body">
-                <div class="legacy-service-event-note legacy-service-event-note--cancelled" data-service-cancelled-note <?= $activeServiceIsCancelled ? '' : 'hidden' ?>>
+                <div class="legacy-service-event-note legacy-service-event-note--cancelled" data-service-cancelled-note <?= ($activeServiceIsCancelled && $cancelledServiceNotice !== '') ? '' : 'hidden' ?>>
                     <?= e($cancelledServiceNotice) ?>
                 </div>
-                <?php if ($settlementSummaryVisible && $refundProgressSummaryText !== '' && ! $showPostedRefundSummary): ?>
-                    <div class="legacy-service-event-note">
-                        <?= e($refundProgressSummaryText) ?>
-                    </div>
-                <?php endif; ?>
                 <?php if ($showPostedRefundSummary): ?>
                     <div class="legacy-service-event-note">
                         Posted refund summary:
                         Customer already received refund of <strong><?= e($formatSettlementAmount($latestCustomerRefundAmountOnlyValue)) ?></strong>,
                         supplier refund received <strong><?= e($formatSettlementAmount($latestSupplierRefundAmountOnlyValue)) ?></strong>.
-                        Use <strong>Edit Penalty / Refund</strong> only if one of these posted values needs correction.
+                        Use <strong>Edit Refund</strong> only if one of these posted values needs correction.
                     </div>
                 <?php endif; ?>
-                <form class="legacy-service-event-bar" method="post" action="<?= e(url('/workspace/services/cancel')) ?>" data-service-event-bar="cancel" <?= $showCancelAction ? '' : 'hidden' ?>>
+                <nav class="service-workflow-tabs" role="tablist" aria-label="Booking service actions" data-service-workflow-tabs>
+                    <button type="button" class="service-workflow-tab service-workflow-tab--cancel<?= $initialServiceWorkflowTab === 'cancel' ? ' is-active' : '' ?>" role="tab" aria-selected="<?= $initialServiceWorkflowTab === 'cancel' ? 'true' : 'false' ?>" data-service-workflow-tab="cancel" <?= $showCancelAction ? '' : 'disabled' ?>>
+                        <span class="service-workflow-tab__step">01</span><span><strong>Cancel Service</strong><small>Stop the current service</small></span>
+                    </button>
+                    <button type="button" class="service-workflow-tab service-workflow-tab--settlement<?= $initialServiceWorkflowTab === 'settlement' ? ' is-active' : '' ?>" role="tab" aria-selected="<?= $initialServiceWorkflowTab === 'settlement' ? 'true' : 'false' ?>" data-service-workflow-tab="settlement" <?= ($showSettlementForm || $showReopenCancelForm) ? '' : 'disabled' ?>>
+                        <span class="service-workflow-tab__step">02</span><span><strong>Save Refund</strong><small>Penalties and expected refund</small></span>
+                    </button>
+                    <button type="button" class="service-workflow-tab service-workflow-tab--refund<?= $initialServiceWorkflowTab === 'refund' ? ' is-active' : '' ?>" role="tab" aria-selected="<?= $initialServiceWorkflowTab === 'refund' ? 'true' : 'false' ?>" data-service-workflow-tab="refund" <?= $showRefundForm ? '' : 'disabled' ?>>
+                        <span class="service-workflow-tab__step">03</span><span><strong>Pay Refund</strong><small>Available after settlement</small></span>
+                    </button>
+                    <button type="button" class="service-workflow-tab service-workflow-tab--reissue<?= $initialServiceWorkflowTab === 'reissue' ? ' is-active' : '' ?>" role="tab" aria-selected="<?= $initialServiceWorkflowTab === 'reissue' ? 'true' : 'false' ?>" data-service-workflow-tab="reissue" <?= $showReissueAction ? '' : 'disabled' ?>>
+                        <span class="service-workflow-tab__step">04</span><span><strong>Reissue Ticket</strong><small>Independent ticket exchange</small></span>
+                    </button>
+                    <button type="button" class="service-workflow-tab service-workflow-tab--edit<?= $initialServiceWorkflowTab === 'edit' ? ' is-active' : '' ?>" role="tab" aria-selected="<?= $initialServiceWorkflowTab === 'edit' ? 'true' : 'false' ?>" data-service-workflow-tab="edit" <?= $showFinancialCorrectionAction ? '' : 'disabled' ?>>
+                        <span class="service-workflow-tab__step">05</span><span><strong>Edit Invoice</strong><small>Correct saved financial values</small></span>
+                    </button>
+                </nav>
+                <div class="service-workflow-tab-help" data-service-workflow-tab-help aria-live="polite"><?= e((string) ($serviceWorkflowHelpText[$initialServiceWorkflowTab] ?? 'Select an available service action.')) ?></div>
+                <form class="legacy-service-event-bar<?= $initialServiceWorkflowTab !== 'cancel' ? ' service-workflow-panel--tab-hidden' : '' ?>" method="post" action="<?= e(url('/workspace/services/cancel')) ?>" data-service-event-bar="cancel" data-service-workflow-panel="cancel" <?= $showCancelAction ? '' : 'hidden' ?>>
                     <?= \App\Helpers\Csrf::input() ?>
                     <input type="hidden" name="booking_id" value="<?= e((string) $workspaceBooking['id']) ?>">
                     <input type="hidden" name="service_id" value="<?= e((string) ($activeService['serviceId'] ?? 0)) ?>" data-service-cancel-id>
@@ -1183,46 +1348,59 @@ Kept here in case manual service save is needed again later.
                     <label class="legacy-service-event-field"><span>Note</span><input type="text" name="cancel_notes" value="" placeholder="Optional note" maxlength="4000"></label>
                     <button class="btn btn-sm legacy-service-event-action" type="submit" data-service-cancel-button <?= $showCancelAction ? '' : 'disabled' ?>>Cancel Service</button>
                 </form>
-                <form class="legacy-service-event-bar legacy-service-event-bar--settlement" method="post" action="<?= e(url('/workspace/services/cancellation-financials')) ?>" data-service-event-bar="settlement" <?= $showSettlementForm ? '' : 'hidden' ?>>
+                <form class="legacy-service-event-bar legacy-service-event-bar--settlement<?= $initialServiceWorkflowTab !== 'settlement' ? ' service-workflow-panel--tab-hidden' : '' ?>" method="post" action="<?= e(url('/workspace/services/cancellation-financials')) ?>" data-service-event-bar="settlement" data-service-workflow-panel="settlement" <?= $showSettlementForm ? '' : 'hidden' ?>>
                     <?= \App\Helpers\Csrf::input() ?>
                     <input type="hidden" name="booking_id" value="<?= e((string) $workspaceBooking['id']) ?>">
                     <input type="hidden" name="service_id" value="<?= e((string) ($activeService['serviceId'] ?? 0)) ?>" data-service-settlement-id>
                     <input type="hidden" name="settlement_edit_mode" value="<?= $showSettlementEditForm ? '1' : '0' ?>">
-                    <div class="legacy-service-event-note">Already received on this booking: <strong><?= e($settlementPaidHintDisplay) ?></strong></div>
+                    <div class="legacy-service-event-note">
+                        Invoice Amount: <strong><?= e(number_format(round($settlementInvoiceHintAmount, 0), 0) . ' ' . $invoiceCurrency) ?></strong>,
+                        Received: <strong><?= e(number_format(round($settlementPaidHintAmount, 0), 0) . ' ' . $invoiceCurrency) ?></strong>
+                    </div>
                     <label class="legacy-service-event-field"><span>Date</span><input type="date" name="settlement_event_date" value="<?= e($settlementEventDateValue) ?>" aria-label="Settlement date"></label>
                     <label class="legacy-service-event-field legacy-service-event-field--customer-penalty"><span>Customer Penalty</span><input type="number" name="customer_penalty_amount" value="<?= e(number_format(round($settlementCustomerPenaltyValue, 0), 0, '.', '')) ?>" min="0" step="0.01" aria-label="Customer penalty amount"></label>
                     <label class="legacy-service-event-field legacy-service-event-field--expected-supplier-refund"><span>Expected Supplier Refund</span><input type="number" name="expected_supplier_refund_amount" value="<?= e(number_format(round($settlementExpectedSupplierRefundValue, 0), 0, '.', '')) ?>" min="0" step="0.01" aria-label="Expected supplier refund amount"></label>
+                    <label class="legacy-service-event-field legacy-service-event-field--agency-fee-refund"><span><small>Charged: <?= e($formatSettlementAmount($settlementAgencyFeeChargedValue)) ?></small>Service Amount</span><input type="number" name="agency_fee_refund_amount" value="<?= e(number_format(round($settlementAgencyFeeRefundValue, 0), 0, '.', '')) ?>" min="0" max="<?= e(number_format(round($settlementAgencyFeeChargedValue, 0), 0, '.', '')) ?>" step="0.01" aria-label="Service amount returned to customer"></label>
+                    <label class="legacy-service-event-field legacy-service-event-field--calculated"><span>Customer Refund Due</span><input type="number" value="<?= e(number_format(round(max($settlementExpectedSupplierRefundValue - $settlementCustomerPenaltyValue + $settlementAgencyFeeRefundValue, 0), 0), 0, '.', '')) ?>" readonly data-settlement-customer-refund-due></label>
                     <label class="legacy-service-event-field legacy-service-event-field--supplier-penalty"><span>Supplier Penalty</span><input type="number" name="supplier_penalty_amount" value="<?= e(number_format(round($settlementSupplierPenaltyValue, 0), 0, '.', '')) ?>" min="0" step="0.01" aria-label="Calculated supplier penalty amount" readonly></label>
                     <label class="legacy-service-event-field"><span>Reason</span><input type="text" name="settlement_reason" value="<?= e($settlementReasonValue) ?>" placeholder="Settlement reason" minlength="5" maxlength="1000" data-service-settlement-reason></label>
-                    <button class="btn btn-sm legacy-service-event-action" type="submit" data-service-settlement-button <?= $showSettlementForm ? '' : 'disabled' ?>>Settle Cancel</button>
+                    <button class="btn btn-sm legacy-service-event-action" type="submit" data-service-settlement-button <?= $showSettlementForm ? '' : 'disabled' ?>>Save Refund</button>
                 </form>
-                <form class="legacy-service-event-bar legacy-service-event-bar--refund" method="post" action="<?= e(url('/workspace/services/refund')) ?>" data-service-event-bar="refund" <?= $showRefundForm ? '' : 'hidden' ?>>
+                <form class="legacy-service-event-bar legacy-service-event-bar--refund<?= $initialServiceWorkflowTab !== 'refund' ? ' service-workflow-panel--tab-hidden' : '' ?>" method="post" action="<?= e(url('/workspace/services/refund')) ?>" data-service-event-bar="refund" data-service-workflow-panel="refund" <?= $showRefundForm ? '' : 'hidden' ?>>
                     <?= \App\Helpers\Csrf::input() ?>
                     <input type="hidden" name="booking_id" value="<?= e((string) $workspaceBooking['id']) ?>">
                     <input type="hidden" name="service_id" value="<?= e((string) ($activeService['serviceId'] ?? 0)) ?>" data-service-refund-id>
                     <input type="hidden" name="refund_branch_id" value="<?= e((string) $workspaceBooking['branchId']) ?>" data-service-refund-branch-id>
                     <input type="hidden" name="refund_currency" value="<?= e((string) ($activeService['currency'] ?? $invoiceCurrency)) ?>" data-service-refund-currency>
                     <input type="hidden" name="refund_edit_scope" value="" data-service-refund-edit-scope>
+                    <fieldset class="customer-refund-treatment" data-customer-refund-treatment>
+                        <legend>Customer Refund</legend>
+                        <label class="customer-refund-treatment__option is-selected"><input type="radio" name="customer_refund_treatment" value="retain_credit" checked> <span><strong>Keep as Available Credit</strong><small>Use it on another booking later.</small></span></label>
+                        <label class="customer-refund-treatment__option customer-refund-treatment__option--pay"><input type="radio" name="customer_refund_treatment" value="pay_now"> <span><strong>Pay Customer Now</strong><small>Money will leave the selected cash/bank account.</small></span></label>
+                    </fieldset>
+                    <?php if ($settlementSummaryVisible && $refundProgressSummaryText !== '' && ! $showPostedRefundSummary): ?>
+                        <div class="legacy-service-event-note"><?= e($refundProgressSummaryText) ?></div>
+                    <?php endif; ?>
                     <div class="legacy-service-event-bar__row legacy-service-event-bar__row--refund-customer">
                         <label class="legacy-service-event-field legacy-service-event-field--refund-date"><span>Date</span><input type="date" name="refund_event_date" value="<?= e(date('Y-m-d')) ?>" aria-label="Refund date"></label>
-                        <label class="legacy-service-event-field legacy-service-event-field--customer-refund"><span>Customer Refund</span><input type="number" name="customer_refund_amount" value="0" min="0" step="1" aria-label="Customer refund amount"></label>
-                        <label class="legacy-service-event-field legacy-service-event-field--customer-method"><span>Customer Method</span><select name="refund_payment_method" aria-label="Customer refund payment method" data-service-refund-method>
+                        <label class="legacy-service-event-field legacy-service-event-field--customer-refund" data-customer-refund-pay-now-field hidden><span>Paid to Customer Now</span><input type="number" name="customer_refund_amount" value="0" min="0" step="1" aria-label="Amount actually paid to customer now" disabled></label>
+                        <label class="legacy-service-event-field legacy-service-event-field--customer-method" data-customer-refund-pay-now-field hidden><span>Customer Method</span><select name="refund_payment_method" aria-label="Customer refund payment method" data-service-refund-method disabled>
                             <?php foreach ($refundPaymentMethodOptions as $refundMethodValue => $refundMethodLabel): ?>
                                 <option value="<?= e($refundMethodValue) ?>" <?= (string) $refundMethodValue === 'cash' ? 'selected' : '' ?>><?= e($refundMethodLabel) ?></option>
                             <?php endforeach; ?>
                         </select></label>
-                        <label class="legacy-service-event-field legacy-service-event-field--customer-account" data-service-refund-treasury-row><span>Paid From</span><select name="refund_treasury_account_id" data-service-refund-treasury-select aria-label="Customer refund paid from account"><option value="">Select refund account</option></select></label>
+                        <label class="legacy-service-event-field legacy-service-event-field--customer-account" data-service-refund-treasury-row data-customer-refund-pay-now-field hidden><span>Paid From</span><select name="refund_treasury_account_id" data-service-refund-treasury-select aria-label="Customer refund paid from account" disabled><option value="">Select refund account</option></select></label>
                         <label class="legacy-service-event-field legacy-service-event-field--refund-reason" data-service-refund-reason><span>Reason</span><input type="text" name="refund_reason" value="" placeholder="Refund reason / correction reason" minlength="5" maxlength="1000" required></label>
                     </div>
                     <div class="legacy-service-event-bar__row legacy-service-event-bar__row--refund-supplier">
-                        <label class="legacy-service-event-field legacy-service-event-field--supplier-refund"><span>Supplier Refund Received</span><input type="number" name="supplier_refund_amount" value="0" min="0" step="1" aria-label="Supplier refund received" <?= $supplierRefundAlreadyReceived ? 'readonly' : '' ?>></label>
+                        <label class="legacy-service-event-field legacy-service-event-field--supplier-refund"><span>Supplier Refund / Credit</span><input type="number" name="supplier_refund_amount" value="0" min="0" step="1" aria-label="Supplier refund or retained credit amount" <?= $supplierRefundAlreadyReceived ? 'readonly' : '' ?>></label>
                         <label class="legacy-service-event-field legacy-service-event-field--supplier-method"><span>Supplier Method</span><select name="supplier_refund_payment_method" aria-label="Supplier refund received method" data-service-supplier-refund-method <?= $supplierRefundAlreadyReceived ? 'disabled' : '' ?>>
-                            <?php foreach ($refundPaymentMethodOptions as $refundMethodValue => $refundMethodLabel): ?>
+                            <?php foreach ($supplierRefundMethodOptions as $refundMethodValue => $refundMethodLabel): ?>
                                 <option value="<?= e($refundMethodValue) ?>" <?= (string) $refundMethodValue === 'cash' ? 'selected' : '' ?>><?= e($refundMethodLabel) ?></option>
                             <?php endforeach; ?>
                         </select></label>
                         <label class="legacy-service-event-field legacy-service-event-field--supplier-account" data-service-supplier-refund-treasury-row><span>Received In</span><select name="supplier_refund_treasury_account_id" data-service-supplier-refund-treasury-select aria-label="Supplier refund received in account" <?= $supplierRefundAlreadyReceived ? 'disabled' : '' ?>><option value="">Select receiving account</option></select></label>
-                        <button class="btn btn-sm legacy-service-event-action" type="submit" data-service-refund-button data-service-refund-submit onclick="this.form.querySelector('[data-service-refund-edit-scope]').value='';" <?= (int) ($activeService['serviceId'] ?? 0) > 0 ? '' : 'disabled' ?>>Post Refund</button>
+                        <button class="btn btn-sm legacy-service-event-action" type="submit" data-service-refund-button data-service-refund-submit onclick="this.form.querySelector('[data-service-refund-edit-scope]').value='';" <?= (int) ($activeService['serviceId'] ?? 0) > 0 ? '' : 'disabled' ?>>Save Refund</button>
                     </div>
                     <label class="legacy-service-event-field" data-service-refund-destination-row hidden><span>Customer Bank</span><input type="text" name="customer_bank_name" value="" maxlength="190" placeholder="Customer bank name" aria-label="Customer bank name"></label>
                     <label class="legacy-service-event-field" data-service-refund-destination-row hidden><span>Account Title</span><input type="text" name="customer_bank_account_title" value="" maxlength="190" placeholder="Account title" aria-label="Customer bank account title"></label>
@@ -1231,42 +1409,138 @@ Kept here in case manual service save is needed again later.
                     <label class="legacy-service-event-field" data-service-refund-destination-row hidden><span>Transaction ID / Ref.</span><input type="text" name="transfer_reference" value="" maxlength="190" placeholder="Bank transaction ID, cheque no., or transfer reference" aria-label="Refund transaction ID or transfer reference"></label>
                     <label class="legacy-service-event-field" data-service-refund-destination-row hidden><span>Charges</span><input type="number" name="refund_charges" value="0" min="0" step="1" aria-label="Refund transfer charges"></label>
                 </form>
-                <form class="legacy-service-event-bar legacy-service-event-bar--refund-reverse" method="post" action="<?= e(url('/workspace/services/cancel/reopen')) ?>" data-service-event-bar="cancel-reopen" <?= $showReopenCancelForm ? '' : 'hidden' ?>>
+                <form class="legacy-service-event-bar legacy-service-event-bar--refund-reverse legacy-service-event-bar--cancel-reopen<?= $initialServiceWorkflowTab !== 'settlement' ? ' service-workflow-panel--tab-hidden' : '' ?>" method="post" action="<?= e(url('/workspace/services/cancel/reopen')) ?>" data-service-event-bar="cancel-reopen" data-service-workflow-panel="settlement" <?= $showReopenCancelForm ? '' : 'hidden' ?>>
                     <?= \App\Helpers\Csrf::input() ?>
                     <input type="hidden" name="booking_id" value="<?= e((string) $workspaceBooking['id']) ?>">
                     <input type="hidden" name="service_id" value="<?= e((string) ($activeService['serviceId'] ?? 0)) ?>">
                     <div class="legacy-service-event-note">Once no settlement or refund remains on this cancellation, you can reopen the service and post the correct cancel workflow again.</div>
-                    <label class="legacy-service-event-field"><span>Reverse Cancel Reason</span><input type="text" name="cancel_reopen_reason" value="" placeholder="Why this cancel needs reversal" minlength="5" maxlength="255" required></label>
-                    <button class="btn btn-sm legacy-service-event-action legacy-service-event-action--secondary" type="submit">Reopen Service</button>
+                    <label class="legacy-service-event-field legacy-service-event-field--reopen-reason"><span>Reverse Cancel Reason</span><input type="text" name="cancel_reopen_reason" value="" placeholder="Why this cancellation needs to be reversed" minlength="5" maxlength="255" required></label>
+                    <button class="btn btn-sm legacy-service-event-action legacy-service-event-action--secondary legacy-service-event-action--reopen" type="submit">Reopen Service</button>
                 </form>
-                <form class="legacy-service-event-bar legacy-service-event-bar--reissue" method="post" action="<?= e(url('/workspace/services/reissue')) ?>" data-service-event-bar="reissue" <?= $showReissueAction ? '' : 'hidden' ?>>
+                <form class="legacy-service-event-bar legacy-service-event-bar--reissue<?= $initialServiceWorkflowTab !== 'reissue' ? ' service-workflow-panel--tab-hidden' : '' ?>" method="post" action="<?= e(url('/workspace/services/reissue')) ?>" data-service-event-bar="reissue" data-service-workflow-panel="reissue" data-reissue-invoice-currency="<?= e((string) ($activeService['currency'] ?? $invoiceCurrency)) ?>" data-reissue-cost-currency="<?= e((string) ($activeService['costCurrency'] ?? $activeService['currency'] ?? $invoiceCurrency)) ?>" data-reissue-service-currency="<?= e((string) ($activeService['serviceChargeCurrency'] ?? $activeService['currency'] ?? $invoiceCurrency)) ?>" <?= $showReissueAction ? '' : 'hidden' ?>>
                     <?= \App\Helpers\Csrf::input() ?>
                     <input type="hidden" name="booking_id" value="<?= e((string) $workspaceBooking['id']) ?>">
                     <input type="hidden" name="service_id" value="<?= e((string) ($activeService['serviceId'] ?? 0)) ?>" data-service-reissue-id>
-                    <label class="legacy-service-event-field"><span>Date</span><input type="date" name="reissue_event_date" value="<?= e(date('Y-m-d')) ?>" aria-label="Reissue date"></label>
-                    <label class="legacy-service-event-field"><span>New Ticket</span><input type="text" name="new_ticket_number" value="" placeholder="New ticket no." maxlength="50" required></label>
-                    <label class="legacy-service-event-field"><span>New PNR</span><input type="text" name="new_pnr" value="" placeholder="New PNR" maxlength="50"></label>
-                    <label class="legacy-service-event-field"><span>Customer Extra</span><input type="number" name="fare_difference_amount" value="0" min="0" step="1" aria-label="Fare difference charged to customer"></label>
-                    <label class="legacy-service-event-field"><span>Service Fee</span><input type="number" name="reissue_service_fee_amount" value="0" min="0" step="1" aria-label="Service fee"></label>
-                    <label class="legacy-service-event-field"><span>Supplier Extra</span><input type="number" name="supplier_cost_difference_amount" value="0" min="0" step="1" aria-label="Supplier cost difference"></label>
-                    <label class="legacy-service-event-field"><span>Reason</span><input type="text" name="reissue_reason" value="" placeholder="Reissue reason" minlength="5" maxlength="1000" required></label>
-                    <button class="btn btn-sm legacy-service-event-action" type="submit" data-service-reissue-button <?= (int) ($activeService['serviceId'] ?? 0) > 0 && (string) ($activeService['type'] ?? '') === 'air ticket' ? '' : 'disabled' ?>>Reissue</button>
+                    <input type="hidden" name="reissue_pricing_mode" value="supplier_plus_service">
+                    <input type="hidden" name="reissue_rate_effective_date" value="<?= e(date('Y-m-d')) ?>" data-reissue-rate-date>
+                    <div class="legacy-service-event-note" data-reissue-position
+                         data-current-invoice="<?= e((string) $currentInvoiceAmountValue) ?>"
+                         data-current-paid="<?= e((string) $currentReceivedPersistedAmount) ?>"
+                         data-current-outstanding="<?= e((string) $effectiveCurrentInvoiceDueValue) ?>"
+                         data-current-supplier="<?= e((string) ((float) ($activeService['purchaseCost'] ?? 0))) ?>"
+                         data-current-profit="<?= e((string) ((float) ($activeService['netProfitLoss'] ?? 0))) ?>">
+                        Current position: Invoice <strong><?= e($invoiceCurrency . ' ' . number_format($currentInvoiceAmountValue, 2)) ?></strong> · Paid <strong><?= e($invoiceCurrency . ' ' . number_format($currentReceivedPersistedAmount, 2)) ?></strong> · Outstanding <strong><?= e($invoiceCurrency . ' ' . number_format($effectiveCurrentInvoiceDueValue, 2)) ?></strong>
+                    </div>
+                    <div class="reissue-ticket-grid">
+                        <label class="legacy-service-event-field"><span>Date</span><input type="date" name="reissue_event_date" value="<?= e(date('Y-m-d')) ?>" aria-label="Reissue date"></label>
+                        <label class="legacy-service-event-field"><span>New Ticket</span><input type="text" name="new_ticket_number" value="" placeholder="New ticket no." maxlength="50" required></label>
+                        <label class="legacy-service-event-field"><span>New PNR</span><input type="text" name="new_pnr" value="" placeholder="New PNR" maxlength="50"></label>
+                    </div>
+                    <section class="reissue-pricing-panel" aria-label="Reissue pricing">
+                        <div class="reissue-pricing-panel__heading">
+                            <div><strong>Reissue Pricing</strong><span>Enter each amount in its actual currency. Conversions are confirmed before saving.</span></div>
+                            <span class="reissue-fx-status" data-reissue-fx-status>Single-currency</span>
+                        </div>
+                        <div class="reissue-money-grid">
+                            <label class="legacy-service-event-field reissue-money-field">
+                                <span>Supplier Charge</span>
+                                <span class="reissue-money-control"><input type="number" name="supplier_cost_difference_amount" value="0" min="0" step="0.01" aria-label="Additional reissue amount payable to supplier" data-reissue-supplier-charge><select name="reissue_supplier_currency" aria-label="Supplier reissue charge currency" data-reissue-supplier-currency><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>" <?= $currencyOption === (string) ($activeService['costCurrency'] ?? $activeService['currency'] ?? $invoiceCurrency) ? 'selected' : '' ?>><?= e($currencyOption) ?></option><?php endforeach; ?></select></span>
+                                <small>Additional amount payable to supplier</small>
+                            </label>
+                            <label class="legacy-service-event-field reissue-money-field">
+                                <span>Agency Service Fee</span>
+                                <span class="reissue-money-control"><input type="number" name="reissue_service_fee_amount" value="0" min="0" step="0.01" aria-label="Agency service fee earned on reissue" data-reissue-agency-fee><select name="reissue_agency_fee_currency" aria-label="Agency service fee currency" data-reissue-agency-currency><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>" <?= $currencyOption === (string) ($activeService['serviceChargeCurrency'] ?? $activeService['currency'] ?? $invoiceCurrency) ? 'selected' : '' ?>><?= e($currencyOption) ?></option><?php endforeach; ?></select></span>
+                                <small>Agency earning on this reissue</small>
+                            </label>
+                            <label class="legacy-service-event-field legacy-service-event-field--calculated reissue-money-field reissue-money-field--total">
+                                <span>Customer Pays</span>
+                                <span class="reissue-money-control"><input type="number" name="reissue_customer_amount" value="0" min="0" step="0.01" readonly aria-label="Total additional amount payable by customer" data-reissue-customer-total><select name="reissue_customer_currency" aria-label="Customer reissue charge currency" data-reissue-customer-currency><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>" <?= $currencyOption === (string) ($activeService['currency'] ?? $invoiceCurrency) ? 'selected' : '' ?>><?= e($currencyOption) ?></option><?php endforeach; ?></select></span>
+                                <small>Supplier charge + agency fee after conversion</small>
+                            </label>
+                            <label class="legacy-service-event-field reissue-money-field reissue-money-field--received">
+                                <span>Receive Now <em>Optional</em></span>
+                                <span class="reissue-money-control"><input type="number" name="reissue_received_amount" value="0" min="0" step="0.01" data-reissue-received><select name="reissue_received_currency" aria-label="Reissue payment currency" data-reissue-received-currency><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>" <?= $currencyOption === (string) ($activeService['currency'] ?? $invoiceCurrency) ? 'selected' : '' ?>><?= e($currencyOption) ?></option><?php endforeach; ?></select></span>
+                                <small>Actual cash or bank amount received now</small>
+                            </label>
+                        </div>
+                    </section>
+                    <div class="reissue-settlement-grid">
+                        <label class="legacy-service-event-field"><span>Available Customer Credit</span><select name="reissue_customer_credit_receipt_id" data-reissue-credit-select><option value="">No transferable credit available</option></select></label>
+                        <label class="legacy-service-event-field" data-reissue-credit-amount-row hidden><span>Customer Credit Used</span><input type="number" name="reissue_customer_credit_apply_amount" value="0" min="0" step="1" data-reissue-credit-amount></label>
+                        <label class="legacy-service-event-field"><span>Due Date</span><input type="date" name="reissue_due_date" value="<?= e($invoiceDueDate) ?>"></label>
+                        <label class="legacy-service-event-field"><span>Payment Method</span><select name="reissue_payment_method" data-reissue-method><?php foreach ($paymentMethodOptions as $paymentMethodValue => $paymentMethodLabel): ?><?php if (in_array((string) $paymentMethodValue, ['cash', 'bank_transfer'], true)): ?><option value="<?= e((string) $paymentMethodValue) ?>"><?= e((string) $paymentMethodLabel) ?></option><?php endif; ?><?php endforeach; ?></select></label>
+                        <label class="legacy-service-event-field" data-reissue-account-row><span>Cash / Bank Account</span><select name="reissue_treasury_account_id" data-reissue-account><option value="">Select receiving account</option></select></label>
+                        <label class="legacy-service-event-field"><span>Payment Reference</span><input type="text" name="reissue_payment_reference" value="" maxlength="190" placeholder="Optional reference"></label>
+                    </div>
+                    <div class="legacy-service-event-note reissue-position-summary">
+                        <span>Reissue Charge <strong data-reissue-revised-invoice><?= e($invoiceCurrency) ?> 0.00</strong></span>
+                        <span>Supplier Charge <strong data-reissue-revised-supplier><?= e((string) ($activeService['costCurrency'] ?? $invoiceCurrency)) ?> 0.00</strong></span>
+                        <span>Agency Fee <strong data-reissue-revised-profit><?= e((string) ($activeService['serviceChargeCurrency'] ?? $invoiceCurrency)) ?> 0.00</strong></span>
+                        <span>Balance After <strong data-reissue-revised-balance><?= e($invoiceCurrency) ?> 0.00</strong></span>
+                    </div>
+                    <label class="legacy-service-event-field reissue-reason-field"><span>Reason</span><input type="text" name="reissue_reason" value="" placeholder="Reissue reason" minlength="5" maxlength="1000" required></label>
+                    <button class="btn btn-sm legacy-service-event-action reissue-submit-action" type="submit" data-service-reissue-button <?= (int) ($activeService['serviceId'] ?? 0) > 0 && (string) ($activeService['type'] ?? '') === 'air ticket' ? '' : 'disabled' ?>>Reissue</button>
+                    <?php if (! empty($activeService['reissueEvents']) && is_array($activeService['reissueEvents'])): ?>
+                        <div class="legacy-service-event-note" style="flex-basis:100%">
+                            <strong>Reissue History</strong>
+                            <?php foreach (array_reverse($activeService['reissueEvents']) as $reissueHistoryEvent): ?>
+                                <?php $historyPayload = json_decode((string) ($reissueHistoryEvent['payload_json'] ?? ''), true); $historyPayload = is_array($historyPayload) ? $historyPayload : []; ?>
+                                <span style="margin-left:12px"><?= e((string) ($reissueHistoryEvent['event_date'] ?? '')) ?> · <?= e((string) ($reissueHistoryEvent['new_ticket_number'] ?? '')) ?> · Customer <?= e((string) ($reissueHistoryEvent['currency'] ?? $invoiceCurrency)) ?> <?= e(number_format((float) ($historyPayload['customer_delta'] ?? 0), 2)) ?> <a href="<?= e(url('/workspace/output?booking_id=' . (int) $workspaceBooking['id'] . '&doc=reissue_voucher&event_id=' . (int) ($reissueHistoryEvent['id'] ?? 0))) ?>" target="_blank">View / Print</a></span>
+                            <?php endforeach; ?>
+                        </div>
+                    <?php endif; ?>
                 </form>
-                <form class="legacy-service-event-bar legacy-service-event-bar--financial-correction" method="post" action="<?= e(url('/workspace/services/financial-correction')) ?>" data-service-event-bar="financial-correction" data-financial-correction-service-type="<?= e((string) ($activeService['type'] ?? 'air ticket')) ?>" data-financial-correction-tax-total="<?= e(number_format(round($financialCorrectionTaxTotal, 0), 0, '.', '')) ?>" data-financial-correction-vat="<?= e(number_format(round($financialCorrectionVatValue, 0), 0, '.', '')) ?>" data-financial-correction-currency="<?= e((string) ($activeService['currency'] ?? $invoiceCurrency)) ?>" <?= $showFinancialCorrectionAction ? '' : 'hidden' ?>>
+                <form class="legacy-service-event-bar legacy-service-event-bar--financial-correction<?= $initialServiceWorkflowTab !== 'edit' ? ' service-workflow-panel--tab-hidden' : '' ?>" method="post" action="<?= e(url('/workspace/services/financial-correction')) ?>" data-service-event-bar="financial-correction" data-service-workflow-panel="edit" data-financial-correction-service-type="<?= e((string) ($activeService['type'] ?? 'air ticket')) ?>" data-financial-correction-tax-total="<?= e(number_format(round($financialCorrectionTaxTotal, 0), 0, '.', '')) ?>" data-financial-correction-vat="<?= e(number_format(round($financialCorrectionVatValue, 0), 0, '.', '')) ?>" data-financial-correction-currency="<?= e((string) ($activeService['currency'] ?? $invoiceCurrency)) ?>" <?= $showFinancialCorrectionAction ? '' : 'hidden' ?>>
                     <?= \App\Helpers\Csrf::input() ?>
                     <input type="hidden" name="booking_id" value="<?= e((string) $workspaceBooking['id']) ?>">
                     <input type="hidden" name="service_id" value="<?= e((string) ($activeService['serviceId'] ?? 0)) ?>">
                     <div class="legacy-service-event-bar__row legacy-service-event-bar__row--financial-correction">
-                        <label class="legacy-service-event-field legacy-service-event-field--date"><span>Date</span><input type="date" name="financial_correction_date" value="<?= e(date('Y-m-d')) ?>" aria-label="Financial correction date"></label>
-                        <label class="legacy-service-event-field legacy-service-event-field--currency"><span>Invoice Curr.</span><select name="corrected_invoice_currency" aria-label="Corrected invoice currency"><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>" <?= $currencyOption === (string) ($activeService['currency'] ?? $invoiceCurrency) ? 'selected' : '' ?>><?= e($currencyOption) ?></option><?php endforeach; ?></select></label>
-                        <label class="legacy-service-event-field legacy-service-event-field--currency"><span>Supplier Curr.</span><select name="corrected_cost_currency" aria-label="Corrected supplier cost currency"><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>" <?= $currencyOption === (string) ($activeService['costCurrency'] ?? $activeService['currency'] ?? $invoiceCurrency) ? 'selected' : '' ?>><?= e($currencyOption) ?></option><?php endforeach; ?></select></label>
-                        <label class="legacy-service-event-field legacy-service-event-field--amount"><span><?= e($financialCorrectionCostLabel) ?></span><input type="number" name="corrected_cost_basis" value="<?= e(number_format(round($financialCorrectionCostValue, 0), 0, '.', '')) ?>" min="0" step="1" aria-label="<?= e($financialCorrectionCostLabel) ?>"></label>
-                        <label class="legacy-service-event-field legacy-service-event-field--amount"><span>Serv.Amount</span><input type="number" name="corrected_service_charge" value="<?= e(number_format(round($financialCorrectionServiceChargeValue, 0), 0, '.', '')) ?>" min="0" step="1" aria-label="Service amount"></label>
-                        <label class="legacy-service-event-field legacy-service-event-field--amount"><span>Discount</span><input type="number" name="corrected_discount_amount" value="<?= e(number_format(round($financialCorrectionDiscountValue, 0), 0, '.', '')) ?>" min="0" step="1" aria-label="Discount amount"></label>
-                        <label class="legacy-service-event-field legacy-service-event-field--customer-total"><span>Customer Total</span><input type="number" name="corrected_final_sale_price" value="<?= e(number_format(round($financialCorrectionCustomerValue, 0), 0, '.', '')) ?>" min="0" step="1" aria-label="Customer total" readonly></label>
-                        <label class="legacy-service-event-field legacy-service-event-field--loss"><span>Loss</span><input type="text" value="<?= e(number_format(round($financialCorrectionLossAmount, 0), 0, '.', '')) ?>" data-financial-correction-loss readonly></label>
-                        <label class="legacy-service-event-field legacy-service-event-field--rate"><span>Exchange Rate</span><input type="number" name="corrected_pricing_exchange_rate" value="<?= e(number_format((float) ($activeService['pricingExchangeRate'] ?? 1), 8, '.', '')) ?>" min="0.00000001" step="0.00000001" aria-label="Corrected exchange rate"></label>
-                        <label class="legacy-service-event-field legacy-service-event-field--date"><span>Rate Date</span><input type="date" name="corrected_pricing_rate_effective_date" value="<?= e((string) ($activeService['pricingRateEffectiveDate'] ?? date('Y-m-d'))) ?>" aria-label="Corrected exchange rate date"></label>
+                        <label class="legacy-service-event-field legacy-service-event-field--date financial-correction-support-field financial-correction-support-field--date"><span>Date</span><input type="date" name="financial_correction_date" value="<?= e(date('Y-m-d')) ?>" aria-label="Financial correction date"></label>
+                        <label class="legacy-service-event-field financial-correction-money-field financial-correction-money-field--cost">
+                            <span><?= e($financialCorrectionCostLabel) ?></span>
+                            <span class="financial-correction-money-control">
+                                <input type="number" name="corrected_cost_basis" value="<?= e(number_format(round($financialCorrectionCostValue, 0), 0, '.', '')) ?>" min="0" step="1" aria-label="<?= e($financialCorrectionCostLabel) ?>">
+                                <select name="corrected_cost_currency" aria-label="Corrected supplier cost currency" data-financial-correction-currency="cost" <?= $financialCorrectionCostValue > 0 ? '' : 'disabled' ?>><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>" <?= $currencyOption === (string) ($activeService['costCurrency'] ?? $activeService['currency'] ?? $invoiceCurrency) ? 'selected' : '' ?>><?= e($currencyOption) ?></option><?php endforeach; ?></select>
+                            </span>
+                        </label>
+                        <label class="legacy-service-event-field financial-correction-money-field financial-correction-money-field--service">
+                            <span>Service Amount</span>
+                            <span class="financial-correction-money-control">
+                                <input type="number" name="corrected_service_charge" value="<?= e(number_format(round($financialCorrectionServiceChargeValue, 0), 0, '.', '')) ?>" min="0" step="1" aria-label="Service amount">
+                                <select name="corrected_service_charge_currency" aria-label="Corrected service amount currency" data-financial-correction-currency="service" <?= $financialCorrectionServiceChargeValue > 0 ? '' : 'disabled' ?>><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>" <?= $currencyOption === (string) ($activeService['serviceChargeCurrency'] ?? $activeService['currency'] ?? $invoiceCurrency) ? 'selected' : '' ?>><?= e($currencyOption) ?></option><?php endforeach; ?></select>
+                            </span>
+                        </label>
+                        <label class="legacy-service-event-field financial-correction-money-field financial-correction-money-field--customer-total">
+                            <span>Customer Total</span>
+                            <span class="financial-correction-money-control">
+                                <input type="number" name="corrected_final_sale_price" value="<?= e(number_format(round($financialCorrectionCustomerValue, 0), 0, '.', '')) ?>" min="0" step="1" aria-label="Customer total" readonly>
+                                <select name="corrected_invoice_currency" aria-label="Corrected invoice currency" data-financial-correction-currency="invoice" <?= $financialCorrectionCustomerValue > 0 ? '' : 'disabled' ?>><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>" <?= $currencyOption === (string) ($activeService['currency'] ?? $invoiceCurrency) ? 'selected' : '' ?>><?= e($currencyOption) ?></option><?php endforeach; ?></select>
+                            </span>
+                        </label>
+                        <label class="legacy-service-event-field legacy-service-event-field--amount financial-correction-support-field financial-correction-support-field--discount"><span>Discount</span><input type="number" name="corrected_discount_amount" value="<?= e(number_format(round($financialCorrectionDiscountValue, 0), 0, '.', '')) ?>" min="0" step="1" aria-label="Discount amount"></label>
+                        <label class="legacy-service-event-field legacy-service-event-field--loss financial-correction-support-field financial-correction-support-field--loss"><span>Loss</span><input type="text" value="<?= e(number_format(round($financialCorrectionLossAmount, 0), 0, '.', '')) ?>" data-financial-correction-loss readonly></label>
+                        <?php
+                        $financialCorrectionStoredPricingRate = max((float) ($activeService['pricingExchangeRate'] ?? 1), 0.00000001);
+                        $financialCorrectionStoredCostCurrency = strtoupper((string) ($activeService['costCurrency'] ?? $activeService['currency'] ?? $invoiceCurrency));
+                        $financialCorrectionStoredInvoiceCurrency = strtoupper((string) ($activeService['currency'] ?? $invoiceCurrency));
+                        $financialCorrectionAedToPkrRate = $financialCorrectionStoredPricingRate;
+                        if ($financialCorrectionStoredCostCurrency === 'PKR' && $financialCorrectionStoredInvoiceCurrency === 'AED') {
+                            $financialCorrectionAedToPkrRate = 1 / $financialCorrectionStoredPricingRate;
+                        } elseif ($financialCorrectionStoredCostCurrency === $financialCorrectionStoredInvoiceCurrency) {
+                            $financialCorrectionAedToPkrRate = 1;
+                        }
+                        $financialCorrectionAedToPkrDisplay = abs($financialCorrectionAedToPkrRate - round($financialCorrectionAedToPkrRate)) < 0.0001
+                            ? number_format(round($financialCorrectionAedToPkrRate), 0, '.', '')
+                            : rtrim(rtrim(number_format($financialCorrectionAedToPkrRate, 8, '.', ''), '0'), '.');
+                        ?>
+                        <label class="legacy-service-event-field legacy-service-event-field--rate financial-correction-support-field financial-correction-support-field--rate">
+                            <span>Ex.Rate 1 AED->PKR</span>
+                            <input type="number" name="corrected_aed_to_pkr_exchange_rate" value="<?= e($financialCorrectionAedToPkrDisplay) ?>" min="0.00000001" step="0.00000001" aria-label="Exchange rate: one AED to PKR">
+                        </label>
+                        <input type="hidden" name="corrected_pricing_exchange_rate" value="<?= e(number_format($financialCorrectionStoredPricingRate, 8, '.', '')) ?>">
+                        <label class="legacy-service-event-field legacy-service-event-field--date financial-correction-support-field financial-correction-support-field--date"><span>Rate Date</span><input type="date" name="corrected_pricing_rate_effective_date" value="<?= e((string) ($activeService['pricingRateEffectiveDate'] ?? date('Y-m-d'))) ?>" aria-label="Corrected exchange rate date"></label>
+                        <input type="hidden" name="corrected_service_charge_exchange_rate" value="<?= e(number_format((float) ($activeService['serviceChargeExchangeRate'] ?? 1), 8, '.', '')) ?>">
+                        <input type="hidden" name="corrected_service_charge_rate_effective_date" value="<?= e((string) ($activeService['serviceChargeRateEffectiveDate'] ?? date('Y-m-d'))) ?>">
                     </div>
                     <div class="legacy-service-event-bar__row legacy-service-event-bar__row--financial-correction-actions">
                         <label class="legacy-service-event-field legacy-service-event-field--reason"><span>Reason</span><input type="text" name="financial_correction_reason" value="" placeholder="Supplier discount, wrong amount, sale correction..." minlength="5" maxlength="1000" required></label>
@@ -1284,15 +1558,12 @@ Kept here in case manual service save is needed again later.
         <div class="customer-picker-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="service-penalty-refund-title" style="max-width:1520px;">
             <header class="customer-picker-modal__header">
                 <div>
-                    <strong id="service-penalty-refund-title">Edit Penalty / Refund</strong>
-                    <span>Enter the correct penalty and refund values once; the system keeps the audit trail in the background.</span>
+                    <strong id="service-penalty-refund-title">Edit Refund</strong>
+                    <span>Correct saved cancellation values or an existing posted refund.</span>
                 </div>
                 <button class="btn btn-sm" type="button" data-service-penalty-refund-close>Close</button>
             </header>
             <div class="customer-picker-modal__body">
-                <div class="legacy-service-event-note legacy-service-event-note--cancelled" <?= $activeServiceIsCancelled ? '' : 'hidden' ?>>
-                    <?= e($cancelledServiceNotice) ?>
-                </div>
                 <?php if (! $settlementSummaryVisible && ! $showRefundReverseForm): ?>
                     <div class="legacy-service-event-note">No posted settlement or refund exists yet for this service. Use <strong>Edit Booking</strong> for the main cancel / settle / refund workflow first.</div>
                 <?php endif; ?>
@@ -1305,27 +1576,37 @@ Kept here in case manual service save is needed again later.
                     <label class="legacy-service-event-field legacy-service-event-field--refund-date"><span>Date</span><input type="date" name="correction_event_date" value="<?= e($settlementEventDateValue) ?>" aria-label="Correction date"></label>
                     <label class="legacy-service-event-field legacy-service-event-field--customer-penalty"><span>Customer Penalty</span><input type="number" name="customer_penalty_amount" value="<?= e(number_format(round($settlementCustomerPenaltyValue, 0), 0, '.', '')) ?>" min="0" step="0.01" aria-label="Customer penalty amount"></label>
                     <label class="legacy-service-event-field legacy-service-event-field--expected-supplier-refund"><span>Expected Supplier Refund</span><input type="number" name="expected_supplier_refund_amount" value="<?= e(number_format(round($settlementExpectedSupplierRefundValue, 0), 0, '.', '')) ?>" min="0" step="0.01" aria-label="Expected supplier refund amount"></label>
+                    <label class="legacy-service-event-field legacy-service-event-field--agency-fee-refund"><span><small>Charged: <?= e($formatSettlementAmount($settlementAgencyFeeChargedValue)) ?></small>Service Amount</span><input type="number" name="agency_fee_refund_amount" value="<?= e(number_format(round($settlementAgencyFeeRefundValue, 0), 0, '.', '')) ?>" min="0" max="<?= e(number_format(round($settlementAgencyFeeChargedValue, 0), 0, '.', '')) ?>" step="0.01" aria-label="Service amount returned to customer"></label>
+                    <label class="legacy-service-event-field legacy-service-event-field--calculated"><span>Customer Refund Due</span><input type="number" value="<?= e(number_format(round(max($settlementExpectedSupplierRefundValue - $settlementCustomerPenaltyValue + $settlementAgencyFeeRefundValue, 0), 0), 0, '.', '')) ?>" readonly data-settlement-customer-refund-due></label>
                     <label class="legacy-service-event-field legacy-service-event-field--supplier-penalty"><span>Supplier Penalty</span><input type="number" name="supplier_penalty_amount" value="<?= e(number_format(round($settlementSupplierPenaltyValue, 0), 0, '.', '')) ?>" min="0" step="0.01" aria-label="Calculated supplier penalty amount" readonly></label>
-                    <label class="legacy-service-event-field legacy-service-event-field--customer-refund"><span>Customer Refund</span><input type="number" name="customer_refund_amount" value="<?= e(number_format(round($latestCustomerRefundAmountOnlyValue, 0), 0, '.', '')) ?>" min="0" step="1" aria-label="Customer refund amount"></label>
-                    <label class="legacy-service-event-field legacy-service-event-field--customer-method"><span>Customer Method</span><select name="refund_payment_method" aria-label="Customer refund payment method" data-service-correction-refund-method>
+                    <div class="legacy-service-event-note legacy-service-refund-status" data-correction-customer-refund-status <?= $customerRefundWasPosted ? 'hidden' : '' ?>>
+                        <span>Customer refund has not been paid yet.</span>
+                        <button class="btn btn-sm" type="button" data-open-refund-workflow="customer">Pay Customer Refund</button>
+                    </div>
+                    <label class="legacy-service-event-field legacy-service-event-field--customer-refund"><span>Paid to Customer</span><input type="number" name="customer_refund_amount" value="<?= e(number_format(round($latestCustomerRefundAmountOnlyValue, 0), 0, '.', '')) ?>" min="0" step="1" aria-label="Amount actually paid to customer" <?= $customerRefundWasPosted ? '' : 'disabled' ?>></label>
+                    <label class="legacy-service-event-field legacy-service-event-field--customer-method"><span>Customer Method</span><select name="refund_payment_method" aria-label="Customer refund payment method" data-service-correction-refund-method <?= $customerRefundWasPosted ? '' : 'disabled' ?>>
                         <?php foreach ($refundPaymentMethodOptions as $refundMethodValue => $refundMethodLabel): ?>
-                            <option value="<?= e($refundMethodValue) ?>" <?= (string) $refundMethodValue === 'cash' ? 'selected' : '' ?>><?= e($refundMethodLabel) ?></option>
+                            <option value="<?= e($refundMethodValue) ?>" <?= (string) $refundMethodValue === $latestCustomerRefundMethod ? 'selected' : '' ?>><?= e($refundMethodLabel) ?></option>
                         <?php endforeach; ?>
                     </select></label>
-                    <label class="legacy-service-event-field legacy-service-event-field--customer-account" data-service-correction-refund-treasury-row><span>Paid From</span><select name="refund_treasury_account_id" data-service-correction-refund-treasury-select aria-label="Customer refund paid from account"><option value="">Select refund account</option></select></label>
-                    <label class="legacy-service-event-field legacy-service-event-field--supplier-refund"><span>Supplier Refund Received</span><input type="number" name="supplier_refund_amount" value="<?= e(number_format(round($latestSupplierRefundAmountOnlyValue, 0), 0, '.', '')) ?>" min="0" step="1" aria-label="Supplier refund received"></label>
-                    <label class="legacy-service-event-field legacy-service-event-field--supplier-method"><span>Supplier Method</span><select name="supplier_refund_payment_method" aria-label="Supplier refund received method" data-service-correction-supplier-refund-method>
-                        <?php foreach ($refundPaymentMethodOptions as $refundMethodValue => $refundMethodLabel): ?>
-                            <option value="<?= e($refundMethodValue) ?>" <?= (string) $refundMethodValue === 'cash' ? 'selected' : '' ?>><?= e($refundMethodLabel) ?></option>
+                    <label class="legacy-service-event-field legacy-service-event-field--customer-account" data-service-correction-refund-treasury-row <?= $customerRefundWasPosted ? '' : 'hidden' ?>><span>Paid From</span><select name="refund_treasury_account_id" data-service-correction-refund-treasury-select data-preferred-account-id="<?= e((string) ($latestCustomerRefundDetail['treasury_account_id'] ?? '')) ?>" aria-label="Customer refund paid from account" <?= $customerRefundWasPosted ? '' : 'disabled' ?>><option value="">Select refund account</option></select></label>
+                    <div class="legacy-service-event-note legacy-service-refund-status" data-correction-supplier-refund-status <?= $supplierRefundWasPosted ? 'hidden' : '' ?>>
+                        <span>Supplier refund has not been received yet.</span>
+                        <button class="btn btn-sm" type="button" data-open-refund-workflow="supplier">Record Supplier Refund</button>
+                    </div>
+                    <label class="legacy-service-event-field legacy-service-event-field--supplier-refund"><span>Supplier Refund / Credit</span><input type="number" name="supplier_refund_amount" value="<?= e(number_format(round($latestSupplierRefundAmountOnlyValue, 0), 0, '.', '')) ?>" min="0" step="1" aria-label="Supplier refund or retained credit amount" <?= $supplierRefundWasPosted ? '' : 'disabled' ?>></label>
+                    <label class="legacy-service-event-field legacy-service-event-field--supplier-method"><span>Supplier Method</span><select name="supplier_refund_payment_method" aria-label="Supplier refund received method" data-service-correction-supplier-refund-method <?= $supplierRefundWasPosted ? '' : 'disabled' ?>>
+                        <?php foreach ($supplierRefundMethodOptions as $refundMethodValue => $refundMethodLabel): ?>
+                            <option value="<?= e($refundMethodValue) ?>" <?= (string) $refundMethodValue === $latestSupplierRefundMethod ? 'selected' : '' ?>><?= e($refundMethodLabel) ?></option>
                         <?php endforeach; ?>
                     </select></label>
-                    <label class="legacy-service-event-field legacy-service-event-field--supplier-account" data-service-correction-supplier-refund-treasury-row><span>Received In</span><select name="supplier_refund_treasury_account_id" data-service-correction-supplier-refund-treasury-select aria-label="Supplier refund received in account"><option value="">Select receiving account</option></select></label>
-                    <label class="legacy-service-event-field" data-service-correction-refund-destination-row hidden><span>Customer Bank</span><input type="text" name="customer_bank_name" value="" maxlength="190" placeholder="Customer bank name" aria-label="Customer bank name"></label>
-                    <label class="legacy-service-event-field" data-service-correction-refund-destination-row hidden><span>Account Title</span><input type="text" name="customer_bank_account_title" value="" maxlength="190" placeholder="Account title" aria-label="Customer bank account title"></label>
-                    <label class="legacy-service-event-field" data-service-correction-refund-destination-row hidden><span>Account No.</span><input type="text" name="customer_bank_account_no" value="" maxlength="120" placeholder="Account no." aria-label="Customer bank account number"></label>
-                    <label class="legacy-service-event-field" data-service-correction-refund-destination-row hidden><span>IBAN</span><input type="text" name="customer_bank_iban" value="" maxlength="120" placeholder="IBAN" aria-label="Customer bank IBAN"></label>
-                    <label class="legacy-service-event-field" data-service-correction-refund-destination-row hidden><span>Transaction ID / Ref.</span><input type="text" name="transfer_reference" value="" maxlength="190" placeholder="Bank transaction ID, cheque no., or transfer reference" aria-label="Refund transaction ID or transfer reference"></label>
-                    <label class="legacy-service-event-field" data-service-correction-refund-destination-row hidden><span>Charges</span><input type="number" name="refund_charges" value="0" min="0" step="1" aria-label="Refund transfer charges"></label>
+                    <label class="legacy-service-event-field legacy-service-event-field--supplier-account" data-service-correction-supplier-refund-treasury-row <?= $supplierRefundWasPosted ? '' : 'hidden' ?>><span>Received In</span><select name="supplier_refund_treasury_account_id" data-service-correction-supplier-refund-treasury-select data-preferred-account-id="<?= e((string) ($latestSupplierRefundDetail['treasury_account_id'] ?? '')) ?>" aria-label="Supplier refund received in account" <?= $supplierRefundWasPosted ? '' : 'disabled' ?>><option value="">Select receiving account</option></select></label>
+                    <label class="legacy-service-event-field" data-service-correction-refund-destination-row hidden><span>Customer Bank</span><input type="text" name="customer_bank_name" value="<?= e((string) ($latestCustomerRefundDetail['customer_bank_name'] ?? '')) ?>" maxlength="190" placeholder="Customer bank name" aria-label="Customer bank name"></label>
+                    <label class="legacy-service-event-field" data-service-correction-refund-destination-row hidden><span>Account Title</span><input type="text" name="customer_bank_account_title" value="<?= e((string) ($latestCustomerRefundDetail['customer_bank_account_title'] ?? '')) ?>" maxlength="190" placeholder="Account title" aria-label="Customer bank account title"></label>
+                    <label class="legacy-service-event-field" data-service-correction-refund-destination-row hidden><span>Account No.</span><input type="text" name="customer_bank_account_no" value="<?= e((string) ($latestCustomerRefundDetail['customer_bank_account_no'] ?? '')) ?>" maxlength="120" placeholder="Account no." aria-label="Customer bank account number"></label>
+                    <label class="legacy-service-event-field" data-service-correction-refund-destination-row hidden><span>IBAN</span><input type="text" name="customer_bank_iban" value="<?= e((string) ($latestCustomerRefundDetail['customer_bank_iban'] ?? '')) ?>" maxlength="120" placeholder="IBAN" aria-label="Customer bank IBAN"></label>
+                    <label class="legacy-service-event-field" data-service-correction-refund-destination-row hidden><span>Transaction ID / Ref.</span><input type="text" name="transfer_reference" value="<?= e((string) ($latestCustomerRefundDetail['transfer_reference'] ?? '')) ?>" maxlength="190" placeholder="Bank transaction ID, cheque no., or transfer reference" aria-label="Refund transaction ID or transfer reference"></label>
+                    <label class="legacy-service-event-field" data-service-correction-refund-destination-row hidden><span>Charges</span><input type="number" name="refund_charges" value="<?= e(number_format((float) ($latestCustomerRefundDetail['charges'] ?? 0), 2, '.', '')) ?>" min="0" step="1" aria-label="Refund transfer charges"></label>
                     <label class="legacy-service-event-field legacy-service-event-field--refund-reason legacy-service-event-field--reason-wide" data-service-refund-reason><span>Reason</span><input type="text" name="correction_reason" value="<?= e($settlementReasonValue) ?>" placeholder="Why these penalty / refund values need correction" minlength="5" maxlength="1000" required data-service-correction-settlement-reason></label>
                     <button class="btn btn-sm legacy-service-event-action legacy-service-event-action--secondary" type="submit" data-service-refund-submit>Save Correction</button>
                     <?php if ($latestRefundPrintUrl !== ''): ?>
@@ -1472,9 +1753,14 @@ Kept here in case manual service save is needed again later.
                         <div class="legacy-client-row__label">Service Chgs %</div>
                         <div class="legacy-client-row__control"><input id="commercial-service-charge-percent" type="number" step="0.01" value="0.00" data-service-percent="service_charge"></div>
                     </div>
-                    <div class="legacy-client-row">
+                    <div class="legacy-client-row legacy-client-row--amount-currency">
                         <div class="legacy-client-row__label">Serv.Amount</div>
-                        <div class="legacy-client-row__control"><input id="commercial-service-charge" type="number" form="legacy-service-form" name="service_charge" step="0.01" value="<?= e((string) ($activeService['serviceCharge'] ?? 0)) ?>" data-service-metric="service_charge"></div>
+                        <div class="legacy-client-row__control legacy-client-row__control--amount-currency">
+                            <input id="commercial-service-charge" type="number" form="legacy-service-form" name="service_charge" step="0.01" value="<?= e((string) ($activeService['serviceCharge'] ?? 0)) ?>" data-service-metric="service_charge">
+                            <select id="commercial-service-charge-currency" form="legacy-service-form" name="service_charge_currency" data-service-field="service_charge_currency" aria-label="Service amount currency"><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>" <?= $currencyOption === (string) ($activeService['serviceChargeCurrency'] ?? $activeService['currency'] ?? $invoiceCurrency) ? 'selected' : '' ?>><?= e($currencyOption) ?></option><?php endforeach; ?></select>
+                            <input id="commercial-service-charge-exchange-rate" type="hidden" form="legacy-service-form" name="service_charge_exchange_rate" value="<?= e((string) ($activeService['serviceChargeExchangeRate'] ?? 1)) ?>" data-service-field="service_charge_exchange_rate">
+                            <input id="commercial-service-charge-rate-effective-date" type="hidden" form="legacy-service-form" name="service_charge_rate_effective_date" value="<?= e((string) ($activeService['serviceChargeRateEffectiveDate'] ?? date('Y-m-d'))) ?>" data-service-field="service_charge_rate_effective_date">
+                        </div>
                     </div>
                     <div class="legacy-client-row">
                         <div class="legacy-client-row__label">Disc.%</div>
@@ -1530,10 +1816,10 @@ Kept here in case manual service save is needed again later.
                 <label class="legacy-fin-summary-inline"><span>Comm. After K.B.</span><select disabled><option selected>N</option><option>Y</option></select></label>
                 <label><span>K.B. Airline</span><input type="text" value="0.00" readonly></label>
                 <label><span>K.B. Cust.</span><input type="text" value="0.00" readonly></label>
-                <label class="legacy-fin-summary-ticket"><span>Tkt.Value</span><input id="commercial-ticket-value" class="legacy-yellow" type="text" value="<?= e($formatMoney((float) ($activeService['purchaseCost'] ?? 0))) ?>" readonly data-ticket-value-field></label>
-                <label class="legacy-fin-summary-fc"><span>fC</span><select disabled><option selected><?= e((string) ($activeService['currency'] ?? 'PKR')) ?></option></select></label>
+                <label class="legacy-fin-summary-ticket"><span>Tkt.Value</span><input id="commercial-ticket-value" class="legacy-yellow" type="text" value="<?= e($formatMoney($activeServiceFinancialPayable)) ?>" readonly data-ticket-value-field></label>
+                <label class="legacy-fin-summary-fc"><span>fC</span><select id="commercial-financial-summary-currency" disabled data-financial-summary-currency><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>" <?= $currencyOption === $activeServiceFinancialCurrency ? 'selected' : '' ?>><?= e($currencyOption) ?></option><?php endforeach; ?></select></label>
                 <label><span>F/c Receivable</span><input id="commercial-client-receivable" type="text" value="<?= e($clientReceivable) ?>" readonly data-client-receivable-field></label>
-                <label><span>F/c Payable</span><input id="commercial-airline-payable-financial" type="text" value="<?= e($airlinePayable) ?>" readonly data-airline-payable-financial-field></label>
+                <label><span>F/c Payable</span><input id="commercial-airline-payable-financial" type="text" value="<?= e($formatMoney($activeServiceFinancialPayable)) ?>" readonly data-airline-payable-financial-field></label>
             </div>
         </section>
 
@@ -1615,13 +1901,23 @@ Kept here in case manual service save is needed again later.
                                 data-payment-partial-date-trigger
                             >
                         </label>
-                        <label class="legacy-payment-panel__full-row" data-payment-advance-row>
+                        <label data-payment-customer-credit-apply-row>
+                            <span>Available Customer Credit</span>
+                            <select name="customer_credit_receipt_id" data-payment-customer-credit-select>
+                                <option value="">No transferable credit available</option>
+                            </select>
+                        </label>
+                        <label data-payment-customer-credit-amount-row hidden>
+                            <span>Customer Credit Used</span>
+                            <input type="number" name="customer_credit_apply_amount" step="1" value="0" data-payment-customer-credit-amount>
+                        </label>
+                        <label data-payment-advance-row>
                             <span>Customer Advance</span>
                             <select name="advance_receipt_id" data-payment-advance-select>
                                 <option value="">No advance available</option>
                             </select>
                         </label>
-                        <label class="legacy-payment-panel__full-row" data-payment-advance-amount-row hidden>
+                        <label data-payment-advance-amount-row hidden>
                             <span>Advance Used</span>
                             <input type="number" name="advance_apply_amount" step="1" value="0" data-payment-advance-amount>
                         </label>
@@ -1669,7 +1965,7 @@ Kept here in case manual service save is needed again later.
                         <div class="legacy-payment-actions">
                             <div class="legacy-payment-actions__row legacy-payment-actions__row--primary">
                                 <button class="btn btn-primary btn-sm legacy-payment-primary" type="button" name="receipt_action" value="save" data-payment-submit-action="save" data-payment-action="save-payment">Save Payment</button>
-                                <button class="btn btn-success btn-sm legacy-payment-receipt" type="button" data-payment-action="print-receipt" data-payment-print-url="<?= e($latestReceiptUrl) ?>" data-payment-latest-receipt-id="<?= e((string) $latestReceiptId) ?>">Print Receipt</button>
+                                <button class="btn btn-success btn-sm legacy-payment-receipt" type="button" data-payment-action="print-receipt" data-payment-print-url="<?= e($latestReceiptUrl) ?>" data-payment-print-target-key="<?= e($latestPrintTargetKey) ?>" data-payment-latest-receipt-id="<?= e((string) $latestReceiptId) ?>">Print Receipt</button>
                             </div>
                             <div class="legacy-payment-actions__row">
                                 <button class="btn btn-sm" type="button" data-workspace-action="payment-history" data-workflow-control="payment-history" data-payment-action="payment-history">Payment History</button>
@@ -1770,7 +2066,7 @@ Kept here in case manual service save is needed again later.
                         <strong><?= e((string) ($reminderCounts['due'] ?? 0)) ?></strong>
                     </div>
                     <div class="legacy-reminder-chip legacy-reminder-chip--overdue">
-                        <span>Overdue</span>
+                       
                         <strong><?= e((string) ($reminderCounts['overdue'] ?? 0)) ?></strong>
                     </div>
                     <div class="legacy-reminder-chip">
@@ -2274,27 +2570,27 @@ Kept here in case manual service save is needed again later.
         </div>
     </section>
 
-    <section class="customer-picker-modal" data-customer-dues-modal hidden aria-hidden="true" data-customer-dues-url="<?= e($duesFinderUrl) ?>">
+    <section class="customer-picker-modal financial-finder-modal financial-finder-modal--customer" data-customer-dues-modal hidden aria-hidden="true" data-customer-dues-url="<?= e($duesFinderUrl) ?>">
         <div class="customer-picker-modal__backdrop" data-customer-dues-close></div>
-        <div class="customer-picker-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="customer-dues-title" style="max-width:1180px;">
-            <header class="customer-picker-modal__header">
+        <div class="customer-picker-modal__dialog financial-finder-dialog" role="dialog" aria-modal="true" aria-labelledby="customer-dues-title">
+            <header class="customer-picker-modal__header financial-finder-header">
                 <div>
                     <strong id="customer-dues-title">Customer Dues Finder</strong>
                 </div>
                 <div class="customer-picker-modal__actions">
-                    <a class="btn btn-primary btn-sm" href="<?= e($globalCustomerPaymentUrl) ?>">Global Customer Payment</a>
+                    <a class="btn btn-primary btn-sm" href="<?= e($globalCustomerPaymentUrl) ?>">Lump-Sum Customer Payment</a>
                     <button class="btn btn-primary btn-sm" type="button" data-customer-advance-open>Customer Advance</button>
                     <button class="btn btn-sm" type="button" data-customer-dues-close>Close</button>
                 </div>
             </header>
-            <div class="customer-picker-modal__body">
-                <div class="station-form-grid station-form-grid--6 station-form-grid--inline">
+            <div class="customer-picker-modal__body financial-finder-body">
+                <div class="station-form-grid station-form-grid--6 station-form-grid--inline financial-finder-toolbar financial-finder-toolbar--customer">
                     <label class="station-field span-4"><span>Search Customer</span><input type="text" value="" placeholder="Name / mobile / passport / family ID" data-customer-dues-search></label>
                     <label class="station-field span-2"><span>Currency Filter</span><select data-customer-dues-currency-filter><option value="">All</option><option value="PKR">PKR</option><option value="AED">AED</option><option value="USD">USD</option></select></label>
                 </div>
                 <div class="workspace-feedback workspace-feedback--inline" data-customer-dues-feedback hidden></div>
-                <div class="legacy-modal-grid top-gap">
-                    <article>
+                <div class="legacy-modal-grid top-gap financial-finder-results">
+                    <article class="financial-finder-card">
                         <h3>Matching Customers</h3>
                         <table class="legacy-table">
                             <thead><tr><th>Customer</th><th>Passport</th><th>Mobile</th><th>Branch</th><th>Outstanding Balance</th><th>Action</th></tr></thead>
@@ -2303,17 +2599,32 @@ Kept here in case manual service save is needed again later.
                             </tbody>
                         </table>
                     </article>
-                    <article>
-                        <h3>Outstanding Invoices</h3>
-                        <div class="workspace-feedback workspace-feedback--inline" data-customer-dues-selected-summary style="display:block;margin-bottom:12px;">No customer selected.</div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="customer-picker-modal customer-picker-modal--child financial-finder-modal financial-finder-modal--customer-invoices" data-customer-dues-invoices-modal hidden aria-hidden="true">
+        <div class="customer-picker-modal__backdrop" data-customer-dues-invoices-close></div>
+        <div class="customer-picker-modal__dialog financial-finder-dialog financial-finder-dialog--wide" role="dialog" aria-modal="true" aria-labelledby="customer-dues-invoices-title">
+            <header class="customer-picker-modal__header financial-finder-header">
+                <div>
+                    <strong id="customer-dues-invoices-title">Outstanding Invoices</strong>
+                </div>
+                <button class="btn btn-sm" type="button" data-customer-dues-invoices-close>Back to Customers</button>
+            </header>
+            <div class="customer-picker-modal__body financial-finder-body">
+                <div class="workspace-feedback workspace-feedback--inline customer-dues-invoices-summary" data-customer-dues-selected-summary style="display:block;">No customer selected.</div>
+                <article class="financial-finder-card customer-dues-invoices-card">
+                    <div class="customer-dues-invoices-table-wrap">
                         <table class="legacy-table">
                             <thead><tr><th>Booking / Invoice</th><th>Booking Date</th><th>Service Type</th><th>Passenger</th><th>Currency</th><th>Invoice Amount</th><th>Paid</th><th>Outstanding</th><th>Due Date</th><th>Status</th><th>Action</th></tr></thead>
                             <tbody data-customer-dues-invoices-body>
                                 <tr><td colspan="11" class="empty-cell">No unpaid invoices loaded yet.</td></tr>
                             </tbody>
                         </table>
-                    </article>
-                </div>
+                    </div>
+                </article>
             </div>
         </div>
     </section>
@@ -2346,6 +2657,7 @@ Kept here in case manual service save is needed again later.
                         <h3>Receive Advance</h3>
                         <div class="customer-advance-form-grid customer-advance-form-grid--receive">
                             <label class="station-field"><span>Branch</span><select name="branch_id" data-customer-advance-branch><?php foreach ($branchOptions as $branchRow): ?><option value="<?= e((string) $branchRow['id']) ?>" <?= (int) $branchRow['id'] === (int) $workspaceBooking['branchId'] ? 'selected' : '' ?>><?= e($compactBranchName((string) $branchRow['name'])) ?></option><?php endforeach; ?></select></label>
+                            <label class="station-field"><span>Account Holder</span><select name="business_source_id" data-customer-advance-business-source required><option value="">Select Account Holder</option><?php foreach ($businessSourceOptions as $businessSourceRow): ?><option value="<?= e((string) ($businessSourceRow['id'] ?? 0)) ?>" <?= (int) ($businessSourceRow['id'] ?? 0) === (int) ($workspaceBooking['businessSourceId'] ?? 0) ? 'selected' : '' ?>><?= e((string) ($businessSourceRow['name'] ?? 'Account Holder')) ?></option><?php endforeach; ?></select></label>
                             <label class="station-field"><span>Currency</span><select name="receipt_currency" data-customer-advance-currency><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>"><?= e($currencyOption) ?></option><?php endforeach; ?></select></label>
                             <label class="station-field"><span>Amount</span><input type="number" step="0.01" min="0" name="received_amount" value="0" data-customer-advance-amount></label>
                             <label class="station-field"><span>Method</span><select name="payment_method" data-customer-advance-method><?php foreach ($paymentMethodOptions as $paymentMethodValue => $paymentMethodLabel): ?><option value="<?= e((string) $paymentMethodValue) ?>" <?= (string) $paymentMethodValue === 'cash' ? 'selected' : '' ?>><?= e((string) $paymentMethodLabel) ?></option><?php endforeach; ?></select></label>
@@ -2389,35 +2701,232 @@ Kept here in case manual service save is needed again later.
         </div>
     </section>
 
-    <section class="customer-picker-modal" data-supplier-history-modal hidden aria-hidden="true" data-supplier-history-url="<?= e($supplierHistoryFinderUrl) ?>">
+    <section class="customer-picker-modal financial-finder-modal financial-finder-modal--supplier" data-supplier-history-modal hidden aria-hidden="true" data-supplier-history-url="<?= e($supplierHistoryFinderUrl) ?>">
         <div class="customer-picker-modal__backdrop" data-supplier-history-close></div>
-        <div class="customer-picker-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="supplier-history-title" style="max-width:1440px;">
-            <header class="customer-picker-modal__header">
+        <div class="customer-picker-modal__dialog financial-finder-dialog financial-finder-dialog--wide" role="dialog" aria-modal="true" aria-labelledby="supplier-history-title">
+            <header class="customer-picker-modal__header financial-finder-header">
                 <div>
-                    <strong id="supplier-history-title">Supplier Payment Finder</strong>
-                    <span>Search supplier name, supplier code, or booking reference, then open the booking supplier history even if the payable is already fully settled.</span>
+                    <strong id="supplier-history-title">Supplier Payment</strong>
                 </div>
                 <div class="customer-picker-modal__actions">
-                    <a class="btn btn-primary btn-sm" href="<?= e($globalSupplierPaymentUrl) ?>">Global Supplier Payment</a>
+                    <a class="btn btn-sm" href="<?= e($globalSupplierPaymentUrl) ?>">Supplier Payment</a>
+                    <button class="btn btn-sm" type="button" data-supplier-history-add>Add Supplier</button>
+                    <?php if ($canCorrectGlobalSupplierPayments): ?>
+                        <button class="btn btn-sm" type="button" data-global-payment-manager-open>Edit Supplier Payment</button>
+                        <button class="btn btn-sm" type="button" data-prepaid-payment-manager-open>Supplier Advances</button>
+                    <?php endif; ?>
                     <a class="btn btn-sm" href="<?= e($supplierPaymentFinderPrintUrl) ?>" target="_blank" rel="noopener">Print / PDF</a>
                     <button class="btn btn-sm" type="button" data-supplier-history-close>Close</button>
                 </div>
             </header>
-            <div class="customer-picker-modal__body">
-                <div class="station-form-grid station-form-grid--6 station-form-grid--inline">
+            <div class="customer-picker-modal__body financial-finder-body">
+                <div class="station-form-grid station-form-grid--6 station-form-grid--inline financial-finder-toolbar financial-finder-toolbar--supplier">
                     <label class="station-field span-6"><span>Search Supplier / Booking</span><input type="text" value="" placeholder="Supplier name / supplier code / booking reference" data-supplier-history-search></label>
                 </div>
                 <div class="workspace-feedback workspace-feedback--inline" data-supplier-history-feedback hidden></div>
-                <div class="legacy-modal-grid top-gap">
-                    <article>
-                        <h3>Matching Supplier Bookings</h3>
+                <div class="legacy-modal-grid top-gap financial-finder-results">
+                    <article class="financial-finder-card">
+                        <h3>Supplier Positions</h3>
                         <table class="legacy-table">
-                            <thead><tr><th>Supplier</th><th>Booking / Invoice</th><th>Passenger</th><th>Route</th><th>Booking Date</th><th>Branch</th><th>Curr.</th><th>Total Payable</th><th>Paid</th><th>Balance</th><th>Due Date</th><th>Status</th><th>Action</th></tr></thead>
+                            <thead><tr><th>Supplier</th><th>Booking / Invoice</th><th>Passenger</th><th>Route</th><th>Booking Date</th><th>Branch</th><th>Curr.</th><th>Original Supplier Cost</th><th>Paid</th><th>Balance</th><th>Due Date</th><th>Status</th><th>Action</th></tr></thead>
                             <tbody data-supplier-history-results-body>
                                 <tr><td colspan="13" class="empty-cell">Search a supplier or booking to load supplier payment history.</td></tr>
                             </tbody>
                         </table>
                     </article>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <?php if ($canCorrectGlobalSupplierPayments): ?>
+    <section class="customer-picker-modal financial-finder-modal financial-finder-modal--global-payment" data-global-payment-manager-modal hidden aria-hidden="true"
+             data-global-payment-history-url="<?= e($globalSupplierPaymentHistoryUrl) ?>"
+             data-global-payment-correction-url="<?= e($globalSupplierPaymentCorrectionUrl) ?>"
+             data-supplier-payment-edit-url="<?= e($supplierPaymentUnifiedCorrectionUrl) ?>">
+        <div class="customer-picker-modal__backdrop" data-global-payment-manager-close></div>
+        <div class="customer-picker-modal__dialog global-payment-manager-dialog financial-finder-dialog financial-finder-dialog--wide" role="dialog" aria-modal="true" aria-labelledby="global-payment-manager-title">
+            <header class="customer-picker-modal__header financial-finder-header">
+                <div>
+                    <strong id="global-payment-manager-title">Find &amp; Edit Supplier Payment</strong>
+                    <span>Find any supplier payment by date, supplier, branch, currency, status, or payment number.</span>
+                </div>
+                <button class="btn btn-sm" type="button" data-global-payment-manager-close>Close</button>
+            </header>
+            <div class="customer-picker-modal__body financial-finder-body">
+                <div class="global-payment-manager-filters">
+                    <label class="station-field"><span>Payment Search</span><input type="search" placeholder="Payment number / supplier code" data-global-payment-manager-search></label>
+                    <label class="station-field"><span>Supplier</span><select data-global-payment-manager-supplier><option value="">All Suppliers</option></select></label>
+                    <label class="station-field"><span>Date From</span><input type="date" data-global-payment-manager-date-from></label>
+                    <label class="station-field"><span>Date To</span><input type="date" data-global-payment-manager-date-to></label>
+                    <label class="station-field"><span>Branch</span><select data-global-payment-manager-branch><option value="">All Accessible Branches</option><?php foreach ($branchOptions as $branchRow): ?><option value="<?= e((string) ($branchRow['id'] ?? 0)) ?>"><?= e((string) ($branchRow['name'] ?? 'Branch')) ?></option><?php endforeach; ?></select></label>
+                    <label class="station-field"><span>Currency</span><select data-global-payment-manager-currency><option value="">All</option><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>"><?= e($currencyOption) ?></option><?php endforeach; ?></select></label>
+                    <label class="station-field"><span>Status</span><select data-global-payment-manager-status><option value="">All</option><option value="posted">Posted</option><option value="void">Void</option></select></label>
+                    <div class="station-command-buttons global-payment-manager-filter-actions">
+                        <button class="btn btn-sm" type="button" data-global-payment-manager-clear>Clear</button>
+                        <button class="btn btn-primary btn-sm" type="button" data-global-payment-manager-search-button>Search</button>
+                    </div>
+                </div>
+                <div class="workspace-feedback workspace-feedback--inline" data-global-payment-manager-feedback hidden></div>
+                <div class="dense-table-wrap top-gap financial-finder-table-wrap">
+                    <table class="dense-table global-payment-manager-table">
+                        <thead><tr><th>Date</th><th>Payment</th><th>Supplier</th><th>Branch</th><th>Curr.</th><th>Paid</th><th>Advance</th><th>Status</th><th>Action</th></tr></thead>
+                        <tbody data-global-payment-manager-results>
+                            <tr><td colspan="9" class="empty-cell">Open this finder to load recent supplier payments.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="customer-picker-modal customer-picker-modal--child financial-finder-modal financial-finder-modal--supplier-payment-edit" data-supplier-payment-edit-modal hidden aria-hidden="true">
+        <div class="customer-picker-modal__backdrop" data-supplier-payment-edit-close></div>
+        <div class="customer-picker-modal__dialog supplier-payment-edit-dialog financial-finder-dialog" role="dialog" aria-modal="true" aria-labelledby="supplier-payment-edit-title">
+            <header class="customer-picker-modal__header financial-finder-header">
+                <div>
+                    <strong id="supplier-payment-edit-title">Edit Supplier Payment</strong>
+                </div>
+                <button class="btn btn-sm" type="button" data-supplier-payment-edit-close>Close</button>
+            </header>
+            <div class="customer-picker-modal__body financial-finder-body">
+                <form method="post" action="<?= e($supplierPaymentUnifiedCorrectionUrl) ?>" data-supplier-payment-edit-form>
+                    <?= \App\Helpers\Csrf::input() ?>
+                    <input type="hidden" name="supplier_payment_id" data-supplier-payment-edit-id>
+                    <div class="supplier-payment-edit-summary">
+                        <div><span>Payment</span><strong data-supplier-payment-edit-number>-</strong></div>
+                        <div><span>Allocation</span><strong data-supplier-payment-edit-allocation>-</strong></div>
+                        <div><span>Status</span><strong data-supplier-payment-edit-status>-</strong></div>
+                    </div>
+                    <div class="station-form-grid station-form-grid--6 supplier-payment-edit-grid top-gap">
+                        <label class="station-field span-2"><span>Supplier</span><select name="supplier_id" required data-supplier-payment-edit-supplier><option value="">Select supplier</option></select></label>
+                        <label class="station-field"><span>Payment Date</span><input type="date" name="payment_date" required data-supplier-payment-edit-date></label>
+                        <label class="station-field"><span>Currency</span><select name="currency" required data-supplier-payment-edit-currency><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>"><?= e($currencyOption) ?></option><?php endforeach; ?></select></label>
+                        <label class="station-field"><span>Amount Paid</span><input type="number" name="paid_amount" min="0.01" step="0.01" required data-supplier-payment-edit-amount></label>
+                        <label class="station-field"><span>Payment Method</span><select name="payment_method" required data-supplier-payment-edit-method><?php foreach ($paymentMethodOptions as $methodCode => $methodLabel): ?><option value="<?= e((string) $methodCode) ?>"><?= e((string) $methodLabel) ?></option><?php endforeach; ?></select></label>
+                        <label class="station-field span-2"><span>Source Account</span><select name="treasury_account_id" data-supplier-payment-edit-account><option value="">Select source account</option></select></label>
+                        <label class="station-field span-2"><span>Reference</span><input type="text" name="reference_number" maxlength="100" data-supplier-payment-edit-reference></label>
+                        <label class="station-field span-2"><span>Bank / Card Detail</span><input type="text" name="bank_card_detail" maxlength="190" data-supplier-payment-edit-bank-detail></label>
+                        <label class="station-field span-3"><span>Remarks</span><input type="text" name="remarks" maxlength="4000" data-supplier-payment-edit-remarks></label>
+                        <label class="station-field span-3"><span>Optional Note</span><input type="text" name="correction_reason" maxlength="1000" placeholder="Only add a note when useful" data-supplier-payment-edit-reason></label>
+                    </div>
+                    <div class="supplier-payment-edit-preview supplier-payment-edit-preview--financial" data-supplier-payment-edit-preview hidden></div>
+                    <div class="workspace-feedback workspace-feedback--inline" data-supplier-payment-edit-feedback hidden></div>
+                    <div class="station-command-buttons top-gap supplier-payment-edit-actions">
+                        <button class="btn btn-sm" type="button" data-supplier-payment-edit-close>Cancel</button>
+                        <button class="btn btn-primary btn-sm" type="submit" data-supplier-payment-edit-submit>Save Changes</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </section>
+    <?php endif; ?>
+
+    <?php if ($canCorrectGlobalSupplierPayments): ?>
+    <section class="customer-picker-modal financial-finder-modal financial-finder-modal--prepaid-manager" data-prepaid-payment-manager-modal hidden aria-hidden="true"
+             data-prepaid-payment-history-url="<?= e(url('/suppliers/advances/history')) ?>"
+             data-prepaid-payment-correction-url="<?= e(url('/suppliers/advances/correct')) ?>">
+        <div class="customer-picker-modal__backdrop" data-prepaid-payment-manager-close></div>
+        <div class="customer-picker-modal__dialog global-payment-manager-dialog financial-finder-dialog financial-finder-dialog--wide" role="dialog" aria-modal="true" aria-labelledby="prepaid-payment-manager-title">
+            <header class="customer-picker-modal__header financial-finder-header">
+                <div>
+                    <strong id="prepaid-payment-manager-title">Supplier Advances</strong>
+                </div>
+                <button class="btn btn-sm" type="button" data-prepaid-payment-manager-close>Close</button>
+            </header>
+            <div class="customer-picker-modal__body financial-finder-body">
+                <div class="global-payment-manager-filters prepaid-payment-manager-filters">
+                    <label class="station-field"><span>Payment Search</span><input type="search" placeholder="Reference / supplier / advance ID" data-prepaid-payment-manager-search></label>
+                    <label class="station-field"><span>Supplier</span><select data-prepaid-payment-manager-supplier><option value="">All Suppliers</option></select></label>
+                    <label class="station-field"><span>Date From</span><input type="date" data-prepaid-payment-manager-date-from></label>
+                    <label class="station-field"><span>Date To</span><input type="date" data-prepaid-payment-manager-date-to></label>
+                    <label class="station-field"><span>Branch</span><select data-prepaid-payment-manager-branch><option value="">All Accessible Branches</option><?php foreach ($branchOptions as $branchRow): ?><option value="<?= e((string) ($branchRow['id'] ?? 0)) ?>"><?= e((string) ($branchRow['name'] ?? 'Branch')) ?></option><?php endforeach; ?></select></label>
+                    <label class="station-field"><span>Currency</span><select data-prepaid-payment-manager-currency><option value="">All</option><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>"><?= e($currencyOption) ?></option><?php endforeach; ?></select></label>
+                    <label class="station-field"><span>Status</span><select data-prepaid-payment-manager-status><option value="">All</option><option value="available">Available</option><option value="partially_used">Partially Used</option><option value="fully_used">Fully Used</option></select></label>
+                    <div class="station-command-buttons global-payment-manager-filter-actions">
+                        <button class="btn btn-sm" type="button" data-prepaid-payment-manager-clear>Clear</button>
+                        <button class="btn btn-primary btn-sm" type="button" data-prepaid-payment-manager-search-button>Search</button>
+                    </div>
+                </div>
+                <div class="workspace-feedback workspace-feedback--inline" data-prepaid-payment-manager-feedback hidden></div>
+                <div class="dense-table-wrap top-gap financial-finder-table-wrap">
+                    <table class="dense-table prepaid-payment-manager-table">
+                        <thead><tr><th>Date</th><th>Payment</th><th>Supplier</th><th>Branch</th><th>Curr.</th><th>Paid</th><th>Used</th><th>Available</th><th>Source Account</th><th>Status</th><th>Action</th></tr></thead>
+                        <tbody data-prepaid-payment-manager-results>
+                            <tr><td colspan="11" class="empty-cell">Open this window to load prepaid supplier payments.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="customer-picker-modal customer-picker-modal--child financial-finder-modal financial-finder-modal--prepaid-edit" data-prepaid-payment-edit-modal hidden aria-hidden="true">
+        <div class="customer-picker-modal__backdrop" data-prepaid-payment-edit-close></div>
+        <div class="customer-picker-modal__dialog global-prepaid-supplier-modal financial-finder-dialog" role="dialog" aria-modal="true" aria-labelledby="prepaid-payment-edit-title">
+            <header class="customer-picker-modal__header financial-finder-header">
+                <div>
+                    <strong id="prepaid-payment-edit-title">Edit Supplier Advance</strong>
+                    <span data-prepaid-payment-edit-subtitle>Correct the saved payment safely.</span>
+                </div>
+                <button class="btn btn-sm" type="button" data-prepaid-payment-edit-close>Close</button>
+            </header>
+            <div class="customer-picker-modal__body financial-finder-body">
+                <form method="post" action="<?= e(url('/suppliers/advances/correct')) ?>" class="global-prepaid-supplier-form" data-prepaid-payment-edit-form>
+                    <?= \App\Helpers\Csrf::input() ?>
+                    <input type="hidden" name="supplier_advance_id" data-prepaid-payment-edit-id>
+                    <div class="station-form-grid station-form-grid--6 global-prepaid-supplier-form-grid prepaid-payment-edit-grid">
+                        <label class="station-field span-2"><span>Supplier</span><select name="supplier_id" data-prepaid-payment-edit-supplier required>
+                            <?php foreach ($serviceSupplierOptions as $supplierOption): ?>
+                                <?php $supplierOptionId = (int) ($supplierOption['id'] ?? 0); ?>
+                                <?php if ($supplierOptionId > 0): ?>
+                                    <option value="<?= e((string) $supplierOptionId) ?>"><?= e((string) ($supplierOption['name'] ?? 'Supplier')) ?><?= trim((string) ($supplierOption['code'] ?? '')) !== '' ? ' / ' . e((string) $supplierOption['code']) : '' ?></option>
+                                <?php endif; ?>
+                            <?php endforeach; ?>
+                        </select></label>
+                        <label class="station-field"><span>Branch</span><input type="text" readonly data-prepaid-payment-edit-branch></label>
+                        <label class="station-field"><span>Currency</span><input type="text" readonly data-prepaid-payment-edit-currency></label>
+                        <label class="station-field"><span>Payment Date</span><input type="date" name="advance_date" required data-prepaid-payment-edit-date></label>
+                        <label class="station-field"><span>Amount Paid</span><input type="number" name="advance_amount" min="0.01" step="0.01" required data-prepaid-payment-edit-amount></label>
+                        <label class="station-field"><span>Payment Method</span><select name="advance_payment_method" required data-prepaid-payment-edit-method><option value="cash">Cash</option><option value="bank_transfer">Bank Transfer</option></select></label>
+                        <label class="station-field span-2"><span>Source Account</span><select name="advance_treasury_account_id" required data-prepaid-payment-edit-account><option value="">Select source account</option></select></label>
+                        <label class="station-field span-2"><span>Reference</span><input type="text" name="advance_reference_number" maxlength="100" data-prepaid-payment-edit-reference></label>
+                        <label class="station-field span-3"><span>Remarks</span><input type="text" name="advance_remarks" maxlength="4000" data-prepaid-payment-edit-remarks></label>
+                        <label class="station-field span-3"><span>Reason for Edit</span><input type="text" name="correction_reason" minlength="5" maxlength="1000" placeholder="Example: wrong supplier or amount entered" required data-prepaid-payment-edit-reason></label>
+                    </div>
+                    <div class="workspace-feedback workspace-feedback--inline" data-prepaid-payment-edit-feedback hidden></div>
+                    <div class="station-command-buttons top-gap global-prepaid-supplier-actions">
+                        <button class="btn btn-sm" type="button" data-prepaid-payment-edit-close>Cancel</button>
+                        <button class="btn btn-primary btn-sm" type="submit" data-prepaid-payment-edit-submit>Save Changes</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </section>
+    <?php endif; ?>
+
+    <section class="customer-picker-modal pricing-exchange-modal" data-pricing-exchange-modal hidden aria-hidden="true">
+        <div class="customer-picker-modal__backdrop" data-pricing-exchange-cancel></div>
+        <div class="customer-picker-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="pricing-exchange-title">
+            <header class="customer-picker-modal__header">
+                <div>
+                    <strong id="pricing-exchange-title" data-pricing-exchange-title>Confirm Invoice Exchange Rates</strong>
+                    <span data-pricing-exchange-subtitle>Original amounts stay in their selected currencies. Confirm only the conversions required for this invoice.</span>
+                </div>
+                <button class="btn btn-sm" type="button" data-pricing-exchange-cancel>Close</button>
+            </header>
+            <div class="customer-picker-modal__body">
+                <div class="pricing-exchange-summary">
+                    <span data-pricing-exchange-currency-label>Invoice Currency</span>
+                    <strong data-pricing-exchange-invoice-currency><?= e($invoiceCurrency) ?></strong>
+                    <span>Rate Date</span>
+                    <strong data-pricing-exchange-date><?= e(date('Y-m-d')) ?></strong>
+                </div>
+                <div class="pricing-exchange-rows" data-pricing-exchange-rows></div>
+                <div class="workspace-feedback workspace-feedback--inline" data-pricing-exchange-feedback hidden></div>
+                <div class="station-command-buttons top-gap">
+                    <button class="btn btn-primary btn-sm" type="button" data-pricing-exchange-confirm>Confirm Rates &amp; Continue</button>
+                    <button class="btn btn-sm" type="button" data-pricing-exchange-cancel>Cancel</button>
                 </div>
             </div>
         </div>
@@ -2464,7 +2973,7 @@ Kept here in case manual service save is needed again later.
         <div class="customer-picker-modal__dialog postpaid-supplier-settlement-modal" role="dialog" aria-modal="true" aria-labelledby="supplier-settlement-title">
             <header class="customer-picker-modal__header">
                 <div>
-                    <strong id="supplier-settlement-title">Postpaid Supplier Settlement</strong>
+                    <strong id="supplier-settlement-title">Supplier Details</strong>
                 </div>
                 <button class="btn btn-sm" type="button" data-supplier-settlement-close>Close</button>
             </header>
@@ -2473,7 +2982,7 @@ Kept here in case manual service save is needed again later.
                     <article>
                         <h3>Supplier Summary</h3>
                         <div class="legacy-highlight-strip">
-                            <div class="legacy-highlight legacy-highlight--red"><span>Total Supplier Payable</span><strong><?= e($formatCurrencyTotals($supplierOutstandingTotals)) ?></strong></div>
+                            <div class="legacy-highlight legacy-highlight--red"><span>Original Supplier Cost</span><strong><?= e($formatCurrencyTotals($supplierGrossTotals)) ?></strong></div>
                             <div class="legacy-highlight legacy-highlight--orange"><span>Advance Used</span><strong><?= e($formatCurrencyTotals($supplierAdvanceAppliedTotals)) ?></strong></div>
                             <div class="legacy-highlight legacy-highlight--green"><span>Prepaid Available</span><strong><?= e($formatCurrencyTotals($supplierAdvanceBalanceTotals)) ?></strong></div>
                             <div class="legacy-highlight legacy-highlight--pink"><span>Paid to Supplier</span><strong><?= e($formatCurrencyTotals($supplierPaidTotals)) ?></strong></div>
@@ -2520,6 +3029,11 @@ Kept here in case manual service save is needed again later.
                             </tbody>
                         </table>
                     </article>
+                    <div class="workspace-feedback workspace-feedback--inline supplier-position-read-only-notice" style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
+                        <span>Payments are recorded once against the supplier account. Any excess automatically becomes supplier advance.</span>
+                        <a class="btn btn-primary btn-sm" href="<?= e($globalSupplierPaymentUrl) ?>">Pay Supplier</a>
+                    </div>
+                    <?php if ($showSupplierPaymentOperationalActions): ?>
                     <article>
                         <h3>Pay Outstanding Supplier Balance</h3>
                         <?php if ($supplierPaymentRecreateDraft !== null): ?>
@@ -2552,8 +3066,8 @@ Kept here in case manual service save is needed again later.
                             </table>
                             <div class="supplier-simple-payment-feedback top-gap" data-simple-postpaid-feedback><?= ($supplierFoundation['openObligations'] ?? []) === [] ? 'No open supplier payable is available to settle.' : 'Please select at least one supplier payable.' ?></div>
                             <div class="station-form-grid station-form-grid--6 station-form-grid--inline">
-                                <label class="station-field span-3"><span>Selected Supplier(s)</span><input type="text" value="" data-simple-postpaid-supplier-display readonly placeholder="Select payable rows"></label>
-                                <label class="station-field span-2"><span>Date</span><input type="date" name="supplier_payment_date" value="<?= e($supplierDraftDate) ?>"></label>
+                                <label class="station-field span-2"><span>Selected Supplier(s)</span><input type="text" value="" data-simple-postpaid-supplier-display readonly placeholder="Select payable rows"></label>
+                                <label class="station-field span-1"><span>Date</span><input type="date" name="supplier_payment_date" value="<?= e($supplierDraftDate) ?>"></label>
                                 <label class="station-field span-1"><span>Currency</span><input type="text" value="" data-simple-postpaid-currency-display readonly placeholder="--"></label>
                                 <label class="station-field span-2"><span>Amount</span><input type="number" step="0.01" name="supplier_paid_amount" value="<?= e($supplierDraftAmount) ?>" data-simple-postpaid-amount></label>
                                 <label class="station-field span-2"><span>Method</span><select name="supplier_payment_method"><?php foreach ($paymentMethodOptions as $paymentMethodValue => $paymentMethodLabel): ?><option value="<?= e((string) $paymentMethodValue) ?>" <?= $supplierDraftMethod === (string) $paymentMethodValue ? 'selected' : '' ?>><?= e((string) $paymentMethodLabel) ?></option><?php endforeach; ?></select></label>
@@ -2659,10 +3173,11 @@ Kept here in case manual service save is needed again later.
                             </div>
                         </details>
                     </article>
+                    <?php endif; ?>
                     <article>
                         <h3>Supplier Payments</h3>
                         <table class="legacy-table">
-                            <thead><tr><th>Payment No.</th><th>Supplier</th><th>Date</th><th>Curr.</th><th>Paid</th><th>Allocated</th><th>Open</th><th>Source</th><th>Status</th><th>Print</th><th>Meta Edit</th><th>Void</th><th>Recreate</th></tr></thead>
+                            <thead><tr><th>Payment No.</th><th>Supplier</th><th>Date</th><th>Curr.</th><th>Paid</th><th>Allocated</th><th>Open</th><th>Source</th><th>Status</th><th>Print</th><?php if ($showSupplierPaymentCorrectionActions): ?><th>Correct Supplier</th><?php endif; ?><?php if ($showSupplierPaymentOperationalActions): ?><th>Meta Edit</th><th>Void</th><th>Recreate</th><?php endif; ?></tr></thead>
                             <tbody>
                             <?php foreach (($supplierFoundation['payments'] ?? []) as $paymentRow): ?>
                                 <?php
@@ -2683,12 +3198,34 @@ Kept here in case manual service save is needed again later.
                                     <td><?= e((string) (($paymentRow['treasuryAccountName'] ?? '') !== '' ? $paymentRow['treasuryAccountName'] : ucwords(str_replace('_', ' ', (string) ($paymentRow['paymentMethod'] ?? ''))))) ?></td>
                                     <td><?= e($formatStatusLabel((string) ($paymentRow['statusRaw'] ?? $paymentRow['status'] ?? ''))) ?></td>
                                     <td><?php if ($supplierPaymentPrintUrl !== ''): ?><a href="<?= e($supplierPaymentPrintUrl) ?>" target="_blank" rel="noopener">Print</a><?php else: ?>-<?php endif; ?></td>
+                                    <?php if ($showSupplierPaymentCorrectionActions): ?>
+                                    <td>
+                                        <?php if ($supplierPaymentStatusRaw !== 'void'): ?>
+                                        <form method="post" action="<?= e(url('/workspace/suppliers/payments/supplier-correct')) ?>" class="supplier-payment-counterparty-form">
+                                            <?= \App\Helpers\Csrf::input() ?>
+                                            <input type="hidden" name="booking_id" value="<?= e((string) ($workspaceBooking['id'] ?? 0)) ?>">
+                                            <input type="hidden" name="supplier_payment_id" value="<?= e((string) ($paymentRow['id'] ?? 0)) ?>">
+                                            <select name="replacement_supplier_id" required aria-label="Correct supplier for <?= e((string) ($paymentRow['paymentNo'] ?? 'payment')) ?>">
+                                                <option value="">Select correct supplier</option>
+                                                <?php foreach ($serviceSupplierOptions as $supplierOption): ?>
+                                                    <?php $replacementSupplierId = (int) ($supplierOption['id'] ?? 0); ?>
+                                                    <option value="<?= e((string) $replacementSupplierId) ?>" <?= $replacementSupplierId === (int) ($paymentRow['supplierId'] ?? 0) ? 'disabled' : '' ?>><?= e((string) ($supplierOption['name'] ?? 'Supplier')) ?></option>
+                                                <?php endforeach; ?>
+                                            </select>
+                                            <input type="text" name="correction_reason" value="" placeholder="Optional note" maxlength="500">
+                                            <button class="btn btn-primary btn-sm" type="submit">Change Supplier</button>
+                                        </form>
+                                        <?php else: ?>-<?php endif; ?>
+                                    </td>
+                                    <?php endif; ?>
+                                    <?php if ($showSupplierPaymentOperationalActions): ?>
                                     <td><form method="post" action="<?= e(url('/workspace/suppliers/payments/metadata-save')) ?>" style="display:grid;gap:6px;min-width:190px;"><?= \App\Helpers\Csrf::input() ?><input type="hidden" name="booking_id" value="<?= e((string) ($workspaceBooking['id'] ?? 0)) ?>"><input type="hidden" name="supplier_payment_id" value="<?= e((string) ($paymentRow['id'] ?? 0)) ?>"><input type="text" name="supplier_reference_number" value="<?= e((string) ($paymentRow['referenceNumber'] ?? '')) ?>" placeholder="Reference" maxlength="100"><input type="text" name="supplier_bank_card_detail" value="<?= e((string) ($paymentRow['bankCardDetail'] ?? '')) ?>" placeholder="Bank / Card detail" maxlength="190"><input type="text" name="supplier_payment_remarks" value="<?= e((string) ($paymentRow['remarks'] ?? '')) ?>" placeholder="Remarks" maxlength="4000"><button class="btn btn-sm" type="submit">Save Notes</button></form></td>
                                     <td><?php if ($canPostServiceEvents && $supplierPaymentStatusRaw !== 'void'): ?><form method="post" action="<?= e(url('/workspace/suppliers/payments/void')) ?>" onsubmit="return confirm('Void this supplier payment and reverse its allocations?');" style="display:grid;gap:6px;min-width:150px;"><?= \App\Helpers\Csrf::input() ?><input type="hidden" name="booking_id" value="<?= e((string) ($workspaceBooking['id'] ?? 0)) ?>"><input type="hidden" name="supplier_payment_id" value="<?= e((string) ($paymentRow['id'] ?? 0)) ?>"><input type="text" name="void_reason" value="" placeholder="Void reason" minlength="5" maxlength="1000" required><button class="btn btn-sm" type="submit">Void</button></form><?php else: ?>-<?php endif; ?></td>
                                     <td><?php if ($supplierPaymentStatusRaw === 'void'): ?><a class="btn btn-sm" href="<?= e($supplierPaymentRecreateUrl) ?>">Recreate</a><?php else: ?>-<?php endif; ?></td>
+                                    <?php endif; ?>
                                 </tr>
                             <?php endforeach; ?>
-                            <?php if (($supplierFoundation['payments'] ?? []) === []): ?><tr><td colspan="13" class="empty-cell">No supplier payments recorded for this invoice yet.</td></tr><?php endif; ?>
+                            <?php if (($supplierFoundation['payments'] ?? []) === []): ?><tr><td colspan="<?= 10 + ($showSupplierPaymentCorrectionActions ? 1 : 0) + ($showSupplierPaymentOperationalActions ? 3 : 0) ?>" class="empty-cell">No supplier payments recorded for this invoice yet.</td></tr><?php endif; ?>
                             </tbody>
                         </table>
                     </article>
@@ -2697,22 +3234,23 @@ Kept here in case manual service save is needed again later.
         </div>
     </section>
 
-    <section class="customer-picker-modal customer-picker-modal--child" data-global-prepaid-supplier-modal hidden aria-hidden="true">
+    <section class="customer-picker-modal customer-picker-modal--child financial-finder-modal financial-finder-modal--prepaid" data-global-prepaid-supplier-modal hidden aria-hidden="true">
         <div class="customer-picker-modal__backdrop" data-global-prepaid-supplier-close></div>
-        <div class="customer-picker-modal__dialog global-prepaid-supplier-modal" role="dialog" aria-modal="true" aria-labelledby="global-prepaid-supplier-title">
-            <header class="customer-picker-modal__header global-prepaid-supplier-modal__header">
+        <div class="customer-picker-modal__dialog global-prepaid-supplier-modal financial-finder-dialog" role="dialog" aria-modal="true" aria-labelledby="global-prepaid-supplier-title">
+            <header class="customer-picker-modal__header global-prepaid-supplier-modal__header financial-finder-header">
                 <div>
                     <strong id="global-prepaid-supplier-title">Prepaid Supplier Payment</strong>
+                    <span>Record money placed with a supplier before it is allocated to tickets.</span>
                 </div>
                 <button class="btn btn-sm" type="button" data-global-prepaid-supplier-close>Close</button>
             </header>
-            <div class="customer-picker-modal__body">
-                <div class="legacy-modal-grid">
-                    <article>
-                        <h3>Record Global Supplier Advance</h3>
-                        <form method="post" action="<?= e(url('/suppliers/advances/save')) ?>" data-global-prepaid-supplier-form>
+            <div class="customer-picker-modal__body financial-finder-body">
+                <div class="legacy-modal-grid financial-finder-results">
+                    <article class="financial-finder-card financial-finder-card--form">
+                        <h3>Supplier Advance Details</h3>
+                        <form method="post" action="<?= e(url('/suppliers/advances/save')) ?>" class="global-prepaid-supplier-form" data-global-prepaid-supplier-form>
                             <?= \App\Helpers\Csrf::input() ?>
-                            <div class="station-form-grid station-form-grid--6 station-form-grid--inline">
+                            <div class="station-form-grid station-form-grid--6 global-prepaid-supplier-form-grid">
                                 <label class="station-field span-2"><span>Branch</span><select name="branch_id" data-global-prepaid-branch><?php foreach ($branchOptions as $branchRow): ?><option value="<?= e((string) $branchRow['id']) ?>" <?= (int) $branchRow['id'] === $globalPrepaidDefaultBranchId ? 'selected' : '' ?>><?= e((string) $branchRow['name']) ?></option><?php endforeach; ?></select></label>
                                 <label class="station-field span-2"><span>Supplier</span><select name="supplier_name" data-global-prepaid-supplier>
                                     <option value="">Select supplier</option>
@@ -2727,13 +3265,14 @@ Kept here in case manual service save is needed again later.
                                 <label class="station-field span-2"><span>Currency</span><select name="advance_currency" data-global-prepaid-currency><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>"><?= e($currencyOption) ?></option><?php endforeach; ?></select></label>
                                 <label class="station-field span-2"><span>Payment Date</span><input type="date" name="advance_date" value="<?= e(date('Y-m-d')) ?>"></label>
                                 <label class="station-field span-2"><span>Advance Amount</span><input type="number" step="0.01" name="advance_amount" value="0.00" data-global-prepaid-amount></label>
-                                <label class="station-field span-3"><span>Reference</span><input type="text" name="advance_reference_number" value=""></label>
-                                <label class="station-field span-3"><span>Remarks</span><input type="text" name="advance_remarks" value=""></label>
+                                <label class="station-field span-2"><span>Payment Method</span><select name="advance_payment_method" data-global-prepaid-method><option value="cash">Cash</option><option value="bank_transfer">Bank Transfer</option></select></label>
+                                <label class="station-field span-2"><span>Source Account</span><select name="advance_treasury_account_id" data-global-prepaid-treasury required><option value="">Select source account</option></select></label>
+                                <label class="station-field span-2"><span>Reference</span><input type="text" name="advance_reference_number" value=""></label>
+                                <label class="station-field span-2"><span>Remarks</span><input type="text" name="advance_remarks" value=""></label>
                             </div>
                             <div class="workspace-feedback workspace-feedback--inline" data-global-prepaid-supplier-feedback hidden></div>
-                            <div class="station-command-buttons top-gap">
+                            <div class="station-command-buttons top-gap global-prepaid-supplier-actions">
                                 <button class="btn btn-primary btn-sm" type="submit" data-global-prepaid-supplier-submit>Save Prepaid Supplier Payment</button>
-                                <a class="btn btn-sm" href="<?= e(url('/reports?report=supplier_prepaid_payments')) ?>" target="_blank" rel="noopener">View All Prepaid Payments</a>
                             </div>
                         </form>
                     </article>
@@ -4364,6 +4903,7 @@ Kept here in case manual service save is needed again later.
             var customerDuesSearch = station.querySelector('[data-customer-dues-search]');
             var customerDuesCurrency = station.querySelector('[data-customer-dues-currency-filter]');
             var customerDuesBody = station.querySelector('[data-customer-dues-customers-body]');
+            var customerDuesInvoicesModal = station.querySelector('[data-customer-dues-invoices-modal]');
             var customerAdvanceModal = station.querySelector('[data-customer-advance-modal]');
             var customerAdvanceAmount = station.querySelector('[data-customer-advance-amount]');
             var supplierHistoryModal = station.querySelector('[data-supplier-history-modal]');
@@ -4400,6 +4940,24 @@ Kept here in case manual service save is needed again later.
                     if (customerDuesModal instanceof HTMLElement) {
                         customerDuesModal.hidden = true;
                         customerDuesModal.setAttribute('aria-hidden', 'true');
+                    }
+                    if (customerDuesInvoicesModal instanceof HTMLElement) {
+                        customerDuesInvoicesModal.hidden = true;
+                        customerDuesInvoicesModal.setAttribute('aria-hidden', 'true');
+                    }
+                });
+            });
+
+            station.querySelectorAll('[data-customer-dues-invoices-close]').forEach(function (button) {
+                attachOnce(button, 'fallbackCustomerDuesInvoicesClose', 'click', function () {
+                    if (typeof window.workspaceCloseCustomerDuesInvoicesModal === 'function') {
+                        window.workspaceCloseCustomerDuesInvoicesModal();
+                        return;
+                    }
+
+                    if (customerDuesInvoicesModal instanceof HTMLElement) {
+                        customerDuesInvoicesModal.hidden = true;
+                        customerDuesInvoicesModal.setAttribute('aria-hidden', 'true');
                     }
                 });
             });
@@ -4515,6 +5073,12 @@ Kept here in case manual service save is needed again later.
                         return;
                     }
 
+                    if (typeof window.workspaceOpenCustomerDuesInvoicesModal === 'function') {
+                        window.workspaceOpenCustomerDuesInvoicesModal();
+                    } else if (customerDuesInvoicesModal instanceof HTMLElement) {
+                        customerDuesInvoicesModal.hidden = false;
+                        customerDuesInvoicesModal.setAttribute('aria-hidden', 'false');
+                    }
                     window.workspaceLoadCustomerDuesFinder({
                         query: customerDuesSearch instanceof HTMLInputElement ? customerDuesSearch.value || '' : '',
                         travelerId: travelerId,
@@ -4552,6 +5116,7 @@ Kept here in case manual service save is needed again later.
             var paymentMethodSelect = station.querySelector('select[name="payment_method"]');
             var paymentTreasuryRow = station.querySelector('[data-payment-treasury-row]');
             var paymentTreasurySelect = station.querySelector('[data-payment-treasury-select]');
+            var paymentReceivedAmount = station.querySelector('[data-payment-focus="received_amount"]');
             var syncPaymentTreasuryFallback = function () {
                 if (!(paymentMethodSelect instanceof HTMLSelectElement) || !(paymentTreasuryRow instanceof HTMLElement)) {
                     return;
@@ -4560,8 +5125,13 @@ Kept here in case manual service save is needed again later.
                 var method = String(paymentMethodSelect.value || '').trim().toLowerCase();
                 var requiresTreasury = method === 'cash' || method === 'bank_transfer';
                 paymentTreasuryRow.hidden = !requiresTreasury;
+                var hasNewCashPayment = paymentReceivedAmount instanceof HTMLInputElement
+                    && Number(paymentReceivedAmount.value || 0) > 0.005;
+                if (paymentTreasurySelect instanceof HTMLSelectElement) {
+                    paymentTreasurySelect.disabled = !requiresTreasury || !hasNewCashPayment;
+                }
 
-                if (!requiresTreasury || !(paymentTreasurySelect instanceof HTMLSelectElement) || paymentTreasurySelect.value !== '') {
+                if (!requiresTreasury || !hasNewCashPayment || !(paymentTreasurySelect instanceof HTMLSelectElement) || paymentTreasurySelect.value !== '') {
                     return;
                 }
 
@@ -4581,6 +5151,10 @@ Kept here in case manual service save is needed again later.
                     window.setTimeout(syncPaymentTreasuryFallback, 0);
                 });
                 window.setTimeout(syncPaymentTreasuryFallback, 0);
+            }
+            if (paymentReceivedAmount instanceof HTMLInputElement) {
+                attachOnce(paymentReceivedAmount, 'fallbackPaymentAmountInput', 'input', syncPaymentTreasuryFallback);
+                attachOnce(paymentReceivedAmount, 'fallbackPaymentAmountChange', 'change', syncPaymentTreasuryFallback);
             }
         };
 

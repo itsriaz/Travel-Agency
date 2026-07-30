@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Repositories;
 
+use RuntimeException;
+
 final class BookingRepository extends BaseRepository
 {
     public function branchOptions(array $accessibleBranchIds): array
@@ -75,6 +77,50 @@ final class BookingRepository extends BaseRepository
     public function updateBooking(int $bookingId, array $bookingData, array $partyData): void
     {
         $this->transaction(function () use ($bookingId, $bookingData, $partyData): void {
+            $bookingStatement = $this->db->prepare(
+                'SELECT branch_id, business_source_id, booking_reference
+                 FROM bookings
+                 WHERE id = :id
+                 FOR UPDATE'
+            );
+            $bookingStatement->execute(['id' => $bookingId]);
+            $currentBooking = $bookingStatement->fetch();
+
+            if (! is_array($currentBooking)) {
+                throw new RuntimeException('The booking could not be found for update.');
+            }
+
+            $priorBranchId = (int) ($currentBooking['branch_id'] ?? 0);
+            $targetBranchId = (int) ($bookingData['branch_id'] ?? 0);
+            $priorBusinessSourceId = (int) ($currentBooking['business_source_id'] ?? 0);
+            $targetBusinessSourceId = (int) ($bookingData['business_source_id'] ?? 0);
+            $bookingReference = (string) ($currentBooking['booking_reference'] ?? '');
+
+            if ($priorBranchId !== $targetBranchId) {
+                $this->assertBranchCorrectionIsSafe($bookingReference, $targetBranchId);
+            }
+            if ($priorBusinessSourceId !== $targetBusinessSourceId) {
+                $offsetStatement = $this->db->prepare(
+                    'SELECT offset_record.offset_no
+                     FROM counterparty_offset_account_allocations allocation
+                     INNER JOIN counterparty_offsets offset_record
+                        ON offset_record.id = allocation.counterparty_offset_id
+                       AND offset_record.status = "posted"
+                     INNER JOIN customer_receivable_items receivable
+                        ON receivable.id = allocation.customer_receivable_item_id
+                     WHERE receivable.booking_reference = :booking_reference
+                     LIMIT 1'
+                );
+                $offsetStatement->execute(['booking_reference' => $bookingReference]);
+                $offsetNo = $offsetStatement->fetchColumn();
+                if ($offsetNo !== false) {
+                    throw new RuntimeException(
+                        'The account holder cannot be changed because linked-party adjustment '
+                        . (string) $offsetNo . ' is posted against this booking. Void that adjustment first.'
+                    );
+                }
+            }
+
             $statement = $this->db->prepare(
                 'UPDATE bookings
                  SET branch_id = :branch_id,
@@ -101,8 +147,201 @@ final class BookingRepository extends BaseRepository
                 'updated_by_user_id' => $bookingData['actor_user_id'],
             ]);
 
+            if ($priorBranchId !== $targetBranchId) {
+                $this->synchronizeBookingBranch($bookingId, $bookingReference, $targetBranchId);
+            }
+
             $this->upsertParty($bookingId, $partyData);
         });
+    }
+
+    private function assertBranchCorrectionIsSafe(string $bookingReference, int $targetBranchId): void
+    {
+        $targetStatement = $this->db->prepare('SELECT 1 FROM branches WHERE id = :id AND is_active = 1 LIMIT 1');
+        $targetStatement->execute(['id' => $targetBranchId]);
+        if ($targetStatement->fetchColumn() === false) {
+            throw new RuntimeException('The selected destination branch is not active.');
+        }
+
+        $offsetConflict = $this->db->prepare(
+            'SELECT offset_rows.offset_no
+             FROM (
+                SELECT offset_record.offset_no
+                FROM counterparty_offset_account_allocations allocation
+                INNER JOIN counterparty_offsets offset_record
+                    ON offset_record.id = allocation.counterparty_offset_id
+                   AND offset_record.status = "posted"
+                INNER JOIN customer_receivable_items receivable
+                    ON receivable.id = allocation.customer_receivable_item_id
+                WHERE receivable.booking_reference = :receivable_booking_reference
+                UNION ALL
+                SELECT offset_record.offset_no
+                FROM counterparty_offset_payable_allocations allocation
+                INNER JOIN counterparty_offsets offset_record
+                    ON offset_record.id = allocation.counterparty_offset_id
+                   AND offset_record.status = "posted"
+                INNER JOIN supplier_obligations obligation
+                    ON obligation.id = allocation.supplier_obligation_id
+                WHERE obligation.booking_reference = :payable_booking_reference
+             ) offset_rows
+             LIMIT 1'
+        );
+        $offsetConflict->execute([
+            'receivable_booking_reference' => $bookingReference,
+            'payable_booking_reference' => $bookingReference,
+        ]);
+        $offsetNo = $offsetConflict->fetchColumn();
+        if ($offsetNo !== false) {
+            throw new RuntimeException(
+                'Branch cannot be changed because linked-party adjustment ' . (string) $offsetNo
+                . ' is posted against this booking. Void that adjustment first.'
+            );
+        }
+
+        $receiptConflict = $this->db->prepare(
+            "SELECT cr.receipt_no
+             FROM customer_receipts cr
+             LEFT JOIN treasury_accounts ta ON ta.id = cr.treasury_account_id
+             WHERE cr.booking_reference = :booking_reference
+               AND cr.status <> 'void'
+               AND ta.id IS NOT NULL
+               AND ta.branch_id <> :target_branch_id
+             LIMIT 1"
+        );
+        $receiptConflict->execute([
+            'booking_reference' => $bookingReference,
+            'target_branch_id' => $targetBranchId,
+        ]);
+        $receiptNo = $receiptConflict->fetchColumn();
+        if ($receiptNo !== false) {
+            throw new RuntimeException(
+                'Branch cannot be changed because active receipt ' . (string) $receiptNo
+                . ' belongs to a cash/bank account in another branch. Correct or void that receipt first.'
+            );
+        }
+
+        $supplierPaymentConflict = $this->db->prepare(
+            "SELECT sp.payment_no
+             FROM supplier_payment_allocations spa
+             INNER JOIN supplier_obligations so ON so.id = spa.supplier_obligation_id
+             INNER JOIN supplier_payments sp ON sp.id = spa.supplier_payment_id
+             LEFT JOIN treasury_accounts ta ON ta.id = sp.treasury_account_id
+             WHERE so.booking_reference = :booking_reference
+               AND sp.status <> 'void'
+               AND (
+                    sp.branch_id <> :target_branch_id
+                    OR (ta.id IS NOT NULL AND ta.branch_id <> :target_treasury_branch_id)
+               )
+             LIMIT 1"
+        );
+        $supplierPaymentConflict->execute([
+            'booking_reference' => $bookingReference,
+            'target_branch_id' => $targetBranchId,
+            'target_treasury_branch_id' => $targetBranchId,
+        ]);
+        $paymentNo = $supplierPaymentConflict->fetchColumn();
+        if ($paymentNo !== false) {
+            throw new RuntimeException(
+                'Branch cannot be changed because supplier payment ' . (string) $paymentNo
+                . ' belongs to another branch. Correct or void that payment first.'
+            );
+        }
+
+        $directSupplierPaymentConflict = $this->db->prepare(
+            "SELECT sp.payment_no
+             FROM supplier_payments sp
+             LEFT JOIN treasury_accounts ta ON ta.id = sp.treasury_account_id
+             WHERE sp.booking_reference = :booking_reference
+               AND sp.status <> 'void'
+               AND ta.id IS NOT NULL
+               AND ta.branch_id <> :target_branch_id
+             LIMIT 1"
+        );
+        $directSupplierPaymentConflict->execute([
+            'booking_reference' => $bookingReference,
+            'target_branch_id' => $targetBranchId,
+        ]);
+        $directPaymentNo = $directSupplierPaymentConflict->fetchColumn();
+        if ($directPaymentNo !== false) {
+            throw new RuntimeException(
+                'Branch cannot be changed because supplier payment ' . (string) $directPaymentNo
+                . ' belongs to a cash/bank account in another branch. Correct or void that payment first.'
+            );
+        }
+    }
+
+    private function synchronizeBookingBranch(int $bookingId, string $bookingReference, int $targetBranchId): void
+    {
+        $bookingTables = [
+            'booking_services' => 'booking_id',
+            'booking_service_events' => 'booking_id',
+            'service_financial_corrections' => 'booking_id',
+            'booking_documents' => 'booking_id',
+            'booking_reminders' => 'booking_id',
+        ];
+
+        foreach ($bookingTables as $table => $bookingColumn) {
+            if (! $this->tableExists($table) || ! $this->columnExists($table, 'branch_id')) {
+                continue;
+            }
+
+            $statement = $this->db->prepare(
+                "UPDATE {$table} SET branch_id = :branch_id WHERE {$bookingColumn} = :booking_id"
+            );
+            $statement->execute([
+                'branch_id' => $targetBranchId,
+                'booking_id' => $bookingId,
+            ]);
+        }
+
+        foreach (['customer_receivable_items', 'supplier_obligations'] as $table) {
+            $statement = $this->db->prepare(
+                "UPDATE {$table} SET branch_id = :branch_id WHERE booking_reference = :booking_reference"
+            );
+            $statement->execute([
+                'branch_id' => $targetBranchId,
+                'booking_reference' => $bookingReference,
+            ]);
+        }
+
+        $receiptStatement = $this->db->prepare(
+            "UPDATE customer_receipts
+             SET branch_id = :branch_id
+             WHERE booking_reference = :booking_reference
+               AND status <> 'void'"
+        );
+        $receiptStatement->execute([
+            'branch_id' => $targetBranchId,
+            'booking_reference' => $bookingReference,
+        ]);
+
+        $supplierPaymentStatement = $this->db->prepare(
+            "UPDATE supplier_payments
+             SET branch_id = :branch_id
+             WHERE booking_reference = :booking_reference
+               AND status <> 'void'"
+        );
+        $supplierPaymentStatement->execute([
+            'branch_id' => $targetBranchId,
+            'booking_reference' => $bookingReference,
+        ]);
+
+        $journalStatement = $this->db->prepare(
+            'UPDATE journal_entries je
+             SET je.branch_id = :branch_id
+             WHERE je.booking_reference = :booking_reference
+               AND EXISTS (
+                    SELECT 1
+                    FROM booking_services bs
+                    WHERE bs.booking_id = :booking_id
+                      AND (bs.currency = je.currency OR bs.cost_currency = je.currency)
+               )'
+        );
+        $journalStatement->execute([
+            'branch_id' => $targetBranchId,
+            'booking_reference' => $bookingReference,
+            'booking_id' => $bookingId,
+        ]);
     }
 
     public function closeReadinessTotals(int $bookingId): array
@@ -421,20 +660,9 @@ final class BookingRepository extends BaseRepository
                         cri.booking_reference,
                         MAX(cri.currency) AS invoice_currency,
                         SUM(cri.due_amount) AS invoice_amount,
-                        SUM(COALESCE(allocation_totals.allocated_amount, 0)) AS paid_amount,
-                        SUM(GREATEST(cri.due_amount - COALESCE(allocation_totals.allocated_amount, 0), 0)) AS outstanding_amount
+                        SUM(cri.allocated_amount) AS paid_amount,
+                        SUM(cri.outstanding_amount) AS outstanding_amount
                     FROM customer_receivable_items cri
-                    LEFT JOIN (
-                        SELECT
-                            cra.customer_receivable_item_id,
-                            SUM(COALESCE(cra.receivable_amount_allocated, cra.allocated_amount, 0)) AS allocated_amount
-                        FROM customer_receipt_allocations cra
-                        INNER JOIN customer_receipts cr
-                            ON cr.id = cra.customer_receipt_id
-                           AND cr.status <> 'void'
-                        GROUP BY cra.customer_receivable_item_id
-                    ) allocation_totals
-                        ON allocation_totals.customer_receivable_item_id = cri.id
                     WHERE cri.status <> 'cancelled'
                     GROUP BY cri.booking_reference
                 ) recv ON recv.booking_reference = b.booking_reference

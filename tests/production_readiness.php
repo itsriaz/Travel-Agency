@@ -73,6 +73,8 @@ $check('Workspace document/reminder readiness test exists', is_file(BASE_PATH . 
 $check('Workspace treasury refresh readiness test exists', is_file(BASE_PATH . '/tests/workspace_treasury_refresh_readiness.php'));
 $check('Accounting engine readiness test exists', is_file(BASE_PATH . '/tests/accounting_engine_readiness.php'));
 $check('Financial invariants audit exists', is_file(BASE_PATH . '/tests/financial_invariants_audit.php'));
+$check('Account/supplier link regression exists', is_file(BASE_PATH . '/tests/account_supplier_link_foundation_regression.php'));
+$check('Linked-party settlement regression exists', is_file(BASE_PATH . '/tests/counterparty_offset_regression.php'));
 $check('Offline sync readiness test exists', is_file(BASE_PATH . '/tests/offline_sync_readiness.php'));
 $check('Security layer readiness test exists', is_file(BASE_PATH . '/tests/security_layer_readiness.php'));
 $opsCheck('Non-production reset script exists', is_file(BASE_PATH . '/scripts/reset_non_production_data.php'));
@@ -111,6 +113,20 @@ $deactivateRouteIsFinancialAdminOnly = preg_match(
     str_replace(["\r", "\n"], ' ', $publicIndex)
 ) === 1;
 $check('Service deactivate route requires financial admin', $deactivateRouteIsFinancialAdminOnly);
+$check(
+    'Linked-party settlement routes require financial admin',
+    preg_match(
+        '#/linked-party-settlements.*FinancialAdminMiddleware::class#',
+        str_replace(["\r", "\n"], ' ', $publicIndex)
+    ) === 1
+);
+$check(
+    'Account/supplier link administration requires super admin',
+    preg_match(
+        '#/master-data/account-supplier-links.*SuperAdminMiddleware::class#',
+        str_replace(["\r", "\n"], ' ', $publicIndex)
+    ) === 1
+);
 $reportServiceSource = is_file(BASE_PATH . '/app/Services/ReportService.php')
     ? (string) file_get_contents(BASE_PATH . '/app/Services/ReportService.php')
     : '';
@@ -199,6 +215,12 @@ foreach ([
     'supplier_payments',
     'supplier_payment_allocations',
     'supplier_obligations',
+    'business_source_supplier_links',
+    'business_source_supplier_link_history',
+    'counterparty_offsets',
+    'counterparty_offset_account_allocations',
+    'counterparty_offset_receivable_allocations',
+    'counterparty_offset_payable_allocations',
     'journal_entries',
     'journal_entry_lines',
     'offline_draft_syncs',
@@ -245,6 +267,7 @@ $requiredAccounts = [
     'SERVICE_REVENUE',
     'SERVICE_COST',
     'CARD_CHARGES',
+    'FX_GAIN',
 ];
 $accountStatement = $db->prepare('SELECT code FROM chart_of_accounts WHERE code IN (' . implode(',', array_fill(0, count($requiredAccounts), '?')) . ')');
 $accountStatement->execute($requiredAccounts);
@@ -281,11 +304,15 @@ $negativePayables = $db->query(
 )->fetchAll() ?: [];
 $check('No negative supplier payable amounts', $negativePayables === [], $negativePayables !== [] ? json_encode($negativePayables, JSON_UNESCAPED_SLASHES) : '');
 
+$recognizedIncomeExpression = $tableExists('customer_credit_income_recognitions')
+    ? '(SELECT COALESCE(SUM(x.amount), 0) FROM customer_credit_income_recognitions x WHERE x.customer_receipt_id = customer_receipts.id)'
+    : '0';
 $receiptMismatches = $db->query(
-    'SELECT id, booking_reference, receipt_no, currency, received_amount, allocated_amount, unallocated_amount
+    'SELECT id, booking_reference, receipt_no, currency, received_amount, allocated_amount, unallocated_amount, returned_amount,
+            ' . $recognizedIncomeExpression . ' AS recognized_income_amount
      FROM customer_receipts
      WHERE status <> "void"
-       AND ABS(received_amount - (allocated_amount + unallocated_amount)) > 0.005
+       AND ABS(received_amount - (allocated_amount + unallocated_amount + returned_amount + ' . $recognizedIncomeExpression . ')) > 0.005
      LIMIT 10'
 )->fetchAll() ?: [];
 $warn('Customer receipt allocation totals are consistent', $receiptMismatches === [], $receiptMismatches !== [] ? json_encode($receiptMismatches, JSON_UNESCAPED_SLASHES) : '');
@@ -296,13 +323,20 @@ $supplierPaymentConvertedAdvanceSelect = $columnExists('supplier_payments', 'con
 $supplierPaymentConvertedAdvanceValue = $columnExists('supplier_payments', 'converted_advance_amount')
     ? 'converted_advance_amount'
     : '0';
+$supplierPaymentReturnedSelect = $columnExists('supplier_payments', 'returned_amount')
+    ? 'returned_amount'
+    : '0 AS returned_amount';
+$supplierPaymentReturnedValue = $columnExists('supplier_payments', 'returned_amount')
+    ? 'returned_amount'
+    : '0';
 
 $supplierPaymentMismatches = $db->query(
     'SELECT id, booking_reference, payment_no, currency, paid_amount, allocated_amount, unallocated_amount, '
-        . $supplierPaymentConvertedAdvanceSelect . '
+        . $supplierPaymentConvertedAdvanceSelect . ', ' . $supplierPaymentReturnedSelect . '
      FROM supplier_payments
      WHERE status <> "void"
-       AND ABS(paid_amount - (allocated_amount + unallocated_amount + ' . $supplierPaymentConvertedAdvanceValue . ')) > 0.005
+       AND ABS(paid_amount - (allocated_amount + unallocated_amount + '
+        . $supplierPaymentConvertedAdvanceValue . ' + ' . $supplierPaymentReturnedValue . ')) > 0.005
      LIMIT 10'
 )->fetchAll() ?: [];
 $warn('Supplier payment allocation totals are consistent', $supplierPaymentMismatches === [], $supplierPaymentMismatches !== [] ? json_encode($supplierPaymentMismatches, JSON_UNESCAPED_SLASHES) : '');

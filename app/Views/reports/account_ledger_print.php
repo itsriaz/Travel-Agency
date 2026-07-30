@@ -7,6 +7,24 @@ $filters = is_array($filters ?? null) ? $filters : [];
 $branchOptions = is_array($branchOptions ?? null) ? $branchOptions : [];
 $businessSourceOptions = is_array($businessSourceOptions ?? null) ? $businessSourceOptions : [];
 $customerOutstandingSummaryRows = is_array($customerOutstandingSummaryRows ?? null) ? $customerOutstandingSummaryRows : [];
+$groupedSummaryCards = [];
+$regularSummaryCards = [];
+foreach ($summaryCards as $summaryCard) {
+    $groupKey = trim((string) ($summaryCard['group'] ?? ''));
+    if ($groupKey === '') {
+        $regularSummaryCards[] = $summaryCard;
+        continue;
+    }
+
+    if (! isset($groupedSummaryCards[$groupKey])) {
+        $groupedSummaryCards[$groupKey] = [
+            'title' => (string) (($summaryCard['group_title'] ?? '') !== '' ? $summaryCard['group_title'] : $groupKey),
+            'cards' => [],
+        ];
+    }
+
+    $groupedSummaryCards[$groupKey]['cards'][] = $summaryCard;
+}
 
 $selectedBranchId = (int) ($filters['branchId'] ?? 0);
 $selectedBusinessSourceId = (int) ($filters['businessSourceId'] ?? 0);
@@ -124,6 +142,9 @@ foreach ($summaryCards as $summaryCard) {
         $summaryBalanceText = (string) ($summaryCard['value'] ?? $summaryBalanceText);
         break;
     }
+}
+if ($summaryCards === [] && count($customerOutstandingSummaryRows) === 1) {
+    $summaryBalanceText = (string) ($customerOutstandingSummaryRows[0]['cash_balance'] ?? $summaryBalanceText);
 }
 
 $ledgerExportLabel = $selectedCustomerName !== ''
@@ -420,6 +441,23 @@ $ledgerExportLabel = $selectedCustomerName !== ''
             </div>
         </section>
 
+        <?php if ($regularSummaryCards !== []): ?>
+            <section class="ledger-print-group">
+                <h2 class="ledger-print-group-title">Controls</h2>
+                <div class="ledger-print-summary">
+                    <?php foreach ($regularSummaryCards as $summaryCard): ?>
+                        <div class="ledger-print-summary-card">
+                            <span><?= e((string) ($summaryCard['label'] ?? 'Summary')) ?></span>
+                            <strong><?= e((string) ($summaryCard['value'] ?? '0.00')) ?></strong>
+                            <?php if (trim((string) ($summaryCard['note'] ?? '')) !== ''): ?>
+                                <small><?= e((string) $summaryCard['note']) ?></small>
+                            <?php endif; ?>
+                        </div>
+                    <?php endforeach; ?>
+                </div>
+            </section>
+        <?php endif; ?>
+
         <?php foreach ($groupedSummaryCards as $groupSection): ?>
             <?php if (($groupSection['cards'] ?? []) === []): ?>
                 <?php continue; ?>
@@ -510,21 +548,3 @@ $ledgerExportLabel = $selectedCustomerName !== ''
         </footer>
     </article>
 </section>
-$groupedSummaryCards = [];
-$regularSummaryCards = [];
-foreach ($summaryCards as $summaryCard) {
-    $groupKey = trim((string) ($summaryCard['group'] ?? ''));
-    if ($groupKey === '') {
-        $regularSummaryCards[] = $summaryCard;
-        continue;
-    }
-
-    if (! isset($groupedSummaryCards[$groupKey])) {
-        $groupedSummaryCards[$groupKey] = [
-            'title' => (string) (($summaryCard['group_title'] ?? '') !== '' ? $summaryCard['group_title'] : $groupKey),
-            'cards' => [],
-        ];
-    }
-
-    $groupedSummaryCards[$groupKey]['cards'][] = $summaryCard;
-}

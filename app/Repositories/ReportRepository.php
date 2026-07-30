@@ -208,7 +208,14 @@ final class ReportRepository extends BaseRepository
         return $rows;
     }
 
-    public function cashBankLedger(array $branchIds, ?string $dateFrom, ?string $dateTo, string $currency = '', string $sourceType = 'all'): array
+    public function cashBankLedger(
+        array $branchIds,
+        ?string $dateFrom,
+        ?string $dateTo,
+        string $currency = '',
+        string $sourceType = 'all',
+        ?float $transactionAmount = null
+    ): array
     {
         [$branchClause, $params] = $this->branchScope($branchIds);
         $dateSql = $this->bookingDateWindow('ledger_rows.entry_date', $dateFrom, $dateTo, $params, 'cash_bank_');
@@ -232,6 +239,16 @@ final class ReportRepository extends BaseRepository
             };
         }
 
+        $amountSql = '';
+        if ($transactionAmount !== null) {
+            $amountSql = ' AND (
+                ABS(ledger_rows.debit_amount - :cash_bank_debit_amount) < 0.005
+                OR ABS(ledger_rows.credit_amount - :cash_bank_credit_amount) < 0.005
+            )';
+            $params['cash_bank_debit_amount'] = round($transactionAmount, 2);
+            $params['cash_bank_credit_amount'] = round($transactionAmount, 2);
+        }
+
         $treasuryCounterpartySql = $this->columnExists('treasury_transactions', 'counterparty_name')
             ? 'NULLIF(tt.counterparty_name, ""), '
             : '';
@@ -252,7 +269,8 @@ final class ReportRepository extends BaseRepository
                 ledger_rows.reference,
                 ledger_rows.description,
                 ledger_rows.debit_amount,
-                ledger_rows.credit_amount
+                ledger_rows.credit_amount,
+                ledger_rows.line_id
              FROM (
                 SELECT
                     cr.treasury_account_id,
@@ -402,7 +420,7 @@ final class ReportRepository extends BaseRepository
                    AND sp.id IS NULL
                    AND be.id IS NULL
              ) AS ledger_rows
-             WHERE ledger_rows.branch_id ' . $branchClause . $dateSql . $currencySql . $sourceSql . '
+             WHERE ledger_rows.branch_id ' . $branchClause . $dateSql . $currencySql . $sourceSql . $amountSql . '
              ORDER BY
                 ledger_rows.branch_name ASC,
                 ledger_rows.account_group ASC,
@@ -530,6 +548,7 @@ final class ReportRepository extends BaseRepository
         $payableBookingWindow = $this->bookingDateWindow('b.booking_date', $dateFrom, $dateTo, $payableParams);
         $receivableAggregateSql = $this->receivableAggregateSql();
         $payableAggregateSql = $this->payableAggregateSql();
+        $payableInInvoiceCurrencyFormula = $this->servicePayableInInvoiceCurrencyFormula('bs', 'so');
 
         $branchRows = $this->fetchRows(
             'SELECT
@@ -549,7 +568,7 @@ final class ReportRepository extends BaseRepository
                     bs.id AS service_id,
                     bs.currency,
                     COALESCE(cri.due_amount, 0) AS receivable_amount,
-                    COALESCE(so.gross_amount, 0) AS payable_amount
+                    ' . $payableInInvoiceCurrencyFormula . ' AS payable_amount
                 FROM booking_services bs
                 INNER JOIN bookings b ON b.id = bs.booking_id
                 INNER JOIN branches br ON br.id = b.branch_id
@@ -560,7 +579,7 @@ final class ReportRepository extends BaseRepository
                 LEFT JOIN ' . $payableAggregateSql . ' so
                     ON so.booking_reference = b.booking_reference
                    AND so.service_line_reference = bs.line_reference
-                   AND so.currency = bs.currency
+                   AND so.currency = COALESCE(NULLIF(bs.cost_currency, ""), bs.currency)
                 WHERE b.branch_id ' . $clause . '
                   AND bs.is_active = 1' . $bookingWindow . '
              ) AS financial_rows
@@ -588,7 +607,7 @@ final class ReportRepository extends BaseRepository
                     bs.currency,
                     bs.service_type,
                     COALESCE(cri.due_amount, 0) AS receivable_amount,
-                    COALESCE(so.gross_amount, 0) AS payable_amount
+                    ' . $payableInInvoiceCurrencyFormula . ' AS payable_amount
                 FROM booking_services bs
                 INNER JOIN bookings b ON b.id = bs.booking_id
                 INNER JOIN branches br ON br.id = b.branch_id
@@ -599,7 +618,7 @@ final class ReportRepository extends BaseRepository
                 LEFT JOIN ' . $payableAggregateSql . ' so
                     ON so.booking_reference = b.booking_reference
                    AND so.service_line_reference = bs.line_reference
-                   AND so.currency = bs.currency
+                   AND so.currency = COALESCE(NULLIF(bs.cost_currency, ""), bs.currency)
                 WHERE b.branch_id ' . $clause . '
                   AND bs.is_active = 1' . $bookingWindow . '
              ) AS financial_rows
@@ -748,16 +767,18 @@ final class ReportRepository extends BaseRepository
     {
         [$clause, $params] = $this->branchScope($branchIds);
         $bookingParams = $params;
-        $receiptParams = $params;
-        $supplierParams = $params;
         $expenseParams = $params;
 
         $bookingWindow = $this->bookingDateWindow('b.booking_date', $dateFrom, $dateTo, $bookingParams);
-        $receiptWindow = $this->bookingDateWindow('cr.receipt_date', $dateFrom, $dateTo, $receiptParams);
-        $supplierWindow = $this->bookingDateWindow('sp.payment_date', $dateFrom, $dateTo, $supplierParams);
         $expenseWindow = $this->bookingDateWindow('be.expense_date', $dateFrom, $dateTo, $expenseParams);
         $receivableAggregateSql = $this->receivableAggregateSql();
         $payableAggregateSql = $this->payableAggregateSql();
+        $receivableFormula = $this->serviceReceivableFormula('bs');
+        $payableFormula = $this->servicePayableFormula('bs');
+        $payableInInvoiceCurrencyFormula = $this->servicePayableInInvoiceCurrencyFormula('bs', 'so');
+        $payableCurrency = 'COALESCE(NULLIF(so.currency, ""), NULLIF(bs.cost_currency, ""), bs.currency)';
+        $rawPayable = 'COALESCE(so.gross_amount, ' . $payableFormula . ')';
+        $receivable = 'COALESCE(cri.due_amount, ' . $receivableFormula . ')';
 
         $branches = $this->fetchRows(
             'SELECT id AS branch_id, name AS branch_name, base_currency
@@ -773,8 +794,35 @@ final class ReportRepository extends BaseRepository
                 b.branch_id,
                 br.name AS branch_name,
                 br.base_currency,
-                ROUND(SUM(COALESCE(cri.due_amount, 0)), 2) AS base_sales,
-                ROUND(SUM(COALESCE(so.gross_amount, 0)), 2) AS base_supplier_cost
+                ROUND(SUM(
+                    CASE
+                        WHEN bs.currency = br.base_currency THEN ' . $receivable . '
+                        WHEN ' . $payableCurrency . ' = br.base_currency
+                             AND COALESCE(bs.pricing_exchange_rate, 0) > 0
+                        THEN ' . $receivable . ' / bs.pricing_exchange_rate
+                        ELSE 0
+                    END
+                ), 2) AS base_sales,
+                ROUND(SUM(
+                    CASE
+                        WHEN bs.currency = br.base_currency THEN ' . $payableInInvoiceCurrencyFormula . '
+                        WHEN ' . $payableCurrency . ' = br.base_currency
+                             AND COALESCE(bs.pricing_exchange_rate, 0) > 0
+                        THEN ' . $rawPayable . '
+                        ELSE 0
+                    END
+                ), 2) AS base_supplier_cost,
+                SUM(
+                    CASE
+                        WHEN bs.currency = br.base_currency
+                          OR (
+                            ' . $payableCurrency . ' = br.base_currency
+                            AND COALESCE(bs.pricing_exchange_rate, 0) > 0
+                          )
+                        THEN 0
+                        ELSE 1
+                    END
+                ) AS pending_fx_count
              FROM booking_services bs
              INNER JOIN bookings b ON b.id = bs.booking_id
              INNER JOIN branches br ON br.id = b.branch_id
@@ -785,93 +833,11 @@ final class ReportRepository extends BaseRepository
              LEFT JOIN ' . $payableAggregateSql . ' so
                 ON so.booking_reference = b.booking_reference
                AND so.service_line_reference = bs.line_reference
-               AND so.currency = bs.currency
+               AND so.currency = COALESCE(NULLIF(bs.cost_currency, ""), bs.currency)
              WHERE b.branch_id ' . $clause . '
-               AND bs.is_active = 1
-               AND bs.currency = br.base_currency' . $bookingWindow . '
+               AND bs.is_active = 1' . $bookingWindow . '
              GROUP BY b.branch_id, br.name, br.base_currency',
             $bookingParams
-        );
-
-        $crossCustomerAllocations = $this->fetchRows(
-            'SELECT
-                b.branch_id,
-                br.name AS branch_name,
-                br.base_currency,
-                ROUND(SUM(
-                    CASE
-                        WHEN cri.currency = br.base_currency THEN COALESCE(cra.receivable_amount_allocated, cra.allocated_amount)
-                        WHEN cr.currency = br.base_currency THEN COALESCE(cra.payment_amount_consumed, 0)
-                        WHEN cra.rate_from_currency = cri.currency
-                             AND cra.rate_to_currency = br.base_currency
-                             AND cra.exchange_rate > 0
-                        THEN COALESCE(cra.receivable_amount_allocated, cra.allocated_amount) * cra.exchange_rate
-                        WHEN cra.rate_from_currency = br.base_currency
-                             AND cra.rate_to_currency = cri.currency
-                             AND cra.exchange_rate > 0
-                        THEN COALESCE(cra.receivable_amount_allocated, cra.allocated_amount) / cra.exchange_rate
-                        ELSE 0
-                    END
-                ), 2) AS converted_sales,
-                SUM(
-                    CASE
-                        WHEN cri.currency = br.base_currency
-                          OR cr.currency = br.base_currency
-                          OR (
-                            cra.rate_from_currency = cri.currency
-                            AND cra.rate_to_currency = br.base_currency
-                            AND cra.exchange_rate > 0
-                          )
-                          OR (
-                            cra.rate_from_currency = br.base_currency
-                            AND cra.rate_to_currency = cri.currency
-                            AND cra.exchange_rate > 0
-                          )
-                        THEN 0
-                        ELSE 1
-                    END
-                ) AS pending_fx_count
-             FROM customer_receipt_allocations cra
-             INNER JOIN customer_receipts cr ON cr.id = cra.customer_receipt_id
-             INNER JOIN customer_receivable_items cri ON cri.id = cra.customer_receivable_item_id
-             INNER JOIN bookings b ON b.booking_reference = cri.booking_reference
-             INNER JOIN branches br ON br.id = b.branch_id
-             WHERE b.branch_id ' . $clause . '
-               AND cr.status <> "void"
-               AND cri.currency <> br.base_currency' . $receiptWindow . '
-             GROUP BY b.branch_id, br.name, br.base_currency',
-            $receiptParams
-        );
-
-        $crossSupplierAllocations = $this->fetchRows(
-            'SELECT
-                so.branch_id,
-                br.name AS branch_name,
-                br.base_currency,
-                ROUND(SUM(
-                    CASE
-                        WHEN so.currency = br.base_currency THEN spa.allocated_amount
-                        WHEN sp.currency = br.base_currency AND spa.exchange_rate_used > 0 THEN spa.allocated_amount / spa.exchange_rate_used
-                        ELSE 0
-                    END
-                ), 2) AS converted_supplier_cost,
-                SUM(
-                    CASE
-                        WHEN so.currency = br.base_currency
-                          OR (sp.currency = br.base_currency AND spa.exchange_rate_used > 0)
-                        THEN 0
-                        ELSE 1
-                    END
-                ) AS pending_fx_count
-             FROM supplier_payment_allocations spa
-             INNER JOIN supplier_payments sp ON sp.id = spa.supplier_payment_id
-             INNER JOIN supplier_obligations so ON so.id = spa.supplier_obligation_id
-             INNER JOIN branches br ON br.id = so.branch_id
-             WHERE so.branch_id ' . $clause . '
-               AND sp.status <> "void"
-               AND so.currency <> br.base_currency' . $supplierWindow . '
-             GROUP BY so.branch_id, br.name, br.base_currency',
-            $supplierParams
         );
 
         $expenses = $this->fetchRows(
@@ -884,7 +850,7 @@ final class ReportRepository extends BaseRepository
              FROM business_expenses be
              INNER JOIN branches br ON br.id = be.branch_id
              WHERE be.branch_id ' . $clause . '
-               AND be.expense_status = "posted"' . $expenseWindow . '
+               AND be.expense_status IN ("active", "posted")' . $expenseWindow . '
              GROUP BY be.branch_id, br.name, br.base_currency',
             $expenseParams
         );
@@ -892,13 +858,17 @@ final class ReportRepository extends BaseRepository
         return [
             'branches' => $branches,
             'baseServices' => $baseServices,
-            'crossCustomerAllocations' => $crossCustomerAllocations,
-            'crossSupplierAllocations' => $crossSupplierAllocations,
             'expenses' => $expenses,
         ];
     }
 
-    public function supplierPostpaidPayments(array $branchIds, ?string $dateFrom, ?string $dateTo, string $currency = ''): array
+    public function supplierPostpaidPayments(
+        array $branchIds,
+        ?string $dateFrom,
+        ?string $dateTo,
+        string $currency = '',
+        int $supplierId = 0
+    ): array
     {
         [$clause, $params] = $this->branchScope($branchIds);
         $dateParams = $params;
@@ -908,6 +878,11 @@ final class ReportRepository extends BaseRepository
         if ($currencyFilter !== '') {
             $currencySql = ' AND sp.currency = :currency_filter';
             $dateParams['currency_filter'] = $currencyFilter;
+        }
+        $supplierSql = '';
+        if ($supplierId > 0) {
+            $supplierSql = ' AND sp.supplier_id = :supplier_id';
+            $dateParams['supplier_id'] = $supplierId;
         }
 
         return $this->fetchRows(
@@ -933,21 +908,32 @@ final class ReportRepository extends BaseRepository
              LEFT JOIN bookings b ON b.booking_reference = sp.booking_reference
              INNER JOIN branches br ON br.id = sp.branch_id
              INNER JOIN suppliers s ON s.id = sp.supplier_id
-             WHERE sp.branch_id ' . $clause . $window . $currencySql . '
+             WHERE sp.branch_id ' . $clause . $window . $currencySql . $supplierSql . '
              ORDER BY sp.payment_date DESC, sp.id DESC',
             $dateParams
         );
     }
 
-    public function supplierPrepaidPayments(array $branchIds, ?string $dateFrom, ?string $dateTo, string $currency = ''): array
+    public function supplierPrepaidPayments(
+        array $branchIds,
+        ?string $dateFrom,
+        ?string $dateTo,
+        string $currency = '',
+        int $supplierId = 0
+    ): array
     {
-        $dateParams = [];
+        [$clause, $dateParams] = $this->branchScope($branchIds);
         $window = $this->bookingDateWindow('a.received_at', $dateFrom, $dateTo, $dateParams);
         $currencyFilter = strtoupper(trim($currency));
         $currencySql = '';
         if ($currencyFilter !== '') {
             $currencySql = ' AND a.currency = :currency_filter';
             $dateParams['currency_filter'] = $currencyFilter;
+        }
+        $supplierSql = '';
+        if ($supplierId > 0) {
+            $supplierSql = ' AND a.supplier_id = :supplier_id';
+            $dateParams['supplier_id'] = $supplierId;
         }
 
         return $this->fetchRows(
@@ -963,6 +949,11 @@ final class ReportRepository extends BaseRepository
                 a.available_amount,
                 a.reference_no,
                 a.remarks,
+                a.payment_method,
+                a.treasury_account_id,
+                a.journal_entry_id,
+                a.source_supplier_payment_id,
+                ta.account_name AS treasury_account_name,
                 CASE
                     WHEN a.available_amount <= 0.005 THEN "fully_used"
                     WHEN a.available_amount + 0.005 < a.deposit_amount THEN "partially_used"
@@ -971,7 +962,8 @@ final class ReportRepository extends BaseRepository
              FROM supplier_advances a
              INNER JOIN branches br ON br.id = a.branch_id
              INNER JOIN suppliers s ON s.id = a.supplier_id
-             WHERE 1 = 1' . $window . $currencySql . '
+             LEFT JOIN treasury_accounts ta ON ta.id = a.treasury_account_id
+             WHERE a.branch_id ' . $clause . $window . $currencySql . $supplierSql . '
              ORDER BY a.received_at DESC, a.id DESC',
             $dateParams
         );
@@ -994,6 +986,11 @@ final class ReportRepository extends BaseRepository
                 a.available_amount,
                 a.reference_no,
                 a.remarks,
+                a.payment_method,
+                a.treasury_account_id,
+                a.journal_entry_id,
+                a.source_supplier_payment_id,
+                ta.account_name AS treasury_account_name,
                 CASE
                     WHEN a.available_amount <= 0.005 THEN "fully_used"
                     WHEN a.available_amount + 0.005 < a.deposit_amount THEN "partially_used"
@@ -1002,6 +999,7 @@ final class ReportRepository extends BaseRepository
              FROM supplier_advances a
              INNER JOIN branches br ON br.id = a.branch_id
              INNER JOIN suppliers s ON s.id = a.supplier_id
+             LEFT JOIN treasury_accounts ta ON ta.id = a.treasury_account_id
              WHERE a.id = :advance_id
              LIMIT 1'
         );
@@ -1418,7 +1416,8 @@ final class ReportRepository extends BaseRepository
         ?string $dateFrom,
         ?string $dateTo,
         string $currency = '',
-        string $balanceView = 'all'
+        string $balanceView = 'all',
+        int $supplierId = 0
     ): array {
         $advanceParams = [];
         $usageParams = [];
@@ -1492,18 +1491,26 @@ final class ReportRepository extends BaseRepository
                    AND usage_summary.branch_id = advance_summary.branch_id
                    AND usage_summary.currency = advance_summary.currency';
 
-        if ($balanceView === 'only_available') {
-            $sql .= '
-                WHERE advance_summary.remaining_advance_balance > 0';
-        } elseif ($balanceView === 'fully_used') {
-            $sql .= '
-                WHERE advance_summary.remaining_advance_balance <= 0.005';
+        [$branchClause, $branchParams] = $this->branchScope($branchIds, 'advance_summary_branch_');
+        $conditions = ['advance_summary.branch_id ' . $branchClause];
+        $params = array_merge($advanceParams, $usageParams, $branchParams);
+        if ($supplierId > 0) {
+            $conditions[] = 'advance_summary.supplier_id = :advance_summary_supplier_id';
+            $params['advance_summary_supplier_id'] = $supplierId;
         }
+        if ($balanceView === 'only_available') {
+            $conditions[] = 'advance_summary.remaining_advance_balance > 0';
+        } elseif ($balanceView === 'fully_used') {
+            $conditions[] = 'advance_summary.remaining_advance_balance <= 0.005';
+        }
+
+        $sql .= '
+                WHERE ' . implode(' AND ', $conditions);
 
         $sql .= '
                 ORDER BY s.name ASC, br.name ASC, advance_summary.currency ASC';
 
-        return $this->fetchRows($sql, array_merge($advanceParams, $usageParams));
+        return $this->fetchRows($sql, $params);
     }
 
     public function grossProfitSummary(array $branchIds, ?string $dateFrom, ?string $dateTo): array
@@ -1515,6 +1522,7 @@ final class ReportRepository extends BaseRepository
         $payableAggregateSql = $this->payableAggregateSql();
         $receivableFormula = $this->serviceReceivableFormula('bs');
         $payableFormula = $this->servicePayableFormula('bs');
+        $payableInInvoiceCurrencyFormula = $this->servicePayableInInvoiceCurrencyFormula('bs', 'so');
 
         return $this->fetchRows(
             'SELECT
@@ -1528,7 +1536,7 @@ final class ReportRepository extends BaseRepository
                     br.name AS branch_name,
                     bs.currency,
                     COALESCE(cri.due_amount, ' . $receivableFormula . ') AS receivable_amount,
-                    COALESCE(so.gross_amount, ' . $payableFormula . ') AS payable_amount
+                    ' . $payableInInvoiceCurrencyFormula . ' AS payable_amount
                 FROM booking_services bs
                 INNER JOIN bookings b ON b.id = bs.booking_id
                 INNER JOIN branches br ON br.id = b.branch_id
@@ -1539,7 +1547,7 @@ final class ReportRepository extends BaseRepository
                 LEFT JOIN ' . $payableAggregateSql . ' so
                     ON so.booking_reference = b.booking_reference
                    AND so.service_line_reference = bs.line_reference
-                   AND so.currency = bs.currency
+                   AND so.currency = COALESCE(NULLIF(bs.cost_currency, ""), bs.currency)
                 WHERE b.branch_id ' . $clause . '
                   AND bs.is_active = 1' . $bookingWindow . '
              ) AS financial_rows
@@ -1905,7 +1913,9 @@ final class ReportRepository extends BaseRepository
         string $asOfDate,
         ?string $dateFrom = null,
         ?string $dateTo = null,
-        string $bookingReference = ''
+        string $bookingReference = '',
+        int $supplierId = 0,
+        int $businessSourceId = 0
     ): array
     {
         [$clause, $params] = $this->branchScope($branchIds);
@@ -1914,6 +1924,16 @@ final class ReportRepository extends BaseRepository
         if ($bookingReference !== '') {
             $bookingReferenceSql = ' AND so.booking_reference LIKE :booking_reference';
             $params['booking_reference'] = '%' . $bookingReference . '%';
+        }
+        $supplierSql = '';
+        if ($supplierId > 0) {
+            $supplierSql = ' AND so.supplier_id = :payable_aging_supplier_id';
+            $params['payable_aging_supplier_id'] = $supplierId;
+        }
+        $accountSql = '';
+        if ($businessSourceId > 0) {
+            $accountSql = ' AND b.business_source_id = :payable_aging_business_source_id';
+            $params['payable_aging_business_source_id'] = $businessSourceId;
         }
         $sql = 'SELECT
                     b.id AS booking_id,
@@ -1935,7 +1955,7 @@ final class ReportRepository extends BaseRepository
                 INNER JOIN suppliers s ON s.id = so.supplier_id
                 WHERE so.net_payable_amount > 0
                   AND so.status IN ("open", "partially_covered")
-                  AND b.branch_id ' . $clause . $bookingReferenceSql . $dateSql . '
+                  AND b.branch_id ' . $clause . $bookingReferenceSql . $supplierSql . $accountSql . $dateSql . '
                 ORDER BY
                     CASE
                         WHEN overdue_days > 90 THEN 0
@@ -1957,14 +1977,31 @@ final class ReportRepository extends BaseRepository
         return $statement->fetchAll() ?: [];
     }
 
-    public function serviceProfit(array $branchIds, ?string $dateFrom, ?string $dateTo): array
+    public function serviceProfit(
+        array $branchIds,
+        ?string $dateFrom,
+        ?string $dateTo,
+        int $supplierId = 0,
+        int $businessSourceId = 0
+    ): array
     {
         [$clause, $params] = $this->branchScope($branchIds);
         $dateSql = $this->bookingDateWindow('b.booking_date', $dateFrom, $dateTo, $params);
+        $supplierSql = '';
+        if ($supplierId > 0) {
+            $supplierSql = ' AND bs.supplier_id = :service_profit_supplier_id';
+            $params['service_profit_supplier_id'] = $supplierId;
+        }
+        $accountSql = '';
+        if ($businessSourceId > 0) {
+            $accountSql = ' AND b.business_source_id = :service_profit_business_source_id';
+            $params['service_profit_business_source_id'] = $businessSourceId;
+        }
         $receivableAggregateSql = $this->receivableAggregateSql();
         $payableAggregateSql = $this->payableAggregateSql();
         $receivableFormula = $this->serviceReceivableFormula('bs');
         $payableFormula = $this->servicePayableFormula('bs');
+        $payableInInvoiceCurrencyFormula = $this->servicePayableInInvoiceCurrencyFormula('bs', 'so');
         $sql = 'SELECT
                     b.branch_id,
                     br.name AS branch_name,
@@ -1972,8 +2009,11 @@ final class ReportRepository extends BaseRepository
                     b.booking_date,
                     bs.line_reference,
                     bs.service_type,
+                    bs.supplier_id,
                     COALESCE(s.name, bs.supplier_name_snapshot, "Supplier pending") AS supplier_name,
                     bs.currency,
+                    bs.cost_currency,
+                    bs.pricing_exchange_rate,
                     bs.sale_price,
                     bs.purchase_cost,
                     bs.taxes,
@@ -1982,7 +2022,9 @@ final class ReportRepository extends BaseRepository
                     bs.service_charge,
                     bs.discount_amount,
                     COALESCE(cri.due_amount, ' . $receivableFormula . ') AS receivable_amount,
-                    COALESCE(so.gross_amount, ' . $payableFormula . ') AS payable_amount
+                    COALESCE(NULLIF(so.currency, ""), NULLIF(bs.cost_currency, ""), bs.currency) AS payable_currency,
+                    COALESCE(so.gross_amount, ' . $payableFormula . ') AS payable_original_amount,
+                    ' . $payableInInvoiceCurrencyFormula . ' AS payable_amount
                 FROM booking_services bs
                 INNER JOIN bookings b ON b.id = bs.booking_id
                 INNER JOIN branches br ON br.id = b.branch_id
@@ -1994,9 +2036,11 @@ final class ReportRepository extends BaseRepository
                 LEFT JOIN ' . $payableAggregateSql . ' so
                     ON so.booking_reference = b.booking_reference
                    AND so.service_line_reference = bs.line_reference
-                   AND so.currency = bs.currency
-                WHERE b.branch_id ' . $clause . '
-                  AND bs.is_active = 1'
+                   AND so.currency = COALESCE(NULLIF(bs.cost_currency, ""), bs.currency)
+                 WHERE b.branch_id ' . $clause . '
+                   AND bs.is_active = 1'
+                . $supplierSql
+                . $accountSql
                 . $dateSql .
                 ' ORDER BY br.name ASC, b.booking_date DESC, b.booking_reference ASC, bs.display_order ASC, bs.id ASC';
 
@@ -2025,6 +2069,7 @@ final class ReportRepository extends BaseRepository
         $payableBookingWindow = $this->bookingDateWindow('b.booking_date', $dateFrom, $dateTo, $payableParams);
         $receivableAggregateSql = $this->receivableAggregateSql();
         $payableAggregateSql = $this->payableAggregateSql();
+        $payableInInvoiceCurrencyFormula = $this->servicePayableInInvoiceCurrencyFormula('bs', 'so');
 
         $bookingRows = $this->fetchRows(
             'SELECT b.branch_id, br.name AS branch_name, COUNT(*) AS booking_count
@@ -2051,7 +2096,7 @@ final class ReportRepository extends BaseRepository
                     bs.id AS service_id,
                     bs.currency,
                     COALESCE(cri.due_amount, 0) AS receivable_amount,
-                    COALESCE(so.gross_amount, 0) AS payable_amount
+                    ' . $payableInInvoiceCurrencyFormula . ' AS payable_amount
                 FROM booking_services bs
                 INNER JOIN bookings b ON b.id = bs.booking_id
                 INNER JOIN branches br ON br.id = b.branch_id
@@ -2062,7 +2107,7 @@ final class ReportRepository extends BaseRepository
                 LEFT JOIN ' . $payableAggregateSql . ' so
                     ON so.booking_reference = b.booking_reference
                    AND so.service_line_reference = bs.line_reference
-                   AND so.currency = bs.currency
+                   AND so.currency = COALESCE(NULLIF(bs.cost_currency, ""), bs.currency)
                 WHERE b.branch_id ' . $clause . '
                   AND bs.is_active = 1' . $bookingWindow . '
              ) AS financial_rows
@@ -2398,6 +2443,110 @@ final class ReportRepository extends BaseRepository
         return $this->fetchRows($sql, $params);
     }
 
+    private function customerCreditTransferLedgerRows(
+        array $branchIds,
+        ?string $dateFrom,
+        ?string $dateTo,
+        string $currency,
+        int $businessSourceId,
+        string $customerName,
+        string $bookingReference
+    ): array {
+        [$clause, $branchParams] = $this->branchScope($branchIds, 'credit_transfer_branch_');
+        $amountExpression = $this->columnExists('customer_receipt_allocations', 'receivable_amount_allocated')
+            ? 'COALESCE(cra.receivable_amount_allocated, cra.allocated_amount)'
+            : 'cra.allocated_amount';
+        $rows = [];
+
+        foreach (['source', 'target'] as $side) {
+            $isSource = $side === 'source';
+            $params = $branchParams;
+            $filters = ['b.branch_id ' . $clause];
+            if ($dateFrom !== null) {
+                $filters[] = 'b.booking_date >= :credit_transfer_date_from';
+                $params['credit_transfer_date_from'] = $dateFrom;
+            }
+            if ($dateTo !== null) {
+                $filters[] = 'b.booking_date <= :credit_transfer_date_to';
+                $params['credit_transfer_date_to'] = $dateTo;
+            }
+            if ($currency !== '') {
+                $filters[] = 'cr.currency = :credit_transfer_currency';
+                $params['credit_transfer_currency'] = $currency;
+            }
+            if ($businessSourceId > 0) {
+                $filters[] = 'b.business_source_id = :credit_transfer_business_source_id';
+                $params['credit_transfer_business_source_id'] = $businessSourceId;
+            }
+            if ($customerName !== '') {
+                $filters[] = 'COALESCE(NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Booking Party") COLLATE utf8mb4_unicode_ci = :credit_transfer_customer_name';
+                $params['credit_transfer_customer_name'] = $customerName;
+            }
+            if ($bookingReference !== '') {
+                $filters[] = 'b.booking_reference LIKE :credit_transfer_booking_reference';
+                $params['credit_transfer_booking_reference'] = '%' . $bookingReference . '%';
+            }
+
+            $bookingJoin = $isSource
+                ? 'b.booking_reference = cr.booking_reference'
+                : 'b.booking_reference = cri.booking_reference';
+            $counterpartReference = $isSource ? 'cri.booking_reference' : 'cr.booking_reference';
+
+            $sideRows = $this->fetchRows(
+                'SELECT
+                    "customer_credit_transfer" AS row_type,
+                    "' . $side . '" AS transfer_direction,
+                    cra.id AS transfer_allocation_id,
+                    ' . $amountExpression . ' AS transfer_amount,
+                    cr.booking_reference AS source_booking_reference,
+                    cri.booking_reference AS target_booking_reference,
+                    ' . $counterpartReference . ' AS counterpart_booking_reference,
+                    cr.receipt_no AS source_receipt_no,
+                    COALESCE(cr.receipt_purpose, "booking_payment") AS receipt_purpose,
+                    b.id AS booking_id,
+                    b.lead_traveler_id,
+                    b.branch_id,
+                    br.name AS branch_name,
+                    COALESCE(bs_src.name, "Unassigned Account") AS business_source_name,
+                    b.booking_reference,
+                    DATE(cra.allocated_at) AS booking_date,
+                    NULL AS due_date,
+                    COALESCE(bs.line_reference, cri.service_line_reference, "") AS service_line_reference,
+                    COALESCE(NULLIF(t_service.full_name, ""), NULLIF(bs.passenger_name_snapshot, ""), NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Passenger") AS passenger_name,
+                    COALESCE(NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Booking Party") AS lead_traveler_name,
+                    COALESCE(NULLIF(bp.contact_mobile, ""), NULLIF(t_lead.mobile, ""), "") AS contact_mobile,
+                    COALESCE(NULLIF(sat.pnr, ""), "") AS pnr,
+                    COALESCE(NULLIF(CONCAT_WS("/", NULLIF(sat.sector_from, ""), NULLIF(sat.sector_to, "")), ""), "") AS route,
+                    cr.currency
+                 FROM customer_receipt_allocations cra
+                 INNER JOIN customer_receipts cr ON cr.id = cra.customer_receipt_id AND cr.status <> "void"
+                 INNER JOIN customer_receivable_items cri ON cri.id = cra.customer_receivable_item_id
+                 INNER JOIN bookings b ON ' . $bookingJoin . '
+                 INNER JOIN branches br ON br.id = b.branch_id
+                 LEFT JOIN business_sources bs_src ON bs_src.id = b.business_source_id
+                 LEFT JOIN booking_parties bp ON bp.booking_id = b.id
+                 LEFT JOIN travelers t_lead ON t_lead.id = b.lead_traveler_id
+                 LEFT JOIN booking_services bs ON bs.booking_id = b.id
+                    AND bs.id = (
+                        SELECT MIN(bs_lookup.id)
+                        FROM booking_services bs_lookup
+                        WHERE bs_lookup.booking_id = b.id
+                          AND ("' . $side . '" = "source" OR bs_lookup.line_reference = cri.service_line_reference)
+                    )
+                 LEFT JOIN travelers t_service ON t_service.id = bs.traveler_id
+                 LEFT JOIN service_air_ticket sat ON sat.booking_service_id = bs.id
+                 WHERE ' . implode(' AND ', $filters) . '
+                   AND cr.booking_reference <> cri.booking_reference
+                   AND ' . $amountExpression . ' > 0.005
+                 ORDER BY cra.allocated_at ASC, cra.id ASC',
+                $params
+            );
+            array_push($rows, ...$sideRows);
+        }
+
+        return $rows;
+    }
+
     public function customerLedger(
         array $branchIds,
         ?string $dateFrom = null,
@@ -2472,12 +2621,53 @@ final class ReportRepository extends BaseRepository
                         CONCAT(UCASE(LEFT(COALESCE(bs.service_type, "service"), 1)), SUBSTRING(COALESCE(bs.service_type, "service"), 2), " Service")
                     ) AS description,
                     cri.currency,
-                    COALESCE(NULLIF(bs.final_sale_price, 0), cri.due_amount) AS original_invoice_amount,
+                    CASE
+                        WHEN COALESCE(bs.net_profit_loss, 0) < -0.005
+                          OR COALESCE(NULLIF(bs.loss_reason, ""), "") <> ""
+                            THEN ROUND(
+                                CASE
+                                    WHEN COALESCE(bs.cost_currency, bs.currency) = bs.currency
+                                        THEN COALESCE(bs.purchase_cost, 0)
+                                    ELSE ROUND(
+                                        COALESCE(bs.purchase_cost, 0)
+                                        * COALESCE(NULLIF(bs.pricing_exchange_rate, 0), 1),
+                                        0
+                                    )
+                                END
+                                + CASE
+                                    WHEN COALESCE(bs.service_charge_currency, bs.currency) = bs.currency
+                                        THEN COALESCE(bs.service_charge, 0)
+                                            + COALESCE(bs.vat, 0)
+                                            - COALESCE(bs.discount_amount, 0)
+                                    ELSE ROUND(
+                                        (
+                                            COALESCE(bs.service_charge, 0)
+                                            + COALESCE(bs.vat, 0)
+                                            - COALESCE(bs.discount_amount, 0)
+                                        ) * COALESCE(NULLIF(bs.service_charge_exchange_rate, 0), 1),
+                                        0
+                                    )
+                                END,
+                                2
+                            )
+                        ELSE COALESCE(NULLIF(bs.final_sale_price, 0), cri.due_amount)
+                    END AS original_invoice_amount,
+                    COALESCE(NULLIF(bs.final_sale_price, 0), cri.due_amount) AS customer_sale_amount,
+                    COALESCE(bs.net_profit_loss, 0) AS service_profit_loss,
+                    COALESCE(NULLIF(bs.loss_reason, ""), "") AS service_loss_reason,
                     cri.due_amount AS total_due,
                     cri.allocated_amount AS total_allocated,
                     cri.outstanding_amount AS total_outstanding,
-                    COALESCE(receipt_summary.customer_received_amount, 0) AS account_customer_received_amount,
-                    COALESCE(receipt_summary.customer_received_date, b.booking_date) AS account_customer_received_date,
+                    ROUND(
+                        COALESCE(receipt_summary.customer_received_amount, 0)
+                        + COALESCE(cross_currency_receipt_summary.customer_received_amount, 0),
+                        2
+                    ) AS account_customer_received_amount,
+                    COALESCE(
+                        receipt_summary.customer_received_date,
+                        cross_currency_receipt_summary.customer_received_date,
+                        b.booking_date
+                    ) AS account_customer_received_date,
                     COALESCE(supplier_payment_summary.supplier_paid_amount, 0) AS account_supplier_paid_amount,
                     COALESCE(supplier_payment_summary.supplier_paid_date, b.booking_date) AS account_supplier_paid_date,
                     COALESCE(refund_summary.customer_paid_amount, 0) AS refund_customer_paid_amount,
@@ -2517,6 +2707,23 @@ final class ReportRepository extends BaseRepository
                 ) receipt_summary
                     ON receipt_summary.booking_reference = cri.booking_reference
                    AND receipt_summary.currency = cri.currency
+                LEFT JOIN (
+                    SELECT
+                        cra.customer_receivable_item_id,
+                        ROUND(SUM(COALESCE(cra.receivable_amount_allocated, cra.allocated_amount)), 2) AS customer_received_amount,
+                        MAX(cr.receipt_date) AS customer_received_date
+                    FROM customer_receipt_allocations cra
+                    INNER JOIN customer_receipts cr
+                        ON cr.id = cra.customer_receipt_id
+                       AND cr.status <> "void"
+                    INNER JOIN customer_receivable_items cri_target
+                        ON cri_target.id = cra.customer_receivable_item_id
+                    WHERE cr.booking_reference = cri_target.booking_reference
+                      AND cr.currency <> cri_target.currency
+                      ' . $customerReceiptPurposeFilter . '
+                    GROUP BY cra.customer_receivable_item_id
+                ) cross_currency_receipt_summary
+                    ON cross_currency_receipt_summary.customer_receivable_item_id = cri.id
                 LEFT JOIN (
                     SELECT
                         so.booking_reference,
@@ -2621,7 +2828,89 @@ final class ReportRepository extends BaseRepository
                          br.name ASC,
                          lead_traveler_name ASC';
 
-        return $this->fetchRows($sql, $params);
+        $rows = $this->fetchRows($sql, $params);
+        array_push($rows, ...$this->customerCreditTransferLedgerRows(
+            $branchIds,
+            $dateFrom,
+            $dateTo,
+            $currency,
+            $businessSourceId,
+            $customerName,
+            $bookingReference
+        ));
+
+        if ($bookingReference === '') {
+            $advanceRows = $this->customerAdvanceLedger(
+                $branchIds,
+                $dateFrom,
+                $dateTo,
+                $currency,
+                $customerName
+            );
+            foreach ($advanceRows as $advanceRow) {
+                $entryType = (string) ($advanceRow['entry_type'] ?? '');
+                if (! in_array($entryType, ['Customer Advance Received', 'Customer Advance Returned'], true)) {
+                    continue;
+                }
+                if ($businessSourceId > 0
+                    && (int) ($advanceRow['business_source_id'] ?? 0) !== $businessSourceId
+                ) {
+                    continue;
+                }
+
+                $rows[] = [
+                    'row_type' => 'customer_advance_movement',
+                    'advance_entry_type' => $entryType,
+                    'advance_row_id' => (int) ($advanceRow['row_id'] ?? 0),
+                    'receipt_id' => (int) ($advanceRow['receipt_id'] ?? 0),
+                    'branch_id' => (int) ($advanceRow['branch_id'] ?? 0),
+                    'branch_name' => (string) ($advanceRow['branch_name'] ?? ''),
+                    'business_source_id' => (int) ($advanceRow['business_source_id'] ?? 0),
+                    'business_source_name' => (string) ($advanceRow['business_source_name'] ?? 'Unassigned Account'),
+                    'booking_id' => 0,
+                    'lead_traveler_id' => (int) ($advanceRow['traveler_id'] ?? 0),
+                    'booking_reference' => 'ADVANCE',
+                    'booking_date' => (string) ($advanceRow['entry_date'] ?? ''),
+                    'due_date' => null,
+                    'service_line_reference' => '',
+                    'service_type' => 'Customer Advance',
+                    'passenger_name' => (string) ($advanceRow['customer_name'] ?? 'Customer'),
+                    'lead_traveler_name' => (string) ($advanceRow['customer_name'] ?? 'Customer'),
+                    'contact_mobile' => '',
+                    'pnr' => '',
+                    'route' => '',
+                    'description' => (string) ($advanceRow['remarks'] ?? ''),
+                    'currency' => (string) ($advanceRow['currency'] ?? 'PKR'),
+                    'advance_received_amount' => (float) ($advanceRow['received_amount'] ?? 0),
+                    'advance_returned_amount' => (float) ($advanceRow['returned_amount'] ?? 0),
+                    'advance_reference' => (string) ($advanceRow['reference'] ?? ''),
+                    'advance_payment_method' => (string) ($advanceRow['payment_method'] ?? ''),
+                    'advance_treasury_account_name' => (string) ($advanceRow['treasury_account_name'] ?? ''),
+                ];
+            }
+        } else {
+            foreach ($rows as &$ledgerRow) {
+                if ((string) ($ledgerRow['row_type'] ?? '') === 'customer_credit_transfer'
+                    && (string) ($ledgerRow['receipt_purpose'] ?? '') === 'customer_advance'
+                ) {
+                    $ledgerRow['customer_advance_booking_view'] = true;
+                }
+            }
+            unset($ledgerRow);
+        }
+
+        if ($bookingReference === '') {
+            foreach ($rows as &$ledgerRow) {
+                if ((string) ($ledgerRow['row_type'] ?? '') === 'customer_credit_transfer'
+                    && (string) ($ledgerRow['receipt_purpose'] ?? '') === 'customer_advance'
+                ) {
+                    $ledgerRow['suppress_customer_movement'] = true;
+                }
+            }
+            unset($ledgerRow);
+        }
+
+        return $rows;
     }
 
     public function customerLedgerCustomers(array $branchIds, int $businessSourceId = 0): array
@@ -2644,7 +2933,43 @@ final class ReportRepository extends BaseRepository
                 WHERE ' . implode(' AND ', $filters) . '
                 ORDER BY customer_name ASC';
 
-        return $this->fetchRows($sql, $params);
+        $customers = $this->fetchRows($sql, $params);
+        if (! $this->columnExists('customer_receipts', 'traveler_id')
+            || ! $this->columnExists('customer_receipts', 'receipt_purpose')
+        ) {
+            return $customers;
+        }
+
+        [$advanceClause, $advanceParams] = $this->branchScope($branchIds, 'customer_ledger_advance_branch_');
+        $advanceFilters = [
+            'cr.branch_id ' . $advanceClause,
+            'cr.status <> "void"',
+            'cr.receipt_purpose = "customer_advance"',
+        ];
+        if ($businessSourceId > 0 && $this->columnExists('customer_receipts', 'business_source_id')) {
+            $advanceFilters[] = 'cr.business_source_id = :customer_ledger_advance_business_source_id';
+            $advanceParams['customer_ledger_advance_business_source_id'] = $businessSourceId;
+        }
+        $advanceCustomers = $this->fetchRows(
+            'SELECT DISTINCT COALESCE(NULLIF(t.full_name, ""), "Customer") AS customer_name
+             FROM customer_receipts cr
+             LEFT JOIN travelers t ON t.id = cr.traveler_id
+             WHERE ' . implode(' AND ', $advanceFilters),
+            $advanceParams
+        );
+
+        $byName = [];
+        foreach (array_merge($customers, $advanceCustomers) as $customer) {
+            $name = trim((string) ($customer['customer_name'] ?? ''));
+            if ($name !== '') {
+                $byName[mb_strtolower($name)] = ['customer_name' => $name];
+            }
+        }
+        uasort($byName, static fn (array $left, array $right): int =>
+            strcasecmp((string) $left['customer_name'], (string) $right['customer_name'])
+        );
+
+        return array_values($byName);
     }
 
     public function customerAdvanceCustomers(array $branchIds): array
@@ -2686,7 +3011,8 @@ final class ReportRepository extends BaseRepository
         ?string $dateFrom,
         ?string $dateTo,
         string $currency = '',
-        string $customerName = ''
+        string $customerName = '',
+        int $businessSourceId = 0
     ): array {
         if (! $this->columnExists('customer_receipts', 'traveler_id')
             || ! $this->columnExists('customer_receipts', 'receipt_purpose')
@@ -2708,6 +3034,12 @@ final class ReportRepository extends BaseRepository
             $params['advance_customer_name'] = trim($customerName);
         }
 
+        $businessSourceSql = '';
+        if ($businessSourceId > 0) {
+            $businessSourceSql = ' AND advance_rows.business_source_id = :advance_business_source_id';
+            $params['advance_business_source_id'] = $businessSourceId;
+        }
+
         $paymentAmountExpression = $this->columnExists('customer_receipt_allocations', 'payment_amount_consumed')
             ? 'COALESCE(cra.payment_amount_consumed, cra.allocated_amount)'
             : 'cra.allocated_amount';
@@ -2718,6 +3050,7 @@ final class ReportRepository extends BaseRepository
                     NULL AS allocation_id,
                     id AS branch_id,
                     0 AS traveler_id,
+                    NULL AS business_source_id,
                     "1900-01-01" AS entry_date,
                     "Customer" AS customer_name,
                     "PKR" AS currency,
@@ -2745,6 +3078,7 @@ final class ReportRepository extends BaseRepository
                     NULL AS allocation_id,
                     car.branch_id,
                     car.traveler_id,
+                    cr.business_source_id,
                     car.refund_date AS entry_date,
                     COALESCE(NULLIF(t.full_name, ""), "Customer") AS customer_name,
                     car.currency,
@@ -2774,6 +3108,8 @@ final class ReportRepository extends BaseRepository
                     advance_rows.allocation_id,
                     advance_rows.branch_id,
                     advance_rows.traveler_id,
+                    advance_rows.business_source_id,
+                    COALESCE(bs.name, "Unassigned Account") AS business_source_name,
                     br.name AS branch_name,
                     advance_rows.entry_date,
                     advance_rows.customer_name,
@@ -2799,6 +3135,7 @@ final class ReportRepository extends BaseRepository
                         NULL AS allocation_id,
                         cr.branch_id,
                         cr.traveler_id,
+                        cr.business_source_id,
                         cr.receipt_date AS entry_date,
                         COALESCE(NULLIF(t.full_name, ""), "Customer") AS customer_name,
                         cr.currency,
@@ -2830,6 +3167,7 @@ final class ReportRepository extends BaseRepository
                         cra.id AS allocation_id,
                         cr.branch_id,
                         cr.traveler_id,
+                        cr.business_source_id,
                         COALESCE(cri.due_date, cr.receipt_date) AS entry_date,
                         COALESCE(NULLIF(t.full_name, ""), "Customer") AS customer_name,
                         cr.currency,
@@ -2861,7 +3199,8 @@ final class ReportRepository extends BaseRepository
                     ' . $refundSelect . '
                 ) advance_rows
                 INNER JOIN branches br ON br.id = advance_rows.branch_id
-                WHERE advance_rows.branch_id ' . $clause . $dateSql . $currencySql . $customerSql . '
+                LEFT JOIN business_sources bs ON bs.id = advance_rows.business_source_id
+                WHERE advance_rows.branch_id ' . $clause . $dateSql . $currencySql . $customerSql . $businessSourceSql . '
                 ORDER BY advance_rows.entry_date DESC, advance_rows.sort_order ASC, advance_rows.row_id DESC';
 
         return $this->fetchRows($sql, $params);
@@ -2874,7 +3213,10 @@ final class ReportRepository extends BaseRepository
         string $statusFilter = 'active',
         string $reminderType = '',
         string $serviceType = '',
-        string $search = ''
+        string $search = '',
+        string $priority = '',
+        int $businessSourceId = 0,
+        string $customerName = ''
     ): array {
         [$clause, $params] = $this->branchScope($branchIds);
 
@@ -2898,6 +3240,22 @@ final class ReportRepository extends BaseRepository
         if ($serviceType !== '') {
             $where[] = 'COALESCE(bs.service_type, bs_obligation.service_type, bs_booking.service_type, "") = :service_type';
             $params['service_type'] = $serviceType;
+        }
+
+        if ($priority !== '') {
+            $where[] = 'brm.priority = :reminder_priority';
+            $params['reminder_priority'] = $priority;
+        }
+
+        if ($businessSourceId > 0) {
+            $where[] = 'b.business_source_id = :reminder_business_source_id';
+            $params['reminder_business_source_id'] = $businessSourceId;
+        }
+
+        $customerName = trim($customerName);
+        if ($customerName !== '') {
+            $where[] = 'COALESCE(NULLIF(t.full_name, ""), NULLIF(t_lead.full_name, ""), COALESCE(bp.lead_traveler_name, "Customer")) = :reminder_customer_name';
+            $params['reminder_customer_name'] = $customerName;
         }
 
         $statusFilter = strtolower(trim($statusFilter));
@@ -2946,6 +3304,8 @@ final class ReportRepository extends BaseRepository
                     b.id AS booking_id,
                     b.booking_reference,
                     b.booking_date,
+                    b.business_source_id,
+                    COALESCE(bs_src.name, "Unassigned Account") AS business_source_name,
                     COALESCE(NULLIF(t.full_name, ""), NULLIF(t_lead.full_name, ""), COALESCE(bp.lead_traveler_name, "Customer")) AS customer_name,
                     COALESCE(NULLIF(bp.contact_mobile, ""), NULLIF(t.mobile, ""), NULLIF(t_lead.mobile, ""), "") AS contact_mobile,
                     t.id AS traveler_id,
@@ -2969,6 +3329,7 @@ final class ReportRepository extends BaseRepository
                 FROM booking_reminders brm
                 INNER JOIN branches br ON br.id = brm.branch_id
                 INNER JOIN bookings b ON b.id = brm.booking_id
+                LEFT JOIN business_sources bs_src ON bs_src.id = b.business_source_id
                 LEFT JOIN booking_parties bp ON bp.booking_id = b.id
                 LEFT JOIN travelers t ON t.id = brm.traveler_id
                 LEFT JOIN travelers t_lead ON t_lead.id = b.lead_traveler_id
@@ -3007,7 +3368,13 @@ final class ReportRepository extends BaseRepository
         return $this->fetchRows($sql, $params);
     }
 
-    public function supplierOutstanding(array $branchIds, ?string $dateFrom = null, ?string $dateTo = null, int $supplierId = 0): array
+    public function supplierOutstanding(
+        array $branchIds,
+        ?string $dateFrom = null,
+        ?string $dateTo = null,
+        int $supplierId = 0,
+        int $businessSourceId = 0
+    ): array
     {
         [$clause, $params] = $this->branchScope($branchIds);
         $dateSql = $this->bookingDateWindow('b.booking_date', $dateFrom, $dateTo, $params, 'supplier_outstanding_');
@@ -3015,6 +3382,11 @@ final class ReportRepository extends BaseRepository
         if ($supplierId > 0) {
             $supplierSql = ' AND so.supplier_id = :supplier_outstanding_supplier_id';
             $params['supplier_outstanding_supplier_id'] = $supplierId;
+        }
+        $accountSql = '';
+        if ($businessSourceId > 0) {
+            $accountSql = ' AND b.business_source_id = :supplier_outstanding_business_source_id';
+            $params['supplier_outstanding_business_source_id'] = $businessSourceId;
         }
         $sql = 'SELECT
                     b.branch_id,
@@ -3032,7 +3404,7 @@ final class ReportRepository extends BaseRepository
                 INNER JOIN branches br ON br.id = b.branch_id
                 INNER JOIN suppliers s ON s.id = so.supplier_id
                 WHERE so.net_payable_amount > 0
-                  AND b.branch_id ' . $clause . $dateSql . $supplierSql . '
+                  AND b.branch_id ' . $clause . $dateSql . $supplierSql . $accountSql . '
                 GROUP BY
                     b.branch_id, br.name, so.booking_reference, b.booking_date,
                     s.name, s.supplier_mode, so.currency
@@ -3041,7 +3413,14 @@ final class ReportRepository extends BaseRepository
         return $this->fetchRows($sql, $params);
     }
 
-    public function supplierReceivable(array $branchIds, ?string $dateFrom, ?string $dateTo, string $airline = '', int $supplierId = 0): array
+    public function supplierReceivable(
+        array $branchIds,
+        ?string $dateFrom,
+        ?string $dateTo,
+        string $airline = '',
+        int $supplierId = 0,
+        int $businessSourceId = 0
+    ): array
     {
         [$clause, $params] = $this->branchScope($branchIds);
         $dateSql = $this->bookingDateWindow('event_totals.event_date', $dateFrom, $dateTo, $params);
@@ -3055,6 +3434,11 @@ final class ReportRepository extends BaseRepository
         if ($supplierId > 0) {
             $supplierSql = ' AND bs.supplier_id = :supplier_receivable_supplier_id';
             $params['supplier_receivable_supplier_id'] = $supplierId;
+        }
+        $accountSql = '';
+        if ($businessSourceId > 0) {
+            $accountSql = ' AND b.business_source_id = :supplier_receivable_business_source_id';
+            $params['supplier_receivable_business_source_id'] = $businessSourceId;
         }
 
         $sql = 'SELECT
@@ -3098,13 +3482,20 @@ final class ReportRepository extends BaseRepository
                 LEFT JOIN suppliers s ON s.id = bs.supplier_id
                 LEFT JOIN travelers t ON t.id = bs.traveler_id
                 WHERE event_totals.supplier_receivable_balance > 0.005
-                  AND b.branch_id ' . $clause . $dateSql . $airlineSql . $supplierSql . '
+                  AND b.branch_id ' . $clause . $dateSql . $airlineSql . $supplierSql . $accountSql . '
                 ORDER BY br.name ASC, supplier_name ASC, event_totals.event_date ASC, b.booking_reference ASC, event_totals.service_line_reference ASC';
 
         return $this->fetchRows($sql, $params);
     }
 
-    public function payableRefunds(array $branchIds, ?string $dateFrom, ?string $dateTo, int $supplierId = 0, string $bookingReference = ''): array
+    public function payableRefunds(
+        array $branchIds,
+        ?string $dateFrom,
+        ?string $dateTo,
+        int $supplierId = 0,
+        string $bookingReference = '',
+        int $businessSourceId = 0
+    ): array
     {
         [$clause, $params] = $this->branchScope($branchIds);
         $dateSql = $this->bookingDateWindow('refund_totals.event_date', $dateFrom, $dateTo, $params, 'payable_refund_');
@@ -3118,6 +3509,11 @@ final class ReportRepository extends BaseRepository
         if ($bookingReference !== '') {
             $bookingReferenceSql = ' AND b.booking_reference LIKE :payable_refund_booking_reference';
             $params['payable_refund_booking_reference'] = '%' . $bookingReference . '%';
+        }
+        $accountSql = '';
+        if ($businessSourceId > 0) {
+            $accountSql = ' AND b.business_source_id = :payable_refund_business_source_id';
+            $params['payable_refund_business_source_id'] = $businessSourceId;
         }
 
         $sql = 'SELECT *
@@ -3133,14 +3529,17 @@ final class ReportRepository extends BaseRepository
                         refund_totals.customer_penalty_amount,
                         refund_totals.customer_refund_expected,
                         refund_totals.customer_refund_posted,
-                        ROUND(GREATEST(
-                            (
-                                CASE
-                                    WHEN refund_totals.customer_refund_expected > 0.005 THEN refund_totals.customer_refund_expected
-                                    ELSE GREATEST(refund_totals.supplier_refund_received - refund_totals.customer_penalty_amount, 0)
-                                END
-                            ) - refund_totals.customer_refund_posted,
-                            0
+                        ROUND(LEAST(
+                            GREATEST(
+                                (
+                                    CASE
+                                        WHEN refund_totals.customer_refund_expected > 0.005 THEN refund_totals.customer_refund_expected
+                                        ELSE GREATEST(refund_totals.supplier_refund_received - refund_totals.customer_penalty_amount, 0)
+                                    END
+                                ) - refund_totals.customer_refund_posted,
+                                0
+                            ),
+                            COALESCE(customer_credit.current_unallocated_credit, 0)
                         ), 2) AS customer_refund_payable,
                         refund_totals.supplier_penalty_amount,
                         refund_totals.supplier_refund_expected,
@@ -3232,7 +3631,18 @@ final class ReportRepository extends BaseRepository
                     LEFT JOIN travelers t_lead ON t_lead.id = b.lead_traveler_id
                     LEFT JOIN travelers t_service ON t_service.id = bs.traveler_id
                     LEFT JOIN suppliers s ON s.id = bs.supplier_id
-                    WHERE b.branch_id ' . $clause . $dateSql . $supplierSql . $bookingReferenceSql . '
+                    LEFT JOIN (
+                        SELECT
+                            booking_reference,
+                            currency,
+                            ROUND(SUM(unallocated_amount), 2) AS current_unallocated_credit
+                        FROM customer_receipts
+                        WHERE status <> "void"
+                        GROUP BY booking_reference, currency
+                    ) customer_credit
+                        ON customer_credit.booking_reference = b.booking_reference
+                       AND customer_credit.currency = refund_totals.currency
+                    WHERE b.branch_id ' . $clause . $dateSql . $supplierSql . $bookingReferenceSql . $accountSql . '
                 ) AS payable_refunds
                 WHERE payable_refunds.customer_refund_payable > 0.005
                    OR payable_refunds.supplier_refund_receivable > 0.005
@@ -3274,8 +3684,24 @@ final class ReportRepository extends BaseRepository
         }
         $accountSql = '';
         if ($businessSourceId > 0) {
-            $accountSql = ' AND ledger_rows.business_source_id = :ledger_business_source_id';
+            $accountSql = ' AND (
+                ledger_rows.business_source_id = :ledger_business_source_id
+                OR EXISTS (
+                    SELECT 1
+                    FROM counterparty_offset_payable_allocations account_filter_allocation
+                    INNER JOIN counterparty_offsets account_filter_offset
+                        ON account_filter_offset.id = account_filter_allocation.counterparty_offset_id
+                    INNER JOIN supplier_obligations account_filter_obligation
+                        ON account_filter_obligation.id = account_filter_allocation.supplier_obligation_id
+                    WHERE account_filter_offset.status = "posted"
+                      AND account_filter_offset.business_source_id = :ledger_linked_business_source_id
+                      AND account_filter_offset.supplier_id = ledger_rows.supplier_id
+                      AND account_filter_obligation.booking_reference COLLATE utf8mb4_unicode_ci = ledger_rows.booking_reference COLLATE utf8mb4_unicode_ci
+                      AND account_filter_obligation.service_line_reference COLLATE utf8mb4_unicode_ci = ledger_rows.service_line_reference COLLATE utf8mb4_unicode_ci
+                )
+            )';
             $params['ledger_business_source_id'] = $businessSourceId;
+            $params['ledger_linked_business_source_id'] = $businessSourceId;
         }
         $bookingReferenceSql = '';
         $bookingReference = trim($bookingReference);
@@ -3313,6 +3739,18 @@ final class ReportRepository extends BaseRepository
 
         $convertedAdvanceSql = '';
         if ($this->columnExists('supplier_payments', 'converted_advance_amount')) {
+            // A refund retained in the supplier account is already represented by
+            // the refund event and, when consumed, by an advance-application row.
+            // Do not present that conversion as another cash advance payment.
+            $cashOverpaymentAdvanceExpression = 'GREATEST(
+                sp.converted_advance_amount - COALESCE((
+                    SELECT SUM(sa_refund.deposit_amount)
+                    FROM supplier_advances sa_refund
+                    WHERE sa_refund.source_supplier_payment_id = sp.id
+                      AND sa_refund.reference_no LIKE "REFUND-EVT-%"
+                ), 0.00),
+                0.00
+            )';
             $convertedAdvanceSql = '
 
                     UNION ALL
@@ -3323,8 +3761,8 @@ final class ReportRepository extends BaseRepository
                         COALESCE(b.id, 0) AS booking_id,
                         CASE
                             WHEN UPPER(COALESCE(sp.booking_reference, "")) = "GLOBAL"
-                                THEN COALESCE(NULLIF(sp.payment_no, ""), "Global Supplier Payment")
-                            ELSE COALESCE(NULLIF(sp.booking_reference, ""), NULLIF(sp.payment_no, ""), "Global Supplier Payment")
+                                THEN COALESCE(NULLIF(sp.payment_no, ""), "Supplier Payment")
+                            ELSE COALESCE(NULLIF(sp.booking_reference, ""), NULLIF(sp.payment_no, ""), "Supplier Payment")
                         END AS booking_reference,
                         "" AS service_line_reference,
                         sp.currency,
@@ -3337,7 +3775,7 @@ final class ReportRepository extends BaseRepository
                         "N/A" AS airline,
                         sp.id AS supplier_payment_id,
                         sp.payment_date AS ledger_date,
-                        sp.converted_advance_amount AS debit_amount,
+                        ' . $cashOverpaymentAdvanceExpression . ' AS debit_amount,
                         0.00 AS credit_amount,
                         "Supplier Advance / Overpayment" AS entry_type,
                         25 AS sort_order,
@@ -3348,7 +3786,50 @@ final class ReportRepository extends BaseRepository
                     LEFT JOIN bookings b ON b.booking_reference = sp.booking_reference
                     LEFT JOIN business_sources bs_src ON bs_src.id = b.business_source_id
                     WHERE sp.status <> "void"
-                      AND sp.converted_advance_amount > 0.005';
+                      AND ' . $cashOverpaymentAdvanceExpression . ' > 0.005';
+        }
+
+        $linkedPartyOffsetSql = '';
+        if ($this->tableExists('counterparty_offsets')) {
+            $linkedPartyOffsetSql = '
+
+                    UNION ALL
+
+                    SELECT
+                        b.branch_id,
+                        br.name AS branch_name,
+                        b.id AS booking_id,
+                        b.booking_reference,
+                        so.service_line_reference,
+                        o.currency,
+                        COALESCE(b.business_source_id, 0) AS business_source_id,
+                        COALESCE(bs_src.name, "Unassigned Account") AS business_source_name,
+                        s.id AS supplier_id,
+                        s.name AS supplier_name,
+                        COALESCE(NULLIF(t.full_name, ""), NULLIF(bs.passenger_name_snapshot, ""), "Passenger") AS passenger_name,
+                        COALESCE(NULLIF(CONCAT_WS("/", NULLIF(sat.sector_from, ""), NULLIF(sat.sector_to, "")), ""), "N/A") AS route,
+                        COALESCE(NULLIF(sat.airline, ""), "N/A") AS airline,
+                        NULL AS supplier_payment_id,
+                        o.offset_date AS ledger_date,
+                        oa.allocated_amount AS debit_amount,
+                        0.00 AS credit_amount,
+                        "Linked Account Balance Adjustment" AS entry_type,
+                        32 AS sort_order,
+                        CONCAT(LPAD(o.id, 12, "0"), "-", LPAD(oa.id, 12, "0")) AS sort_reference
+                    FROM counterparty_offset_payable_allocations oa
+                    INNER JOIN counterparty_offsets o ON o.id = oa.counterparty_offset_id
+                    INNER JOIN supplier_obligations so ON so.id = oa.supplier_obligation_id
+                    INNER JOIN bookings b ON b.booking_reference = so.booking_reference
+                    INNER JOIN branches br ON br.id = b.branch_id
+                    INNER JOIN suppliers s ON s.id = o.supplier_id
+                    LEFT JOIN business_sources bs_src ON bs_src.id = b.business_source_id
+                    LEFT JOIN booking_services bs
+                        ON bs.booking_id = b.id
+                       AND bs.line_reference = so.service_line_reference
+                    LEFT JOIN service_air_ticket sat ON sat.booking_service_id = bs.id
+                    LEFT JOIN travelers t ON t.id = bs.traveler_id
+                    WHERE o.status = "posted"
+                      AND oa.allocated_amount > 0.005';
         }
 
         $supplierPenaltyExpression = 'COALESCE(CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.supplier_penalty_amount")), "") AS DECIMAL(18,2)), 0.00)';
@@ -3397,8 +3878,18 @@ final class ReportRepository extends BaseRepository
                         je.currency,
                         COALESCE(b.business_source_id, 0) AS business_source_id,
                         COALESCE(bs_src.name, "Unassigned Account") AS business_source_name,
-                        s.id AS supplier_id,
-                        s.name AS supplier_name,
+                        CASE
+                            WHEN je.source_type IN ("supplier_payment_allocated", "supplier_payment_void_reversed")
+                             AND source_payment_supplier.id IS NOT NULL
+                                THEN source_payment_supplier.id
+                            ELSE s.id
+                        END AS supplier_id,
+                        CASE
+                            WHEN je.source_type IN ("supplier_payment_allocated", "supplier_payment_void_reversed")
+                             AND source_payment_supplier.id IS NOT NULL
+                                THEN source_payment_supplier.name
+                            ELSE s.name
+                        END AS supplier_name,
                         COALESCE(NULLIF(t.full_name, ""), NULLIF(bs.passenger_name_snapshot, ""), "Passenger") AS passenger_name,
                         COALESCE(NULLIF(CONCAT_WS("/", NULLIF(sat.sector_from, ""), NULLIF(sat.sector_to, "")), ""), "N/A") AS route,
                         COALESCE(NULLIF(sat.airline, ""), "N/A") AS airline,
@@ -3409,7 +3900,14 @@ final class ReportRepository extends BaseRepository
                         CASE je.source_type
                             WHEN "supplier_payable_created" THEN "Payable Created"
                             WHEN "supplier_payable_adjusted" THEN "Payable Adjustment"
-                            WHEN "supplier_payment_allocated" THEN "Supplier Payment"
+                            WHEN "supplier_payment_allocated" THEN
+                                CASE
+                                    WHEN source_payment.id IS NOT NULL
+                                     AND UPPER(COALESCE(source_payment.booking_reference, "")) NOT IN ("", "GLOBAL")
+                                     AND source_payment.booking_reference COLLATE utf8mb4_unicode_ci <> so.booking_reference COLLATE utf8mb4_unicode_ci
+                                        THEN "Supplier Credit Applied"
+                                    ELSE "Supplier Payment"
+                                END
                             WHEN "supplier_advance_applied" THEN "Advance Applied"
                             WHEN "supplier_advance_adjusted" THEN "Advance Adjustment"
                             WHEN "customer_direct_supplier_payment" THEN "Customer Paid Supplier"
@@ -3432,6 +3930,8 @@ final class ReportRepository extends BaseRepository
                     INNER JOIN chart_of_accounts coa ON coa.id = jel.account_id AND coa.code = "AP_CONTROL"
                     INNER JOIN supplier_obligations so ON so.id = jel.supplier_obligation_id
                     ' . $serviceContextSql . '
+                    LEFT JOIN supplier_payments source_payment ON source_payment.id = jel.supplier_payment_id
+                    LEFT JOIN suppliers source_payment_supplier ON source_payment_supplier.id = source_payment.supplier_id
                     WHERE je.source_type IN (
                         "supplier_payable_created",
                         "supplier_payable_adjusted",
@@ -3446,8 +3946,21 @@ final class ReportRepository extends BaseRepository
                           je.source_type = "supplier_payable_adjusted"
                           AND je.narration LIKE "Cancellation supplier penalty adjustment%"
                       )
+                      AND NOT (
+                          je.source_type = "supplier_payable_adjusted"
+                          AND EXISTS (
+                              SELECT 1
+                              FROM journal_entries je_data_reversal
+                              WHERE je_data_reversal.booking_reference = je.booking_reference
+                                AND je_data_reversal.currency = je.currency
+                                AND je_data_reversal.source_type = "data_integrity_reversal"
+                                AND je_data_reversal.narration LIKE CONCAT("% journal ", je.id)
+                          )
+                      )
 
                     ' . $convertedAdvanceSql . '
+
+                    ' . $linkedPartyOffsetSql . '
 
                     UNION ALL
 
@@ -3541,7 +4054,14 @@ final class ReportRepository extends BaseRepository
                         bse.event_date AS ledger_date,
                         0.00 AS debit_amount,
                         bse.supplier_refund_amount AS credit_amount,
-                        "Supplier Refund Received" AS entry_type,
+                        CASE
+                            WHEN COALESCE(
+                                NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.supplier_refund_payment_method")), ""),
+                                NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.refund_detail.refund_payment_method")), "")
+                            ) = "supplier_credit"
+                                THEN "Supplier Refund Retained as Credit"
+                            ELSE "Supplier Refund Received"
+                        END AS entry_type,
                         50 AS sort_order,
                         CAST(bse.id AS CHAR) AS sort_reference
                     FROM booking_service_events bse
@@ -3714,9 +4234,42 @@ final class ReportRepository extends BaseRepository
         string $currency = '',
         string $customerName = '',
         int $supplierId = 0,
-        string $bookingReference = ''
+        string $bookingReference = '',
+        int $businessSourceId = 0
     ): array {
         $rows = $this->cashBankLedger($branchIds, $dateFrom, $dateTo, $currency, 'all');
+        if ($businessSourceId > 0) {
+            $bookingIds = array_values(array_unique(array_filter(array_map(
+                static fn (array $row): int => (int) ($row['booking_id'] ?? 0),
+                $rows
+            ))));
+            if ($bookingIds === []) {
+                $rows = [];
+            } else {
+                $params = ['actual_money_business_source_id' => $businessSourceId];
+                $placeholders = [];
+                foreach ($bookingIds as $index => $bookingId) {
+                    $key = 'actual_money_booking_' . $index;
+                    $placeholders[] = ':' . $key;
+                    $params[$key] = $bookingId;
+                }
+                $allowedRows = $this->fetchRows(
+                    'SELECT id
+                     FROM bookings
+                     WHERE business_source_id = :actual_money_business_source_id
+                       AND id IN (' . implode(', ', $placeholders) . ')',
+                    $params
+                );
+                $allowedBookingIds = array_fill_keys(array_map(
+                    static fn (array $row): int => (int) ($row['id'] ?? 0),
+                    $allowedRows
+                ), true);
+                $rows = array_values(array_filter(
+                    $rows,
+                    static fn (array $row): bool => isset($allowedBookingIds[(int) ($row['booking_id'] ?? 0)])
+                ));
+            }
+        }
         $customerName = strtolower(trim($customerName));
         $supplierName = $supplierId > 0 ? strtolower($this->supplierNameById($supplierId)) : '';
         $bookingReference = strtolower(trim($bookingReference));
@@ -4274,7 +4827,7 @@ final class ReportRepository extends BaseRepository
         $receivableAggregateSql = $this->receivableAggregateSql();
         $payableAggregateSql = $this->payableAggregateSql();
         $receivableFormula = $this->serviceReceivableFormula('bs');
-        $payableFormula = $this->servicePayableFormula('bs');
+        $payableInInvoiceCurrencyFormula = $this->servicePayableInInvoiceCurrencyFormula('bs', 'so');
         $sql = 'SELECT
                     b.branch_id,
                     br.name AS branch_name,
@@ -4282,7 +4835,7 @@ final class ReportRepository extends BaseRepository
                     sat.airline,
                     COUNT(bs.id) AS ticket_count,
                     SUM(COALESCE(cri.due_amount, ' . $receivableFormula . ')) AS receivable_amount,
-                    SUM(COALESCE(so.gross_amount, ' . $payableFormula . ')) AS payable_amount,
+                    SUM(' . $payableInInvoiceCurrencyFormula . ') AS payable_amount,
                     SUM(COALESCE(bs.service_charge, 0)) AS service_charge,
                     SUM(COALESCE(bs.discount_amount, 0)) AS discount_amount
                 FROM booking_services bs
@@ -4296,7 +4849,7 @@ final class ReportRepository extends BaseRepository
                 LEFT JOIN ' . $payableAggregateSql . ' so
                     ON so.booking_reference = b.booking_reference
                    AND so.service_line_reference = bs.line_reference
-                   AND so.currency = bs.currency
+                   AND so.currency = COALESCE(NULLIF(bs.cost_currency, ""), bs.currency)
                 WHERE b.branch_id ' . $clause . '
                   AND bs.is_active = 1'
                 . $dateSql .
@@ -4509,6 +5062,29 @@ final class ReportRepository extends BaseRepository
                         COALESCE(' . $alias . '.purchase_cost, 0)
                     ELSE
                         COALESCE(' . $alias . '.purchase_cost, 0)
+                END';
+    }
+
+    private function servicePayableInInvoiceCurrencyFormula(string $serviceAlias, string $payableAlias): string
+    {
+        $rawPayable = 'COALESCE(' . $payableAlias . '.gross_amount, '
+            . $this->servicePayableFormula($serviceAlias) . ')';
+        $payableCurrency = 'COALESCE(NULLIF(' . $payableAlias . '.currency, ""), NULLIF('
+            . $serviceAlias . '.cost_currency, ""), ' . $serviceAlias . '.currency)';
+
+        return 'CASE
+                    WHEN ' . $payableCurrency . ' = ' . $serviceAlias . '.currency THEN
+                        ' . $rawPayable . '
+                    WHEN COALESCE(' . $serviceAlias . '.pricing_exchange_rate, 0) > 0 THEN
+                        ROUND(' . $rawPayable . ' * ' . $serviceAlias . '.pricing_exchange_rate, 2)
+                    WHEN ' . $serviceAlias . '.final_sale_price IS NOT NULL
+                         AND ' . $serviceAlias . '.net_profit_loss IS NOT NULL THEN
+                        GREATEST(ROUND(
+                            ' . $serviceAlias . '.final_sale_price
+                            - ' . $serviceAlias . '.net_profit_loss,
+                            2
+                        ), 0)
+                    ELSE 0
                 END';
     }
 
