@@ -808,6 +808,72 @@ final class CustomerPaymentRepository extends BaseRepository
         return $statement->fetchAll() ?: [];
     }
 
+    public function customerAdvanceCustomers(array $accessibleBranchIds, string $search = '', ?int $branchId = null): array
+    {
+        if (
+            $accessibleBranchIds === []
+            || ! $this->columnExists('customer_receipts', 'traveler_id')
+            || ! $this->columnExists('customer_receipts', 'receipt_purpose')
+        ) {
+            return [];
+        }
+
+        $accessibleBranchIds = array_values(array_unique(array_map('intval', array_filter($accessibleBranchIds, static fn ($id): bool => (int) $id > 0))));
+        if ($accessibleBranchIds === []) {
+            return [];
+        }
+
+        $branchPlaceholders = [];
+        $params = [];
+        foreach ($accessibleBranchIds as $index => $accessibleBranchId) {
+            $placeholder = ':accessible_branch_' . $index;
+            $branchPlaceholders[] = $placeholder;
+            $params[ltrim($placeholder, ':')] = (int) $accessibleBranchId;
+        }
+        $filters = ['cr.branch_id IN (' . implode(', ', $branchPlaceholders) . ')'];
+
+        if ($branchId !== null && $branchId > 0) {
+            $filters[] = 'cr.branch_id = :branch_id';
+            $params['branch_id'] = $branchId;
+        }
+
+        $normalizedSearch = trim($search);
+        if ($normalizedSearch !== '') {
+            $filters[] = '(COALESCE(t.full_name, "") LIKE :search_full_name OR COALESCE(t.mobile, "") LIKE :search_mobile OR COALESCE(t.passport_number, "") LIKE :search_passport OR COALESCE(t.family_id, "") LIKE :search_family)';
+            $like = '%' . $normalizedSearch . '%';
+            $params['search_full_name'] = $like;
+            $params['search_mobile'] = $like;
+            $params['search_passport'] = $like;
+            $params['search_family'] = $like;
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT
+                cr.traveler_id,
+                cr.branch_id,
+                COALESCE(t.full_name, "Customer") AS customer_name,
+                COALESCE(t.mobile, "") AS mobile,
+                COALESCE(t.passport_number, "") AS passport_number,
+                COALESCE(t.family_id, "") AS family_id,
+                SUM(CASE WHEN cr.currency = "PKR" THEN cr.unallocated_amount ELSE 0 END) AS total_pkr,
+                SUM(CASE WHEN cr.currency = "AED" THEN cr.unallocated_amount ELSE 0 END) AS total_aed,
+                SUM(CASE WHEN cr.currency = "USD" THEN cr.unallocated_amount ELSE 0 END) AS total_usd,
+                COUNT(*) AS advance_count,
+                MAX(cr.receipt_date) AS latest_receipt_date
+             FROM customer_receipts cr
+             LEFT JOIN travelers t ON t.id = cr.traveler_id
+             WHERE ' . implode(' AND ', $filters) . '
+               AND cr.receipt_purpose = "customer_advance"
+               AND cr.status <> "void"
+               AND cr.unallocated_amount > 0.005
+             GROUP BY cr.traveler_id, cr.branch_id, t.full_name, t.mobile, t.passport_number, t.family_id
+             ORDER BY customer_name ASC, cr.branch_id ASC'
+        );
+        $statement->execute($params);
+
+        return $statement->fetchAll() ?: [];
+    }
+
     /**
      * Unused booking receipts that may be transferred to another invoice for
      * the same customer. Formal customer advances remain a separate workflow.
@@ -1119,15 +1185,18 @@ final class CustomerPaymentRepository extends BaseRepository
                 throw new RuntimeException('The selected customer advance could not be found.');
             }
 
-            if ((int) ($receipt['branch_id'] ?? 0) !== (int) ($data['branch_id'] ?? 0)
-                || (int) ($receipt['traveler_id'] ?? 0) !== (int) ($data['traveler_id'] ?? 0)
-                || strtoupper((string) ($receipt['currency'] ?? '')) !== strtoupper((string) ($data['currency'] ?? ''))
-            ) {
-                throw new RuntimeException('The selected advance does not match this customer, branch, and currency.');
+            if ((int) ($receipt['traveler_id'] ?? 0) !== (int) ($data['traveler_id'] ?? 0)) {
+                throw new RuntimeException('The selected advance does not match this customer.');
             }
 
             $allocatedAmount = round((float) ($receipt['allocated_amount'] ?? 0), 2);
             $returnedAmount = round((float) ($receipt['returned_amount'] ?? 0), 2);
+            $oldCurrency = strtoupper((string) ($receipt['currency'] ?? ''));
+            $newCurrency = strtoupper((string) ($data['currency'] ?? $oldCurrency));
+            $currencyChanged = $newCurrency !== '' && $newCurrency !== $oldCurrency;
+            if ($currencyChanged && ($allocatedAmount > 0.005 || $returnedAmount > 0.005)) {
+                throw new RuntimeException('Advance currency cannot be changed after any amount has been allocated or returned.');
+            }
             if ($newAmount + 0.005 < $allocatedAmount + $returnedAmount) {
                 throw new RuntimeException('Corrected advance amount cannot be less than the amount already applied or returned.');
             }
@@ -1139,9 +1208,11 @@ final class CustomerPaymentRepository extends BaseRepository
 
             $update = $this->db->prepare(
                 'UPDATE customer_receipts
-                 SET receipt_date = :receipt_date,
+                 SET branch_id = :branch_id,
+                     receipt_date = :receipt_date,
+                     currency = :currency,
                      received_amount = :received_amount,
-                     tendered_amount = :received_amount,
+                     tendered_amount = :tendered_amount,
                      unallocated_amount = :unallocated_amount,
                      payment_method = :payment_method,
                      treasury_account_id = :treasury_account_id,
@@ -1151,8 +1222,11 @@ final class CustomerPaymentRepository extends BaseRepository
                  WHERE id = :receipt_id'
             );
             $update->execute([
+                'branch_id' => (int) ($data['branch_id'] ?? 0),
                 'receipt_date' => $data['entry_date'],
+                'currency' => $newCurrency,
                 'received_amount' => $newAmount,
+                'tendered_amount' => $newAmount,
                 'unallocated_amount' => $newUnallocated,
                 'payment_method' => $data['payment_method'],
                 'treasury_account_id' => $data['treasury_account_id'] ?? null,
@@ -1165,7 +1239,9 @@ final class CustomerPaymentRepository extends BaseRepository
             return [
                 'old' => $receipt,
                 'new' => array_merge($receipt, [
+                    'branch_id' => (int) ($data['branch_id'] ?? 0),
                     'receipt_date' => $data['entry_date'],
+                    'currency' => $newCurrency,
                     'received_amount' => $newAmount,
                     'unallocated_amount' => $newUnallocated,
                     'payment_method' => $data['payment_method'],
@@ -1278,22 +1354,45 @@ final class CustomerPaymentRepository extends BaseRepository
             return 0;
         }
 
-        $statement = $this->db->prepare(
-            'INSERT INTO customer_advance_corrections (
-                correction_type, customer_receipt_id, customer_advance_refund_id, branch_id, traveler_id,
-                old_entry_date, new_entry_date, currency, old_amount, new_amount,
-                old_payment_method, new_payment_method, old_treasury_account_id, new_treasury_account_id,
-                old_reference_number, new_reference_number, old_remarks, new_remarks, reason,
-                old_journal_entry_id, reversal_journal_entry_id, new_journal_entry_id, created_by_user_id
-             ) VALUES (
-                :correction_type, :customer_receipt_id, :customer_advance_refund_id, :branch_id, :traveler_id,
-                :old_entry_date, :new_entry_date, :currency, :old_amount, :new_amount,
-                :old_payment_method, :new_payment_method, :old_treasury_account_id, :new_treasury_account_id,
-                :old_reference_number, :new_reference_number, :old_remarks, :new_remarks, :reason,
-                :old_journal_entry_id, :reversal_journal_entry_id, :new_journal_entry_id, :created_by_user_id
-             )'
+        $hasOldCurrency = $this->columnExists('customer_advance_corrections', 'old_currency');
+        $hasNewCurrency = $this->columnExists('customer_advance_corrections', 'new_currency');
+
+        $columns = [
+            'correction_type', 'customer_receipt_id', 'customer_advance_refund_id', 'branch_id', 'traveler_id',
+            'old_entry_date', 'new_entry_date', 'currency',
+        ];
+        $values = [
+            ':correction_type', ':customer_receipt_id', ':customer_advance_refund_id', ':branch_id', ':traveler_id',
+            ':old_entry_date', ':new_entry_date', ':currency',
+        ];
+        if ($hasOldCurrency) {
+            $columns[] = 'old_currency';
+            $values[] = ':old_currency';
+        }
+        if ($hasNewCurrency) {
+            $columns[] = 'new_currency';
+            $values[] = ':new_currency';
+        }
+        array_push(
+            $columns,
+            'old_amount', 'new_amount', 'old_payment_method', 'new_payment_method',
+            'old_treasury_account_id', 'new_treasury_account_id', 'old_reference_number', 'new_reference_number',
+            'old_remarks', 'new_remarks', 'reason', 'old_journal_entry_id', 'reversal_journal_entry_id',
+            'new_journal_entry_id', 'created_by_user_id'
         );
-        $statement->execute([
+        array_push(
+            $values,
+            ':old_amount', ':new_amount', ':old_payment_method', ':new_payment_method',
+            ':old_treasury_account_id', ':new_treasury_account_id', ':old_reference_number', ':new_reference_number',
+            ':old_remarks', ':new_remarks', ':reason', ':old_journal_entry_id', ':reversal_journal_entry_id',
+            ':new_journal_entry_id', ':created_by_user_id'
+        );
+
+        $statement = $this->db->prepare(
+            'INSERT INTO customer_advance_corrections (' . implode(', ', $columns) . ')
+             VALUES (' . implode(', ', $values) . ')'
+        );
+        $params = [
             'correction_type' => $data['correction_type'],
             'customer_receipt_id' => (int) $data['customer_receipt_id'],
             'customer_advance_refund_id' => $data['customer_advance_refund_id'] ?? null,
@@ -1301,7 +1400,7 @@ final class CustomerPaymentRepository extends BaseRepository
             'traveler_id' => (int) $data['traveler_id'],
             'old_entry_date' => $data['old_entry_date'] ?? null,
             'new_entry_date' => $data['new_entry_date'],
-            'currency' => strtoupper((string) $data['currency']),
+            'currency' => strtoupper((string) ($data['new_currency'] ?? $data['currency'] ?? '')),
             'old_amount' => round((float) ($data['old_amount'] ?? 0), 2),
             'new_amount' => round((float) ($data['new_amount'] ?? 0), 2),
             'old_payment_method' => $data['old_payment_method'] ?? null,
@@ -1317,7 +1416,14 @@ final class CustomerPaymentRepository extends BaseRepository
             'reversal_journal_entry_id' => $data['reversal_journal_entry_id'] ?? null,
             'new_journal_entry_id' => $data['new_journal_entry_id'] ?? null,
             'created_by_user_id' => $data['created_by_user_id'] ?? null,
-        ]);
+        ];
+        if ($hasOldCurrency) {
+            $params['old_currency'] = strtoupper((string) ($data['old_currency'] ?? $data['currency'] ?? ''));
+        }
+        if ($hasNewCurrency) {
+            $params['new_currency'] = strtoupper((string) ($data['new_currency'] ?? $data['currency'] ?? ''));
+        }
+        $statement->execute($params);
 
         return (int) $this->db->lastInsertId();
     }
@@ -1583,7 +1689,7 @@ final class CustomerPaymentRepository extends BaseRepository
         ?string $reason = null
     ): array {
         $receivableStatement = $this->db->prepare(
-            'SELECT id, booking_reference, service_line_reference, currency, due_amount, allocated_amount, outstanding_amount
+            'SELECT id, branch_id, booking_reference, service_line_reference, currency, due_amount, allocated_amount, outstanding_amount
              FROM customer_receivable_items
              WHERE id = :receivable_id
              FOR UPDATE'
@@ -1597,13 +1703,51 @@ final class CustomerPaymentRepository extends BaseRepository
 
         $currentAllocatedAmount = round((float) ($receivable['allocated_amount'] ?? 0), 2);
         $targetAllocatedAmount = round(max($targetAllocatedAmount, 0), 2);
+        $linkedPartyOffsetAmount = $this->linkedPartyOffsetAmountForReceivableItem($receivableItemId);
 
         $releasedReceivableAmount = round(max($currentAllocatedAmount - $targetAllocatedAmount, 0), 2);
+        $releasedLinkedOffsetAmount = 0.0;
+        $affectedOffsetIds = [];
 
-        if ($releasedReceivableAmount <= 0) {
+        if ($targetAllocatedAmount + 0.005 < $linkedPartyOffsetAmount) {
+            $offsetReleaseNeeded = round(max($linkedPartyOffsetAmount - $targetAllocatedAmount, 0), 2);
+            if ($offsetReleaseNeeded > 0.005) {
+                $offsetRepository = new CounterpartyOffsetRepository($this->app);
+                $offsetRelease = $offsetRepository->releaseCoverageForReceivable($receivableItemId, $offsetReleaseNeeded);
+                $releasedLinkedOffsetAmount = round((float) ($offsetRelease['released_amount'] ?? 0), 2);
+                $affectedOffsetIds = array_values(array_unique(array_map('intval', (array) ($offsetRelease['affected_offset_ids'] ?? []))));
+
+                if ($releasedLinkedOffsetAmount > 0.005) {
+                    (new AccountingRepository($this->app))->postJournalEntry([
+                        'branch_id' => (int) ($receivable['branch_id'] ?? 0),
+                        'booking_reference' => (string) ($receivable['booking_reference'] ?? ''),
+                        'source_type' => 'linked_party_offset_release',
+                        'source_reference' => 'REL-OFFSET-AR-' . $receivableItemId,
+                        'entry_date' => date('Y-m-d'),
+                        'currency' => (string) ($receivable['currency'] ?? 'PKR'),
+                        'narration' => 'Linked-party settlement released for customer invoice correction/cancellation',
+                        'actor_user_id' => $actorUserId,
+                    ], [[
+                        'account_code' => 'AR_CONTROL',
+                        'line_description' => 'Account-holder recovery released from linked supplier settlement',
+                        'debit_amount' => 0,
+                        'credit_amount' => $releasedLinkedOffsetAmount,
+                    ], [
+                        'account_code' => 'AP_CONTROL',
+                        'line_description' => 'Supplier payable restored after linked customer release',
+                        'debit_amount' => $releasedLinkedOffsetAmount,
+                        'credit_amount' => 0,
+                    ]]);
+                }
+            }
+        }
+
+        if ($releasedReceivableAmount <= 0 && $releasedLinkedOffsetAmount <= 0.005) {
             return [
                 'released_receivable_amount' => 0.0,
+                'released_linked_offset_amount' => 0.0,
                 'released_payment_amount' => 0.0,
+                'affected_offset_ids' => [],
                 'affected_receipt_ids' => [],
             ];
         }
@@ -1753,16 +1897,259 @@ final class CustomerPaymentRepository extends BaseRepository
             'service_line_reference' => (string) ($receivable['service_line_reference'] ?? ''),
             'currency' => (string) ($receivable['currency'] ?? 'PKR'),
             'released_receivable_amount' => $releasedReceivableAmount,
+            'released_linked_offset_amount' => $releasedLinkedOffsetAmount,
             'released_payment_amount' => $releasedPaymentAmount,
             'reason' => $reason,
+            'affected_offset_ids' => $affectedOffsetIds,
             'affected_receipt_ids' => array_values(array_unique($affectedReceiptIds)),
         ]);
 
         return [
             'released_receivable_amount' => $releasedReceivableAmount,
+            'released_linked_offset_amount' => $releasedLinkedOffsetAmount,
             'released_payment_amount' => $releasedPaymentAmount,
+            'affected_offset_ids' => $affectedOffsetIds,
             'affected_receipt_ids' => array_values(array_unique($affectedReceiptIds)),
         ];
+    }
+
+    public function releaseSpecificReceiptAllocations(
+        int $receiptId,
+        ?array $allocationIds = null,
+        ?int $actorUserId = null,
+        ?string $reason = null
+    ): array {
+        return $this->transaction(function () use ($receiptId, $allocationIds, $actorUserId, $reason): array {
+            $hasReturnedAmount = $this->columnExists('customer_receipts', 'returned_amount');
+            $receiptStatement = $this->db->prepare(
+                'SELECT id, branch_id, traveler_id, business_source_id, booking_reference, receipt_no, receipt_date, currency,
+                        received_amount, allocated_amount, unallocated_amount, '
+                        . ($hasReturnedAmount ? 'returned_amount' : '0.00 AS returned_amount') . ',
+                        receipt_purpose, status
+                 FROM customer_receipts
+                 WHERE id = :receipt_id
+                 LIMIT 1
+                 FOR UPDATE'
+            );
+            $receiptStatement->execute(['receipt_id' => $receiptId]);
+            $receipt = $receiptStatement->fetch();
+
+            if ($receipt === false) {
+                throw new RuntimeException('Customer receipt not found.');
+            }
+
+            $receiptStatus = str_replace(' ', '_', mb_strtolower(trim((string) ($receipt['status'] ?? ''))));
+            if ($receiptStatus === 'void') {
+                throw new RuntimeException('Void receipts cannot release customer advance allocations.');
+            }
+            if ((string) ($receipt['receipt_purpose'] ?? '') !== 'customer_advance') {
+                throw new RuntimeException('Only customer advance receipts can release customer advance allocations.');
+            }
+
+            $normalizedAllocationIds = array_values(array_filter(array_map(
+                static fn ($value): int => max(0, (int) $value),
+                (array) $allocationIds
+            )));
+            $allocationWhere = 'a.customer_receipt_id = :receipt_id';
+            $params = ['receipt_id' => $receiptId];
+            if ($normalizedAllocationIds !== []) {
+                $placeholders = [];
+                foreach ($normalizedAllocationIds as $index => $allocationId) {
+                    $key = 'allocation_id_' . $index;
+                    $placeholders[] = ':' . $key;
+                    $params[$key] = $allocationId;
+                }
+                $allocationWhere .= ' AND a.id IN (' . implode(', ', $placeholders) . ')';
+            }
+
+            $allocationStatement = $this->db->prepare(
+                'SELECT
+                    a.id AS allocation_id,
+                    a.customer_receivable_item_id,
+                    a.allocated_amount,
+                    COALESCE(a.receivable_amount_allocated, a.allocated_amount) AS receivable_amount_allocated,
+                    COALESCE(a.payment_amount_consumed, a.allocated_amount) AS payment_amount_consumed,
+                    a.allocated_at,
+                    i.branch_id AS receivable_branch_id,
+                    i.booking_reference AS receivable_booking_reference,
+                    i.service_line_reference,
+                    i.currency AS receivable_currency,
+                    i.due_amount,
+                    i.allocated_amount AS current_receivable_allocated_amount,
+                    i.outstanding_amount AS current_receivable_outstanding_amount,
+                    i.status AS current_receivable_status
+                 FROM customer_receipt_allocations a
+                 INNER JOIN customer_receivable_items i ON i.id = a.customer_receivable_item_id
+                 WHERE ' . $allocationWhere . '
+                 ORDER BY a.allocated_at DESC, a.id DESC
+                 FOR UPDATE'
+            );
+            $allocationStatement->execute($params);
+            $allocations = $allocationStatement->fetchAll() ?: [];
+
+            if ($normalizedAllocationIds !== [] && count($allocations) !== count($normalizedAllocationIds)) {
+                throw new RuntimeException('One or more selected customer advance allocations could not be found.');
+            }
+
+            if ($allocations === []) {
+                return [
+                    'receipt' => $receipt,
+                    'released_amount' => 0.0,
+                    'released_payment_amount' => 0.0,
+                    'allocation_count_released' => 0,
+                    'released_allocations' => [],
+                ];
+            }
+
+            $deleteAllocationStatement = $this->db->prepare(
+                'DELETE FROM customer_receipt_allocations
+                 WHERE id = :allocation_id'
+            );
+            $updateReceivableStatement = $this->db->prepare(
+                'UPDATE customer_receivable_items
+                 SET allocated_amount = :allocated_amount,
+                     outstanding_amount = :outstanding_amount,
+                     status = :status
+                 WHERE id = :receivable_id'
+            );
+            $updateReceiptStatement = $this->db->prepare(
+                'UPDATE customer_receipts
+                 SET allocated_amount = :allocated_amount,
+                     unallocated_amount = :unallocated_amount,
+                     status = :status
+                 WHERE id = :receipt_id'
+            );
+
+            $currentReceiptAllocated = round((float) ($receipt['allocated_amount'] ?? 0), 2);
+            $currentReceiptUnallocated = round((float) ($receipt['unallocated_amount'] ?? 0), 2);
+            $receiptReceivedAmount = round((float) ($receipt['received_amount'] ?? 0), 2);
+            $receiptReturnedAmount = round((float) ($receipt['returned_amount'] ?? 0), 2);
+            $maxReceiptUnallocated = round(max($receiptReceivedAmount - $receiptReturnedAmount, 0), 2);
+
+            $releasedAmount = 0.0;
+            $releasedPaymentAmount = 0.0;
+            $releasedAllocations = [];
+
+            foreach ($allocations as $allocation) {
+                $allocationId = (int) ($allocation['allocation_id'] ?? 0);
+                $receivableId = (int) ($allocation['customer_receivable_item_id'] ?? 0);
+                $releasedReceivableAmount = round((float) ($allocation['receivable_amount_allocated'] ?? 0), 2);
+                $releasedReceiptAmount = round((float) ($allocation['payment_amount_consumed'] ?? 0), 2);
+                if ($allocationId <= 0 || $receivableId <= 0 || $releasedReceivableAmount <= 0.005) {
+                    continue;
+                }
+
+                $dueAmount = round((float) ($allocation['due_amount'] ?? 0), 2);
+                $currentReceivableAllocated = round((float) ($allocation['current_receivable_allocated_amount'] ?? 0), 2);
+                $currentReceivableOutstanding = round((float) ($allocation['current_receivable_outstanding_amount'] ?? 0), 2);
+                $newReceivableAllocated = round(max($currentReceivableAllocated - $releasedReceivableAmount, 0), 2);
+                $newReceivableOutstanding = round(min($currentReceivableOutstanding + $releasedReceivableAmount, $dueAmount), 2);
+                $newReceivableStatus = 'open';
+                if ($dueAmount <= 0.005) {
+                    $newReceivableStatus = 'cancelled';
+                } elseif ($newReceivableOutstanding <= 0.005) {
+                    $newReceivableStatus = 'paid';
+                } elseif ($newReceivableAllocated > 0.005) {
+                    $newReceivableStatus = 'partially_paid';
+                }
+
+                $updateReceivableStatement->execute([
+                    'receivable_id' => $receivableId,
+                    'allocated_amount' => $newReceivableAllocated,
+                    'outstanding_amount' => $newReceivableOutstanding,
+                    'status' => $newReceivableStatus,
+                ]);
+
+                $deleteAllocationStatement->execute([
+                    'allocation_id' => $allocationId,
+                ]);
+
+                $currentReceiptAllocated = round(max($currentReceiptAllocated - $releasedReceiptAmount, 0), 2);
+                $currentReceiptUnallocated = round(min($maxReceiptUnallocated, $currentReceiptUnallocated + $releasedReceiptAmount), 2);
+
+                $releasedAmount = round($releasedAmount + $releasedReceivableAmount, 2);
+                $releasedPaymentAmount = round($releasedPaymentAmount + $releasedReceiptAmount, 2);
+                $releasedAllocations[] = [
+                    'allocation_id' => $allocationId,
+                    'customer_receivable_item_id' => $receivableId,
+                    'branch_id' => (int) ($allocation['receivable_branch_id'] ?? 0),
+                    'booking_reference' => (string) ($allocation['receivable_booking_reference'] ?? ''),
+                    'service_line_reference' => (string) ($allocation['service_line_reference'] ?? ''),
+                    'currency' => (string) ($allocation['receivable_currency'] ?? $receipt['currency'] ?? 'PKR'),
+                    'released_amount' => $releasedReceivableAmount,
+                    'released_payment_amount' => $releasedReceiptAmount,
+                    'allocated_at' => (string) ($allocation['allocated_at'] ?? ''),
+                ];
+            }
+
+            $newReceiptStatus = $currentReceiptAllocated <= 0.005
+                ? ($currentReceiptUnallocated <= 0.005
+                    ? ($receiptReturnedAmount > 0.005 ? 'returned' : 'received')
+                    : 'received')
+                : ($currentReceiptUnallocated <= 0.005 ? 'fully_allocated' : 'partially_allocated');
+
+            $updateReceiptStatement->execute([
+                'receipt_id' => $receiptId,
+                'allocated_amount' => $currentReceiptAllocated,
+                'unallocated_amount' => $currentReceiptUnallocated,
+                'status' => $newReceiptStatus,
+            ]);
+
+            AuditLog::record($this->app, 'customer.advance.allocation_released_from_receipt', [
+                'user_id' => $actorUserId,
+                'customer_receipt_id' => $receiptId,
+                'receipt_no' => (string) ($receipt['receipt_no'] ?? ''),
+                'currency' => (string) ($receipt['currency'] ?? 'PKR'),
+                'released_amount' => $releasedAmount,
+                'released_payment_amount' => $releasedPaymentAmount,
+                'allocation_count_released' => count($releasedAllocations),
+                'allocation_ids' => array_values(array_map(
+                    static fn (array $row): int => (int) ($row['allocation_id'] ?? 0),
+                    $releasedAllocations
+                )),
+                'reason' => $reason,
+            ]);
+
+            $receipt['allocated_amount'] = $currentReceiptAllocated;
+            $receipt['unallocated_amount'] = $currentReceiptUnallocated;
+            $receipt['status'] = $newReceiptStatus;
+
+            return [
+                'receipt' => $receipt,
+                'released_amount' => $releasedAmount,
+                'released_payment_amount' => $releasedPaymentAmount,
+                'allocation_count_released' => count($releasedAllocations),
+                'released_allocations' => $releasedAllocations,
+            ];
+        });
+    }
+
+    public function linkedPartyOffsetAmountForReceivableItem(int $receivableItemId): float
+    {
+        if ($receivableItemId <= 0) {
+            return 0.0;
+        }
+
+        $offsetStatement = $this->db->prepare(
+            'SELECT COALESCE(SUM(offset_rows.allocated_amount), 0)
+             FROM (
+                SELECT allocation.allocated_amount
+                FROM counterparty_offset_account_allocations allocation
+                INNER JOIN counterparty_offsets offset_record ON offset_record.id = allocation.counterparty_offset_id AND offset_record.status = "posted"
+                WHERE allocation.customer_receivable_item_id = :account_receivable_id
+                UNION ALL
+                SELECT allocation.allocated_amount
+                FROM counterparty_offset_receivable_allocations allocation
+                INNER JOIN counterparty_offsets offset_record ON offset_record.id = allocation.counterparty_offset_id AND offset_record.status = "posted"
+                WHERE allocation.customer_receivable_item_id = :legacy_receivable_id
+             ) offset_rows'
+        );
+        $offsetStatement->execute([
+            'account_receivable_id' => $receivableItemId,
+            'legacy_receivable_id' => $receivableItemId,
+        ]);
+
+        return round((float) $offsetStatement->fetchColumn(), 2);
     }
 
     public function applyRefundAgainstBookingReceiptCredit(
@@ -1770,7 +2157,8 @@ final class CustomerPaymentRepository extends BaseRepository
         string $currency,
         float $refundAmount,
         ?int $actorUserId = null,
-        ?string $reason = null
+        ?string $reason = null,
+        bool $allowSyntheticSettlementCredit = false
     ): array {
         $targetAmount = round($refundAmount, 2);
         if ($targetAmount <= 0.005) {
@@ -1801,6 +2189,21 @@ final class CustomerPaymentRepository extends BaseRepository
             'currency' => $currency,
         ]);
         $receipts = $receiptStatement->fetchAll() ?: [];
+
+        if ($allowSyntheticSettlementCredit && $receipts === []) {
+            AuditLog::record($this->app, 'customer.receipt.refund_applied_synthetic', [
+                'user_id' => $actorUserId,
+                'booking_reference' => $bookingReference,
+                'currency' => $currency,
+                'refund_amount_applied' => $targetAmount,
+                'reason' => $reason,
+            ]);
+
+            return [
+                'applied_amount' => $targetAmount,
+                'affected_receipt_ids' => [],
+            ];
+        }
 
         $updateStatement = $this->db->prepare(
             'UPDATE customer_receipts
@@ -1879,7 +2282,8 @@ final class CustomerPaymentRepository extends BaseRepository
         string $currency,
         float $refundAmount,
         ?int $actorUserId = null,
-        ?string $reason = null
+        ?string $reason = null,
+        bool $allowSyntheticSettlementCredit = false
     ): array {
         $targetAmount = round($refundAmount, 2);
         if ($targetAmount <= 0.005) {
@@ -1913,6 +2317,21 @@ final class CustomerPaymentRepository extends BaseRepository
             'currency' => $currency,
         ]);
         $receipts = $receiptStatement->fetchAll() ?: [];
+
+        if ($allowSyntheticSettlementCredit && $receipts === []) {
+            AuditLog::record($this->app, 'customer.receipt.refund_restored_synthetic', [
+                'user_id' => $actorUserId,
+                'booking_reference' => $bookingReference,
+                'currency' => $currency,
+                'refund_amount_restored' => $targetAmount,
+                'reason' => $reason,
+            ]);
+
+            return [
+                'restored_amount' => $targetAmount,
+                'affected_receipt_ids' => [],
+            ];
+        }
 
         $updateStatement = $this->db->prepare(
             'UPDATE customer_receipts
