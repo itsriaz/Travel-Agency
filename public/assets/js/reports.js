@@ -5,7 +5,9 @@
     }
 
     const immediateFilters = form.querySelectorAll('[data-report-filter="immediate"]');
-    const debouncedFilters = form.querySelectorAll('[data-report-filter="debounced"]');
+    const dateFilters = form.querySelectorAll('[data-report-filter="debounced-date"]');
+    const textFilters = form.querySelectorAll('[data-report-filter="debounced-text"], [data-report-filter="debounced"]');
+    const referenceFilters = form.querySelectorAll('[data-report-filter="debounced-reference"]');
     const amountFilters = form.querySelectorAll('[data-report-filter="debounced-amount"]');
     const exportLink = document.getElementById('reports-export-link');
     const status = document.getElementById('reports-auto-status');
@@ -28,7 +30,6 @@
     };
 
     const isCompleteDateValue = (value) => /^\d{4}-\d{2}-\d{2}$/.test(String(value || '').trim());
-
     const syncExportUrl = () => {
         if (!exportLink || !exportBaseUrl) {
             return;
@@ -80,7 +81,7 @@
         });
     });
 
-    debouncedFilters.forEach((field) => {
+    dateFilters.forEach((field) => {
         const handlePotentialUpdate = () => {
             syncExportUrl();
 
@@ -89,11 +90,55 @@
                 return;
             }
 
-            scheduleSubmit();
+            scheduleSubmit(1200);
         };
 
-        field.addEventListener('input', handlePotentialUpdate);
-        field.addEventListener('change', handlePotentialUpdate);
+        field.addEventListener('focus', () => {
+            window.clearTimeout(debounceTimer);
+        });
+        field.addEventListener('input', () => {
+            syncExportUrl();
+        });
+        field.addEventListener('change', () => {
+            syncExportUrl();
+        });
+        field.addEventListener('blur', handlePotentialUpdate);
+        field.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter' || event.isComposing) {
+                return;
+            }
+
+            event.preventDefault();
+            window.clearTimeout(debounceTimer);
+            handlePotentialUpdate();
+        });
+    });
+
+    textFilters.forEach((field) => {
+        const handleTextUpdate = () => {
+            syncExportUrl();
+            scheduleSubmit(500);
+        };
+
+        field.addEventListener('input', handleTextUpdate);
+        field.addEventListener('change', handleTextUpdate);
+    });
+
+    referenceFilters.forEach((field) => {
+        field.addEventListener('input', () => {
+            syncExportUrl();
+        });
+
+        field.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter' || event.isComposing) {
+                return;
+            }
+
+            event.preventDefault();
+            window.clearTimeout(debounceTimer);
+            syncExportUrl();
+            submitReport();
+        });
     });
 
     amountFilters.forEach((field) => {
@@ -105,11 +150,23 @@
                 return;
             }
 
-            scheduleSubmit(350);
+            scheduleSubmit(0);
         };
 
-        field.addEventListener('input', handleAmountUpdate);
+        field.addEventListener('input', () => {
+            syncExportUrl();
+        });
+        field.addEventListener('blur', handleAmountUpdate);
         field.addEventListener('change', handleAmountUpdate);
+        field.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter' || event.isComposing) {
+                return;
+            }
+
+            event.preventDefault();
+            window.clearTimeout(debounceTimer);
+            handleAmountUpdate();
+        });
     });
 
     form.addEventListener('submit', () => {

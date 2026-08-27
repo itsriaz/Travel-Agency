@@ -54,9 +54,11 @@ $check(
 );
 
 $check(
-    'Amount inputs update reports automatically after a short debounce',
+    'Amount inputs wait until blur, change, or Enter so typing is not interrupted',
     str_contains($javascriptSource, 'data-report-filter="debounced-amount"')
-        && str_contains($javascriptSource, 'scheduleSubmit(350)')
+        && str_contains($javascriptSource, "field.addEventListener('blur', handleAmountUpdate);")
+        && str_contains($javascriptSource, "field.addEventListener('change', handleAmountUpdate);")
+        && str_contains($javascriptSource, "if (event.key !== 'Enter' || event.isComposing)")
 );
 
 $service = new \App\Services\ReportService($app);

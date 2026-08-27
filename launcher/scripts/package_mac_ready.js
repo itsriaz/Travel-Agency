@@ -131,6 +131,9 @@ async function packageRuntime(runtimeZip, architecture, appAsar, iconPath) {
     '',
     'The application connects securely to https://app.imdadint.ae.',
     '',
+    'Runtime log file after installation:',
+    '~/Library/Application Support/Travel Agency Operations/logs/launcher-runtime.log',
+    '',
   ].join('\n');
   const installer = `#!/bin/bash
 set -euo pipefail
@@ -264,6 +267,9 @@ trap cleanup EXIT
     'Enter the Mac login password if requested.',
     '',
     'If macOS blocks it, Control-click the installer, choose Open, and confirm once.',
+    '',
+    'Runtime log file after installation:',
+    '~/Library/Application Support/Travel Agency Operations/logs/launcher-runtime.log',
     '',
   ].join('\n');
 

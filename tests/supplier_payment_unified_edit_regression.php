@@ -54,10 +54,10 @@ $check(
         && str_contains($serviceCode, "'mode' => 'supplier'")
 );
 $check(
-    'Allocated supplier payment currency is locked to its payable currency',
+    'Allocated supplier payment currency can be corrected through rebuild while backend still enforces payable currency truth',
     str_contains($serviceCode, 'supplierPaymentAllocationCurrencies')
         && str_contains($serviceCode, 'Supplier payment currency must match the currency of its allocated supplier invoices.')
-        && str_contains($javascript, 'Currency is fixed because this payment is already allocated to')
+        && str_contains($javascript, 'the system will rebuild the payment and allocations safely')
 );
 $check(
     'Unified editor shows one concise notice only after financial details change',

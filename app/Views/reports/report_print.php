@@ -18,6 +18,7 @@ $selectedSupplierId = (int) ($filters['supplierId'] ?? 0);
 $selectedCustomerName = trim((string) ($filters['customerName'] ?? ''));
 $selectedCurrency = strtoupper(trim((string) ($filters['currency'] ?? '')));
 $selectedSourceType = (string) ($filters['treasurySourceType'] ?? 'all');
+$showTraceColumn = (bool) ($showTraceColumn ?? false);
 $dateFrom = trim((string) ($filters['dateFrom'] ?? ''));
 $dateTo = trim((string) ($filters['dateTo'] ?? ''));
 $asOfDate = trim((string) ($filters['asOfDate'] ?? ''));
@@ -258,6 +259,84 @@ $displayValue = static function (array $row, array $column) use ($formatDate, $f
         padding: 16px 24px 20px;
     }
 
+    .supplier-ledger-trace-table {
+        min-width: 1180px;
+        table-layout: fixed;
+    }
+
+    .supplier-ledger-trace-table th,
+    .supplier-ledger-trace-table td {
+        padding: 7px 8px;
+    }
+
+    .supplier-ledger-trace-table th:nth-child(1),
+    .supplier-ledger-trace-table td:nth-child(1) {
+        min-width: 210px;
+        width: 210px;
+    }
+
+    .supplier-ledger-trace-table th:nth-child(2),
+    .supplier-ledger-trace-table td:nth-child(2) {
+        min-width: 96px;
+        width: 96px;
+    }
+
+    .supplier-ledger-trace-table th:nth-child(3),
+    .supplier-ledger-trace-table td:nth-child(3) {
+        min-width: 130px;
+        width: 130px;
+    }
+
+    .supplier-ledger-trace-table th:nth-child(4),
+    .supplier-ledger-trace-table td:nth-child(4) {
+        min-width: 220px;
+        width: 220px;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+        line-height: 1.2;
+    }
+
+    .supplier-ledger-trace-table th:nth-child(5),
+    .supplier-ledger-trace-table td:nth-child(5) {
+        min-width: 105px;
+        width: 105px;
+    }
+
+    .supplier-ledger-trace-table th:nth-child(6),
+    .supplier-ledger-trace-table td:nth-child(6) {
+        min-width: 82px;
+        width: 82px;
+    }
+
+    .supplier-ledger-trace-table th:nth-child(7),
+    .supplier-ledger-trace-table td:nth-child(7) {
+        min-width: 58px;
+        width: 58px;
+    }
+
+    .supplier-ledger-trace-table th:nth-child(8),
+    .supplier-ledger-trace-table td:nth-child(8),
+    .supplier-ledger-trace-table th:nth-child(9),
+    .supplier-ledger-trace-table td:nth-child(9),
+    .supplier-ledger-trace-table th:nth-child(10),
+    .supplier-ledger-trace-table td:nth-child(10) {
+        min-width: 88px;
+        width: 88px;
+    }
+
+    .supplier-ledger-trace-table th:last-child,
+    .supplier-ledger-trace-table td:last-child {
+        box-sizing: border-box;
+        min-width: 150px;
+        width: 150px;
+        max-width: 150px;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+        line-height: 1.2;
+    }
+
     .report-print-table {
         width: 100%;
         border-collapse: collapse;
@@ -376,7 +455,7 @@ $displayValue = static function (array $row, array $column) use ($formatDate, $f
         </section>
 
         <div class="report-print-table-wrap">
-            <table class="report-print-table">
+            <table class="report-print-table<?= $showTraceColumn ? ' supplier-ledger-trace-table' : '' ?>">
                 <thead>
                     <tr>
                         <?php foreach ($columns as $column): ?>

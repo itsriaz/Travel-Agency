@@ -9,6 +9,7 @@ use App\Helpers\Authorization;
 use App\Helpers\Csrf;
 use App\Helpers\Flash;
 use App\Helpers\Session;
+use App\Repositories\AccountHolderBalanceRepository;
 use App\Repositories\BusinessSourceRepository;
 use App\Repositories\BookingRepository;
 use App\Repositories\BookingServiceRepository;
@@ -194,6 +195,8 @@ final class WorkspaceController extends BaseController
         $requestedServiceId = isset($_GET['service_id']) ? (int) $_GET['service_id'] : 0;
         $newMode = isset($_GET['new']) && $_GET['new'] === '1';
 
+        $workspaceLoadFallbackUrl = '/workspace?new=1';
+
         try {
             $workspaceState = (new BookingWorkspaceService($this->app))->workspaceState(
                 $accessibleBranchIds,
@@ -205,7 +208,7 @@ final class WorkspaceController extends BaseController
             );
         } catch (RuntimeException $exception) {
             Flash::error($exception->getMessage());
-            $this->redirect('/workspace');
+            $this->redirect($workspaceLoadFallbackUrl);
         }
         $currentBookingRecord = is_array($workspaceState['currentBooking'] ?? null)
             ? $workspaceState['currentBooking']
@@ -224,7 +227,7 @@ final class WorkspaceController extends BaseController
             );
         } catch (RuntimeException $exception) {
             Flash::error($exception->getMessage());
-            $this->redirect('/workspace');
+            $this->redirect($workspaceLoadFallbackUrl);
         } catch (Throwable $exception) {
             app_log_exception($exception, 'workspace.index.traveler_state_failed');
             app_write_log('workspace.index.traveler_state_context', 'Traveler workspace state was skipped for this workspace load.', $this->workspaceLoadFailureContext($currentBookingRecord));
@@ -251,7 +254,7 @@ final class WorkspaceController extends BaseController
             );
         } catch (RuntimeException $exception) {
             Flash::error($exception->getMessage());
-            $this->redirect('/workspace');
+            $this->redirect($workspaceLoadFallbackUrl);
         } catch (Throwable $exception) {
             app_log_exception($exception, 'workspace.index.service_state_failed');
             app_write_log('workspace.index.service_state_context', 'Service workspace state was skipped for this workspace load.', $this->workspaceLoadFailureContext($currentBookingRecord));
@@ -463,14 +466,19 @@ final class WorkspaceController extends BaseController
             $accounts = array_map(
                 static function (array $row): array {
                     $bankName = trim((string) ($row['bank_name'] ?? ''));
+                    $branchName = trim((string) ($row['branch_name'] ?? ''));
                     $label = (string) ($row['account_name'] ?? '');
                     if ($bankName !== '' && $bankName !== $label) {
                         $label .= ' - ' . $bankName;
+                    }
+                    if ($branchName !== '') {
+                        $label = $branchName . ' / ' . $label;
                     }
 
                     return [
                         'id' => (int) ($row['id'] ?? 0),
                         'branchId' => (int) ($row['branch_id'] ?? 0),
+                        'branchName' => $branchName,
                         'accountName' => (string) ($row['account_name'] ?? ''),
                         'accountType' => (string) ($row['account_type'] ?? ''),
                         'currency' => (string) ($row['currency'] ?? 'PKR'),
@@ -488,6 +496,31 @@ final class WorkspaceController extends BaseController
         $this->jsonResponse([
             'ok' => true,
             'accounts' => $accounts,
+        ]);
+    }
+
+    public function availableAccountHolderBalances(): never
+    {
+        $branchId = (int) ($_GET['branch_id'] ?? 0);
+        $businessSourceId = (int) ($_GET['business_source_id'] ?? 0);
+        $accessibleBranchIds = array_values(array_unique(array_map('intval', Authorization::accessibleBranchIds())));
+
+        if ($branchId <= 0 || $businessSourceId <= 0 || ! in_array($branchId, $accessibleBranchIds, true)) {
+            $this->jsonResponse(['ok' => true, 'balances' => []]);
+        }
+
+        $balances = (new AccountHolderBalanceRepository($this->app))->availableBalances($branchId, $businessSourceId);
+        $this->jsonResponse([
+            'ok' => true,
+            'balances' => array_map(static function (array $row): array {
+                return [
+                    'currency' => (string) ($row['currency'] ?? 'PKR'),
+                    'available_amount' => round((float) ($row['available_amount'] ?? 0), 2),
+                    'total_increase' => round((float) ($row['total_increase'] ?? 0), 2),
+                    'total_decrease' => round((float) ($row['total_decrease'] ?? 0), 2),
+                    'total_applied' => round((float) ($row['total_applied'] ?? 0), 2),
+                ];
+            }, $balances),
         ]);
     }
 
@@ -529,12 +562,16 @@ final class WorkspaceController extends BaseController
     private function workspacePaymentMethodOptions(MasterDataRepository $repository): array
     {
         $options = $repository->activeCodeLabelMap('payment_methods');
+        if (! array_key_exists('account_holder_balance', $options)) {
+            $options['account_holder_balance'] = 'Use Account Balance';
+        }
 
         return $options !== [] ? $options : [
             'cash' => 'Cash',
             'bank_transfer' => 'Bank Transfer',
             'debit_card' => 'Debit Card',
             'credit_card' => 'Credit Card',
+            'account_holder_balance' => 'Use Account Balance',
         ];
     }
 
@@ -748,6 +785,8 @@ final class WorkspaceController extends BaseController
 
                 if ($rowType === 'supplier_advance') {
                     $status = $balanceAmount > 0.005 ? 'Prepaid Available' : 'Prepaid Used';
+                } elseif ($rowType === 'supplier_directory') {
+                    $status = 'No open position';
                 } elseif ($balanceAmount <= 0.005 && $grossAmount > 0.005) {
                     $status = 'Settled';
                 } elseif ($balanceAmount > 0.005 && $paidAmount > 0.005) {
@@ -814,6 +853,69 @@ final class WorkspaceController extends BaseController
             'query' => $query,
             'results' => $results,
             'message' => $message,
+        ]);
+    }
+
+    public function customerPaidSupplierOptions(): never
+    {
+        $accessibleBranchIds = Authorization::accessibleBranchIds();
+        $branchId = (int) ($_GET['branch_id'] ?? 0);
+        $currency = strtoupper(trim((string) ($_GET['currency'] ?? '')));
+        $query = trim((string) ($_GET['q'] ?? ''));
+
+        if ($branchId <= 0 || ! Authorization::canAccessBranch($branchId)) {
+            $this->jsonResponse([
+                'ok' => false,
+                'message' => 'Select a valid accessible branch first.',
+            ], 403);
+        }
+
+        if (! in_array($currency, ['PKR', 'AED', 'USD'], true)) {
+            $this->jsonResponse([
+                'ok' => false,
+                'message' => 'Select a valid payment currency first.',
+            ], 422);
+        }
+
+        $rows = (new SupplierRepository($this->app))->searchSuppliersForDirectCustomerSettlement(
+            $accessibleBranchIds,
+            $branchId,
+            $currency,
+            $query,
+            250
+        );
+
+        $results = array_map(
+            static function (array $row): array {
+                return [
+                    'id' => (int) ($row['supplier_id'] ?? $row['id'] ?? 0),
+                    'supplier_id' => (int) ($row['supplier_id'] ?? 0),
+                    'branch_id' => (int) ($row['branch_id'] ?? 0),
+                    'branch_name' => (string) ($row['branch_name'] ?? ''),
+                    'booking_id' => (int) ($row['booking_id'] ?? 0),
+                    'booking_reference' => (string) ($row['latest_booking_reference'] ?? $row['booking_reference'] ?? ''),
+                    'booking_date' => (string) ($row['booking_date'] ?? ''),
+                    'service_line_reference' => (string) ($row['service_line_reference'] ?? ''),
+                    'service_type' => (string) ($row['service_type'] ?? 'service'),
+                    'supplier_name' => (string) ($row['supplier_name'] ?? 'Supplier'),
+                    'supplier_code' => (string) ($row['supplier_code'] ?? ''),
+                    'passenger_name' => (string) ($row['latest_passenger_name'] ?? $row['passenger_name'] ?? ''),
+                    'currency' => strtoupper(trim((string) ($row['currency'] ?? $_GET['currency'] ?? 'PKR'))),
+                    'outstanding_amount' => round((float) ($row['open_payable_amount'] ?? $row['net_payable_amount'] ?? 0), 2),
+                    'due_date' => (string) ($row['next_due_date'] ?? $row['due_date'] ?? ''),
+                    'status' => (float) ($row['open_payable_amount'] ?? 0) > 0.005 ? 'open' : 'no_payable',
+                    'open_invoice_count' => (int) ($row['open_invoice_count'] ?? 0),
+                ];
+            },
+            $rows
+        );
+
+        $this->jsonResponse([
+            'ok' => true,
+            'results' => $results,
+            'message' => $results === []
+                ? 'No supplier matched this branch and search.'
+                : count($results) . ' supplier(s) available for Paid Supplier.',
         ]);
     }
 
@@ -976,17 +1078,12 @@ final class WorkspaceController extends BaseController
 
         $supplierRepository = new \App\Repositories\SupplierRepository($this->app);
         $supplier = null;
-        $availableAmount = 0.0;
 
         if ($supplierId > 0) {
             $supplier = $supplierRepository->findSupplierById($supplierId);
             if ($supplier !== null && (int) ($supplier['is_active'] ?? 1) !== 1) {
                 $supplier = null;
             }
-        }
-
-        if ($supplier === null && $supplierName !== '') {
-            $availableAmount = $supplierRepository->availableAdvanceBalanceForSupplierName($supplierName, $currency);
         }
 
         if ($supplier === null && $supplierName !== '') {
@@ -1007,31 +1104,31 @@ final class WorkspaceController extends BaseController
             ]);
         }
 
-        if ($availableAmount <= 0.005) {
-            $availableAmount = $supplierRepository->availableAdvanceBalanceForSupplier(
-                (int) ($supplier['id'] ?? 0),
-                $branchId,
-                $currency
-            );
-        }
-        $availableBalances = $supplierRepository->availableAdvanceBalancesForSupplierName(
+        $resolvedSupplierName = $supplierRepository->supplierAdvancePoolNameForSupplier(
+            (int) ($supplier['id'] ?? 0),
             (string) ($supplier['name'] ?? $supplierName)
         );
+        $availableAmount = $supplierRepository->availableAdvanceBalanceForSupplierName($resolvedSupplierName, $currency);
+        $availableBalances = $supplierRepository->availableAdvanceBalancesForSupplierName($resolvedSupplierName);
         $advanceCandidates = array_map(
             static fn (array $row): array => [
                 'id' => (int) ($row['id'] ?? 0),
+                'supplier_id' => (int) ($row['supplier_id'] ?? 0),
                 'currency' => (string) ($row['currency'] ?? ''),
                 'available_amount' => (float) ($row['available_amount'] ?? 0),
             ],
-            $supplierRepository->availableAdvanceCandidatesForSupplierName((string) ($supplier['name'] ?? $supplierName))
+            $supplierRepository->availableAdvanceCandidatesForSupplierName($resolvedSupplierName)
         );
-        if ($availableAmount > 0.005) {
-            $availableBalances[$currency] = $availableAmount;
-        }
         $availableBalances = array_filter(
             $availableBalances,
             static fn (float $amount): bool => $amount > 0.005
         );
+        $requiresFxConfirmation = $availableAmount <= 0.005
+            && array_values(array_filter(
+                $advanceCandidates,
+                static fn (array $row): bool => strtoupper((string) ($row['currency'] ?? '')) !== $currency
+                    && (float) ($row['available_amount'] ?? 0) > 0.005
+            )) !== [];
         $formattedBalances = [];
         foreach ($availableBalances as $balanceCurrency => $balanceAmount) {
             $formattedBalances[] = strtoupper((string) $balanceCurrency) . ' ' . number_format((float) $balanceAmount, 2);
@@ -1048,8 +1145,10 @@ final class WorkspaceController extends BaseController
             'branch_id' => $branchId,
             'currency' => $currency,
             'available_amount' => $availableAmount,
+            'same_currency_available_amount' => $availableAmount,
             'available_balances' => $availableBalances,
             'advance_candidates' => $advanceCandidates,
+            'requires_fx_confirmation' => $requiresFxConfirmation,
             'formatted_available_amount' => $formattedAvailableAmount,
             'message' => $availableBalances !== []
                 ? 'Available prepaid supplier balance found.'
@@ -1149,6 +1248,20 @@ final class WorkspaceController extends BaseController
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);
         $traceId = $this->startSupplierAdvanceTrace('autosaveService', $_POST);
+        app_write_log('workspace.autosave_service.currency_request', 'Service autosave request received for currency tracing.', array_merge(
+            $this->autosaveFailureContext($_POST, ['trace_id' => $traceId]),
+            [
+                'currency' => (string) ($_POST['currency'] ?? ''),
+                'cost_currency' => (string) ($_POST['cost_currency'] ?? ''),
+                'service_charge_currency' => (string) ($_POST['service_charge_currency'] ?? ''),
+                'sale_price' => (string) ($_POST['sale_price'] ?? ''),
+                'purchase_cost' => (string) ($_POST['purchase_cost'] ?? ''),
+                'pricing_exchange_rate' => (string) ($_POST['pricing_exchange_rate'] ?? ''),
+                'service_charge_exchange_rate' => (string) ($_POST['service_charge_exchange_rate'] ?? ''),
+                'service_status' => (string) ($_POST['service_status'] ?? ''),
+                'service_updated_at' => (string) ($_POST['service_updated_at'] ?? $_POST['updated_at'] ?? ''),
+            ]
+        ));
 
         try {
             $accessibleBranchIds = Authorization::accessibleBranchIds();
@@ -1206,6 +1319,7 @@ final class WorkspaceController extends BaseController
                 'booking_id' => (int) $result['booking_id'],
                 'invoice_no' => $snapshot['invoiceNo'],
                 'service_id' => (int) (($savedService['serviceId'] ?? 0)),
+                'service_updated_at' => (string) ($savedService['updatedAt'] ?? ''),
                 'service_line' => $savedService,
                 'payment_eligible' => $paymentEligible,
                 'customer' => $this->workspaceAutosaveCustomer(
@@ -1469,6 +1583,14 @@ final class WorkspaceController extends BaseController
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);
         $serviceId = (int) ($_POST['service_id'] ?? 0);
+        $isAjax = strtolower((string) ($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '')) === 'xmlhttprequest';
+        app_write_log('workspace.cancel_service.request', 'Cancel service request received.', [
+            'booking_id' => (int) ($_POST['booking_id'] ?? 0),
+            'service_id' => $serviceId,
+            'is_ajax' => $isAjax,
+            'cancel_event_date' => (string) ($_POST['cancel_event_date'] ?? ''),
+            'cancel_reason' => (string) ($_POST['cancel_reason'] ?? ''),
+        ]);
 
         try {
             $bookingId = (new ServiceWorkspaceService($this->app))->cancelService(
@@ -1476,9 +1598,35 @@ final class WorkspaceController extends BaseController
                 (int) Auth::id(),
                 Authorization::accessibleBranchIds()
             );
+            $redirectUrl = $this->buildServiceWorkflowRedirect($bookingId, $serviceId, 'cancelled');
+            app_write_log('workspace.cancel_service.success', 'Service cancellation recorded successfully.', [
+                'booking_id' => $bookingId,
+                'service_id' => $serviceId,
+                'is_ajax' => $isAjax,
+                'redirect_url' => $redirectUrl,
+            ]);
+            if ($isAjax) {
+                $this->jsonResponse([
+                    'ok' => true,
+                    'message' => 'Service cancellation recorded. Continue with refund settlement.',
+                    'booking_id' => $bookingId,
+                    'service_id' => $serviceId,
+                ]);
+            }
             Flash::success('Service cancellation recorded. Financial refund or penalty posting still needs the refund workflow.');
-            $this->redirect($this->buildServiceWorkflowRedirect($bookingId, $serviceId, 'cancelled'));
+            $this->redirect($redirectUrl);
         } catch (RuntimeException $exception) {
+            app_write_log('workspace.cancel_service.failed', $exception->getMessage(), [
+                'booking_id' => (int) ($_POST['booking_id'] ?? 0),
+                'service_id' => $serviceId,
+                'is_ajax' => $isAjax,
+            ]);
+            if ($isAjax) {
+                $this->jsonResponse([
+                    'ok' => false,
+                    'message' => $exception->getMessage(),
+                ], 422);
+            }
             Flash::error($exception->getMessage());
             $this->redirect($this->buildServiceWorkflowRedirect((int) ($_POST['booking_id'] ?? 0), $serviceId));
         }
@@ -1528,6 +1676,7 @@ final class WorkspaceController extends BaseController
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);
         $serviceId = (int) ($_POST['service_id'] ?? 0);
+        $isAjax = strtolower((string) ($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '')) === 'xmlhttprequest';
 
         try {
             $bookingId = (new ServiceWorkspaceService($this->app))->correctPenaltyRefundWorkflow(
@@ -1535,9 +1684,23 @@ final class WorkspaceController extends BaseController
                 (int) Auth::id(),
                 Authorization::accessibleBranchIds()
             );
+            if ($isAjax) {
+                $this->jsonResponse([
+                    'ok' => true,
+                    'message' => 'Refund correction saved successfully.',
+                    'booking_id' => $bookingId,
+                    'service_id' => $serviceId,
+                ]);
+            }
             Flash::success('Refund correction saved successfully.');
             $this->redirect($this->buildServiceWorkflowRedirect($bookingId, $serviceId, 'penalty_refund_corrected'));
         } catch (RuntimeException $exception) {
+            if ($isAjax) {
+                $this->jsonResponse([
+                    'ok' => false,
+                    'message' => $exception->getMessage(),
+                ], 422);
+            }
             Flash::error($exception->getMessage());
             $this->redirect($this->buildServiceWorkflowRedirect((int) ($_POST['booking_id'] ?? 0), $serviceId));
         }
@@ -2861,6 +3024,7 @@ final class WorkspaceController extends BaseController
         return [
             'serviceId' => (int) ($serviceRow['id'] ?? 0),
             'lineNumber' => (string) ($serviceRow['line_reference'] ?? 'SV-DRAFT'),
+            'updatedAt' => (string) ($serviceRow['updated_at'] ?? ''),
             'type' => (string) ($serviceRow['service_type'] ?? 'air ticket'),
             'supplierId' => (int) ($serviceRow['supplier_id'] ?? 0),
             'supplier' => (string) ($serviceRow['supplier_name'] ?? $serviceRow['supplier_name_snapshot'] ?? 'Supplier not selected'),
@@ -2964,8 +3128,19 @@ final class WorkspaceController extends BaseController
             'hasCancellationEvent' => $hasCancellationEvent,
             'latestCancelFinanciallySettled' => (bool) ($serviceRow['latest_cancel_financially_settled'] ?? false),
             'latestCancelCustomerPenaltyAmount' => (float) ($serviceRow['latest_cancel_customer_penalty_amount'] ?? 0),
+            'latestCancelCustomerPenaltyCurrency' => (string) ($serviceRow['latest_cancel_customer_penalty_currency'] ?? $invoiceCurrency),
+            'latestCancelCustomerPenaltySourceAmount' => (float) ($serviceRow['latest_cancel_customer_penalty_source_amount'] ?? ($serviceRow['latest_cancel_customer_penalty_amount'] ?? 0)),
+            'latestCancelCustomerPenaltyExchangeRate' => (float) ($serviceRow['latest_cancel_customer_penalty_exchange_rate'] ?? 1),
+            'latestCancelAgencyFeeRefundAmount' => (float) ($serviceRow['latest_cancel_agency_fee_refund_amount'] ?? 0),
             'latestCancelSupplierPenaltyAmount' => $latestCancelSupplierPenaltyAmount,
+            'latestCancelSupplierPenaltyCurrency' => (string) ($serviceRow['latest_cancel_supplier_penalty_currency'] ?? $invoiceCurrency),
+            'latestCancelSupplierPenaltySourceAmount' => (float) ($serviceRow['latest_cancel_supplier_penalty_source_amount'] ?? ($serviceRow['latest_cancel_supplier_penalty_amount'] ?? 0)),
+            'latestCancelSupplierPenaltyExchangeRate' => (float) ($serviceRow['latest_cancel_supplier_penalty_exchange_rate'] ?? 1),
+            'supplierTruthCurrency' => (string) ($serviceRow['supplier_truth_currency'] ?? $serviceRow['cost_currency'] ?? $invoiceCurrency),
             'latestCancelExpectedSupplierRefundAmount' => $latestCancelExpectedSupplierRefundAmount,
+            'latestCancelExpectedSupplierRefundCurrency' => (string) ($serviceRow['latest_cancel_expected_supplier_refund_currency'] ?? $invoiceCurrency),
+            'latestCancelExpectedSupplierRefundSourceAmount' => (float) ($serviceRow['latest_cancel_expected_supplier_refund_source_amount'] ?? ($serviceRow['latest_cancel_expected_supplier_refund_amount'] ?? 0)),
+            'latestCancelExpectedSupplierRefundExchangeRate' => (float) ($serviceRow['latest_cancel_expected_supplier_refund_exchange_rate'] ?? 1),
             'latestCancelCustomerFinalChargeAmount' => (float) ($serviceRow['latest_cancel_customer_final_charge_amount'] ?? 0),
             'latestCancelReleasedCustomerCreditAmount' => (float) ($serviceRow['latest_cancel_released_customer_credit_amount'] ?? 0),
             'latestCancelReleasedSupplierCreditAmount' => $latestCancelReleasedSupplierCreditAmount,
@@ -2975,6 +3150,7 @@ final class WorkspaceController extends BaseController
             'latestRefundEventId' => (int) ($serviceRow['latest_refund_event_id'] ?? 0),
             'latestCustomerRefundEventId' => (int) ($serviceRow['latest_customer_refund_event_id'] ?? 0),
             'latestCustomerRefundAmountOnly' => (float) ($serviceRow['latest_customer_refund_amount_only'] ?? 0),
+            'customerRefundTruthCurrency' => (string) ($serviceRow['customer_refund_truth_currency'] ?? $invoiceCurrency),
             'latestSupplierRefundEventId' => (int) ($serviceRow['latest_supplier_refund_event_id'] ?? 0),
             'latestSupplierRefundAmountOnly' => (float) ($serviceRow['latest_supplier_refund_amount_only'] ?? 0),
             'customerRefundableCreditAmount' => round((float) ($serviceRow['customer_refundable_credit_amount'] ?? 0), 2),

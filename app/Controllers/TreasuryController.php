@@ -8,6 +8,7 @@ use App\Helpers\Auth;
 use App\Helpers\Authorization;
 use App\Helpers\Csrf;
 use App\Helpers\Flash;
+use App\Repositories\MasterDataRepository;
 use App\Repositories\TreasuryRepository;
 use RuntimeException;
 
@@ -23,6 +24,10 @@ final class TreasuryController extends BaseController
         $editAccount = $editId > 0
             ? $repository->findAccount($editId, $accessibleBranchIds)
             : null;
+        $editTransactionId = (int) ($_GET['edit_transaction_id'] ?? 0);
+        $editTransaction = $editTransactionId > 0
+            ? $repository->findTransactionForCorrection($editTransactionId, $accessibleBranchIds)
+            : null;
 
         return $this->view('treasury/accounts', [
             'title' => 'Treasury Accounts',
@@ -32,7 +37,9 @@ final class TreasuryController extends BaseController
             'branches' => $repository->branches($accessibleBranchIds),
             'currencies' => $repository->currencies(),
             'ledgerAccounts' => $repository->assetLedgerAccounts(),
+            'businessSourceOptions' => (new MasterDataRepository($this->app))->activeRows('business_sources'),
             'editAccount' => $editAccount,
+            'editTransaction' => $editTransaction,
             'returnTo' => $returnTo,
             'accountTypes' => [
                 'cash' => 'Cash Counter',
@@ -74,45 +81,89 @@ final class TreasuryController extends BaseController
     public function saveDirectEntry(): never
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);
+        $returnTo = $this->sanitizeReturnTo((string) ($_POST['return_to'] ?? ''));
+        $correctionTransactionId = (int) ($_POST['correction_transaction_id'] ?? 0);
 
         try {
             $repository = new TreasuryRepository($this->app);
-            $repository->saveDirectEntry(
-                array_merge($_POST, [
-                    'created_by_user_id' => Auth::id(),
-                ]),
-                Authorization::accessibleBranchIds()
-            );
+            $payload = array_merge($_POST, [
+                'created_by_user_id' => Auth::id(),
+            ]);
+            if ($correctionTransactionId > 0) {
+                $repository->correctDirectEntry(
+                    $payload,
+                    Auth::id() ?? 0,
+                    Authorization::accessibleBranchIds()
+                );
+                Flash::success('Treasury direct entry corrected successfully.');
+            } else {
+                $repository->saveDirectEntry(
+                    $payload,
+                    Authorization::accessibleBranchIds()
+                );
 
-            Flash::success('Direct treasury entry posted successfully.');
+                Flash::success('Direct treasury entry posted successfully.');
+            }
+            if ($returnTo !== '') {
+                $this->redirect($returnTo);
+            }
         } catch (RuntimeException $exception) {
             Flash::error($exception->getMessage());
-            $this->redirect('/treasury/accounts');
+            if ($correctionTransactionId > 0) {
+                $query = http_build_query(array_filter([
+                    'edit_transaction_id' => $correctionTransactionId,
+                    'return_to' => $returnTo,
+                ], static fn (mixed $value): bool => (string) $value !== ''));
+                $this->redirect('/treasury/accounts' . ($query !== '' ? '?' . $query : ''));
+            }
+            $this->redirect($returnTo !== '' ? $returnTo : '/treasury/accounts');
         }
 
-        $this->redirect('/treasury/accounts');
+        $this->redirect($returnTo !== '' ? $returnTo : '/treasury/accounts');
     }
 
     public function saveTransfer(): never
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);
+        $returnTo = $this->sanitizeReturnTo((string) ($_POST['return_to'] ?? ''));
+        $correctionTransactionId = (int) ($_POST['correction_transaction_id'] ?? 0);
 
         try {
             $repository = new TreasuryRepository($this->app);
-            $repository->saveTransfer(
-                array_merge($_POST, [
-                    'created_by_user_id' => Auth::id(),
-                ]),
-                Authorization::accessibleBranchIds()
-            );
+            $payload = array_merge($_POST, [
+                'created_by_user_id' => Auth::id(),
+            ]);
+            if ($correctionTransactionId > 0) {
+                $repository->correctTransfer(
+                    $payload,
+                    Auth::id() ?? 0,
+                    Authorization::accessibleBranchIds()
+                );
+                Flash::success('Treasury transfer corrected successfully.');
+            } else {
+                $repository->saveTransfer(
+                    $payload,
+                    Authorization::accessibleBranchIds()
+                );
 
-            Flash::success('Treasury transfer posted successfully.');
+                Flash::success('Treasury transfer posted successfully.');
+            }
+            if ($returnTo !== '') {
+                $this->redirect($returnTo);
+            }
         } catch (RuntimeException $exception) {
             Flash::error($exception->getMessage());
-            $this->redirect('/treasury/accounts');
+            if ($correctionTransactionId > 0) {
+                $query = http_build_query(array_filter([
+                    'edit_transaction_id' => $correctionTransactionId,
+                    'return_to' => $returnTo,
+                ], static fn (mixed $value): bool => (string) $value !== ''));
+                $this->redirect('/treasury/accounts' . ($query !== '' ? '?' . $query : ''));
+            }
+            $this->redirect($returnTo !== '' ? $returnTo : '/treasury/accounts');
         }
 
-        $this->redirect('/treasury/accounts');
+        $this->redirect($returnTo !== '' ? $returnTo : '/treasury/accounts');
     }
 
     public function voidTransfer(): never

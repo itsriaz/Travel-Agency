@@ -199,9 +199,7 @@ final class ReportsController extends BaseController
             $selectedBranchId = (int) ($branchOptions[0]['id'] ?? 0);
         }
 
-        $supplierOptions = $selectedBranchId > 0
-            ? $supplierRepository->globalSettlementSupplierOptions($selectedBranchId)
-            : [];
+        $supplierOptions = $supplierRepository->activeSuppliersForBranches($accessibleBranchIds);
         $selectedSupplierId = $recreateDraft !== null
             ? (int) ($recreateDraft['supplier_id'] ?? 0)
             : ($postedPaymentConfirmation !== null
@@ -218,11 +216,21 @@ final class ReportsController extends BaseController
             $selectedSupplierId = $startNewPayment ? 0 : (int) ($supplierOptions[0]['id'] ?? 0);
         }
 
+        $selectedSupplier = $selectedSupplierId > 0
+            ? $supplierRepository->findSupplierById($selectedSupplierId)
+            : null;
+        $effectiveBranchId = $selectedBranchId;
+        if ($selectedSupplier !== null) {
+            $supplierBranchId = (int) ($selectedSupplier['branch_id'] ?? 0);
+            if (in_array($supplierBranchId, array_map('intval', $accessibleBranchIds), true)) {
+                $effectiveBranchId = $supplierBranchId;
+            }
+        }
+
         $currencyOptions = $selectedSupplierId > 0
-            ? $supplierRepository->globalSettlementCurrencies($selectedBranchId, $selectedSupplierId)
+            ? $supplierRepository->globalSettlementCurrencies($effectiveBranchId, $selectedSupplierId)
             : [];
         if ($selectedSupplierId > 0) {
-            $selectedSupplier = $supplierRepository->findSupplierById($selectedSupplierId);
             $currencyRowsByCode = [];
             foreach ($currencyOptions as $currencyRow) {
                 $currencyRowsByCode[strtoupper((string) ($currencyRow['currency'] ?? ''))] = $currencyRow;
@@ -255,24 +263,35 @@ final class ReportsController extends BaseController
             $currency = (string) ($availableCurrencies[0] ?? 'PKR');
         }
 
-        $openObligations = $selectedSupplierId > 0 && $selectedBranchId > 0
-            ? $supplierRepository->globalOpenObligations($selectedBranchId, $selectedSupplierId, $currency)
+        $openObligations = $selectedSupplierId > 0 && $effectiveBranchId > 0
+            ? $supplierRepository->globalOpenObligations($effectiveBranchId, $selectedSupplierId, $currency)
             : [];
 
         $sourceAccounts = [];
-        foreach (['cash', 'bank_transfer'] as $method) {
-            foreach ($treasuryRepository->eligiblePaymentTreasuryAccounts($selectedBranchId, $currency, $method) as $account) {
+        $paymentMethodTypes = [
+            'cash' => ['cash', 'bank', 'wallet'],
+            'bank_transfer' => ['bank', 'wallet', 'cash'],
+        ];
+        if ($currency !== '') {
+            foreach ($treasuryRepository->accounts($accessibleBranchIds) as $account) {
                 $accountId = (int) ($account['id'] ?? 0);
-                if ($accountId <= 0) {
+                $accountType = strtolower(trim((string) ($account['account_type'] ?? '')));
+                if ($accountId <= 0 || (int) ($account['is_active'] ?? 0) !== 1) {
                     continue;
                 }
 
-                if (! isset($sourceAccounts[$accountId])) {
-                    $sourceAccounts[$accountId] = $account;
-                    $sourceAccounts[$accountId]['payment_methods'] = [];
-                    $sourceAccounts[$accountId]['current_balance'] = $treasuryRepository->currentBalanceForAccountId($accountId);
+                $allowedMethods = [];
+                foreach ($paymentMethodTypes as $method => $compatibleTypes) {
+                    if (in_array($accountType, $compatibleTypes, true)) {
+                        $allowedMethods[] = $method;
+                    }
                 }
-                $sourceAccounts[$accountId]['payment_methods'][] = $method;
+                if ($allowedMethods === []) {
+                    continue;
+                }
+
+                $sourceAccounts[$accountId] = $account;
+                $sourceAccounts[$accountId]['payment_methods'] = $allowedMethods;
             }
         }
 
@@ -299,7 +318,7 @@ final class ReportsController extends BaseController
             'title' => 'Supplier Payment',
             'branchOptions' => $branchOptions,
             'supplierOptions' => $supplierOptions,
-            'selectedBranchId' => $selectedBranchId,
+            'selectedBranchId' => $effectiveBranchId,
             'selectedSupplierId' => $selectedSupplierId,
             'selectedCurrency' => $currency,
             'currencyOptions' => $currencyOptions,
@@ -489,6 +508,7 @@ final class ReportsController extends BaseController
     public function voidGlobalSupplierSettlement(): never
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);
+        $isAjax = strtolower((string) ($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '')) === 'xmlhttprequest';
         $action = strtolower(trim((string) ($_POST['correction_action'] ?? 'void')));
         $result = null;
 
@@ -503,7 +523,28 @@ final class ReportsController extends BaseController
                     ? 'The original supplier payment was safely reversed. Review the prefilled correction and save it.'
                     : 'Supplier payment ' . (string) ($result['payment_no'] ?? '') . ' was voided and its payables were reopened.'
             );
+            if ($isAjax) {
+                $this->jsonResponse([
+                    'ok' => true,
+                    'message' => $action === 'edit'
+                        ? 'The original supplier payment was safely reversed. Review the prefilled correction and save it.'
+                        : 'Supplier payment ' . (string) ($result['payment_no'] ?? '') . ' was voided and its payables were reopened.',
+                    'result' => [
+                        'payment_no' => (string) ($result['payment_no'] ?? ''),
+                        'supplier_payment_id' => (int) ($result['supplier_payment_id'] ?? 0),
+                        'supplier_id' => (int) ($result['supplier_id'] ?? 0),
+                        'branch_id' => (int) ($result['branch_id'] ?? 0),
+                        'currency' => (string) ($result['currency'] ?? ''),
+                    ],
+                ]);
+            }
         } catch (RuntimeException $exception) {
+            if ($isAjax) {
+                $this->jsonResponse([
+                    'ok' => false,
+                    'message' => $exception->getMessage(),
+                ], 422);
+            }
             Flash::error($exception->getMessage());
         }
 
@@ -567,6 +608,7 @@ final class ReportsController extends BaseController
         $accessibleBranchIds = Authorization::accessibleBranchIds();
         $bookingRepository = new BookingRepository($this->app);
         $customerRepository = new CustomerPaymentRepository($this->app);
+        $supplierRepository = new SupplierRepository($this->app);
         $treasuryRepository = new TreasuryRepository($this->app);
         $masterData = new MasterDataRepository($this->app);
 
@@ -600,6 +642,9 @@ final class ReportsController extends BaseController
         $availableAdvances = $selectedTravelerId > 0 && $selectedBranchId > 0
             ? $customerRepository->availableCustomerAdvances($selectedBranchId, $selectedTravelerId, $currency)
             : [];
+        $supplierOptions = $selectedBranchId > 0
+            ? $supplierRepository->globalSettlementSupplierOptions($selectedBranchId)
+            : [];
 
         $treasuryAccounts = [];
         foreach (['cash', 'bank_transfer'] as $method) {
@@ -624,19 +669,23 @@ final class ReportsController extends BaseController
             'bank_transfer' => 'Bank Transfer',
             'debit_card' => 'Debit Card',
             'credit_card' => 'Credit Card',
-        ], array_flip(['cash', 'bank_transfer', 'debit_card', 'credit_card']));
+            'account_holder_balance' => 'Use Account Balance',
+            'customer_paid_supplier' => 'Paid Supplier',
+        ], array_flip(['cash', 'bank_transfer', 'debit_card', 'credit_card', 'account_holder_balance', 'customer_paid_supplier']));
 
         return $this->view('reports/global_customer_settlement', [
             'user' => Auth::user(),
             'title' => 'Lumpsum Customer Payment',
             'branchOptions' => $branchOptions,
             'customerOptions' => $customerOptions,
+            'businessSourceOptions' => $masterData->activeRows('business_sources'),
             'selectedBranchId' => $selectedBranchId,
             'selectedTravelerId' => $selectedTravelerId,
             'selectedCurrency' => $currency,
             'currencyOptions' => $currencyOptions,
             'openReceivables' => $openReceivables,
             'availableAdvances' => $availableAdvances,
+            'supplierOptions' => $supplierOptions,
             'treasuryAccounts' => array_values($treasuryAccounts),
             'paymentMethods' => $paymentMethods,
         ]);
@@ -918,6 +967,83 @@ final class ReportsController extends BaseController
                     'unallocated_amount' => (float) ($credit['unallocated_amount'] ?? 0),
                 ];
             }, $credits),
+        ]);
+    }
+
+    public function customerAdvanceCustomers(): never
+    {
+        $search = trim((string) ($_GET['q'] ?? ''));
+        $branchId = (int) ($_GET['branch_id'] ?? 0);
+        $accessibleBranchIds = array_values(array_unique(array_map('intval', Authorization::accessibleBranchIds())));
+
+        if ($branchId > 0 && ! in_array($branchId, $accessibleBranchIds, true)) {
+            $this->jsonResponse(['ok' => true, 'customers' => []]);
+        }
+
+        $repository = new CustomerPaymentRepository($this->app);
+        $rows = $repository->customerAdvanceCustomers(
+            $accessibleBranchIds,
+            $search,
+            $branchId > 0 ? $branchId : null
+        );
+
+        $this->jsonResponse([
+            'ok' => true,
+            'customers' => array_map(static function (array $row): array {
+                return [
+                    'traveler_id' => (int) ($row['traveler_id'] ?? 0),
+                    'branch_id' => (int) ($row['branch_id'] ?? 0),
+                    'customer_name' => (string) ($row['customer_name'] ?? 'Customer'),
+                    'mobile' => (string) ($row['mobile'] ?? ''),
+                    'passport_number' => (string) ($row['passport_number'] ?? ''),
+                    'family_id' => (string) ($row['family_id'] ?? ''),
+                    'advance_count' => (int) ($row['advance_count'] ?? 0),
+                    'latest_receipt_date' => (string) ($row['latest_receipt_date'] ?? ''),
+                    'total_pkr' => round((float) ($row['total_pkr'] ?? 0), 2),
+                    'total_aed' => round((float) ($row['total_aed'] ?? 0), 2),
+                    'total_usd' => round((float) ($row['total_usd'] ?? 0), 2),
+                ];
+            }, $rows),
+        ]);
+    }
+
+    public function customerAdvanceDetail(): never
+    {
+        $receiptId = (int) ($_GET['receipt_id'] ?? 0);
+        $accessibleBranchIds = array_values(array_unique(array_map('intval', Authorization::accessibleBranchIds())));
+
+        if ($receiptId <= 0) {
+            $this->jsonResponse(['ok' => false, 'message' => 'Invalid advance selected.'], 422);
+        }
+
+        $repository = new CustomerPaymentRepository($this->app);
+        $receipt = $repository->findReceiptById($receiptId);
+        if ($receipt === null || (string) ($receipt['receipt_purpose'] ?? '') !== 'customer_advance') {
+            $this->jsonResponse(['ok' => false, 'message' => 'Customer advance not found.'], 404);
+        }
+
+        $branchId = (int) ($receipt['branch_id'] ?? 0);
+        if ($branchId <= 0 || ! in_array($branchId, $accessibleBranchIds, true)) {
+            $this->jsonResponse(['ok' => false, 'message' => 'You cannot access this customer advance.'], 403);
+        }
+
+        $this->jsonResponse([
+            'ok' => true,
+            'advance' => [
+                'id' => (int) ($receipt['id'] ?? 0),
+                'branch_id' => $branchId,
+                'traveler_id' => (int) ($receipt['traveler_id'] ?? 0),
+                'receipt_no' => (string) ($receipt['receipt_no'] ?? ''),
+                'receipt_date' => (string) ($receipt['receipt_date'] ?? ''),
+                'currency' => (string) ($receipt['currency'] ?? 'PKR'),
+                'received_amount' => (float) ($receipt['received_amount'] ?? 0),
+                'payment_method' => (string) ($receipt['payment_method'] ?? 'cash'),
+                'treasury_account_id' => isset($receipt['treasury_account_id']) ? (int) $receipt['treasury_account_id'] : 0,
+                'reference_number' => (string) ($receipt['reference_number'] ?? ''),
+                'remarks' => (string) ($receipt['remarks'] ?? ''),
+                'business_source_name' => (string) ($receipt['business_source_name'] ?? 'Unassigned Account'),
+                'customer_name' => $repository->customerNameByTraveler((int) ($receipt['traveler_id'] ?? 0)),
+            ],
         ]);
     }
 

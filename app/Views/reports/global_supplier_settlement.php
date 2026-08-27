@@ -210,7 +210,7 @@ $clearHistoryUrl = url('/suppliers/settlements/global?' . http_build_query(array
             <select name="supplier_id">
                 <option value="" <?= $selectedSupplierId <= 0 ? 'selected' : '' ?>>Select Supplier</option>
                 <?php if ($supplierOptions === []): ?>
-                    <option value="" disabled><?= $selectedBranchId > 0 ? 'No open payable supplier' : 'Select branch first' ?></option>
+                    <option value="" disabled>No supplier available</option>
                 <?php endif; ?>
                 <?php foreach ($supplierOptions as $supplier): ?>
                     <?php
@@ -220,9 +220,14 @@ $clearHistoryUrl = url('/suppliers/settlements/global?' . http_build_query(array
                         ? $selectedCurrencyPayableCount
                         : (int) ($supplier['open_payable_count'] ?? 0);
                     $payableCountScope = $isSelectedSupplier ? ' ' . $selectedCurrency : ' total';
+                    $supplierBranchName = trim((string) ($supplier['branch_name'] ?? ''));
+                    $supplierCode = trim((string) ($supplier['code'] ?? ''));
                     ?>
                     <option value="<?= e((string) $supplierId) ?>" <?= $isSelectedSupplier ? 'selected' : '' ?>>
-                        <?= e((string) ($supplier['name'] ?? 'Supplier')) ?><?= $displayPayableCount > 0 ? ' / ' . e((string) $displayPayableCount) . e($payableCountScope) . ' payable(s)' : '' ?>
+                        <?= e((string) ($supplier['name'] ?? 'Supplier')) ?>
+                        <?= $supplierBranchName !== '' ? ' / ' . e($supplierBranchName) : '' ?>
+                        <?= $supplierCode !== '' ? ' / ' . e($supplierCode) : '' ?>
+                        <?= $displayPayableCount > 0 ? ' / ' . e((string) $displayPayableCount) . e($payableCountScope) . ' payable(s)' : '' ?>
                     </option>
                 <?php endforeach; ?>
             </select>
@@ -295,6 +300,9 @@ $clearHistoryUrl = url('/suppliers/settlements/global?' . http_build_query(array
             <header class="global-settlement-payment-entry__header">
                 <div>
                     <strong>Payment Details</strong>
+                    <p class="global-settlement-payment-entry__hint">
+                        Enter amount in <?= e($selectedCurrency) ?>. If source account is in another currency, enter FX rate as 1 source = ? <?= e($selectedCurrency) ?>.
+                    </p>
                 </div>
                 <span class="global-settlement-payment-entry__currency"><?= e($selectedCurrency) ?></span>
             </header>
@@ -304,7 +312,7 @@ $clearHistoryUrl = url('/suppliers/settlements/global?' . http_build_query(array
                 <input type="date" name="supplier_payment_date" value="<?= e((string) ($recreateDraft['payment_date'] ?? date('Y-m-d'))) ?>">
             </label>
             <label class="station-field span-2">
-                <span>Amount</span>
+                <span>Amount (<?= e($selectedCurrency) ?>)</span>
                 <input type="number" step="0.01" min="0" name="supplier_paid_amount" value="<?= e(number_format((float) ($recreateDraft['paid_amount'] ?? 0), 2, '.', '')) ?>" data-global-supplier-payment-amount <?= $recreateDraft !== null ? '' : 'data-autofilled="1"' ?>>
             </label>
             <label class="station-field span-2">
@@ -321,11 +329,15 @@ $clearHistoryUrl = url('/suppliers/settlements/global?' . http_build_query(array
                     <option value="">Select source account</option>
                     <?php foreach ($sourceAccounts as $account): ?>
                         <?php $methods = implode(',', array_unique(array_map('strval', (array) ($account['payment_methods'] ?? [])))); ?>
-                        <option value="<?= e((string) ($account['id'] ?? 0)) ?>" data-methods="<?= e($methods) ?>" <?= (int) ($account['id'] ?? 0) === $draftTreasuryAccountId ? 'selected' : '' ?>>
-                            <?= e((string) ($account['account_name'] ?? 'Account')) ?> / <?= e((string) ($account['currency'] ?? $selectedCurrency)) ?> / Bal <?= e($formatMoney((float) ($account['current_balance'] ?? 0))) ?><?= (int) ($account['is_default'] ?? 0) === 1 ? ' / Default' : '' ?>
+                        <option value="<?= e((string) ($account['id'] ?? 0)) ?>" data-methods="<?= e($methods) ?>" data-currency="<?= e((string) ($account['currency'] ?? '')) ?>" <?= (int) ($account['id'] ?? 0) === $draftTreasuryAccountId ? 'selected' : '' ?>>
+                            <?= e((string) ($account['branch_name'] ?? 'Branch')) ?> / <?= e((string) ($account['account_name'] ?? 'Account')) ?> / <?= e((string) ($account['currency'] ?? $selectedCurrency)) ?> / Bal <?= e($formatMoney((float) ($account['current_balance'] ?? 0))) ?><?= (int) ($account['is_default'] ?? 0) === 1 ? ' / Default' : '' ?>
                         </option>
                     <?php endforeach; ?>
                 </select>
+            </label>
+            <label class="station-field span-3" data-global-supplier-exchange-row hidden style="display:none;">
+                <span>FX Rate</span>
+                <input type="number" step="0.00000001" min="0.00000001" name="supplier_exchange_rate_to_booking" value="<?= e((string) ($recreateDraft['exchange_rate_to_booking'] ?? '')) ?>" data-global-supplier-exchange-input placeholder="1 source = ? payment">
             </label>
             <label class="station-field span-3">
                 <span>Reference</span>
@@ -492,8 +504,8 @@ $clearHistoryUrl = url('/suppliers/settlements/global?' . http_build_query(array
                                     <input type="text" name="void_reason" maxlength="500" placeholder="Optional note" aria-label="Optional correction note for <?= e((string) ($payment['payment_no'] ?? 'payment')) ?>">
                                     <button class="btn btn-primary btn-sm" type="submit" formaction="<?= e(url('/suppliers/settlements/global/supplier-correct')) ?>">Change Supplier</button>
                                     <?php if ($isBulkPayment): ?>
-                                        <button class="btn btn-sm" type="submit" name="correction_action" value="edit" onclick="return confirm('Reverse this payment and reopen its payables for correction?')">Edit</button>
-                                        <button class="btn btn-danger btn-sm" type="submit" name="correction_action" value="void" onclick="return confirm('Void this payment and reopen all payables it covered?')">Void</button>
+                                        <button class="btn btn-sm" type="submit" name="correction_action" value="edit" formnovalidate onclick="return confirm('Reverse this payment and reopen its payables for correction?')">Edit</button>
+                                        <button class="btn btn-danger btn-sm" type="submit" name="correction_action" value="void" formnovalidate onclick="return confirm('Void this payment and reopen all payables it covered?')">Void</button>
                                     <?php elseif ($paymentBookingId > 0): ?>
                                         <a class="btn btn-sm" href="<?= e(url('/workspace?booking_id=' . $paymentBookingId . '#dock-panel-suppliers')) ?>">Open Payment</a>
                                     <?php endif; ?>
@@ -553,6 +565,10 @@ $clearHistoryUrl = url('/suppliers/settlements/global?' . http_build_query(array
         const feedback = form.querySelector('[data-global-supplier-feedback]');
         const methodField = form.querySelector('[data-global-supplier-payment-method]');
         const sourceField = form.querySelector('[data-global-supplier-source-account]');
+        const exchangeRow = form.querySelector('[data-global-supplier-exchange-row]');
+        const exchangeInput = form.querySelector('[data-global-supplier-exchange-input]');
+        const exchangeNote = form.querySelector('[data-global-supplier-exchange-note]');
+        const paymentCurrency = '<?= e($selectedCurrency) ?>';
 
         const money = (value) => Number(value || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
         const selectedTotal = () => Math.max(Number(accountPosition?.dataset.supplierAccountPayable || 0), 0);
@@ -561,7 +577,7 @@ $clearHistoryUrl = url('/suppliers/settlements/global?' . http_build_query(array
             if (totalNode) {
                 totalNode.textContent = money(total);
             }
-            if (amountField && (Number(amountField.value || 0) <= 0 || amountField.dataset.autofilled === '1')) {
+            if (amountField && amountField.dataset.autofilled === '1') {
                 amountField.value = total.toFixed(2);
                 amountField.dataset.autofilled = '1';
             }
@@ -596,20 +612,66 @@ $clearHistoryUrl = url('/suppliers/settlements/global?' . http_build_query(array
                 sourceField.value = '';
             }
         };
+        const syncExchangeField = () => {
+            if (!(sourceField instanceof HTMLSelectElement)) {
+                return;
+            }
+            const selectedOption = sourceField.selectedOptions[0] || null;
+            const hasSelectedSourceAccount = selectedOption !== null && String(selectedOption.value || '').trim() !== '';
+            const sourceCurrency = hasSelectedSourceAccount ? String(selectedOption.dataset.currency || '').trim().toUpperCase() : '';
+            const targetCurrency = String(paymentCurrency || '').trim().toUpperCase();
+            const requiresRate = hasSelectedSourceAccount && sourceCurrency !== '' && targetCurrency !== '' && sourceCurrency !== targetCurrency;
 
+            if (exchangeRow instanceof HTMLElement) {
+                exchangeRow.hidden = !requiresRate;
+                exchangeRow.style.display = requiresRate ? '' : 'none';
+            }
+            if (exchangeInput instanceof HTMLInputElement) {
+                if (requiresRate) {
+                    exchangeInput.placeholder = `1 ${sourceCurrency} = ? ${targetCurrency}`;
+                } else {
+                    exchangeInput.value = '';
+                    exchangeInput.placeholder = '1 source = ? payment';
+                }
+            }
+            if (exchangeNote instanceof HTMLElement) {
+                exchangeNote.textContent = requiresRate
+                    ? `Enter today's exact rate: 1 ${sourceCurrency} = how many ${targetCurrency}.`
+                    : 'Enter the exact source-to-payment rate.';
+            }
+        };
+
+        const markAmountAsManual = () => {
+            if (amountField instanceof HTMLInputElement) {
+                amountField.dataset.autofilled = '0';
+            }
+        };
+        amountField?.addEventListener('focus', markAmountAsManual);
+        amountField?.addEventListener('keydown', markAmountAsManual);
+        amountField?.addEventListener('change', markAmountAsManual);
         amountField?.addEventListener('input', () => {
-            amountField.dataset.autofilled = '0';
+            markAmountAsManual();
             syncTotal();
         });
-        methodField?.addEventListener('change', syncSourceAccounts);
+        methodField?.addEventListener('change', () => {
+            syncSourceAccounts();
+            syncExchangeField();
+        });
+        sourceField?.addEventListener('change', syncExchangeField);
         form.addEventListener('submit', (event) => {
             const total = selectedTotal();
             const amount = Number(amountField?.value || 0);
+            const selectedOption = sourceField instanceof HTMLSelectElement ? sourceField.selectedOptions[0] || null : null;
+            const sourceCurrency = selectedOption ? String(selectedOption.dataset.currency || '').trim().toUpperCase() : '';
+            const requiresRate = sourceCurrency !== '' && paymentCurrency !== '' && sourceCurrency !== paymentCurrency;
+            const fxRate = Number(exchangeInput instanceof HTMLInputElement ? exchangeInput.value || 0 : 0);
             let message = '';
             if (amount <= 0) {
                 message = 'Enter a valid supplier payment amount.';
             } else if (['cash', 'bank_transfer'].includes(String(methodField?.value || '')) && String(sourceField?.value || '') === '') {
                 message = 'Please select the source cash or bank account.';
+            } else if (requiresRate && (!Number.isFinite(fxRate) || fxRate <= 0)) {
+                message = `Enter today's FX rate for ${sourceCurrency} to ${paymentCurrency}.`;
             }
 
             if (message !== '') {
@@ -623,5 +685,6 @@ $clearHistoryUrl = url('/suppliers/settlements/global?' . http_build_query(array
 
         syncTotal();
         syncSourceAccounts();
+        syncExchangeField();
     })();
 </script>

@@ -83,11 +83,11 @@ if (! str_contains((string) ($formatted[1]['booking_reference_href'] ?? ''), '/s
     $failures[] = 'Supplier payment references must open the unified Supplier Payment screen.';
 }
 
-if (($cards['Supplier Debit / PKR'] ?? '') !== 'PKR 1,188.00') {
-    $failures[] = 'Summary Debit must contain only the original supplier invoice.';
+if (($cards['Supplier Debit / PKR'] ?? '') !== 'PKR 535.00') {
+    $failures[] = 'Summary Debit must contain the latest net supplier cost after cancellation.';
 }
 if (($cards['Supplier Credit / PKR'] ?? '') !== 'PKR 1,188.00') {
-    $failures[] = 'Summary Credit must contain only the original supplier payment.';
+    $failures[] = 'Summary Credit must contain the actual supplier payment made.';
 }
 if (($cards['Supplier Balance / PKR'] ?? '') !== 'PKR 0.00') {
     $failures[] = 'Fully refunded supplier lifecycle must close at zero.';
@@ -106,6 +106,48 @@ $partialSupplier = $service->buildReport([
 $partialSupplierRows = (array) ($partialSupplier['rows'] ?? []);
 if ((string) ($partialSupplierRows[1]['balance_amount'] ?? '') !== '188.00 Payable') {
     $failures[] = 'Partially paid supplier invoice must leave 188.00 Payable.';
+}
+
+$advanceConsumptionRows = [
+    array_merge($row('2026-07-30', 'Supplier Advance / Overpayment', 3000.00, 0.00, 50), [
+        'booking_id' => 0,
+        'booking_reference' => 'SPAY-000050',
+        'service_line_reference' => '',
+    ]),
+];
+foreach ([
+    ['BK-000587', 502.00],
+    ['BK-000589', 1743.00],
+    ['BK-000590', 561.00],
+] as [$bookingReference, $supplierCost]) {
+    $advanceConsumptionRows[] = array_merge(
+        $row('2026-08-02', 'Payable Created', 0.00, $supplierCost),
+        ['booking_reference' => $bookingReference]
+    );
+    $advanceConsumptionRows[] = array_merge(
+        $row('2026-08-02', 'Advance Applied', $supplierCost, 0.00),
+        ['booking_reference' => $bookingReference]
+    );
+}
+$advanceConsumptionReport = $service->buildReport($advanceConsumptionRows);
+$advanceConsumptionFormatted = (array) ($advanceConsumptionReport['rows'] ?? []);
+$advanceConsumptionCards = array_column(
+    (array) ($advanceConsumptionReport['summaryCards'] ?? []),
+    'value',
+    'label'
+);
+$advanceApplicationRows = array_values(array_filter(
+    $advanceConsumptionFormatted,
+    static fn (array $ledgerRow): bool => (string) ($ledgerRow['source_entry_type'] ?? '') === 'Advance Applied'
+));
+if (
+    count($advanceConsumptionFormatted) !== 4
+    || $advanceApplicationRows !== []
+    || (string) ($advanceConsumptionFormatted[3]['balance_amount'] ?? '') !== '194.00 Advance'
+    || ($advanceConsumptionCards['Supplier Credit / PKR'] ?? '') !== 'PKR 3,000.00'
+    || ($advanceConsumptionCards['Supplier Balance / PKR'] ?? '') !== 'PKR 194.00 Advance'
+) {
+    $failures[] = 'A PKR 3,000 supplier advance consumed by invoices of 502, 1,743, and 561 must appear once and close at PKR 194 Advance.';
 }
 
 $pendingRefund = $service->buildReport(array_slice($settledRows, 0, 4));

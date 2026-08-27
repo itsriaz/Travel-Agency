@@ -12,12 +12,30 @@ use App\Repositories\SupplierRepository;
 use App\Services\SupplierSettlementWorkspaceService;
 
 $apply = in_array('--apply', $argv, true);
+$supplierIdFilter = 0;
+$supplierNameFilter = '';
+foreach ($argv as $argument) {
+    if (str_starts_with($argument, '--supplier-id=')) {
+        $supplierIdFilter = max(0, (int) substr($argument, 14));
+        continue;
+    }
+    if (str_starts_with($argument, '--supplier-name=')) {
+        $supplierNameFilter = trim((string) substr($argument, 16));
+    }
+}
+
 $app = App::bootstrap(BASE_PATH);
 /** @var PDO $db */
 $db = $app->get('db');
 
 echo 'Supplier advance to payable reconciliation' . PHP_EOL;
 echo 'Mode: ' . ($apply ? 'APPLY' : 'DRY RUN') . PHP_EOL;
+if ($supplierIdFilter > 0) {
+    echo 'Supplier filter ID: ' . $supplierIdFilter . PHP_EOL;
+}
+if ($supplierNameFilter !== '') {
+    echo 'Supplier filter name: ' . $supplierNameFilter . PHP_EOL;
+}
 
 $branchIds = array_values(array_filter(array_map(
     'intval',
@@ -43,9 +61,21 @@ if ($actorUserId <= 0) {
 }
 
 $repository = new SupplierRepository($app);
+$resolvedSupplier = null;
+if ($supplierIdFilter > 0) {
+    $resolvedSupplier = $repository->findSupplierById($supplierIdFilter);
+} elseif ($supplierNameFilter !== '') {
+    $resolvedSupplier = $repository->findAccessibleSupplierByName($supplierNameFilter, $branchIds);
+    $supplierIdFilter = (int) ($resolvedSupplier['id'] ?? 0);
+}
+if (($supplierIdFilter > 0 || $supplierNameFilter !== '') && $resolvedSupplier === null) {
+    fwrite(STDERR, 'The requested supplier filter could not be resolved.' . PHP_EOL);
+    exit(1);
+}
+
 $db->beginTransaction();
 try {
-    $obligations = $repository->openObligationsForAdvanceReconciliation($branchIds);
+    $obligations = $repository->openObligationsForAdvanceReconciliation($branchIds, $supplierIdFilter);
     $groups = [];
     foreach ($obligations as $obligation) {
         $supplierId = (int) ($obligation['supplier_id'] ?? 0);
@@ -109,7 +139,8 @@ try {
 
     $result = (new SupplierSettlementWorkspaceService($app))->applyAvailableSupplierAdvancesToOpenPayables(
         $branchIds,
-        $actorUserId
+        $actorUserId,
+        $supplierIdFilter
     );
     echo sprintf(
         'Applied: %s through %d payable reconciliation(s).' . PHP_EOL,
@@ -124,4 +155,3 @@ try {
     fwrite(STDERR, 'Reconciliation failed: ' . $exception->getMessage() . PHP_EOL);
     exit(1);
 }
-

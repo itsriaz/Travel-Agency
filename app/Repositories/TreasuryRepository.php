@@ -25,74 +25,10 @@ final class TreasuryRepository extends BaseRepository
                 ta.*,
                 b.name AS branch_name,
                 coa.code AS linked_account_code,
-                coa.name AS linked_account_name,
-                ROUND(
-                    COALESCE(ta.opening_balance, 0)
-                    + COALESCE(receipt_balance.receipt_balance, 0)
-                    + COALESCE(treasury_balance.treasury_balance, 0),
-                    2
-                ) AS current_balance
+                coa.name AS linked_account_name
              FROM treasury_accounts ta
              INNER JOIN branches b ON b.id = ta.branch_id
              LEFT JOIN chart_of_accounts coa ON coa.id = ta.linked_account_id
-             LEFT JOIN (
-                SELECT
-                    movement.treasury_account_id,
-                    ROUND(SUM(movement.signed_amount), 2) AS receipt_balance
-                FROM (
-                    SELECT
-                        ta_match.id AS treasury_account_id,
-                        COALESCE(jel.debit_amount, 0) - COALESCE(jel.credit_amount, 0) AS signed_amount
-                    FROM journal_entry_lines jel
-                    INNER JOIN journal_entries je ON je.id = jel.journal_entry_id
-                    INNER JOIN chart_of_accounts coa ON coa.id = jel.account_id
-                    INNER JOIN treasury_accounts ta_match
-                        ON ta_match.linked_account_id = jel.account_id
-                       AND ta_match.branch_id = je.branch_id
-                       AND ta_match.currency = je.currency
-                       AND ta_match.is_active = 1
-                       AND ta_match.account_code = coa.code
-
-                    UNION ALL
-
-                    SELECT
-                        cr.treasury_account_id AS treasury_account_id,
-                        COALESCE(jel.debit_amount, 0) - COALESCE(jel.credit_amount, 0) AS signed_amount
-                    FROM customer_receipts cr
-                    INNER JOIN journal_entry_lines jel ON jel.customer_receipt_id = cr.id
-                    INNER JOIN journal_entries je ON je.id = jel.journal_entry_id
-                    INNER JOIN chart_of_accounts coa ON coa.id = jel.account_id
-                    INNER JOIN treasury_accounts ta_link ON ta_link.id = cr.treasury_account_id
-                    WHERE cr.treasury_account_id IS NOT NULL
-                      AND coa.code IN ('CASH_ON_HAND', 'BANK_CLEARING', 'CARD_CLEARING')
-                ) AS movement
-                GROUP BY movement.treasury_account_id
-             ) AS receipt_balance ON receipt_balance.treasury_account_id = ta.id
-             LEFT JOIN (
-                SELECT
-                    movement.account_id,
-                    ROUND(SUM(movement.signed_amount), 2) AS treasury_balance
-                FROM (
-                    SELECT
-                        tt.to_treasury_account_id AS account_id,
-                        tt.amount AS signed_amount
-                    FROM treasury_transactions tt
-                    WHERE tt.status = 'posted'
-                      AND tt.journal_entry_id IS NULL
-                      AND tt.to_treasury_account_id IS NOT NULL
-
-                    UNION ALL
-
-                    SELECT
-                        tt.from_treasury_account_id AS account_id,
-                        -tt.amount AS signed_amount
-                    FROM treasury_transactions tt
-                    WHERE tt.status = 'posted'
-                      AND tt.journal_entry_id IS NULL
-                      AND tt.from_treasury_account_id IS NOT NULL
-                ) AS movement
-                GROUP BY movement.account_id
-             ) AS treasury_balance ON treasury_balance.account_id = ta.id
              WHERE ta.branch_id IN ({$placeholders})
              ORDER BY
                 b.name ASC,
@@ -100,8 +36,14 @@ final class TreasuryRepository extends BaseRepository
                 ta.account_name ASC"
         );
         $statement->execute($branchIds);
+        $rows = $statement->fetchAll(PDO::FETCH_ASSOC) ?: [];
 
-        return $statement->fetchAll(PDO::FETCH_ASSOC) ?: [];
+        foreach ($rows as &$row) {
+            $row['current_balance'] = $this->currentBalanceForAccountId((int) ($row['id'] ?? 0));
+        }
+        unset($row);
+
+        return $rows;
     }
 
     public function findAccount(int $id, array $branchIds): ?array
@@ -196,80 +138,23 @@ final class TreasuryRepository extends BaseRepository
                 ta.account_code,
                 ta.currency,
                 ta.is_default,
-                ta.is_active,
-                ROUND(
-                    COALESCE(ta.opening_balance, 0)
-                    + COALESCE(receipt_balance.receipt_balance, 0)
-                    + COALESCE(treasury_balance.treasury_balance, 0),
-                    2
-                ) AS current_balance
+                ta.is_active
              FROM treasury_accounts ta
              INNER JOIN branches b ON b.id = ta.branch_id
-             LEFT JOIN (
-                SELECT
-                    movement.treasury_account_id,
-                    ROUND(SUM(movement.signed_amount), 2) AS receipt_balance
-                FROM (
-                    SELECT
-                        ta_match.id AS treasury_account_id,
-                        COALESCE(jel.debit_amount, 0) - COALESCE(jel.credit_amount, 0) AS signed_amount
-                    FROM journal_entry_lines jel
-                    INNER JOIN journal_entries je ON je.id = jel.journal_entry_id
-                    INNER JOIN chart_of_accounts coa ON coa.id = jel.account_id
-                    INNER JOIN treasury_accounts ta_match
-                        ON ta_match.linked_account_id = jel.account_id
-                       AND ta_match.branch_id = je.branch_id
-                       AND ta_match.currency = je.currency
-                       AND ta_match.is_active = 1
-                       AND ta_match.account_code = coa.code
-
-                    UNION ALL
-
-                    SELECT
-                        cr.treasury_account_id AS treasury_account_id,
-                        COALESCE(jel.debit_amount, 0) - COALESCE(jel.credit_amount, 0) AS signed_amount
-                    FROM customer_receipts cr
-                    INNER JOIN journal_entry_lines jel ON jel.customer_receipt_id = cr.id
-                    INNER JOIN journal_entries je ON je.id = jel.journal_entry_id
-                    INNER JOIN chart_of_accounts coa ON coa.id = jel.account_id
-                    WHERE cr.treasury_account_id IS NOT NULL
-                      AND coa.code IN ('CASH_ON_HAND', 'BANK_CLEARING', 'CARD_CLEARING')
-                ) AS movement
-                GROUP BY movement.treasury_account_id
-             ) AS receipt_balance ON receipt_balance.treasury_account_id = ta.id
-             LEFT JOIN (
-                SELECT
-                    movement.account_id,
-                    ROUND(SUM(movement.signed_amount), 2) AS treasury_balance
-                FROM (
-                    SELECT
-                        tt.to_treasury_account_id AS account_id,
-                        tt.amount AS signed_amount
-                    FROM treasury_transactions tt
-                    WHERE tt.status = 'posted'
-                      AND tt.journal_entry_id IS NULL
-                      AND tt.to_treasury_account_id IS NOT NULL
-
-                    UNION ALL
-
-                    SELECT
-                        tt.from_treasury_account_id AS account_id,
-                        -tt.amount AS signed_amount
-                    FROM treasury_transactions tt
-                    WHERE tt.status = 'posted'
-                      AND tt.journal_entry_id IS NULL
-                      AND tt.from_treasury_account_id IS NOT NULL
-                ) AS movement
-                GROUP BY movement.account_id
-             ) AS treasury_balance ON treasury_balance.account_id = ta.id
              WHERE ta.branch_id IN ({$placeholders})
                AND ta.is_active = 1
                AND ta.account_type IN ('cash', 'bank')
              ORDER BY b.name ASC, ta.account_type ASC, ta.is_default DESC, ta.account_name ASC"
         );
         $statement->execute($branchIds);
+        $rows = $statement->fetchAll(PDO::FETCH_ASSOC) ?: [];
 
-        return $statement->fetchAll(PDO::FETCH_ASSOC) ?: [];
+        foreach ($rows as &$row) {
+            $row['current_balance'] = $this->currentBalanceForAccountId((int) ($row['id'] ?? 0));
+        }
+        unset($row);
+
+        return $rows;
     }
 
     public function recentTransfers(array $branchIds, int $limit = 20): array
@@ -285,6 +170,29 @@ final class TreasuryRepository extends BaseRepository
         $counterpartySelect = $this->columnExists('treasury_transactions', 'counterparty_name')
             ? ', tt.counterparty_name'
             : ', NULL AS counterparty_name';
+        $hasSourceBranchColumn = $this->columnExists('treasury_transactions', 'source_branch_id');
+        $hasDestinationBranchColumn = $this->columnExists('treasury_transactions', 'destination_branch_id');
+        $sourceBranchSelect = $hasSourceBranchColumn
+            ? ', tt.source_branch_id, source_branch.name AS source_branch_name'
+            : ', tt.branch_id AS source_branch_id, b.name AS source_branch_name';
+        $destinationBranchSelect = $hasDestinationBranchColumn
+            ? ', tt.destination_branch_id, destination_branch.name AS destination_branch_name'
+            : ', tt.branch_id AS destination_branch_id, b.name AS destination_branch_name';
+        $sourceCurrencySelect = $this->columnExists('treasury_transactions', 'source_currency')
+            ? ', tt.source_currency'
+            : ', tt.currency AS source_currency';
+        $destinationCurrencySelect = $this->columnExists('treasury_transactions', 'destination_currency')
+            ? ', tt.destination_currency'
+            : ', tt.currency AS destination_currency';
+        $sourceAmountSelect = $this->columnExists('treasury_transactions', 'source_amount')
+            ? ', tt.source_amount'
+            : ', tt.amount AS source_amount';
+        $destinationAmountSelect = $this->columnExists('treasury_transactions', 'destination_amount')
+            ? ', tt.destination_amount'
+            : ', tt.amount AS destination_amount';
+        $exchangeRateSelect = $this->columnExists('treasury_transactions', 'exchange_rate')
+            ? ', tt.exchange_rate'
+            : ', NULL AS exchange_rate';
         $statement = $this->db->prepare(
             "SELECT
                 tt.id,
@@ -295,6 +203,13 @@ final class TreasuryRepository extends BaseRepository
                 tt.reference_no,
                 tt.narration,
                 " . ltrim($counterpartySelect, ', ') . ",
+                " . ltrim($sourceBranchSelect, ', ') . ",
+                " . ltrim($destinationBranchSelect, ', ') . ",
+                " . ltrim($sourceCurrencySelect, ', ') . ",
+                " . ltrim($destinationCurrencySelect, ', ') . ",
+                " . ltrim($sourceAmountSelect, ', ') . ",
+                " . ltrim($destinationAmountSelect, ', ') . ",
+                " . ltrim($exchangeRateSelect, ', ') . ",
                 tt.status,
                 tt.voided_at,
                 tt.void_reason,
@@ -308,6 +223,8 @@ final class TreasuryRepository extends BaseRepository
                 void_user.username AS voided_by_username
              FROM treasury_transactions tt
              INNER JOIN branches b ON b.id = tt.branch_id
+             " . ($hasSourceBranchColumn ? 'LEFT JOIN branches source_branch ON source_branch.id = tt.source_branch_id' : '') . "
+             " . ($hasDestinationBranchColumn ? 'LEFT JOIN branches destination_branch ON destination_branch.id = tt.destination_branch_id' : '') . "
              LEFT JOIN treasury_accounts from_ta ON from_ta.id = tt.from_treasury_account_id
              LEFT JOIN treasury_accounts to_ta ON to_ta.id = tt.to_treasury_account_id
              LEFT JOIN users u ON u.id = tt.created_by_user_id
@@ -319,6 +236,71 @@ final class TreasuryRepository extends BaseRepository
         $statement->execute($branchIds);
 
         return $statement->fetchAll(PDO::FETCH_ASSOC) ?: [];
+    }
+
+    public function findTransactionForCorrection(int $transactionId, array $branchIds): ?array
+    {
+        $branchIds = array_values(array_map('intval', $branchIds));
+        if ($transactionId <= 0 || $branchIds === []) {
+            return null;
+        }
+
+        $placeholders = implode(',', array_fill(0, count($branchIds), '?'));
+        $hasCounterpartyColumn = $this->columnExists('treasury_transactions', 'counterparty_name');
+        $hasBusinessSourceColumn = $this->columnExists('treasury_transactions', 'business_source_id');
+        $hasSourceBranchColumn = $this->columnExists('treasury_transactions', 'source_branch_id');
+        $hasDestinationBranchColumn = $this->columnExists('treasury_transactions', 'destination_branch_id');
+        $hasSourceCurrencyColumn = $this->columnExists('treasury_transactions', 'source_currency');
+        $hasDestinationCurrencyColumn = $this->columnExists('treasury_transactions', 'destination_currency');
+        $hasSourceAmountColumn = $this->columnExists('treasury_transactions', 'source_amount');
+        $hasDestinationAmountColumn = $this->columnExists('treasury_transactions', 'destination_amount');
+        $hasExchangeRateColumn = $this->columnExists('treasury_transactions', 'exchange_rate');
+        $hasRateDateColumn = $this->columnExists('treasury_transactions', 'exchange_rate_effective_date');
+
+        $params = array_merge([$transactionId], $branchIds, $branchIds, $branchIds);
+        $statement = $this->db->prepare(
+            'SELECT
+                tt.id,
+                tt.branch_id,
+                tt.transaction_type,
+                tt.transaction_date,
+                tt.currency,
+                tt.from_treasury_account_id,
+                tt.to_treasury_account_id,
+                tt.amount,
+                tt.reference_no,
+                tt.narration,
+                tt.status,
+                tt.journal_entry_id,
+                ' . ($hasCounterpartyColumn ? 'tt.counterparty_name' : 'NULL') . ' AS counterparty_name,
+                ' . ($hasBusinessSourceColumn ? 'tt.business_source_id' : 'NULL') . ' AS business_source_id,
+                ' . ($hasSourceBranchColumn ? 'COALESCE(tt.source_branch_id, tt.branch_id)' : 'tt.branch_id') . ' AS source_branch_id,
+                ' . ($hasDestinationBranchColumn ? 'COALESCE(tt.destination_branch_id, tt.branch_id)' : 'tt.branch_id') . ' AS destination_branch_id,
+                ' . ($hasSourceCurrencyColumn ? 'COALESCE(tt.source_currency, tt.currency)' : 'tt.currency') . ' AS source_currency,
+                ' . ($hasDestinationCurrencyColumn ? 'COALESCE(tt.destination_currency, tt.currency)' : 'tt.currency') . ' AS destination_currency,
+                ' . ($hasSourceAmountColumn ? 'COALESCE(tt.source_amount, tt.amount)' : 'tt.amount') . ' AS source_amount,
+                ' . ($hasDestinationAmountColumn ? 'COALESCE(tt.destination_amount, tt.amount)' : 'tt.amount') . ' AS destination_amount,
+                ' . ($hasExchangeRateColumn ? 'tt.exchange_rate' : 'NULL') . ' AS exchange_rate,
+                ' . ($hasRateDateColumn ? 'tt.exchange_rate_effective_date' : 'NULL') . ' AS exchange_rate_effective_date,
+                from_ta.account_name AS from_account_name,
+                to_ta.account_name AS to_account_name,
+                b.name AS branch_name
+             FROM treasury_transactions tt
+             INNER JOIN branches b ON b.id = tt.branch_id
+             LEFT JOIN treasury_accounts from_ta ON from_ta.id = tt.from_treasury_account_id
+             LEFT JOIN treasury_accounts to_ta ON to_ta.id = tt.to_treasury_account_id
+             WHERE tt.id = ?
+               AND (
+                    tt.branch_id IN (' . $placeholders . ')
+                    OR ' . ($hasSourceBranchColumn ? 'COALESCE(tt.source_branch_id, tt.branch_id)' : 'tt.branch_id') . ' IN (' . $placeholders . ')
+                    OR ' . ($hasDestinationBranchColumn ? 'COALESCE(tt.destination_branch_id, tt.branch_id)' : 'tt.branch_id') . ' IN (' . $placeholders . ')
+               )
+             LIMIT 1'
+        );
+        $statement->execute($params);
+        $row = $statement->fetch(PDO::FETCH_ASSOC);
+
+        return $row ?: null;
     }
 
     public function saveDirectEntry(array $data, array $branchIds): int
@@ -368,6 +350,14 @@ final class TreasuryRepository extends BaseRepository
 
             $counterpartyName = trim((string) ($data['counterparty_name'] ?? ''));
             $counterpartyName = $counterpartyName !== '' ? mb_substr($counterpartyName, 0, 190) : null;
+            $businessSourceId = max(0, (int) ($data['business_source_id'] ?? 0));
+            $businessSource = null;
+            if ($businessSourceId > 0) {
+                $businessSource = (new MasterDataRepository($this->app))->find('business_sources', $businessSourceId);
+                if ($businessSource === null || (int) ($businessSource['is_active'] ?? 1) !== 1) {
+                    throw new RuntimeException('Please select a valid active account holder.');
+                }
+            }
             $referenceNo = trim((string) ($data['reference_no'] ?? ''));
             $referenceNo = $referenceNo !== '' ? mb_substr($referenceNo, 0, 100) : null;
             $remarks = trim((string) ($data['narration'] ?? ''));
@@ -375,6 +365,7 @@ final class TreasuryRepository extends BaseRepository
 
             $directionLabel = $transactionType === 'adjustment_increase' ? 'Money In' : 'Money Out';
             $defaultNarration = $directionLabel
+                . ($businessSource !== null ? ' / ' . trim((string) ($businessSource['name'] ?? 'Account Holder')) : '')
                 . ($counterpartyName !== null ? ' - ' . $counterpartyName : '')
                 . ($remarks !== null ? ' - ' . $remarks : '');
 
@@ -388,11 +379,13 @@ final class TreasuryRepository extends BaseRepository
                 'source_reference' => $referenceNo,
                 'narration' => $defaultNarration,
                 'counterparty_name' => $counterpartyName,
+                'business_source_id' => $businessSourceId > 0 ? $businessSourceId : null,
                 'treasury_account_id' => $treasuryAccountId,
                 'actor_user_id' => $data['created_by_user_id'] ?? null,
             ]);
 
             $hasCounterpartyColumn = $this->columnExists('treasury_transactions', 'counterparty_name');
+            $hasBusinessSourceColumn = $this->columnExists('treasury_transactions', 'business_source_id');
             $columns = [
                 'branch_id',
                 'transaction_type',
@@ -407,12 +400,16 @@ final class TreasuryRepository extends BaseRepository
                 'status',
                 'created_by_user_id',
             ];
+            if ($hasBusinessSourceColumn) {
+                array_splice($columns, 1, 0, ['business_source_id']);
+            }
             if ($hasCounterpartyColumn) {
                 array_splice($columns, 8, 0, ['counterparty_name']);
             }
 
             $payload = [
                 'branch_id' => $branchId,
+                'business_source_id' => $businessSourceId > 0 ? $businessSourceId : null,
                 'transaction_type' => $transactionType,
                 'transaction_date' => $transactionDate,
                 'currency' => $currency,
@@ -447,6 +444,8 @@ final class TreasuryRepository extends BaseRepository
                 'currency' => $currency,
                 'amount' => $amount,
                 'treasury_account_id' => $treasuryAccountId,
+                'business_source_id' => $businessSourceId,
+                'business_source_name' => $businessSource !== null ? (string) ($businessSource['name'] ?? '') : null,
                 'treasury_account_name' => (string) ($account['account_name'] ?? ''),
                 'counterparty_name' => $counterpartyName,
                 'reference_no' => $referenceNo,
@@ -454,6 +453,59 @@ final class TreasuryRepository extends BaseRepository
             ]);
 
             return $transactionId;
+        });
+    }
+
+    public function correctDirectEntry(array $data, int $actorUserId, array $branchIds): array
+    {
+        $branchIds = array_values(array_map('intval', $branchIds));
+
+        return $this->transaction(function () use ($data, $actorUserId, $branchIds): array {
+            $transactionId = (int) ($data['correction_transaction_id'] ?? 0);
+            if ($transactionId <= 0) {
+                throw new RuntimeException('Please select a treasury entry to correct.');
+            }
+
+            $original = $this->findTransactionForCorrection($transactionId, $branchIds);
+            if ($original === null) {
+                throw new RuntimeException('The selected treasury entry could not be found for correction.');
+            }
+
+            $transactionType = (string) ($original['transaction_type'] ?? '');
+            if (! in_array($transactionType, ['adjustment_increase', 'adjustment_decrease'], true)) {
+                throw new RuntimeException('Only direct treasury entries can be corrected from this form.');
+            }
+
+            $status = str_replace(' ', '_', mb_strtolower(trim((string) ($original['status'] ?? 'posted'))));
+            if ($status === 'void') {
+                throw new RuntimeException('Voided treasury entries cannot be corrected.');
+            }
+
+            $correctionReason = trim((string) ($data['correction_reason'] ?? ''));
+            if ($correctionReason === '') {
+                throw new RuntimeException('Please enter the correction reason before saving the treasury entry edit.');
+            }
+
+            $voidResult = $this->voidTransfer(
+                $transactionId,
+                'Correction: ' . mb_substr($correctionReason, 0, 500),
+                $actorUserId,
+                $branchIds
+            );
+            $newTransactionId = $this->saveDirectEntry($data, $branchIds);
+
+            AuditLog::record($this->app, 'treasury.direct_entry.corrected', [
+                'user_id' => $actorUserId,
+                'original_treasury_transaction_id' => $transactionId,
+                'corrected_treasury_transaction_id' => $newTransactionId,
+                'void_reversal_journal_entry_id' => (int) ($voidResult['reversal_journal_entry_id'] ?? 0),
+                'correction_reason' => $correctionReason,
+            ]);
+
+            return [
+                'original_treasury_transaction_id' => $transactionId,
+                'corrected_treasury_transaction_id' => $newTransactionId,
+            ];
         });
     }
 
@@ -513,7 +565,10 @@ final class TreasuryRepository extends BaseRepository
         int $branchId,
         string $currency,
         string $paymentMethod,
-        bool $allowBankSourceForCash = false
+        bool $allowBankSourceForCash = false,
+        bool $allowDifferentCurrency = false,
+        bool $allowDifferentBranch = true,
+        bool $allowCashBankInterchange = false
     ): array
     {
         if ($treasuryAccountId <= 0) {
@@ -551,15 +606,19 @@ final class TreasuryRepository extends BaseRepository
             throw new RuntimeException('Selected cash or bank account is inactive.');
         }
 
-        if ((int) ($account['branch_id'] ?? 0) !== $branchId) {
+        if (! $allowDifferentBranch && (int) ($account['branch_id'] ?? 0) !== $branchId) {
             throw new RuntimeException('Selected cash or bank account does not belong to this branch.');
         }
 
-        if (strtoupper((string) ($account['currency'] ?? '')) !== strtoupper(trim($currency))) {
+        if (! $allowDifferentCurrency
+            && strtoupper((string) ($account['currency'] ?? '')) !== strtoupper(trim($currency))) {
             throw new RuntimeException('Selected cash or bank account does not match the payment currency.');
         }
 
         $compatibleTypes = $this->compatibleTreasuryTypesForPaymentMethod($paymentMethod);
+        if ($allowCashBankInterchange && in_array(str_replace(' ', '_', mb_strtolower(trim($paymentMethod))), ['cash', 'bank_transfer'], true)) {
+            $compatibleTypes = array_values(array_unique(array_merge($compatibleTypes, ['cash', 'bank'])));
+        }
         if ($allowBankSourceForCash && str_replace(' ', '_', mb_strtolower(trim($paymentMethod))) === 'cash') {
             $compatibleTypes[] = 'bank';
             $compatibleTypes = array_values(array_unique($compatibleTypes));
@@ -612,6 +671,42 @@ final class TreasuryRepository extends BaseRepository
         $id = $statement->fetchColumn();
 
         return $id !== false ? (int) $id : null;
+    }
+
+    private function ensureOperationalLedgerAccountId(string $accountCode, string $accountName, ?int $fallbackAccountId = null): ?int
+    {
+        $accountCode = strtoupper(trim($accountCode));
+        if ($accountCode === '') {
+            return $fallbackAccountId;
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT id
+             FROM chart_of_accounts
+             WHERE code = :code
+             LIMIT 1'
+        );
+        $statement->execute(['code' => $accountCode]);
+        $existingId = (int) ($statement->fetchColumn() ?: 0);
+
+        if ($existingId > 0) {
+            return $existingId;
+        }
+
+        $insert = $this->db->prepare(
+            'INSERT INTO chart_of_accounts (
+                code, name, purpose, account_type, normal_balance, is_system, is_active
+             ) VALUES (
+                :code, :name, :purpose, "asset", "debit", 0, 1
+             )'
+        );
+        $insert->execute([
+            'code' => $accountCode,
+            'name' => $accountName !== '' ? $accountName : $accountCode,
+            'purpose' => 'Operational treasury account',
+        ]);
+
+        return (int) $this->db->lastInsertId();
     }
 
     private function accountTypeSupportsBankDetails(string $accountType): bool
@@ -815,6 +910,11 @@ final class TreasuryRepository extends BaseRepository
                 $payload['account_code'] = $existingAccountCode !== ''
                     ? $existingAccountCode
                     : $this->uniqueAccountCode($baseAccountCode, $id);
+                $payload['linked_account_id'] = $this->ensureOperationalLedgerAccountId(
+                    $payload['account_code'],
+                    $accountName,
+                    $linkedAccountId
+                );
 
                 $statement = $this->db->prepare(
                     'UPDATE treasury_accounts
@@ -847,6 +947,11 @@ final class TreasuryRepository extends BaseRepository
 
             $payload['created_by_user_id'] = $data['created_by_user_id'] ?? null;
             $payload['account_code'] = $this->uniqueAccountCode($baseAccountCode);
+            $payload['linked_account_id'] = $this->ensureOperationalLedgerAccountId(
+                $payload['account_code'],
+                $accountName,
+                $linkedAccountId
+            );
 
             $statement = $this->db->prepare(
                 'INSERT INTO treasury_accounts (
@@ -899,11 +1004,6 @@ final class TreasuryRepository extends BaseRepository
         $branchIds = array_values(array_map('intval', $branchIds));
 
         return $this->transaction(function () use ($data, $branchIds): int {
-            $branchId = (int) ($data['branch_id'] ?? 0);
-            if ($branchId <= 0 || ! in_array($branchId, $branchIds, true)) {
-                throw new RuntimeException('Please select an accessible branch for the treasury transfer.');
-            }
-
             $transactionType = trim((string) ($data['transaction_type'] ?? ''));
             $allowedTypes = ['cash_deposit_to_bank', 'bank_withdrawal_to_cash', 'bank_to_bank_transfer', 'cash_to_cash_transfer'];
             if (! in_array($transactionType, $allowedTypes, true)) {
@@ -915,16 +1015,6 @@ final class TreasuryRepository extends BaseRepository
                 throw new RuntimeException('Please select the treasury transfer date.');
             }
 
-            $currency = strtoupper(trim((string) ($data['currency'] ?? 'PKR')));
-            if ($currency === '') {
-                throw new RuntimeException('Please select the transfer currency.');
-            }
-
-            $amount = round((float) ($data['amount'] ?? 0), 2);
-            if ($amount <= 0) {
-                throw new RuntimeException('Please enter a treasury transfer amount greater than zero.');
-            }
-
             $fromAccountId = (int) ($data['from_treasury_account_id'] ?? 0);
             $toAccountId = (int) ($data['to_treasury_account_id'] ?? 0);
             if ($fromAccountId <= 0 || $toAccountId <= 0) {
@@ -934,15 +1024,74 @@ final class TreasuryRepository extends BaseRepository
                 throw new RuntimeException('Source and destination treasury accounts must be different.');
             }
 
-            $fromAccount = $this->validatedTransferAccount($fromAccountId, $branchId, $currency);
-            $toAccount = $this->validatedTransferAccount($toAccountId, $branchId, $currency);
-            $availableSourceBalance = $this->currentBalanceForAccountId($fromAccountId);
+            $fromAccount = $this->validatedTransferAccount($fromAccountId);
+            $toAccount = $this->validatedTransferAccount($toAccountId);
+            $branchId = (int) ($fromAccount['branch_id'] ?? 0);
+            if ($branchId <= 0 || ! in_array($branchId, $branchIds, true)) {
+                throw new RuntimeException('Please select an accessible source branch for the treasury transfer.');
+            }
+            $destinationBranchId = (int) ($toAccount['branch_id'] ?? 0);
+            if ($destinationBranchId <= 0 || ! in_array($destinationBranchId, $branchIds, true)) {
+                throw new RuntimeException('Please select an accessible destination branch for the treasury transfer.');
+            }
 
-            if (round($availableSourceBalance + 0.005, 2) < $amount) {
+            $sourceCurrency = strtoupper(trim((string) ($data['source_currency'] ?? $data['currency'] ?? $fromAccount['currency'] ?? 'PKR')));
+            $destinationCurrency = strtoupper(trim((string) ($data['destination_currency'] ?? $data['currency'] ?? $toAccount['currency'] ?? $sourceCurrency)));
+            if ($sourceCurrency === '' || $destinationCurrency === '') {
+                throw new RuntimeException('Please select the source and destination currencies.');
+            }
+
+            if (strtoupper((string) ($fromAccount['currency'] ?? '')) !== $sourceCurrency) {
+                throw new RuntimeException('Selected source treasury account does not match the chosen source currency.');
+            }
+            if (strtoupper((string) ($toAccount['currency'] ?? '')) !== $destinationCurrency) {
+                throw new RuntimeException('Selected destination treasury account does not match the chosen destination currency.');
+            }
+
+            $sourceAmount = round((float) ($data['source_amount'] ?? $data['amount'] ?? 0), 2);
+            $destinationAmount = round((float) ($data['destination_amount'] ?? $data['amount_received'] ?? $data['amount'] ?? 0), 2);
+            if ($sourceAmount <= 0 || $destinationAmount <= 0) {
+                throw new RuntimeException('Please enter both sent and received transfer amounts greater than zero.');
+            }
+
+            $hasSourceBranchColumn = $this->columnExists('treasury_transactions', 'source_branch_id');
+            $hasDestinationBranchColumn = $this->columnExists('treasury_transactions', 'destination_branch_id');
+            $hasSourceCurrencyColumn = $this->columnExists('treasury_transactions', 'source_currency');
+            $hasDestinationCurrencyColumn = $this->columnExists('treasury_transactions', 'destination_currency');
+            $hasSourceAmountColumn = $this->columnExists('treasury_transactions', 'source_amount');
+            $hasDestinationAmountColumn = $this->columnExists('treasury_transactions', 'destination_amount');
+            $hasExchangeRateColumn = $this->columnExists('treasury_transactions', 'exchange_rate');
+            $hasExchangeRateDateColumn = $this->columnExists('treasury_transactions', 'exchange_rate_effective_date');
+            $hasDestinationJournalColumn = $this->columnExists('treasury_transactions', 'destination_journal_entry_id');
+
+            $exchangeRate = round((float) ($data['exchange_rate'] ?? 0), 8);
+            if ($sourceCurrency === $destinationCurrency) {
+                $exchangeRate = 1.0;
+                $destinationAmount = $sourceAmount;
+            } elseif (
+                ! $hasSourceBranchColumn
+                || ! $hasDestinationBranchColumn
+                || ! $hasSourceCurrencyColumn
+                || ! $hasDestinationCurrencyColumn
+                || ! $hasSourceAmountColumn
+                || ! $hasDestinationAmountColumn
+                || ! $hasExchangeRateColumn
+                || ! $hasExchangeRateDateColumn
+            ) {
+                throw new RuntimeException(
+                    'Cross-currency treasury transfer is not available until the treasury migration is applied. '
+                    . 'Run migration 20260825_000076_treasury_cross_branch_cross_currency and save again.'
+                );
+            } elseif ($exchangeRate <= 0) {
+                throw new RuntimeException('Please enter the transfer exchange rate for cross-currency treasury movement.');
+            }
+
+            $availableSourceBalance = $this->currentBalanceForAccountId($fromAccountId);
+            if (round($availableSourceBalance + 0.005, 2) < $sourceAmount) {
                 throw new RuntimeException(
                     'Selected source treasury account does not have enough balance for this transfer. Available: '
                     . number_format($availableSourceBalance, 2)
-                    . ' ' . $currency . '.'
+                    . ' ' . $sourceCurrency . '.'
                 );
             }
 
@@ -993,63 +1142,98 @@ final class TreasuryRepository extends BaseRepository
                 ],
             };
 
-            $accounting = new AccountingRepository($this->app);
-            $journalEntryId = $accounting->postTreasuryTransfer([
-                'branch_id' => $branchId,
-                'entry_date' => $transactionDate,
-                'currency' => $currency,
-                'amount' => $amount,
-                'source_reference' => $referenceNo,
-                'narration' => $narration ?: $defaultNarration,
-                'actor_user_id' => $data['created_by_user_id'] ?? null,
-                'from_treasury_account_id' => $fromAccountId,
-                'to_treasury_account_id' => $toAccountId,
-                'from_line_description' => $sourceDescription . ': ' . (string) ($fromAccount['account_name'] ?? ''),
-                'to_line_description' => $destinationDescription . ': ' . (string) ($toAccount['account_name'] ?? ''),
-            ]);
+            $isSingleCurrencySameBranch = $branchId === $destinationBranchId && $sourceCurrency === $destinationCurrency;
+            $journalEntryId = null;
+            if ($isSingleCurrencySameBranch) {
+                $accounting = new AccountingRepository($this->app);
+                $journalEntryId = $accounting->postTreasuryTransfer([
+                    'branch_id' => $branchId,
+                    'entry_date' => $transactionDate,
+                    'currency' => $sourceCurrency,
+                    'amount' => $sourceAmount,
+                    'source_reference' => $referenceNo,
+                    'narration' => $narration ?: $defaultNarration,
+                    'actor_user_id' => $data['created_by_user_id'] ?? null,
+                    'from_treasury_account_id' => $fromAccountId,
+                    'to_treasury_account_id' => $toAccountId,
+                    'from_line_description' => $sourceDescription . ': ' . (string) ($fromAccount['account_name'] ?? ''),
+                    'to_line_description' => $destinationDescription . ': ' . (string) ($toAccount['account_name'] ?? ''),
+                ]);
+            }
 
-            $statement = $this->db->prepare(
-                'INSERT INTO treasury_transactions (
-                    branch_id,
-                    transaction_type,
-                    transaction_date,
-                    currency,
-                    from_treasury_account_id,
-                    to_treasury_account_id,
-                    amount,
-                    reference_no,
-                    narration,
-                    journal_entry_id,
-                    status,
-                    created_by_user_id
-                ) VALUES (
-                    :branch_id,
-                    :transaction_type,
-                    :transaction_date,
-                    :currency,
-                    :from_treasury_account_id,
-                    :to_treasury_account_id,
-                    :amount,
-                    :reference_no,
-                    :narration,
-                    :journal_entry_id,
-                    "posted",
-                    :created_by_user_id
-                )'
-            );
-            $statement->execute([
+            $columns = [
+                'branch_id',
+                'transaction_type',
+                'transaction_date',
+                'currency',
+                'from_treasury_account_id',
+                'to_treasury_account_id',
+                'amount',
+                'reference_no',
+                'narration',
+                'journal_entry_id',
+                'status',
+                'created_by_user_id',
+            ];
+            if ($hasSourceBranchColumn) {
+                $columns[] = 'source_branch_id';
+            }
+            if ($hasDestinationBranchColumn) {
+                $columns[] = 'destination_branch_id';
+            }
+            if ($hasSourceCurrencyColumn) {
+                $columns[] = 'source_currency';
+            }
+            if ($hasDestinationCurrencyColumn) {
+                $columns[] = 'destination_currency';
+            }
+            if ($hasSourceAmountColumn) {
+                $columns[] = 'source_amount';
+            }
+            if ($hasDestinationAmountColumn) {
+                $columns[] = 'destination_amount';
+            }
+            if ($hasExchangeRateColumn) {
+                $columns[] = 'exchange_rate';
+            }
+            if ($hasExchangeRateDateColumn) {
+                $columns[] = 'exchange_rate_effective_date';
+            }
+            if ($hasDestinationJournalColumn) {
+                $columns[] = 'destination_journal_entry_id';
+            }
+
+            $payload = [
                 'branch_id' => $branchId,
                 'transaction_type' => $transactionType,
                 'transaction_date' => $transactionDate,
-                'currency' => $currency,
+                'currency' => $sourceCurrency,
                 'from_treasury_account_id' => $fromAccountId,
                 'to_treasury_account_id' => $toAccountId,
-                'amount' => $amount,
+                'amount' => $sourceAmount,
                 'reference_no' => $referenceNo,
                 'narration' => $narration,
                 'journal_entry_id' => $journalEntryId,
+                'status' => 'posted',
                 'created_by_user_id' => $data['created_by_user_id'] ?? null,
-            ]);
+                'source_branch_id' => $branchId,
+                'destination_branch_id' => $destinationBranchId,
+                'source_currency' => $sourceCurrency,
+                'destination_currency' => $destinationCurrency,
+                'source_amount' => $sourceAmount,
+                'destination_amount' => $destinationAmount,
+                'exchange_rate' => $exchangeRate > 0 ? $exchangeRate : null,
+                'exchange_rate_effective_date' => trim((string) ($data['exchange_rate_effective_date'] ?? '')) ?: null,
+                'destination_journal_entry_id' => null,
+            ];
+
+            $placeholders = array_map(static fn (string $column): string => ':' . $column, $columns);
+            $statement = $this->db->prepare(sprintf(
+                'INSERT INTO treasury_transactions (%s) VALUES (%s)',
+                implode(', ', $columns),
+                implode(', ', $placeholders)
+            ));
+            $statement->execute(array_intersect_key($payload, array_flip($columns)));
 
             $transferId = (int) $this->db->lastInsertId();
 
@@ -1060,8 +1244,15 @@ final class TreasuryRepository extends BaseRepository
                 'branch_id' => $branchId,
                 'transaction_type' => $transactionType,
                 'transaction_date' => $transactionDate,
-                'currency' => $currency,
-                'amount' => $amount,
+                'currency' => $sourceCurrency,
+                'amount' => $sourceAmount,
+                'source_branch_id' => $branchId,
+                'destination_branch_id' => $destinationBranchId,
+                'source_currency' => $sourceCurrency,
+                'destination_currency' => $destinationCurrency,
+                'source_amount' => $sourceAmount,
+                'destination_amount' => $destinationAmount,
+                'exchange_rate' => $exchangeRate > 0 ? $exchangeRate : null,
                 'reference_no' => $referenceNo,
                 'from_treasury_account_id' => $fromAccountId,
                 'from_account_name' => (string) ($fromAccount['account_name'] ?? ''),
@@ -1070,6 +1261,59 @@ final class TreasuryRepository extends BaseRepository
             ]);
 
             return $transferId;
+        });
+    }
+
+    public function correctTransfer(array $data, int $actorUserId, array $branchIds): array
+    {
+        $branchIds = array_values(array_map('intval', $branchIds));
+
+        return $this->transaction(function () use ($data, $actorUserId, $branchIds): array {
+            $transactionId = (int) ($data['correction_transaction_id'] ?? 0);
+            if ($transactionId <= 0) {
+                throw new RuntimeException('Please select a treasury transfer to correct.');
+            }
+
+            $original = $this->findTransactionForCorrection($transactionId, $branchIds);
+            if ($original === null) {
+                throw new RuntimeException('The selected treasury transfer could not be found for correction.');
+            }
+
+            $transactionType = (string) ($original['transaction_type'] ?? '');
+            if (! in_array($transactionType, ['cash_deposit_to_bank', 'bank_withdrawal_to_cash', 'bank_to_bank_transfer', 'cash_to_cash_transfer'], true)) {
+                throw new RuntimeException('Only internal treasury transfers can be corrected from this form.');
+            }
+
+            $status = str_replace(' ', '_', mb_strtolower(trim((string) ($original['status'] ?? 'posted'))));
+            if ($status === 'void') {
+                throw new RuntimeException('Voided treasury transfers cannot be corrected.');
+            }
+
+            $correctionReason = trim((string) ($data['correction_reason'] ?? ''));
+            if ($correctionReason === '') {
+                throw new RuntimeException('Please enter the correction reason before saving the treasury transfer edit.');
+            }
+
+            $voidResult = $this->voidTransfer(
+                $transactionId,
+                'Correction: ' . mb_substr($correctionReason, 0, 500),
+                $actorUserId,
+                $branchIds
+            );
+            $newTransactionId = $this->saveTransfer($data, $branchIds);
+
+            AuditLog::record($this->app, 'treasury.transfer.corrected', [
+                'user_id' => $actorUserId,
+                'original_treasury_transaction_id' => $transactionId,
+                'corrected_treasury_transaction_id' => $newTransactionId,
+                'void_reversal_journal_entry_id' => (int) ($voidResult['reversal_journal_entry_id'] ?? 0),
+                'correction_reason' => $correctionReason,
+            ]);
+
+            return [
+                'original_treasury_transaction_id' => $transactionId,
+                'corrected_treasury_transaction_id' => $newTransactionId,
+            ];
         });
     }
 
@@ -1181,7 +1425,7 @@ final class TreasuryRepository extends BaseRepository
         });
     }
 
-    private function validatedTransferAccount(int $treasuryAccountId, int $branchId, string $currency): array
+    private function validatedTransferAccount(int $treasuryAccountId, ?int $branchId = null, string $currency = ''): array
     {
         $statement = $this->db->prepare(
             'SELECT
@@ -1207,11 +1451,11 @@ final class TreasuryRepository extends BaseRepository
             throw new RuntimeException('Selected treasury account is inactive.');
         }
 
-        if ((int) ($account['branch_id'] ?? 0) !== $branchId) {
+        if ($branchId !== null && (int) ($account['branch_id'] ?? 0) !== $branchId) {
             throw new RuntimeException('Selected treasury account does not belong to the chosen branch.');
         }
 
-        if (strtoupper((string) ($account['currency'] ?? '')) !== strtoupper($currency)) {
+        if ($currency !== '' && strtoupper((string) ($account['currency'] ?? '')) !== strtoupper($currency)) {
             throw new RuntimeException('Selected treasury account does not match the chosen currency.');
         }
 
@@ -1228,47 +1472,32 @@ final class TreasuryRepository extends BaseRepository
             return 0.0;
         }
 
+        $hasSourceAmountColumn = $this->columnExists('treasury_transactions', 'source_amount');
+        $hasDestinationAmountColumn = $this->columnExists('treasury_transactions', 'destination_amount');
+
         $statement = $this->db->prepare(
             'SELECT
                 ROUND(
                     COALESCE(ta.opening_balance, 0)
-                    + COALESCE(receipt_balance.receipt_balance, 0)
+                    + COALESCE(journal_balance.journal_balance, 0)
                     + COALESCE(treasury_balance.treasury_balance, 0),
                     2
                 ) AS current_balance
              FROM treasury_accounts ta
              LEFT JOIN (
                 SELECT
-                    movement.treasury_account_id,
-                    ROUND(SUM(movement.signed_amount), 2) AS receipt_balance
-                FROM (
-                    SELECT
-                        ta_match.id AS treasury_account_id,
-                        COALESCE(jel.debit_amount, 0) - COALESCE(jel.credit_amount, 0) AS signed_amount
-                    FROM journal_entry_lines jel
-                    INNER JOIN journal_entries je ON je.id = jel.journal_entry_id
-                    INNER JOIN chart_of_accounts coa ON coa.id = jel.account_id
-                    INNER JOIN treasury_accounts ta_match
-                        ON ta_match.linked_account_id = jel.account_id
-                       AND ta_match.branch_id = je.branch_id
-                       AND ta_match.currency = je.currency
-                       AND ta_match.is_active = 1
-                       AND ta_match.account_code = coa.code
-
-                    UNION ALL
-
-                    SELECT
-                        cr.treasury_account_id AS treasury_account_id,
-                        COALESCE(jel.debit_amount, 0) - COALESCE(jel.credit_amount, 0) AS signed_amount
-                    FROM customer_receipts cr
-                    INNER JOIN journal_entry_lines jel ON jel.customer_receipt_id = cr.id
-                    INNER JOIN journal_entries je ON je.id = jel.journal_entry_id
-                    INNER JOIN chart_of_accounts coa ON coa.id = jel.account_id
-                    WHERE cr.treasury_account_id IS NOT NULL
-                      AND coa.code IN (\'CASH_ON_HAND\', \'BANK_CLEARING\', \'CARD_CLEARING\')
-                ) AS movement
-                GROUP BY movement.treasury_account_id
-             ) AS receipt_balance ON receipt_balance.treasury_account_id = ta.id
+                    ta_match.id AS treasury_account_id,
+                    ROUND(SUM(COALESCE(jel.debit_amount, 0) - COALESCE(jel.credit_amount, 0)), 2) AS journal_balance
+                 FROM treasury_accounts ta_match
+                 INNER JOIN chart_of_accounts coa ON coa.code = ta_match.account_code
+                 INNER JOIN journal_entry_lines jel ON jel.account_id = coa.id
+                 INNER JOIN journal_entries je ON je.id = jel.journal_entry_id
+                 WHERE ta_match.account_code IS NOT NULL
+                   AND ta_match.account_code <> \'\'
+                   AND je.branch_id = ta_match.branch_id
+                   AND je.currency = ta_match.currency
+                 GROUP BY ta_match.id
+             ) AS journal_balance ON journal_balance.treasury_account_id = ta.id
              LEFT JOIN (
                 SELECT
                     movement.account_id,
@@ -1276,7 +1505,7 @@ final class TreasuryRepository extends BaseRepository
                 FROM (
                     SELECT
                         tt.to_treasury_account_id AS account_id,
-                        tt.amount AS signed_amount
+                        ' . ($hasDestinationAmountColumn ? 'COALESCE(tt.destination_amount, tt.amount)' : 'tt.amount') . ' AS signed_amount
                     FROM treasury_transactions tt
                     WHERE tt.status = \'posted\'
                       AND tt.journal_entry_id IS NULL
@@ -1286,7 +1515,7 @@ final class TreasuryRepository extends BaseRepository
 
                     SELECT
                         tt.from_treasury_account_id AS account_id,
-                        -tt.amount AS signed_amount
+                        -' . ($hasSourceAmountColumn ? 'COALESCE(tt.source_amount, tt.amount)' : 'tt.amount') . ' AS signed_amount
                     FROM treasury_transactions tt
                     WHERE tt.status = \'posted\'
                       AND tt.journal_entry_id IS NULL

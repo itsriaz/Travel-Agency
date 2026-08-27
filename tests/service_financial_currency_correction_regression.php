@@ -20,6 +20,7 @@ $receivableRepository = new \App\Repositories\CustomerPaymentRepository($app);
 $supplierRepository = new \App\Repositories\SupplierRepository($app);
 $accountingRepository = new \App\Repositories\AccountingRepository($app);
 $treasuryRepository = new \App\Repositories\TreasuryRepository($app);
+$ledgerService = new \App\Services\SupplierLedgerService($app);
 
 $actorUserId = 1;
 $accessibleBranchIds = [1, 2];
@@ -127,6 +128,62 @@ try {
         $serviceId > 0
         && ($receivableBefore['currency'] ?? '') === 'AED'
         && ($obligationBefore['currency'] ?? '') === 'AED');
+
+    $originalServiceUpdatedAt = (string) ($service['updated_at'] ?? '');
+    $touchStatement = $db->prepare(
+        'UPDATE booking_services
+         SET remarks = CONCAT(remarks, " [stale save touch]"),
+             updated_at = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 5 MINUTE)
+         WHERE id = :id'
+    );
+    $touchStatement->execute(['id' => $serviceId]);
+
+    $staleRejected = false;
+    try {
+        $serviceWorkspace->saveService([
+            'booking_id' => $bookingId,
+            'service_id' => $serviceId,
+            'service_updated_at' => $originalServiceUpdatedAt,
+            'service_type' => 'air ticket',
+            'service_status' => 'Open',
+            'currency' => 'PKR',
+            'cost_currency' => 'PKR',
+            'supplier_name' => 'Currency Correction Regression Supplier',
+            'service_passenger_name' => 'Currency Regression Passenger',
+            'sale_price' => '1000.00',
+            'purchase_cost' => '1000.00',
+            'taxes' => '0.00',
+            'other_fare' => '0.00',
+            'soto_fare' => '0.00',
+            'spyi_amount' => '0.00',
+            'aq_yr_pk_amount' => '0.00',
+            'yq_amount' => '0.00',
+            'oth_amount' => '0.00',
+            'vat_input' => '0.00',
+            'vat' => '0.00',
+            'commission' => '0.00',
+            'service_charge' => '100.00',
+            'discount_amount' => '0.00',
+            'remarks' => 'Currency correction regression service',
+            'ticket_pnr' => 'CURR01',
+            'ticket_number' => 'CURR-REG-001',
+            'ticket_airline' => 'PIA',
+            'ticket_sector_from' => 'ISB',
+            'ticket_sector_to' => 'DXB',
+            'ticket_departure_date' => $today,
+            'ticket_return_date' => '',
+            'ticket_class' => 'Economy',
+            'ticket_fare' => '1000.00',
+            'ticket_tax' => '0.00',
+            'ticket_vat' => '0.00',
+            'ticket_commission' => '0.00',
+            'ticket_remarks' => 'Currency correction regression service',
+        ], $actorUserId, $accessibleBranchIds);
+    } catch (Throwable $staleException) {
+        $staleRejected = str_contains($staleException->getMessage(), 'updated elsewhere');
+    }
+    $check('Stale service save is rejected before it can flip currency back',
+        $staleRejected);
 
     $oldReceivableAmount = round((float) ($receivableBefore['due_amount'] ?? 0), 2);
     $oldPayableAmount = round((float) ($obligationBefore['gross_amount'] ?? 0), 2);
@@ -275,6 +332,156 @@ try {
         && abs((float) ($sameCurrencyBalances['PKR']['SERVICE_COST'] ?? 0) - 1050.00) <= 0.005
         && abs((float) ($sameCurrencyBalances['PKR']['AP_CONTROL'] ?? 0) + 1050.00) <= 0.005,
         json_encode($sameCurrencyBalances['PKR'] ?? [], JSON_UNESCAPED_SLASHES));
+    $ledgerAfterSameCurrencyCorrection = $ledgerService->report([
+        'dateFrom' => null,
+        'dateTo' => null,
+        'currency' => '',
+        'airline' => '',
+        'supplierId' => (int) ($obligationAfter['supplier_id'] ?? 0),
+        'businessSourceId' => 0,
+        'bookingReference' => $bookingReference,
+    ], [$booking['branch_id']]);
+    $sameCurrencyPayableRows = array_values(array_filter(
+        (array) ($ledgerAfterSameCurrencyCorrection['rows'] ?? []),
+        static fn (array $row): bool =>
+            (string) ($row['booking_reference'] ?? '') === $bookingReference
+            && (string) ($row['currency'] ?? '') === 'PKR'
+            && in_array((string) ($row['source_entry_type'] ?? ''), ['Payable Created', 'Payable Adjustment'], true)
+    ));
+    $check('Supplier ledger keeps a single live PKR payable row after same-currency adjustments that follow a currency correction',
+        count($sameCurrencyPayableRows) === 1
+        && abs((float) str_replace(',', '', (string) ($sameCurrencyPayableRows[0]['debit_amount'] ?? '0')) - 1050.00) <= 0.005,
+        json_encode($sameCurrencyPayableRows, JSON_UNESCAPED_SLASHES));
+
+    $serviceWorkspace->correctFinancials([
+        'booking_id' => $bookingId,
+        'service_id' => $serviceId,
+        'corrected_invoice_currency' => 'AED',
+        'corrected_cost_currency' => 'AED',
+        'corrected_cost_basis' => '1050.00',
+        'corrected_final_sale_price' => '1150.00',
+        'financial_correction_date' => $today,
+        'financial_correction_reason' => 'Flip the service back to AED to verify repeated currency corrections stay singular',
+    ], $actorUserId, $accessibleBranchIds);
+
+    $ledgerAfterAedFlip = $ledgerService->report([
+        'dateFrom' => null,
+        'dateTo' => null,
+        'currency' => '',
+        'airline' => '',
+        'supplierId' => (int) ($obligationAfter['supplier_id'] ?? 0),
+        'businessSourceId' => 0,
+        'bookingReference' => $bookingReference,
+    ], [$booking['branch_id']]);
+    $ledgerRowsAfterAedFlip = array_values(array_filter(
+        (array) ($ledgerAfterAedFlip['rows'] ?? []),
+        static fn (array $row): bool => (string) ($row['booking_reference'] ?? '') === $bookingReference
+    ));
+    $staleAdvanceAdjustmentsAfterAedFlip = array_values(array_filter(
+        $ledgerRowsAfterAedFlip,
+        static fn (array $row): bool =>
+            (string) ($row['source_entry_type'] ?? '') === 'Advance Adjustment'
+            && (string) ($row['currency'] ?? '') !== 'AED'
+    ));
+    $check('Supplier ledger drops stale non-AED advance-adjustment artifacts after flipping back to AED',
+        $staleAdvanceAdjustmentsAfterAedFlip === [],
+        json_encode($staleAdvanceAdjustmentsAfterAedFlip, JSON_UNESCAPED_SLASHES));
+
+    $serviceWorkspace->correctFinancials([
+        'booking_id' => $bookingId,
+        'service_id' => $serviceId,
+        'corrected_invoice_currency' => 'PKR',
+        'corrected_cost_currency' => 'PKR',
+        'corrected_cost_basis' => '1050.00',
+        'corrected_final_sale_price' => '1150.00',
+        'financial_correction_date' => $today,
+        'financial_correction_reason' => 'Return the service to PKR after the temporary AED flip',
+    ], $actorUserId, $accessibleBranchIds);
+
+    $ledgerReport = $ledgerService->report([
+        'dateFrom' => null,
+        'dateTo' => null,
+        'currency' => '',
+        'airline' => '',
+        'supplierId' => (int) ($obligationAfter['supplier_id'] ?? 0),
+        'businessSourceId' => 0,
+        'bookingReference' => $bookingReference,
+    ], [$booking['branch_id']]);
+    $ledgerRows = array_values(array_filter(
+        (array) ($ledgerReport['rows'] ?? []),
+        static fn (array $row): bool => (string) ($row['booking_reference'] ?? '') === $bookingReference
+    ));
+    $payableRows = array_values(array_filter(
+        $ledgerRows,
+        static fn (array $row): bool => in_array((string) ($row['source_entry_type'] ?? ''), ['Payable Created', 'Payable Adjustment'], true)
+    ));
+    $staleAdvanceAdjustmentRows = array_values(array_filter(
+        $ledgerRows,
+        static fn (array $row): bool =>
+            (string) ($row['source_entry_type'] ?? '') === 'Advance Adjustment'
+            && (string) ($row['currency'] ?? '') !== 'PKR'
+    ));
+    $totalPayableDebit = 0.0;
+    $allPayableRowsArePkr = $payableRows !== [];
+    foreach ($payableRows as $payableRow) {
+        $totalPayableDebit += (float) str_replace(',', '', (string) ($payableRow['debit_amount'] ?? '0'));
+        if ((string) ($payableRow['currency'] ?? '') !== 'PKR') {
+            $allPayableRowsArePkr = false;
+        }
+    }
+    $check('Repeated supplier currency corrections keep only PKR live payable movements and preserve the final payable truth',
+        $allPayableRowsArePkr
+        && count($payableRows) >= 1
+        && abs($totalPayableDebit - 1050.00) <= 0.005,
+        json_encode($payableRows, JSON_UNESCAPED_SLASHES));
+    $check('Supplier ledger drops stale old-currency advance-adjustment artifacts after currency correction',
+        $staleAdvanceAdjustmentRows === [],
+        json_encode($staleAdvanceAdjustmentRows, JSON_UNESCAPED_SLASHES));
+
+    $reportService = new \App\Services\ReportService($app);
+    $screenState = $reportService->reportState([
+        'report' => 'supplier_ledger',
+        'bookingReference' => $bookingReference,
+        'supplierId' => (int) ($obligationAfter['supplier_id'] ?? 0),
+        'currency' => '',
+        'airline' => '',
+        'businessSourceId' => 0,
+        'dateFrom' => null,
+        'dateTo' => null,
+    ], $accessibleBranchIds, $actorUserId, 'screen');
+    $printState = $reportService->reportState([
+        'report' => 'supplier_ledger',
+        'bookingReference' => $bookingReference,
+        'supplierId' => (int) ($obligationAfter['supplier_id'] ?? 0),
+        'currency' => '',
+        'airline' => '',
+        'businessSourceId' => 0,
+        'dateFrom' => null,
+        'dateTo' => null,
+    ], $accessibleBranchIds, $actorUserId, 'print');
+    $screenColumns = array_map(static fn (array $column): string => (string) ($column['key'] ?? ''), (array) ($screenState['columns'] ?? []));
+    $printColumns = array_map(static fn (array $column): string => (string) ($column['key'] ?? ''), (array) ($printState['columns'] ?? []));
+    $screenRows = array_values(array_filter(
+        (array) ($screenState['rows'] ?? []),
+        static fn (array $row): bool => (string) ($row['booking_reference'] ?? '') === $bookingReference
+    ));
+    $traceRow = null;
+    foreach ($screenRows as $row) {
+        if (trim((string) ($row['trace'] ?? '')) !== '') {
+            $traceRow = $row;
+            break;
+        }
+    }
+    $check('Supplier ledger trace is visible only in the on-screen report',
+        in_array('trace', $screenColumns, true)
+        && ! in_array('trace', $printColumns, true)
+        && $traceRow !== null
+        && trim((string) ($traceRow['trace'] ?? '')) !== '',
+        json_encode([
+            'screen_columns' => $screenColumns,
+            'print_columns' => $printColumns,
+            'trace_row' => $traceRow,
+        ], JSON_UNESCAPED_SLASHES));
 } catch (Throwable $exception) {
     $failures[] = $exception::class . ': ' . $exception->getMessage();
     echo '[FAIL] Unexpected exception - ' . $exception::class . ': ' . $exception->getMessage() . PHP_EOL;

@@ -114,13 +114,18 @@ final class SupplierRepository extends BaseRepository
             return [];
         }
 
+        $placeholders = implode(', ', array_fill(0, count($accessibleBranchIds), '?'));
+
         $statement = $this->db->prepare(
-            "SELECT id, branch_id, code, name, supplier_mode, default_currency
-             FROM suppliers
-             WHERE is_active = 1
-             ORDER BY name ASC, id ASC"
+            "SELECT s.id, s.branch_id, s.code, s.name, s.supplier_mode, s.default_currency,
+                    b.name AS branch_name
+             FROM suppliers s
+             LEFT JOIN branches b ON b.id = s.branch_id
+             WHERE s.is_active = 1
+               AND s.branch_id IN ({$placeholders})
+             ORDER BY s.name ASC, s.id ASC"
         );
-        $statement->execute();
+        $statement->execute(array_map('intval', $accessibleBranchIds));
 
         return $statement->fetchAll() ?: [];
     }
@@ -407,7 +412,7 @@ final class SupplierRepository extends BaseRepository
                 FROM supplier_advances a
                 INNER JOIN suppliers s ON s.id = a.supplier_id
                 INNER JOIN branches br ON br.id = a.branch_id
-                WHERE 1 = 1
+                WHERE a.branch_id IN ({$placeholders})
                 {$advanceSearchSql}
                 GROUP BY a.supplier_id, a.branch_id, a.currency
                 HAVING SUM(a.deposit_amount) > 0.005
@@ -420,9 +425,98 @@ final class SupplierRepository extends BaseRepository
         $statement = $this->db->prepare($sql);
         $statement->execute(array_merge(
             array_map('intval', $accessibleBranchIds),
+            array_map('intval', $accessibleBranchIds),
             $bookingSearchParams,
             $advanceSearchParams
         ));
+
+        $rows = $statement->fetchAll() ?: [];
+        $supplierIdsWithHistory = [];
+        foreach ($rows as $row) {
+            $supplierId = (int) ($row['supplier_id'] ?? 0);
+            if ($supplierId > 0) {
+                $supplierIdsWithHistory[$supplierId] = true;
+            }
+        }
+
+        foreach ($this->searchActiveSuppliersForBranches($accessibleBranchIds, $trimmed, $limit) as $supplier) {
+            $supplierId = (int) ($supplier['id'] ?? 0);
+            if ($supplierId <= 0 || isset($supplierIdsWithHistory[$supplierId])) {
+                continue;
+            }
+
+            $rows[] = [
+                'booking_id' => 0,
+                'booking_reference' => '',
+                'booking_date' => '',
+                'branch_id' => (int) ($supplier['branch_id'] ?? 0),
+                'branch_name' => (string) ($supplier['branch_name'] ?? ''),
+                'supplier_id' => $supplierId,
+                'supplier_code' => (string) ($supplier['code'] ?? ''),
+                'supplier_name' => (string) ($supplier['name'] ?? ''),
+                'passenger_name' => '',
+                'route' => '',
+                'currency' => (string) ($supplier['default_currency'] ?? 'PKR'),
+                'total_gross_amount' => 0.0,
+                'total_paid_amount' => 0.0,
+                'total_balance_amount' => 0.0,
+                'due_date' => '',
+                'advance_id' => 0,
+                'advance_count' => 0,
+                'row_type' => 'supplier_directory',
+            ];
+        }
+
+        usort($rows, static function (array $left, array $right): int {
+            $supplierCompare = strcasecmp((string) ($left['supplier_name'] ?? ''), (string) ($right['supplier_name'] ?? ''));
+            if ($supplierCompare !== 0) {
+                return $supplierCompare;
+            }
+
+            $dateCompare = strcmp((string) ($right['booking_date'] ?? ''), (string) ($left['booking_date'] ?? ''));
+            if ($dateCompare !== 0) {
+                return $dateCompare;
+            }
+
+            $referenceCompare = strcmp((string) ($right['booking_reference'] ?? ''), (string) ($left['booking_reference'] ?? ''));
+            if ($referenceCompare !== 0) {
+                return $referenceCompare;
+            }
+
+            return strcmp((string) ($left['currency'] ?? ''), (string) ($right['currency'] ?? ''));
+        });
+
+        return array_slice($rows, 0, $limit);
+    }
+
+    private function searchActiveSuppliersForBranches(array $accessibleBranchIds, string $query, int $limit): array
+    {
+        if ($accessibleBranchIds === []) {
+            return [];
+        }
+
+        $placeholders = implode(', ', array_fill(0, count($accessibleBranchIds), '?'));
+        $limit = max(1, min($limit, 100));
+        $searchSql = '';
+        $params = array_map('intval', $accessibleBranchIds);
+
+        if ($query !== '') {
+            $searchSql = ' AND (s.name LIKE ? OR s.code LIKE ?)';
+            $params[] = '%' . $query . '%';
+            $params[] = '%' . $query . '%';
+        }
+
+        $statement = $this->db->prepare(
+            "SELECT s.id, s.branch_id, s.code, s.name, s.default_currency, b.name AS branch_name
+             FROM suppliers s
+             LEFT JOIN branches b ON b.id = s.branch_id
+             WHERE s.is_active = 1
+               AND s.branch_id IN ({$placeholders})
+               {$searchSql}
+             ORDER BY s.name ASC, s.id ASC
+             LIMIT {$limit}"
+        );
+        $statement->execute($params);
 
         return $statement->fetchAll() ?: [];
     }
@@ -583,6 +677,25 @@ final class SupplierRepository extends BaseRepository
         ]);
 
         return round((float) $statement->fetchColumn(), 2);
+    }
+
+    public function supplierAdvancePoolNameForSupplier(int $supplierId, ?string $fallbackName = null): string
+    {
+        if ($supplierId > 0) {
+            $statement = $this->db->prepare(
+                'SELECT name
+                 FROM suppliers
+                 WHERE id = :supplier_id
+                 LIMIT 1'
+            );
+            $statement->execute(['supplier_id' => $supplierId]);
+            $name = trim((string) $statement->fetchColumn());
+            if ($name !== '') {
+                return $name;
+            }
+        }
+
+        return trim((string) ($fallbackName ?? ''));
     }
 
     public function availableAdvanceBalancesForSupplierName(string $supplierName): array
@@ -1174,6 +1287,182 @@ final class SupplierRepository extends BaseRepository
         return $statement->fetchAll() ?: [];
     }
 
+    public function searchOpenObligationsForDirectCustomerSettlement(
+        array $accessibleBranchIds,
+        int $branchId,
+        string $currency,
+        string $query = '',
+        int $limit = 250
+    ): array {
+        $branchIds = array_values(array_unique(array_filter(
+            array_map('intval', $accessibleBranchIds),
+            static fn (int $value): bool => $value > 0
+        )));
+        if ($branchIds === [] || $branchId <= 0 || ! in_array($branchId, $branchIds, true)) {
+            return [];
+        }
+
+        $normalizedCurrency = strtoupper(trim($currency));
+        if ($normalizedCurrency === '') {
+            return [];
+        }
+
+        $limit = max(1, min($limit, 1000));
+        $sql = 'SELECT
+                    o.id,
+                    o.supplier_id,
+                    o.branch_id,
+                    o.booking_reference,
+                    o.service_line_reference,
+                    o.currency,
+                    o.net_payable_amount,
+                    o.due_date,
+                    o.status,
+                    s.name AS supplier_name,
+                    s.code AS supplier_code,
+                    b.id AS booking_id,
+                    b.booking_date,
+                    br.name AS branch_name,
+                    COALESCE(bs.service_type, "service") AS service_type,
+                    COALESCE(t.full_name, bs.passenger_name_snapshot, bp.lead_traveler_name, "") AS passenger_name
+                FROM supplier_obligations o
+                INNER JOIN suppliers s ON s.id = o.supplier_id
+                INNER JOIN branches br ON br.id = o.branch_id
+                LEFT JOIN bookings b ON b.booking_reference = o.booking_reference
+                LEFT JOIN booking_parties bp ON bp.booking_id = b.id
+                LEFT JOIN booking_services bs
+                    ON bs.booking_id = b.id
+                   AND bs.line_reference = o.service_line_reference
+                LEFT JOIN travelers t ON t.id = bs.traveler_id
+                WHERE o.branch_id = :branch_id
+                  AND o.currency = :currency
+                  AND o.status IN ("open", "partially_covered")
+                  AND o.net_payable_amount > 0';
+
+        $params = [
+            'branch_id' => $branchId,
+            'currency' => $normalizedCurrency,
+        ];
+
+        $trimmedQuery = trim($query);
+        if ($trimmedQuery !== '') {
+            $sql .= '
+                  AND (
+                        o.booking_reference LIKE :query
+                     OR o.service_line_reference LIKE :query
+                     OR s.name LIKE :query
+                     OR s.code LIKE :query
+                     OR COALESCE(t.full_name, bs.passenger_name_snapshot, bp.lead_traveler_name, "") LIKE :query
+                  )';
+            $params['query'] = '%' . $trimmedQuery . '%';
+        }
+
+        $sql .= '
+                ORDER BY
+                    o.due_date IS NULL,
+                    o.due_date ASC,
+                    b.booking_date IS NULL,
+                    b.booking_date ASC,
+                    o.booking_reference ASC,
+                    o.service_line_reference ASC,
+                    o.id ASC
+                LIMIT ' . $limit;
+
+        $statement = $this->db->prepare($sql);
+        $statement->execute($params);
+
+        return $statement->fetchAll() ?: [];
+    }
+
+    public function searchSuppliersForDirectCustomerSettlement(
+        array $accessibleBranchIds,
+        int $branchId,
+        string $currency,
+        string $query = '',
+        int $limit = 50
+    ): array {
+        $branchIds = array_values(array_unique(array_filter(
+            array_map('intval', $accessibleBranchIds),
+            static fn (int $value): bool => $value > 0
+        )));
+        if ($branchIds === [] || $branchId <= 0 || ! in_array($branchId, $branchIds, true)) {
+            return [];
+        }
+
+        $normalizedCurrency = strtoupper(trim($currency));
+        if ($normalizedCurrency === '') {
+            return [];
+        }
+
+        $limit = max(1, min($limit, 100));
+        $sql = 'SELECT
+                    s.id AS supplier_id,
+                    s.branch_id,
+                    s.code AS supplier_code,
+                    s.name AS supplier_name,
+                    s.supplier_mode,
+                    s.default_currency,
+                    COALESCE(open_positions.open_invoice_count, 0) AS open_invoice_count,
+                    COALESCE(open_positions.open_payable_amount, 0) AS open_payable_amount,
+                    COALESCE(open_positions.next_due_date, "") AS next_due_date,
+                    COALESCE(open_positions.latest_booking_reference, "") AS latest_booking_reference,
+                    COALESCE(open_positions.latest_passenger_name, "") AS latest_passenger_name
+                FROM suppliers s
+                LEFT JOIN (
+                    SELECT
+                        o.supplier_id,
+                        COUNT(o.id) AS open_invoice_count,
+                        COALESCE(SUM(o.net_payable_amount), 0) AS open_payable_amount,
+                        MIN(COALESCE(o.due_date, "9999-12-31")) AS next_due_date,
+                        MAX(o.booking_reference) AS latest_booking_reference,
+                        MAX(COALESCE(t.full_name, bs.passenger_name_snapshot, bp.lead_traveler_name, "")) AS latest_passenger_name
+                    FROM supplier_obligations o
+                    LEFT JOIN bookings b ON b.booking_reference = o.booking_reference
+                    LEFT JOIN booking_parties bp ON bp.booking_id = b.id
+                    LEFT JOIN booking_services bs
+                        ON bs.booking_id = b.id
+                       AND bs.line_reference = o.service_line_reference
+                    LEFT JOIN travelers t ON t.id = bs.traveler_id
+                    WHERE o.branch_id = :open_branch_id
+                      AND o.currency = :open_currency
+                      AND o.status IN ("open", "partially_covered")
+                      AND o.net_payable_amount > 0
+                    GROUP BY o.supplier_id
+                ) open_positions ON open_positions.supplier_id = s.id
+                WHERE s.is_active = 1
+                  AND s.branch_id = :branch_id';
+
+        $params = [
+            'open_branch_id' => $branchId,
+            'open_currency' => $normalizedCurrency,
+            'branch_id' => $branchId,
+        ];
+
+        $trimmedQuery = trim($query);
+        if ($trimmedQuery !== '') {
+            $sql .= '
+                  AND (
+                        s.name LIKE :query
+                     OR s.code LIKE :query
+                     OR COALESCE(open_positions.latest_booking_reference, "") LIKE :query
+                     OR COALESCE(open_positions.latest_passenger_name, "") LIKE :query
+                  )';
+            $params['query'] = '%' . $trimmedQuery . '%';
+        }
+
+        $sql .= '
+                ORDER BY
+                    CASE WHEN COALESCE(open_positions.open_payable_amount, 0) > 0 THEN 0 ELSE 1 END ASC,
+                    s.name ASC,
+                    s.id ASC
+                LIMIT ' . $limit;
+
+        $statement = $this->db->prepare($sql);
+        $statement->execute($params);
+
+        return $statement->fetchAll() ?: [];
+    }
+
     public function globalOpenObligations(int $branchId, int $supplierId, string $currency): array
     {
         if ($branchId <= 0 || $supplierId <= 0 || trim($currency) === '') {
@@ -1211,7 +1500,7 @@ final class SupplierRepository extends BaseRepository
              WHERE o.branch_id = :branch_id
                AND o.supplier_id = :supplier_id
                AND o.currency = :currency
-               AND o.status IN ("open", "partially_covered")
+               AND o.status <> "cancelled"
                AND o.net_payable_amount > 0
              ORDER BY o.due_date IS NULL, o.due_date ASC, o.booking_reference ASC, o.service_line_reference ASC, o.id ASC'
         );
@@ -1247,11 +1536,13 @@ final class SupplierRepository extends BaseRepository
               AND o.status IN ("open", "partially_covered")
               AND o.net_payable_amount > 0
              WHERE s.is_active = 1
+               AND s.branch_id = :supplier_branch_id
              GROUP BY s.id, s.branch_id, s.code, s.name, s.supplier_mode, s.default_currency
              ORDER BY s.name ASC'
         );
         $statement->execute([
             'obligation_branch_id' => $branchId,
+            'supplier_branch_id' => $branchId,
         ]);
 
         return $statement->fetchAll() ?: [];
@@ -1329,12 +1620,14 @@ final class SupplierRepository extends BaseRepository
      * payment. Allocation remains an internal reconciliation detail; callers
      * must not require users to choose individual invoice rows.
      */
-    public function openSupplierAccountObligationsForSettlement(int $branchId, int $supplierId, string $currency): array
+    public function openSupplierAccountObligationsForSettlement(array $branchIds, int $supplierId, string $currency): array
     {
-        if ($branchId <= 0 || $supplierId <= 0 || trim($currency) === '') {
+        $branchIds = array_values(array_unique(array_filter(array_map('intval', $branchIds))));
+        if ($branchIds === [] || $supplierId <= 0 || trim($currency) === '') {
             return [];
         }
 
+        $placeholders = implode(', ', array_fill(0, count($branchIds), '?'));
         $statement = $this->db->prepare(
             'SELECT
                 o.id,
@@ -1353,19 +1646,15 @@ final class SupplierRepository extends BaseRepository
                 s.supplier_mode
              FROM supplier_obligations o
              INNER JOIN suppliers s ON s.id = o.supplier_id
-             WHERE o.branch_id = :branch_id
-               AND o.supplier_id = :supplier_id
-               AND o.currency = :currency
-               AND o.status IN ("open", "partially_covered")
+             WHERE o.branch_id IN (' . $placeholders . ')
+               AND o.supplier_id = ?
+               AND o.currency = ?
+               AND o.status <> "cancelled"
                AND o.net_payable_amount > 0
              ORDER BY o.due_date IS NULL, o.due_date ASC, o.booking_reference ASC, o.service_line_reference ASC, o.id ASC
              FOR UPDATE'
         );
-        $statement->execute([
-            'branch_id' => $branchId,
-            'supplier_id' => $supplierId,
-            'currency' => strtoupper(trim($currency)),
-        ]);
+        $statement->execute(array_merge($branchIds, [$supplierId, strtoupper(trim($currency))]));
 
         return $statement->fetchAll() ?: [];
     }
@@ -1382,7 +1671,7 @@ final class SupplierRepository extends BaseRepository
 
         $conditions = [
             'o.branch_id IN (' . implode(', ', array_fill(0, count($branchIds), '?')) . ')',
-            'o.status IN ("open", "partially_covered")',
+            'o.status <> "cancelled"',
             'o.net_payable_amount > 0.005',
         ];
         $parameters = $branchIds;
@@ -1572,6 +1861,7 @@ final class SupplierRepository extends BaseRepository
         $statement = $this->db->prepare(
             'UPDATE supplier_advances
              SET supplier_id = :supplier_id,
+                 currency = :currency,
                  deposit_amount = :deposit_amount,
                  available_amount = :available_amount,
                  received_at = :received_at,
@@ -1587,6 +1877,7 @@ final class SupplierRepository extends BaseRepository
         $statement->execute([
             'id' => $data['id'],
             'supplier_id' => $data['supplier_id'],
+            'currency' => strtoupper((string) ($data['currency'] ?? 'PKR')),
             'deposit_amount' => $data['deposit_amount'],
             'available_amount' => $data['available_amount'],
             'received_at' => $data['received_at'],
@@ -1601,32 +1892,45 @@ final class SupplierRepository extends BaseRepository
 
     public function recordAdvanceCorrection(array $data): int
     {
-        $statement = $this->db->prepare(
-            'INSERT INTO supplier_advance_corrections (
-                supplier_advance_id, reason,
-                old_supplier_id, new_supplier_id,
-                old_payment_date, new_payment_date,
-                old_amount, new_amount,
-                old_payment_method, new_payment_method,
-                old_treasury_account_id, new_treasury_account_id,
-                old_reference_no, new_reference_no,
-                old_remarks, new_remarks,
-                old_journal_entry_id, reversal_journal_entry_id, new_journal_entry_id,
-                created_by_user_id
-             ) VALUES (
-                :supplier_advance_id, :reason,
-                :old_supplier_id, :new_supplier_id,
-                :old_payment_date, :new_payment_date,
-                :old_amount, :new_amount,
-                :old_payment_method, :new_payment_method,
-                :old_treasury_account_id, :new_treasury_account_id,
-                :old_reference_no, :new_reference_no,
-                :old_remarks, :new_remarks,
-                :old_journal_entry_id, :reversal_journal_entry_id, :new_journal_entry_id,
-                :created_by_user_id
-             )'
+        $hasOldCurrency = $this->columnExists('supplier_advance_corrections', 'old_currency');
+        $hasNewCurrency = $this->columnExists('supplier_advance_corrections', 'new_currency');
+        $columns = [
+            'supplier_advance_id', 'reason',
+            'old_supplier_id', 'new_supplier_id',
+            'old_payment_date', 'new_payment_date',
+        ];
+        $values = [
+            ':supplier_advance_id', ':reason',
+            ':old_supplier_id', ':new_supplier_id',
+            ':old_payment_date', ':new_payment_date',
+        ];
+        if ($hasOldCurrency) {
+            $columns[] = 'old_currency';
+            $values[] = ':old_currency';
+        }
+        if ($hasNewCurrency) {
+            $columns[] = 'new_currency';
+            $values[] = ':new_currency';
+        }
+        array_push(
+            $columns,
+            'old_amount', 'new_amount', 'old_payment_method', 'new_payment_method',
+            'old_treasury_account_id', 'new_treasury_account_id', 'old_reference_no', 'new_reference_no',
+            'old_remarks', 'new_remarks', 'old_journal_entry_id', 'reversal_journal_entry_id',
+            'new_journal_entry_id', 'created_by_user_id'
         );
-        $statement->execute([
+        array_push(
+            $values,
+            ':old_amount', ':new_amount', ':old_payment_method', ':new_payment_method',
+            ':old_treasury_account_id', ':new_treasury_account_id', ':old_reference_no', ':new_reference_no',
+            ':old_remarks', ':new_remarks', ':old_journal_entry_id', ':reversal_journal_entry_id',
+            ':new_journal_entry_id', ':created_by_user_id'
+        );
+        $statement = $this->db->prepare(
+            'INSERT INTO supplier_advance_corrections (' . implode(', ', $columns) . ')
+             VALUES (' . implode(', ', $values) . ')'
+        );
+        $params = [
             'supplier_advance_id' => $data['supplier_advance_id'],
             'reason' => $data['reason'],
             'old_supplier_id' => $data['old_supplier_id'] ?? null,
@@ -1647,7 +1951,14 @@ final class SupplierRepository extends BaseRepository
             'reversal_journal_entry_id' => $data['reversal_journal_entry_id'] ?? null,
             'new_journal_entry_id' => $data['new_journal_entry_id'] ?? null,
             'created_by_user_id' => $data['actor_user_id'] ?? null,
-        ]);
+        ];
+        if ($hasOldCurrency) {
+            $params['old_currency'] = strtoupper((string) ($data['old_currency'] ?? ''));
+        }
+        if ($hasNewCurrency) {
+            $params['new_currency'] = strtoupper((string) ($data['new_currency'] ?? ''));
+        }
+        $statement->execute($params);
 
         $correctionId = (int) $this->db->lastInsertId();
         AuditLog::record($this->app, 'supplier.advance.corrected', [
@@ -2992,10 +3303,6 @@ final class SupplierRepository extends BaseRepository
                 throw new \RuntimeException('Supplier payment and obligation booking mismatch.');
             }
 
-            if ($isGlobalPayment && (int) ($payment['branch_id'] ?? 0) !== (int) ($obligation['branch_id'] ?? 0)) {
-                throw new \RuntimeException('Supplier payment and obligation branch mismatch.');
-            }
-
             $paymentCurrency = (string) $payment['currency'];
             $obligationCurrency = (string) $obligation['currency'];
             $effectiveRate = $exchangeRateUsed ?? (isset($payment['exchange_rate_to_booking']) ? (float) $payment['exchange_rate_to_booking'] : null);
@@ -3060,20 +3367,23 @@ final class SupplierRepository extends BaseRepository
                 'payment_id' => $paymentId,
             ]);
 
+            $newNetPayableAmount = round(max($remainingObligation - $applicableAmount, 0), 2);
+            $newObligationStatus = 'partially_covered';
+            if ($newNetPayableAmount <= 0.005) {
+                $newObligationStatus = (float) ($obligation['advance_applied_amount'] ?? 0) > 0.005
+                    ? 'covered_by_advance'
+                    : 'paid';
+            }
+
             $updateObligation = $this->db->prepare(
                 'UPDATE supplier_obligations
-                 SET net_payable_amount = GREATEST(0, net_payable_amount - :obligation_allocated_amount),
-                     status = CASE
-                         WHEN net_payable_amount - :obligation_status_advance_amount <= 0 AND advance_applied_amount > 0 THEN "covered_by_advance"
-                         WHEN net_payable_amount - :obligation_status_paid_amount <= 0 THEN "paid"
-                         ELSE "partially_covered"
-                     END
+                 SET net_payable_amount = :net_payable_amount,
+                     status = :status
                  WHERE id = :obligation_id'
             );
             $updateObligation->execute([
-                'obligation_allocated_amount' => $applicableAmount,
-                'obligation_status_advance_amount' => $applicableAmount,
-                'obligation_status_paid_amount' => $applicableAmount,
+                'net_payable_amount' => $newNetPayableAmount,
+                'status' => $newObligationStatus,
                 'obligation_id' => $obligationId,
             ]);
 
@@ -3177,6 +3487,67 @@ final class SupplierRepository extends BaseRepository
         ]);
 
         return $statement->fetchAll() ?: [];
+    }
+
+    public function availableAdvanceRowsForSupplierName(string $supplierName, string $currency, array $preferredAdvanceIds = []): array
+    {
+        $name = trim($supplierName);
+        if ($name === '' || trim($currency) === '') {
+            return [];
+        }
+
+        $advanceNoSelect = $this->columnExists('supplier_advances', 'advance_no')
+            ? 'a.advance_no'
+            : 'COALESCE(a.reference_no, CONCAT("SADV-", a.id)) AS advance_no';
+        $advanceDateColumn = $this->columnExists('supplier_advances', 'advance_date')
+            ? 'a.advance_date'
+            : 'a.received_at';
+        $amountReceivedSelect = $this->columnExists('supplier_advances', 'amount_received')
+            ? 'a.amount_received'
+            : 'a.deposit_amount AS amount_received';
+        $statusSelect = $this->columnExists('supplier_advances', 'status')
+            ? 'a.status'
+            : '"available" AS status';
+        $statusWhere = $this->columnExists('supplier_advances', 'status')
+            ? 'AND a.status <> "void"'
+            : '';
+
+        $orderClause = 'ORDER BY ' . $advanceDateColumn . ' DESC, a.id DESC';
+        if ($preferredAdvanceIds !== []) {
+            $preferredAdvanceIds = array_values(array_filter(array_map('intval', $preferredAdvanceIds), static fn (int $id): bool => $id > 0));
+            if ($preferredAdvanceIds !== []) {
+                $preferredList = implode(', ', $preferredAdvanceIds);
+                $orderClause = "ORDER BY CASE WHEN a.id IN ({$preferredList}) THEN 0 ELSE 1 END, {$advanceDateColumn} DESC, a.id DESC";
+            }
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT a.id, a.supplier_id, ' . $advanceNoSelect . ', ' . $advanceDateColumn . ' AS advance_date, a.currency, ' . $amountReceivedSelect . ', a.available_amount, ' . $statusSelect . '
+             FROM supplier_advances a
+             INNER JOIN suppliers s ON s.id = a.supplier_id
+             WHERE s.is_active = 1
+               AND s.name = :supplier_name
+               AND a.currency = :currency
+               ' . $statusWhere . '
+               AND a.available_amount > 0.005
+             ' . $orderClause
+        );
+        $statement->execute([
+            'supplier_name' => $name,
+            'currency' => strtoupper(trim($currency)),
+        ]);
+
+        return $statement->fetchAll() ?: [];
+    }
+
+    public function availableAdvanceRowsForSupplierPool(int $supplierId, string $currency, array $preferredAdvanceIds = []): array
+    {
+        $supplierName = $this->supplierAdvancePoolNameForSupplier($supplierId);
+        if ($supplierName !== '') {
+            return $this->availableAdvanceRowsForSupplierName($supplierName, $currency, $preferredAdvanceIds);
+        }
+
+        return $this->availableAdvanceRowsForSupplier($supplierId, $currency, $preferredAdvanceIds);
     }
 
     public function paymentAllocationHistory(string $bookingReference): array
@@ -3297,6 +3668,62 @@ final class SupplierRepository extends BaseRepository
 
         return [
             'supplier_id' => $supplierId,
+            'branch_id' => $branchId,
+            'currency' => $normalizedCurrency,
+            'advance_row_count' => (int) ($summary['advance_row_count'] ?? 0),
+            'total_available_amount' => round((float) ($summary['total_available_amount'] ?? 0), 2),
+            'first_advance_id' => (int) ($firstAdvance['id'] ?? 0),
+            'first_advance_available_amount' => round((float) ($firstAdvance['available_amount'] ?? 0), 2),
+            'fifo_order' => 'received_at ASC, id ASC',
+        ];
+    }
+
+    public function traceAvailableSupplierAdvancesForSupplierPool(int $supplierId, int $branchId, string $currency): array
+    {
+        $supplierName = $this->supplierAdvancePoolNameForSupplier($supplierId);
+        if ($supplierName === '') {
+            return $this->traceAvailableSupplierAdvances($supplierId, $branchId, $currency);
+        }
+
+        $normalizedCurrency = strtoupper(trim($currency));
+
+        $summaryStatement = $this->db->prepare(
+            'SELECT
+                COUNT(*) AS advance_row_count,
+                COALESCE(SUM(a.available_amount), 0) AS total_available_amount
+             FROM supplier_advances a
+             INNER JOIN suppliers s ON s.id = a.supplier_id
+             WHERE s.is_active = 1
+               AND s.name = :supplier_name
+               AND a.currency = :currency
+               AND a.available_amount > 0'
+        );
+        $summaryStatement->execute([
+            'supplier_name' => $supplierName,
+            'currency' => $normalizedCurrency,
+        ]);
+        $summary = $summaryStatement->fetch() ?: [];
+
+        $firstAdvanceStatement = $this->db->prepare(
+            'SELECT a.id, a.available_amount
+             FROM supplier_advances a
+             INNER JOIN suppliers s ON s.id = a.supplier_id
+             WHERE s.is_active = 1
+               AND s.name = :supplier_name
+               AND a.currency = :currency
+               AND a.available_amount > 0
+             ORDER BY a.received_at ASC, a.id ASC
+             LIMIT 1'
+        );
+        $firstAdvanceStatement->execute([
+            'supplier_name' => $supplierName,
+            'currency' => $normalizedCurrency,
+        ]);
+        $firstAdvance = $firstAdvanceStatement->fetch() ?: [];
+
+        return [
+            'supplier_id' => $supplierId,
+            'supplier_name' => $supplierName,
             'branch_id' => $branchId,
             'currency' => $normalizedCurrency,
             'advance_row_count' => (int) ($summary['advance_row_count'] ?? 0),
@@ -3579,21 +4006,60 @@ final class SupplierRepository extends BaseRepository
             $linkedPartyOffsetAmount = $this->linkedPartyOffsetAmountForObligation($obligationId);
             $currentSettledAmount = round($currentAdvanceAppliedAmount + $currentPaymentAllocatedAmount + $linkedPartyOffsetAmount, 2);
             $targetSettledAmount = round(max(min($targetSettledAmount, $grossAmount), 0), 2);
-            if ($targetSettledAmount + 0.005 < $linkedPartyOffsetAmount) {
-                throw new \RuntimeException(
-                    'This supplier payable includes a linked account/supplier adjustment. Void that adjustment before reducing or cancelling the payable.'
-                );
-            }
             $remainingToRelease = round(max($currentSettledAmount - $targetSettledAmount, 0), 2);
 
             if ($remainingToRelease <= 0.005) {
                 return [
                     'released_amount' => 0.0,
+                    'released_linked_offset_amount' => 0.0,
                     'released_payment_amount' => 0.0,
                     'released_advance_amount' => 0.0,
+                    'affected_offset_ids' => [],
                     'affected_payment_ids' => [],
                     'affected_advance_ids' => [],
                 ];
+            }
+
+            $releasedLinkedOffsetAmount = 0.0;
+            $affectedOffsetIds = [];
+            if ($linkedPartyOffsetAmount > 0.005 && $targetSettledAmount + 0.005 < $linkedPartyOffsetAmount) {
+                $linkedOffsetReleaseNeeded = round(min(
+                    $remainingToRelease,
+                    max($linkedPartyOffsetAmount - $targetSettledAmount, 0)
+                ), 2);
+                if ($linkedOffsetReleaseNeeded > 0.005) {
+                    $offsetRepository = new CounterpartyOffsetRepository($this->app);
+                    $offsetRelease = $offsetRepository->releaseCoverageForObligation($obligationId, $linkedOffsetReleaseNeeded);
+                    $releasedLinkedOffsetAmount = round((float) ($offsetRelease['released_amount'] ?? 0), 2);
+                    $affectedOffsetIds = array_values(array_unique(array_map('intval', $offsetRelease['affected_offset_ids'] ?? [])));
+
+                    if ($releasedLinkedOffsetAmount > 0.005) {
+                        $accountingRepository = new AccountingRepository($this->app);
+                        $accountingRepository->postJournalEntry([
+                            'branch_id' => (int) ($obligation['branch_id'] ?? 0),
+                            'booking_reference' => (string) ($obligation['booking_reference'] ?? ''),
+                            'source_type' => 'linked_party_offset_release',
+                            'source_reference' => 'REL-OFFSET-' . $obligationId,
+                            'entry_date' => date('Y-m-d'),
+                            'currency' => (string) ($obligation['currency'] ?? 'PKR'),
+                            'narration' => 'Linked-party settlement released for supplier payable correction/cancellation',
+                            'actor_user_id' => $actorUserId,
+                        ], [[
+                            'account_code' => 'AR_CONTROL',
+                            'line_description' => 'Linked account-holder recovery restored after supplier payable release',
+                            'debit_amount' => $releasedLinkedOffsetAmount,
+                            'credit_amount' => 0,
+                        ], [
+                            'account_code' => 'AP_CONTROL',
+                            'line_description' => 'Supplier payable restored after linked-party settlement release',
+                            'debit_amount' => 0,
+                            'credit_amount' => $releasedLinkedOffsetAmount,
+                        ]]);
+                    }
+
+                    $remainingToRelease = round(max($remainingToRelease - $releasedLinkedOffsetAmount, 0), 2);
+                    $linkedPartyOffsetAmount = round(max($linkedPartyOffsetAmount - $releasedLinkedOffsetAmount, 0), 2);
+                }
             }
 
             $paymentAllocationStatement = $this->db->prepare(
@@ -3767,7 +4233,10 @@ final class SupplierRepository extends BaseRepository
 
             $finalAdvanceAppliedAmount = round(max($currentAdvanceAppliedAmount - $releasedAdvanceAmount, 0), 2);
             $finalPaymentAllocatedAmount = round(max($currentPaymentAllocatedAmount - $releasedPaymentAmount, 0), 2);
-            $finalNetPayableAmount = round(max($grossAmount - $finalAdvanceAppliedAmount - $finalPaymentAllocatedAmount, 0), 2);
+            $finalNetPayableAmount = round(max(
+                $grossAmount - $finalAdvanceAppliedAmount - $finalPaymentAllocatedAmount - $linkedPartyOffsetAmount,
+                0
+            ), 2);
             $finalStatus = $this->obligationStatus($grossAmount, $finalAdvanceAppliedAmount, $finalPaymentAllocatedAmount, $finalNetPayableAmount);
 
             $updateObligation->execute([
@@ -3783,18 +4252,22 @@ final class SupplierRepository extends BaseRepository
                 'booking_reference' => (string) ($obligation['booking_reference'] ?? ''),
                 'service_line_reference' => (string) ($obligation['service_line_reference'] ?? ''),
                 'currency' => (string) ($obligation['currency'] ?? 'PKR'),
-                'released_amount' => round($releasedPaymentAmount + $releasedAdvanceAmount, 2),
+                'released_amount' => round($releasedLinkedOffsetAmount + $releasedPaymentAmount + $releasedAdvanceAmount, 2),
+                'released_linked_offset_amount' => $releasedLinkedOffsetAmount,
                 'released_payment_amount' => $releasedPaymentAmount,
                 'released_advance_amount' => $releasedAdvanceAmount,
                 'reason' => $reason,
+                'affected_offset_ids' => $affectedOffsetIds,
                 'affected_payment_ids' => array_values(array_unique($affectedPaymentIds)),
                 'affected_advance_ids' => array_values(array_unique($affectedAdvanceIds)),
             ]);
 
             return [
-                'released_amount' => round($releasedPaymentAmount + $releasedAdvanceAmount, 2),
+                'released_amount' => round($releasedLinkedOffsetAmount + $releasedPaymentAmount + $releasedAdvanceAmount, 2),
+                'released_linked_offset_amount' => $releasedLinkedOffsetAmount,
                 'released_payment_amount' => $releasedPaymentAmount,
                 'released_advance_amount' => $releasedAdvanceAmount,
+                'affected_offset_ids' => $affectedOffsetIds,
                 'affected_payment_ids' => array_values(array_unique($affectedPaymentIds)),
                 'affected_advance_ids' => array_values(array_unique($affectedAdvanceIds)),
             ];
@@ -4206,7 +4679,7 @@ final class SupplierRepository extends BaseRepository
                AND o.currency = ?
                AND o.branch_id IN (' . $placeholders . ')
                AND o.net_payable_amount > 0.005
-               AND o.status IN ("open", "partially_covered")' . $excludeSql . '
+               AND o.status <> "cancelled"' . $excludeSql . '
              ORDER BY COALESCE(o.due_date, b.booking_date, "9999-12-31") ASC, o.id ASC'
         );
         $statement->execute($parameters);
@@ -4417,6 +4890,9 @@ final class SupplierRepository extends BaseRepository
             $branchId = (int) ($obligation['branch_id'] ?? 0);
             $obligationCurrency = strtoupper((string) ($obligation['currency'] ?? ''));
             $grossAmount = round((float) ($obligation['gross_amount'] ?? 0), 2);
+            $supplierPoolName = $supplierId > 0
+                ? $this->supplierAdvancePoolNameForSupplier($supplierId)
+                : '';
 
             $this->supplierAdvanceTraceLog('autoApplyAvailableAdvanceToObligation', 'method_entered', [
                 'trace_id' => $traceId,
@@ -4457,26 +4933,15 @@ final class SupplierRepository extends BaseRepository
                 0.0
             ), 2);
 
-            $advanceStatement = $this->db->prepare(
-                'SELECT id, supplier_id, branch_id, currency, available_amount, received_at
-                 FROM supplier_advances
-                 WHERE supplier_id = :supplier_id
-                   AND currency = :currency
-                 ORDER BY received_at ASC, id ASC
-                 FOR UPDATE'
-            );
             $advanceRows = [];
-            if ($supplierId > 0 && $branchId > 0) {
-                $advanceStatement->execute([
-                    'supplier_id' => $supplierId,
-                    'currency' => $obligationCurrency,
-                ]);
-                $advanceRows = $advanceStatement->fetchAll() ?: [];
+            if ($supplierId > 0 && $branchId > 0 && $supplierPoolName !== '') {
+                $advanceRows = $this->availableAdvanceRowsForSupplierPool($supplierId, $obligationCurrency);
             }
 
             $this->supplierAdvanceTraceLog('autoApplyAvailableAdvanceToObligation', 'advance_rows_loaded', [
                 'trace_id' => $traceId,
                 'supplier_id' => $supplierId > 0 ? $supplierId : null,
+                'supplier_pool_name' => $supplierPoolName !== '' ? $supplierPoolName : null,
                 'branch_id' => $branchId > 0 ? $branchId : null,
                 'currency' => (string) ($obligation['currency'] ?? ''),
                 'purchase_cost' => $grossAmount,
@@ -4495,12 +4960,25 @@ final class SupplierRepository extends BaseRepository
                 $advanceRowsById[(int) $advanceRow['id']] = $advanceRow;
             }
 
+            $supplierPoolMatchCache = [];
+            $matchesCurrentSupplierPool = static function (int $advanceSupplierId) use (&$supplierPoolMatchCache, $supplierPoolName): bool {
+                if ($advanceSupplierId <= 0 || $supplierPoolName === '') {
+                    return false;
+                }
+
+                if (! array_key_exists($advanceSupplierId, $supplierPoolMatchCache)) {
+                    $supplierPoolMatchCache[$advanceSupplierId] = $this->supplierAdvancePoolNameForSupplier($advanceSupplierId) === $supplierPoolName;
+                }
+
+                return $supplierPoolMatchCache[$advanceSupplierId];
+            };
+
             $matchingAppliedAmount = 0.0;
             $protectedAppliedAmount = 0.0;
             foreach ($applicationRows as $applicationRow) {
                 $applicationCurrency = strtoupper((string) ($applicationRow['currency'] ?? ''));
                 $applicationType = (string) ($applicationRow['application_type'] ?? '');
-                $matchesCurrentSupplier = (int) ($applicationRow['supplier_id'] ?? 0) === $supplierId
+                $matchesCurrentSupplier = $matchesCurrentSupplierPool((int) ($applicationRow['supplier_id'] ?? 0))
                     && $applicationCurrency === $obligationCurrency;
                 if ($applicationType === 'cross_currency_explicit') {
                     $protectedAppliedAmount = round($protectedAppliedAmount + (float) ($applicationRow['applied_amount'] ?? 0), 2);
@@ -4586,7 +5064,7 @@ final class SupplierRepository extends BaseRepository
                 }
 
                 $applicationCurrency = strtoupper((string) ($applicationRow['currency'] ?? ''));
-                $matchesCurrentSupplier = (int) ($applicationRow['supplier_id'] ?? 0) === $supplierId
+                $matchesCurrentSupplier = $matchesCurrentSupplierPool((int) ($applicationRow['supplier_id'] ?? 0))
                     && $applicationCurrency === $obligationCurrency;
                 $applicationAmount = round((float) ($applicationRow['applied_amount'] ?? 0), 2);
                 if ($applicationAmount <= 0) {

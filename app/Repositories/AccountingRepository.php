@@ -466,6 +466,20 @@ final class AccountingRepository extends BaseRepository
         $chargesAmount = (float) ($data['charges_amount'] ?? 0);
         $paidAmount = (float) $data['paid_amount'];
         $sourceAccount = $this->paymentMethodAssetAccount($data);
+        $journalCurrency = strtoupper(trim((string) ($data['currency'] ?? 'PKR')));
+        $treasuryCurrency = strtoupper(trim((string) ($data['treasury_currency'] ?? $journalCurrency)));
+        $treasuryAmount = round((float) ($data['treasury_amount'] ?? ($paidAmount + $chargesAmount)), 2);
+        $crossCurrencyFunding = (int) ($data['treasury_account_id'] ?? 0) > 0
+            && $treasuryCurrency !== ''
+            && $treasuryCurrency !== $journalCurrency;
+        $bridgeAccount = $crossCurrencyFunding
+            ? $this->ensureAccountByCode(
+                'SUPPLIER_PAYMENT_FX_CLEARING',
+                'Supplier Payment FX Clearing',
+                'asset',
+                'debit'
+            )
+            : null;
 
         $lines = [
             [
@@ -488,15 +502,17 @@ final class AccountingRepository extends BaseRepository
         }
 
         $lines[] = [
-            'account_code' => $sourceAccount['account_code'],
-            'account_id' => $sourceAccount['account_id'],
+            'account_code' => $crossCurrencyFunding ? (string) ($bridgeAccount['account_code'] ?? '') : $sourceAccount['account_code'],
+            'account_id' => $crossCurrencyFunding ? (int) ($bridgeAccount['account_id'] ?? 0) : $sourceAccount['account_id'],
             'supplier_payment_id' => $data['supplier_payment_id'] ?? null,
-            'line_description' => 'Cash or bank supplier outflow',
+            'line_description' => $crossCurrencyFunding
+                ? 'Cross-currency supplier payment bridge credited'
+                : 'Cash or bank supplier outflow',
             'debit_amount' => 0,
             'credit_amount' => $paidAmount + $chargesAmount,
         ];
 
-        return $this->postJournalEntry([
+        $journalId = $this->postJournalEntry([
             'branch_id' => $data['branch_id'],
             'booking_reference' => $data['booking_reference'],
             'source_type' => 'supplier_payment_recorded',
@@ -506,6 +522,51 @@ final class AccountingRepository extends BaseRepository
             'narration' => $data['narration'] ?? 'Supplier payment recorded at booking level',
             'actor_user_id' => $data['actor_user_id'] ?? null,
         ], $lines);
+
+        if ($crossCurrencyFunding && $bridgeAccount !== null && $treasuryAmount > 0) {
+            $treasuryReference = $this->treasuryAccountLedgerReference((int) ($data['treasury_account_id'] ?? 0));
+            if ($treasuryReference === null) {
+                throw new RuntimeException('Cross-currency supplier payment requires a valid treasury account.');
+            }
+            $fundingReference = (string) ($data['source_reference'] ?? $data['payment_no'] ?? '');
+            if ($fundingReference === '') {
+                $fundingReference = 'SUPPLIER-PAYMENT';
+            }
+
+            $this->postJournalEntry([
+                'branch_id' => (int) ($treasuryReference['branch_id'] ?? $data['branch_id']),
+                'booking_reference' => $data['booking_reference'],
+                'source_type' => 'supplier_payment_treasury_funded',
+                'source_reference' => $fundingReference . '-FX',
+                'entry_date' => $data['entry_date'],
+                'currency' => $treasuryCurrency,
+                'narration' => sprintf(
+                    'Supplier payment treasury funding: %s source used for %s payable',
+                    $treasuryCurrency,
+                    $journalCurrency
+                ),
+                'actor_user_id' => $data['actor_user_id'] ?? null,
+            ], [
+                [
+                    'account_code' => (string) $bridgeAccount['account_code'],
+                    'account_id' => (int) $bridgeAccount['account_id'],
+                    'supplier_payment_id' => $data['supplier_payment_id'] ?? null,
+                    'line_description' => 'Cross-currency supplier payment bridge debited',
+                    'debit_amount' => $treasuryAmount,
+                    'credit_amount' => 0,
+                ],
+                [
+                    'account_code' => (string) $treasuryReference['account_code'],
+                    'account_id' => (int) $treasuryReference['account_id'],
+                    'supplier_payment_id' => $data['supplier_payment_id'] ?? null,
+                    'line_description' => 'Cash or bank supplier outflow',
+                    'debit_amount' => 0,
+                    'credit_amount' => $treasuryAmount,
+                ],
+            ]);
+        }
+
+        return $journalId;
     }
 
     public function postSupplierPaymentAllocation(array $data): int
@@ -544,6 +605,7 @@ final class AccountingRepository extends BaseRepository
     public function postSupplierPaymentVoidReversal(array $data): ?int
     {
         $rows = [];
+        $sourceTypes = '"supplier_payment_recorded", "supplier_payment_allocated", "supplier_payment_treasury_funded"';
         if ($this->columnExists('journal_entry_lines', 'supplier_payment_id')) {
             $statement = $this->db->prepare(
                 'SELECT
@@ -562,7 +624,7 @@ final class AccountingRepository extends BaseRepository
                  INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
                  INNER JOIN chart_of_accounts coa ON coa.id = jel.account_id
                  WHERE jel.supplier_payment_id = :supplier_payment_id
-                   AND je.source_type IN ("supplier_payment_recorded", "supplier_payment_allocated")
+                   AND je.source_type IN (' . $sourceTypes . ')
                  ORDER BY je.id ASC, jel.id ASC'
             );
             $statement->execute([
@@ -588,10 +650,11 @@ final class AccountingRepository extends BaseRepository
                  FROM journal_entries je
                  INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
                  INNER JOIN chart_of_accounts coa ON coa.id = jel.account_id
-                 WHERE je.source_type IN ("supplier_payment_recorded", "supplier_payment_allocated")
+                 WHERE je.source_type IN (' . $sourceTypes . ')
                    AND (
                         je.source_reference = :payment_no_exact
                         OR je.source_reference LIKE :payment_no_alloc
+                        OR je.source_reference LIKE :payment_no_fx
                    )
                  ORDER BY je.id ASC, jel.id ASC'
             );
@@ -599,6 +662,7 @@ final class AccountingRepository extends BaseRepository
             $statement->execute([
                 'payment_no_exact' => $paymentNo,
                 'payment_no_alloc' => $paymentNo . '-ALLOC-%',
+                'payment_no_fx' => $paymentNo . '-FX%',
             ]);
             $rows = $statement->fetchAll() ?: [];
         }
@@ -607,45 +671,74 @@ final class AccountingRepository extends BaseRepository
             return null;
         }
 
-        $lines = [];
+        $groups = [];
         foreach ($rows as $row) {
-            $debitAmount = round((float) ($row['debit_amount'] ?? 0), 2);
-            $creditAmount = round((float) ($row['credit_amount'] ?? 0), 2);
-            if ($debitAmount <= 0 && $creditAmount <= 0) {
-                continue;
+            $currencyKey = strtoupper(trim((string) ($row['currency'] ?? 'PKR')));
+            if (! isset($groups[$currencyKey])) {
+                $groups[$currencyKey] = [];
             }
 
-            $lines[] = [
-                'account_code' => (string) ($row['account_code'] ?? ''),
-                'service_line_reference' => ($row['service_line_reference'] ?? null) !== null && (string) ($row['service_line_reference'] ?? '') !== ''
-                    ? (string) $row['service_line_reference']
-                    : null,
-                'supplier_obligation_id' => (int) ($row['supplier_obligation_id'] ?? 0) > 0
-                    ? (int) $row['supplier_obligation_id']
-                    : null,
-                'supplier_payment_id' => (int) ($data['supplier_payment_id'] ?? 0) > 0
-                    ? (int) $data['supplier_payment_id']
-                    : null,
-                'line_description' => 'Supplier payment void reversal: ' . (string) ($row['line_description'] ?? ''),
-                'debit_amount' => $creditAmount,
-                'credit_amount' => $debitAmount,
-            ];
+            $groups[$currencyKey][] = $row;
         }
 
-        if ($lines === []) {
+        if ($groups === []) {
             return null;
         }
 
-        return $this->postJournalEntry([
-            'branch_id' => $data['branch_id'],
-            'booking_reference' => $data['booking_reference'],
-            'source_type' => 'supplier_payment_void_reversed',
-            'source_reference' => $data['source_reference'] ?? null,
-            'entry_date' => $data['entry_date'],
-            'currency' => $data['currency'],
-            'narration' => $data['narration'] ?? 'Supplier payment void reversal',
-            'actor_user_id' => $data['actor_user_id'] ?? null,
-        ], $lines);
+        $createdJournalId = null;
+        $groupIndex = 0;
+        $groupCount = count($groups);
+
+        foreach ($groups as $currencyKey => $currencyRows) {
+            $groupIndex++;
+            $lines = [];
+            foreach ($currencyRows as $row) {
+                $debitAmount = round((float) ($row['debit_amount'] ?? 0), 2);
+                $creditAmount = round((float) ($row['credit_amount'] ?? 0), 2);
+                if ($debitAmount <= 0 && $creditAmount <= 0) {
+                    continue;
+                }
+
+                $lines[] = [
+                    'account_code' => (string) ($row['account_code'] ?? ''),
+                    'service_line_reference' => ($row['service_line_reference'] ?? null) !== null && (string) ($row['service_line_reference'] ?? '') !== ''
+                        ? (string) $row['service_line_reference']
+                        : null,
+                    'supplier_obligation_id' => (int) ($row['supplier_obligation_id'] ?? 0) > 0
+                        ? (int) $row['supplier_obligation_id']
+                        : null,
+                    'supplier_payment_id' => (int) ($data['supplier_payment_id'] ?? 0) > 0
+                        ? (int) $data['supplier_payment_id']
+                        : null,
+                    'line_description' => 'Supplier payment void reversal: ' . (string) ($row['line_description'] ?? ''),
+                    'debit_amount' => $creditAmount,
+                    'credit_amount' => $debitAmount,
+                ];
+            }
+
+            if ($lines === []) {
+                continue;
+            }
+
+            $journalId = $this->postJournalEntry([
+                'branch_id' => $data['branch_id'],
+                'booking_reference' => $data['booking_reference'],
+                'source_type' => 'supplier_payment_void_reversed',
+                'source_reference' => $groupCount > 1
+                    ? (((string) ($data['source_reference'] ?? 'SUPPLIER-PAYMENT-VOID')) . '-' . $currencyKey)
+                    : ($data['source_reference'] ?? null),
+                'entry_date' => $data['entry_date'],
+                'currency' => $currencyKey,
+                'narration' => $data['narration'] ?? 'Supplier payment void reversal',
+                'actor_user_id' => $data['actor_user_id'] ?? null,
+            ], $lines);
+
+            if ($createdJournalId === null) {
+                $createdJournalId = $journalId;
+            }
+        }
+
+        return $createdJournalId;
     }
 
     public function postCustomerReceiptRecorded(array $data): int
@@ -800,6 +893,74 @@ final class AccountingRepository extends BaseRepository
 
     public function postCustomerDirectSupplierPayment(array $data): int
     {
+        $supplierAllocatedAmount = round((float) ($data['supplier_allocated_amount'] ?? 0), 2);
+        $supplierAdvanceAmount = round((float) ($data['supplier_advance_amount'] ?? 0), 2);
+        $customerAllocations = is_array($data['customer_allocations'] ?? null)
+            ? $data['customer_allocations']
+            : [];
+        $supplierAllocations = is_array($data['supplier_allocations'] ?? null)
+            ? $data['supplier_allocations']
+            : [];
+
+        $lines = [];
+        if ($supplierAllocations !== []) {
+            foreach ($supplierAllocations as $allocation) {
+                $allocatedAmount = round((float) ($allocation['allocated_amount'] ?? 0), 2);
+                if ($allocatedAmount <= 0) {
+                    continue;
+                }
+
+                $lines[] = [
+                    'account_code' => 'AP_CONTROL',
+                    'service_line_reference' => $allocation['service_line_reference'] ?? null,
+                    'supplier_obligation_id' => $allocation['supplier_obligation_id'] ?? null,
+                    'supplier_payment_id' => $data['supplier_payment_id'] ?? null,
+                    'line_description' => 'Supplier payable reduced by customer-paid supplier settlement',
+                    'debit_amount' => $allocatedAmount,
+                    'credit_amount' => 0,
+                ];
+            }
+        } elseif ($supplierAllocatedAmount > 0) {
+            $lines[] = [
+                'account_code' => 'AP_CONTROL',
+                'service_line_reference' => $data['supplier_service_line_reference'] ?? null,
+                'supplier_obligation_id' => $data['supplier_obligation_id'] ?? null,
+                'supplier_payment_id' => $data['supplier_payment_id'] ?? null,
+                'line_description' => 'Supplier payable reduced by customer-paid supplier settlement',
+                'debit_amount' => $supplierAllocatedAmount,
+                'credit_amount' => 0,
+            ];
+        }
+
+        if ($supplierAdvanceAmount > 0) {
+            $lines[] = [
+                'account_code' => 'SUPPLIER_ADVANCES',
+                'service_line_reference' => $data['supplier_service_line_reference'] ?? null,
+                'supplier_obligation_id' => $data['supplier_obligation_id'] ?? null,
+                'supplier_payment_id' => $data['supplier_payment_id'] ?? null,
+                'line_description' => 'Excess customer-paid supplier amount moved to supplier advance',
+                'debit_amount' => $supplierAdvanceAmount,
+                'credit_amount' => 0,
+            ];
+        }
+
+        foreach ($customerAllocations as $allocation) {
+            $allocatedAmount = round((float) ($allocation['allocated_amount'] ?? 0), 2);
+            if ($allocatedAmount <= 0) {
+                continue;
+            }
+
+            $lines[] = [
+                'account_code' => 'AR_CONTROL',
+                'service_line_reference' => $allocation['service_line_reference'] ?? null,
+                'customer_receivable_item_id' => $allocation['customer_receivable_item_id'] ?? null,
+                'customer_receipt_id' => $data['customer_receipt_id'] ?? null,
+                'line_description' => 'Customer receivable reduced by customer-paid supplier settlement',
+                'debit_amount' => 0,
+                'credit_amount' => $allocatedAmount,
+            ];
+        }
+
         return $this->postJournalEntry([
             'branch_id' => $data['branch_id'],
             'booking_reference' => $data['booking_reference'],
@@ -807,28 +968,9 @@ final class AccountingRepository extends BaseRepository
             'source_reference' => $data['source_reference'] ?? null,
             'entry_date' => $data['entry_date'],
             'currency' => $data['currency'],
-            'narration' => $data['narration'] ?? 'Customer paid supplier directly',
+            'narration' => $data['narration'] ?? 'Customer paid supplier; supplier payable settled first',
             'actor_user_id' => $data['actor_user_id'] ?? null,
-        ], [
-            [
-                'account_code' => 'AP_CONTROL',
-                'service_line_reference' => $data['service_line_reference'] ?? null,
-                'supplier_obligation_id' => $data['supplier_obligation_id'] ?? null,
-                'supplier_payment_id' => $data['supplier_payment_id'] ?? null,
-                'line_description' => 'Supplier payable reduced by direct customer payment',
-                'debit_amount' => $data['amount'],
-                'credit_amount' => 0,
-            ],
-            [
-                'account_code' => 'AR_CONTROL',
-                'service_line_reference' => $data['service_line_reference'] ?? null,
-                'customer_receivable_item_id' => $data['customer_receivable_item_id'] ?? null,
-                'customer_receipt_id' => $data['customer_receipt_id'] ?? null,
-                'line_description' => 'Customer receivable reduced by direct supplier payment',
-                'debit_amount' => 0,
-                'credit_amount' => $data['amount'],
-            ],
-        ]);
+        ], $lines);
     }
 
     public function postCustomerAdvanceRefund(array $data): int
@@ -1275,9 +1417,75 @@ final class AccountingRepository extends BaseRepository
 
         $counterparty = trim((string) ($data['counterparty_name'] ?? ''));
         $counterpartyLabel = $counterparty !== '' ? $counterparty : 'Direct treasury counterparty';
+        $accountHolderId = (int) ($data['business_source_id'] ?? 0);
+        $accountHolderLabel = trim((string) ($data['business_source_name'] ?? ''));
+        if ($accountHolderId > 0 && $accountHolderLabel === '') {
+            $statement = $this->db->prepare('SELECT name FROM business_sources WHERE id = :id LIMIT 1');
+            $statement->execute(['id' => $accountHolderId]);
+            $accountHolderLabel = trim((string) (($statement->fetchColumn() ?: '')));
+        }
+        if ($accountHolderId > 0 && $accountHolderLabel === '') {
+            $accountHolderLabel = 'Account Holder';
+        }
         $treasuryAccountName = trim((string) ($treasuryAccount['account_name'] ?? ''));
         if ($treasuryAccountName === '') {
             $treasuryAccountName = (string) ($treasuryAccount['account_code'] ?? 'treasury account');
+        }
+
+        if ($accountHolderId > 0) {
+            $contraAccount = $this->ensureAccountByCode(
+                'ACCOUNT_HOLDER_BALANCES',
+                'Account Holder Balances',
+                'liability',
+                'credit'
+            );
+
+            if ($transactionType === 'adjustment_increase') {
+                $lines = [
+                    [
+                        'account_id' => $treasuryAccount['account_id'],
+                        'account_code' => $treasuryAccount['account_code'],
+                        'line_description' => 'Money received into ' . $treasuryAccountName . ' for ' . $accountHolderLabel,
+                        'debit_amount' => $amount,
+                        'credit_amount' => 0,
+                    ],
+                    [
+                        'account_id' => $contraAccount['account_id'],
+                        'account_code' => $contraAccount['account_code'],
+                        'line_description' => 'Account-holder balance increased for ' . $accountHolderLabel,
+                        'debit_amount' => 0,
+                        'credit_amount' => $amount,
+                    ],
+                ];
+            } else {
+                $lines = [
+                    [
+                        'account_id' => $contraAccount['account_id'],
+                        'account_code' => $contraAccount['account_code'],
+                        'line_description' => 'Account-holder balance reduced for ' . $accountHolderLabel,
+                        'debit_amount' => $amount,
+                        'credit_amount' => 0,
+                    ],
+                    [
+                        'account_id' => $treasuryAccount['account_id'],
+                        'account_code' => $treasuryAccount['account_code'],
+                        'line_description' => 'Money paid out from ' . $treasuryAccountName . ' for ' . $accountHolderLabel,
+                        'debit_amount' => 0,
+                        'credit_amount' => $amount,
+                    ],
+                ];
+            }
+
+            return $this->postJournalEntry([
+                'branch_id' => $data['branch_id'],
+                'booking_reference' => null,
+                'source_type' => 'direct_treasury_entry_posted',
+                'source_reference' => $data['source_reference'] ?? null,
+                'entry_date' => $data['entry_date'],
+                'currency' => $data['currency'],
+                'narration' => $data['narration'] ?? 'Account-holder treasury balance posted',
+                'actor_user_id' => $data['actor_user_id'] ?? null,
+            ], $lines);
         }
 
         if ($transactionType === 'adjustment_increase') {
@@ -1742,6 +1950,14 @@ final class AccountingRepository extends BaseRepository
     private function paymentMethodAssetAccount(array $data): array
     {
         $paymentMethod = (string) ($data['payment_method'] ?? '');
+        if ($paymentMethod === 'account_holder_balance') {
+            return $this->ensureAccountByCode(
+                'ACCOUNT_HOLDER_BALANCES',
+                'Account Holder Balances',
+                'liability',
+                'credit'
+            );
+        }
         if (in_array($paymentMethod, ['debit_card', 'credit_card'], true)) {
             return [
                 'account_code' => 'CARD_CLEARING',
@@ -1770,6 +1986,7 @@ final class AccountingRepository extends BaseRepository
         $statement = $this->db->prepare(
             'SELECT
                 ta.id,
+                ta.branch_id,
                 ta.account_type,
                 ta.account_name,
                 ta.account_code,
@@ -1803,6 +2020,7 @@ final class AccountingRepository extends BaseRepository
 
         if ($linkedAccountId > 0 && $linkedAccountCode === $desiredCode) {
             return [
+                'branch_id' => (int) ($account['branch_id'] ?? 0),
                 'account_code' => $desiredCode,
                 'account_id' => $linkedAccountId,
                 'account_name' => (string) ($account['account_name'] ?? $desiredCode),
@@ -1848,6 +2066,7 @@ final class AccountingRepository extends BaseRepository
 
         return $existingId > 0
             ? [
+                'branch_id' => (int) ($account['branch_id'] ?? 0),
                 'account_code' => $desiredCode,
                 'account_id' => $existingId,
                 'account_name' => (string) ($account['account_name'] ?? $desiredCode),

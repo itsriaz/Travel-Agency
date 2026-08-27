@@ -183,6 +183,157 @@ final class CounterpartyOffsetRepository extends BaseRepository
         return $statement->fetchAll() ?: [];
     }
 
+    public function releaseCoverageForObligation(int $obligationId, float $amount): array
+    {
+        $remaining = round(max($amount, 0), 2);
+        if ($obligationId <= 0 || $remaining <= 0.005) {
+            return [
+                'released_amount' => 0.0,
+                'affected_offset_ids' => [],
+                'affected_account_receivable_ids' => [],
+            ];
+        }
+
+        $payableAllocationStatement = $this->db->prepare(
+            'SELECT
+                allocation.id,
+                allocation.counterparty_offset_id,
+                allocation.supplier_obligation_id,
+                allocation.allocated_amount,
+                offset_record.amount AS offset_amount
+             FROM counterparty_offset_payable_allocations allocation
+             INNER JOIN counterparty_offsets offset_record
+                ON offset_record.id = allocation.counterparty_offset_id
+               AND offset_record.status = "posted"
+             WHERE allocation.supplier_obligation_id = :obligation_id
+             ORDER BY offset_record.id DESC, allocation.id DESC
+             FOR UPDATE'
+        );
+        $payableAllocationStatement->execute(['obligation_id' => $obligationId]);
+        $payableAllocations = $payableAllocationStatement->fetchAll() ?: [];
+
+        if ($payableAllocations === []) {
+            return [
+                'released_amount' => 0.0,
+                'affected_offset_ids' => [],
+                'affected_account_receivable_ids' => [],
+            ];
+        }
+
+        $updatePayableAllocation = $this->db->prepare(
+            'UPDATE counterparty_offset_payable_allocations
+             SET allocated_amount = :allocated_amount
+             WHERE id = :id'
+        );
+        $deletePayableAllocation = $this->db->prepare(
+            'DELETE FROM counterparty_offset_payable_allocations
+             WHERE id = :id'
+        );
+        $updateOffsetAmount = $this->db->prepare(
+            'UPDATE counterparty_offsets
+             SET amount = :amount
+             WHERE id = :id'
+        );
+
+        $releasedAmount = 0.0;
+        $affectedOffsetIds = [];
+        $affectedAccountReceivableIds = [];
+
+        foreach ($payableAllocations as $allocation) {
+            if ($remaining <= 0.005) {
+                break;
+            }
+
+            $allocationAmount = round((float) ($allocation['allocated_amount'] ?? 0), 2);
+            $releaseAmount = round(min($remaining, $allocationAmount), 2);
+            if ($releaseAmount <= 0.005) {
+                continue;
+            }
+
+            $releasedAccounts = $this->releaseOffsetCounterpartCoverage(
+                (int) $allocation['counterparty_offset_id'],
+                $releaseAmount
+            );
+
+            $remainingPayableAllocation = round($allocationAmount - $releaseAmount, 2);
+            if ($remainingPayableAllocation > 0.005) {
+                $updatePayableAllocation->execute([
+                    'allocated_amount' => $remainingPayableAllocation,
+                    'id' => (int) $allocation['id'],
+                ]);
+            } else {
+                $deletePayableAllocation->execute(['id' => (int) $allocation['id']]);
+            }
+
+            $newOffsetAmount = round(max((float) ($allocation['offset_amount'] ?? 0) - $releaseAmount, 0), 2);
+            $updateOffsetAmount->execute([
+                'amount' => $newOffsetAmount,
+                'id' => (int) $allocation['counterparty_offset_id'],
+            ]);
+
+            $releasedAmount = round($releasedAmount + $releaseAmount, 2);
+            $remaining = round(max($remaining - $releaseAmount, 0), 2);
+            $affectedOffsetIds[] = (int) $allocation['counterparty_offset_id'];
+            $affectedAccountReceivableIds = array_merge($affectedAccountReceivableIds, $releasedAccounts);
+        }
+
+        if ($remaining > 0.005) {
+            throw new \RuntimeException('Unable to release the linked account/supplier adjustment for this payable.');
+        }
+
+        return [
+            'released_amount' => $releasedAmount,
+            'affected_offset_ids' => array_values(array_unique($affectedOffsetIds)),
+            'affected_account_receivable_ids' => array_values(array_unique($affectedAccountReceivableIds)),
+        ];
+    }
+
+    public function releaseCoverageForReceivable(int $receivableId, float $amount): array
+    {
+        $remaining = round(max($amount, 0), 2);
+        if ($receivableId <= 0 || $remaining <= 0.005) {
+            return [
+                'released_amount' => 0.0,
+                'affected_offset_ids' => [],
+                'affected_payable_ids' => [],
+            ];
+        }
+
+        $releasedAmount = 0.0;
+        $affectedOffsetIds = [];
+        $affectedPayableIds = [];
+
+        $remaining = $this->releaseReceivableCoverageRows(
+            'counterparty_offset_account_allocations',
+            $receivableId,
+            $remaining,
+            $releasedAmount,
+            $affectedOffsetIds,
+            $affectedPayableIds
+        );
+
+        if ($remaining > 0.005) {
+            $remaining = $this->releaseReceivableCoverageRows(
+                'counterparty_offset_receivable_allocations',
+                $receivableId,
+                $remaining,
+                $releasedAmount,
+                $affectedOffsetIds,
+                $affectedPayableIds
+            );
+        }
+
+        if ($remaining > 0.005) {
+            throw new \RuntimeException('Unable to release the linked account/supplier adjustment for this invoice.');
+        }
+
+        return [
+            'released_amount' => $releasedAmount,
+            'affected_offset_ids' => array_values(array_unique($affectedOffsetIds)),
+            'affected_payable_ids' => array_values(array_unique($affectedPayableIds)),
+        ];
+    }
+
     public function voidOffset(int $offsetId, int $actorUserId, string $reason, int $reversalJournalId): void
     {
         // Legacy offsets changed customer receivables directly. Preserve their
@@ -214,6 +365,265 @@ final class CounterpartyOffsetRepository extends BaseRepository
         if ($statement->rowCount() !== 1) {
             throw new \RuntimeException('The settlement could not be voided.');
         }
+    }
+
+    private function releaseOffsetCounterpartCoverage(int $offsetId, float $amount): array
+    {
+        $remaining = round(max($amount, 0), 2);
+        $affectedAccountReceivableIds = [];
+
+        $accountAllocationStatement = $this->db->prepare(
+            'SELECT id, customer_receivable_item_id, allocated_amount
+             FROM counterparty_offset_account_allocations
+             WHERE counterparty_offset_id = :offset_id
+             ORDER BY id DESC
+             FOR UPDATE'
+        );
+        $accountAllocationStatement->execute(['offset_id' => $offsetId]);
+        $accountAllocations = $accountAllocationStatement->fetchAll() ?: [];
+
+        $updateAccountAllocation = $this->db->prepare(
+            'UPDATE counterparty_offset_account_allocations
+             SET allocated_amount = :allocated_amount
+             WHERE id = :id'
+        );
+        $deleteAccountAllocation = $this->db->prepare(
+            'DELETE FROM counterparty_offset_account_allocations
+             WHERE id = :id'
+        );
+
+        foreach ($accountAllocations as $allocation) {
+            if ($remaining <= 0.005) {
+                break;
+            }
+
+            $allocationAmount = round((float) ($allocation['allocated_amount'] ?? 0), 2);
+            $releaseAmount = round(min($remaining, $allocationAmount), 2);
+            if ($releaseAmount <= 0.005) {
+                continue;
+            }
+
+            $remainingAmount = round($allocationAmount - $releaseAmount, 2);
+            if ($remainingAmount > 0.005) {
+                $updateAccountAllocation->execute([
+                    'allocated_amount' => $remainingAmount,
+                    'id' => (int) $allocation['id'],
+                ]);
+            } else {
+                $deleteAccountAllocation->execute(['id' => (int) $allocation['id']]);
+            }
+
+            $remaining = round(max($remaining - $releaseAmount, 0), 2);
+            $affectedAccountReceivableIds[] = (int) $allocation['customer_receivable_item_id'];
+        }
+
+        if ($remaining > 0.005) {
+            $legacyAllocationStatement = $this->db->prepare(
+                'SELECT id, customer_receivable_item_id, allocated_amount
+                 FROM counterparty_offset_receivable_allocations
+                 WHERE counterparty_offset_id = :offset_id
+                 ORDER BY id DESC
+                 FOR UPDATE'
+            );
+            $legacyAllocationStatement->execute(['offset_id' => $offsetId]);
+            $legacyAllocations = $legacyAllocationStatement->fetchAll() ?: [];
+
+            $updateLegacyAllocation = $this->db->prepare(
+                'UPDATE counterparty_offset_receivable_allocations
+                 SET allocated_amount = :allocated_amount
+                 WHERE id = :id'
+            );
+            $deleteLegacyAllocation = $this->db->prepare(
+                'DELETE FROM counterparty_offset_receivable_allocations
+                 WHERE id = :id'
+            );
+            $releaseLegacyReceivable = $this->db->prepare(
+                'UPDATE customer_receivable_items
+                 SET allocated_amount = GREATEST(0, allocated_amount - :allocated_delta),
+                     outstanding_amount = outstanding_amount + :outstanding_delta,
+                     status = CASE
+                        WHEN GREATEST(0, allocated_amount - :allocated_delta) <= 0.005 THEN "open"
+                        ELSE "partially_paid"
+                     END
+                 WHERE id = :id'
+            );
+
+            foreach ($legacyAllocations as $allocation) {
+                if ($remaining <= 0.005) {
+                    break;
+                }
+
+                $allocationAmount = round((float) ($allocation['allocated_amount'] ?? 0), 2);
+                $releaseAmount = round(min($remaining, $allocationAmount), 2);
+                if ($releaseAmount <= 0.005) {
+                    continue;
+                }
+
+                $remainingAmount = round($allocationAmount - $releaseAmount, 2);
+                if ($remainingAmount > 0.005) {
+                    $updateLegacyAllocation->execute([
+                        'allocated_amount' => $remainingAmount,
+                        'id' => (int) $allocation['id'],
+                    ]);
+                } else {
+                    $deleteLegacyAllocation->execute(['id' => (int) $allocation['id']]);
+                }
+
+                $releaseLegacyReceivable->execute([
+                    'allocated_delta' => $releaseAmount,
+                    'outstanding_delta' => $releaseAmount,
+                    'id' => (int) $allocation['customer_receivable_item_id'],
+                ]);
+
+                $remaining = round(max($remaining - $releaseAmount, 0), 2);
+                $affectedAccountReceivableIds[] = (int) $allocation['customer_receivable_item_id'];
+            }
+        }
+
+        if ($remaining > 0.005) {
+            throw new \RuntimeException('Unable to release the linked account-side coverage for this settlement.');
+        }
+
+        return array_values(array_unique($affectedAccountReceivableIds));
+    }
+
+    private function releaseReceivableCoverageRows(
+        string $table,
+        int $receivableId,
+        float $remaining,
+        float &$releasedAmount,
+        array &$affectedOffsetIds,
+        array &$affectedPayableIds
+    ): float {
+        $statement = $this->db->prepare(
+            'SELECT id, counterparty_offset_id, customer_receivable_item_id, allocated_amount
+             FROM ' . $table . '
+             WHERE customer_receivable_item_id = :receivable_id
+             ORDER BY counterparty_offset_id DESC, id DESC
+             FOR UPDATE'
+        );
+        $statement->execute(['receivable_id' => $receivableId]);
+        $allocations = $statement->fetchAll() ?: [];
+
+        $updateAllocation = $this->db->prepare(
+            'UPDATE ' . $table . '
+             SET allocated_amount = :allocated_amount
+             WHERE id = :id'
+        );
+        $deleteAllocation = $this->db->prepare(
+            'DELETE FROM ' . $table . '
+             WHERE id = :id'
+        );
+        $offsetAmountStatement = $this->db->prepare(
+            'SELECT amount
+             FROM counterparty_offsets
+             WHERE id = :id
+             LIMIT 1
+             FOR UPDATE'
+        );
+        $updateOffsetAmount = $this->db->prepare(
+            'UPDATE counterparty_offsets
+             SET amount = :amount
+             WHERE id = :id'
+        );
+
+        foreach ($allocations as $allocation) {
+            if ($remaining <= 0.005) {
+                break;
+            }
+
+            $allocationAmount = round((float) ($allocation['allocated_amount'] ?? 0), 2);
+            $releaseAmount = round(min($remaining, $allocationAmount), 2);
+            if ($releaseAmount <= 0.005) {
+                continue;
+            }
+
+            $remainingAllocationAmount = round($allocationAmount - $releaseAmount, 2);
+            if ($remainingAllocationAmount > 0.005) {
+                $updateAllocation->execute([
+                    'allocated_amount' => $remainingAllocationAmount,
+                    'id' => (int) $allocation['id'],
+                ]);
+            } else {
+                $deleteAllocation->execute(['id' => (int) $allocation['id']]);
+            }
+
+            $releasedPayables = $this->releaseOffsetPayableCoverage(
+                (int) $allocation['counterparty_offset_id'],
+                $releaseAmount
+            );
+
+            $offsetAmountStatement->execute(['id' => (int) $allocation['counterparty_offset_id']]);
+            $offsetAmount = round((float) $offsetAmountStatement->fetchColumn(), 2);
+            $updateOffsetAmount->execute([
+                'amount' => round(max($offsetAmount - $releaseAmount, 0), 2),
+                'id' => (int) $allocation['counterparty_offset_id'],
+            ]);
+
+            $releasedAmount = round($releasedAmount + $releaseAmount, 2);
+            $remaining = round(max($remaining - $releaseAmount, 0), 2);
+            $affectedOffsetIds[] = (int) $allocation['counterparty_offset_id'];
+            $affectedPayableIds = array_merge($affectedPayableIds, $releasedPayables);
+        }
+
+        return $remaining;
+    }
+
+    private function releaseOffsetPayableCoverage(int $offsetId, float $amount): array
+    {
+        $remaining = round(max($amount, 0), 2);
+        $affectedPayableIds = [];
+
+        $payableAllocationStatement = $this->db->prepare(
+            'SELECT id, supplier_obligation_id, allocated_amount
+             FROM counterparty_offset_payable_allocations
+             WHERE counterparty_offset_id = :offset_id
+             ORDER BY id DESC
+             FOR UPDATE'
+        );
+        $payableAllocationStatement->execute(['offset_id' => $offsetId]);
+        $payableAllocations = $payableAllocationStatement->fetchAll() ?: [];
+
+        $updatePayableAllocation = $this->db->prepare(
+            'UPDATE counterparty_offset_payable_allocations
+             SET allocated_amount = :allocated_amount
+             WHERE id = :id'
+        );
+        $deletePayableAllocation = $this->db->prepare(
+            'DELETE FROM counterparty_offset_payable_allocations
+             WHERE id = :id'
+        );
+
+        foreach ($payableAllocations as $allocation) {
+            if ($remaining <= 0.005) {
+                break;
+            }
+
+            $allocationAmount = round((float) ($allocation['allocated_amount'] ?? 0), 2);
+            $releaseAmount = round(min($remaining, $allocationAmount), 2);
+            if ($releaseAmount <= 0.005) {
+                continue;
+            }
+
+            $remainingAmount = round($allocationAmount - $releaseAmount, 2);
+            if ($remainingAmount > 0.005) {
+                $updatePayableAllocation->execute([
+                    'allocated_amount' => $remainingAmount,
+                    'id' => (int) $allocation['id'],
+                ]);
+            } else {
+                $deletePayableAllocation->execute(['id' => (int) $allocation['id']]);
+            }
+
+            $remaining = round(max($remaining - $releaseAmount, 0), 2);
+            $affectedPayableIds[] = (int) $allocation['supplier_obligation_id'];
+        }
+
+        if ($remaining > 0.005) {
+            throw new \RuntimeException('Unable to release the linked supplier-side coverage for this settlement.');
+        }
+
+        return array_values(array_unique($affectedPayableIds));
     }
 
     public function recent(array $branchIds = [], int $limit = 100): array

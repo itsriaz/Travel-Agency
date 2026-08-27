@@ -101,9 +101,9 @@ $summarySource = array_merge($source, ['currency' => 'PKR']);
 [, $summaryCards] = $reportMethod->invoke($service, [$summarySource], ['PKR' => 1.0], 'customer', true);
 $summaryValues = array_column($summaryCards, 'value', 'label');
 if (
-    ($summaryValues['Debit / PKR'] ?? '') !== 'PKR 1,188.00'
-    || ($summaryValues['Credit / PKR'] ?? '') !== 'PKR 1,188.00'
-    || ($summaryValues['Balance / PKR'] ?? '') !== 'PKR 0.00'
+    ($summaryValues['Debit / PKR'] ?? '') !== 'PKR 1,188'
+    || ($summaryValues['Credit / PKR'] ?? '') !== 'PKR 1,188'
+    || ($summaryValues['Balance / PKR'] ?? '') !== 'PKR 0'
     || count($summaryCards) !== 3
     || ($summaryCards[0]['group'] ?? '') !== 'customer_detail_pkr'
     || array_filter(
@@ -186,8 +186,8 @@ if (abs(($partialDebit - $partialCredit) - (-8.00)) > 0.005) {
     fwrite(STDERR, 'Ordinary partial payment must leave 8.00 Cr outstanding.' . PHP_EOL);
     exit(1);
 }
-if ($partialClosingBalance !== '8.00 Cr') {
-    fwrite(STDERR, 'Ordinary partial payment running balance must display as 8.00 Cr, got ' . $partialClosingBalance . '.' . PHP_EOL);
+if ($partialClosingBalance !== '8 Cr') {
+    fwrite(STDERR, 'Ordinary partial payment running balance must display as 8 Cr, got ' . $partialClosingBalance . '.' . PHP_EOL);
     exit(1);
 }
 
@@ -245,9 +245,9 @@ if (abs($unpaidRefundBalance - 600.00) > 0.005) {
 );
 $unpaidRefundSummaryValues = array_column($unpaidRefundSummaryCards, 'value', 'label');
 if (
-    ($unpaidRefundSummaryValues['Debit / AED'] ?? '') !== 'AED 1,188.00'
-    || ($unpaidRefundSummaryValues['Credit / AED'] ?? '') !== 'AED 1,188.00'
-    || ($unpaidRefundSummaryValues['Balance / AED'] ?? '') !== 'AED 600.00'
+    ($unpaidRefundSummaryValues['Debit / AED'] ?? '') !== 'AED 1,188'
+    || ($unpaidRefundSummaryValues['Credit / AED'] ?? '') !== 'AED 1,188'
+    || ($unpaidRefundSummaryValues['Balance / AED'] ?? '') !== 'AED 600'
 ) {
     fwrite(
         STDERR,
@@ -272,3 +272,54 @@ if (abs($partialRefundBalance - 300.00) > 0.005) {
     exit(1);
 }
 echo '[PASS] Partial refund payment leaves the exact remaining Debit balance.' . PHP_EOL;
+
+$mixedCurrencyRefundSource = array_merge($source, [
+    'booking_reference' => 'BK-MIXED-REFUND-001',
+    'currency' => 'AED',
+    'original_invoice_amount' => 1230.00,
+    'customer_sale_amount' => 1230.00,
+    'service_profit_loss' => 41.00,
+    'service_loss_reason' => '',
+    'account_customer_received_amount' => 1230.00,
+    'refund_customer_paid_amount' => 1230.00,
+    'refund_customer_penalty_amount' => 826.00,
+    'refund_customer_final_charge_amount' => 515.72,
+    'refund_customer_refund_expected' => 55000.00,
+    'refund_customer_refund_currency' => 'PKR',
+    'refund_customer_refund_posted' => 55000.00,
+    'refund_supplier_penalty_amount' => 35700.00,
+    'refund_event_count' => 1,
+]);
+$mixedCurrencyRows = $method->invoke($service, $mixedCurrencyRefundSource, []);
+$mixedEntries = [];
+foreach ($mixedCurrencyRows as $row) {
+    $mixedEntries[(string) ($row['ledger_entry'] ?? '')] = $row;
+}
+
+if ((string) ($mixedEntries['Refund calculated after 515.72 cancellation deduction']['currency'] ?? '') !== 'PKR') {
+    fwrite(STDERR, 'Mixed-currency refund due must be shown in PKR truth currency.' . PHP_EOL);
+    exit(1);
+}
+if ((string) ($mixedEntries['Refund paid to customer']['currency'] ?? '') !== 'PKR') {
+    fwrite(STDERR, 'Mixed-currency refund payment must be shown in PKR truth currency.' . PHP_EOL);
+    exit(1);
+}
+
+[, $mixedCurrencySummaryCards] = $reportMethod->invoke(
+    $service,
+    [$mixedCurrencyRefundSource],
+    ['PKR' => 1.0, 'AED' => 1.0],
+    'customer',
+    true
+);
+$mixedSummaryValues = array_column($mixedCurrencySummaryCards, 'value', 'label');
+if (($mixedSummaryValues['Balance / AED'] ?? '') !== 'AED 0') {
+    fwrite(STDERR, 'Mixed-currency refund must not leave a false AED balance after PKR payout is posted.' . PHP_EOL);
+    exit(1);
+}
+if (($mixedSummaryValues['Balance / PKR'] ?? '') !== 'PKR 0') {
+    fwrite(STDERR, 'Mixed-currency refund must close the PKR refund truth balance after payout.' . PHP_EOL);
+    exit(1);
+}
+
+echo '[PASS] Mixed-currency refund ledger separates AED invoice history from PKR refund settlement and closes both balances.' . PHP_EOL;

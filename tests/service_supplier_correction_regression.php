@@ -36,8 +36,8 @@ $check = static function (string $label, bool $passed, string $details = '') use
     }
 };
 
-$serviceInput = static function (int $bookingId, int $serviceId, string $supplierName, string $passenger): array {
-    return [
+$serviceInput = static function (int $bookingId, int $serviceId, string $supplierName, string $passenger, array $overrides = []): array {
+    return array_replace([
         'booking_id' => $bookingId,
         'service_id' => $serviceId,
         'service_type' => 'visa',
@@ -56,7 +56,7 @@ $serviceInput = static function (int $bookingId, int $serviceId, string $supplie
         'visa_country' => 'UAE',
         'visa_type' => 'Visit Visa',
         'visa_remarks' => 'Rollback-only supplier correction regression',
-    ];
+    ], $overrides);
 };
 
 $paymentAllocationTotal = static function (int $paymentId, int $obligationId) use ($db): float {
@@ -107,7 +107,9 @@ try {
     $oldSupplierId = (int) ($unpaidOldObligation['supplier_id'] ?? 0);
 
     $unpaidUpdate = $serviceWorkspace->saveService(
-        $serviceInput($bookingId, $unpaidServiceId, $newSupplierName, 'Unpaid Supplier Correction Passenger'),
+        $serviceInput($bookingId, $unpaidServiceId, $newSupplierName, 'Unpaid Supplier Correction Passenger', [
+            'service_updated_at' => (string) ($unpaidService['updated_at'] ?? ''),
+        ]),
         $actorUserId,
         $accessibleBranchIds
     );
@@ -124,6 +126,50 @@ try {
         && abs((float) ($unpaidCorrectedObligation['gross_amount'] ?? 0) - 1000.00) <= 0.005
         && abs((float) ($unpaidCorrectedObligation['net_payable_amount'] ?? 0) - 1000.00) <= 0.005,
         json_encode($unpaidUpdate['debug']['supplierCorrection'] ?? [], JSON_UNESCAPED_SLASHES)
+    );
+
+    // Case 1b: mixed-currency saved services reuse their stored FX for supplier-only correction.
+    $mixedCreate = $serviceWorkspace->saveService(
+        $serviceInput($bookingId, 0, $oldSupplierName, 'Mixed Currency Supplier Correction Passenger', [
+            'currency' => 'AED',
+            'cost_currency' => 'PKR',
+            'sale_price' => '90000',
+            'purchase_cost' => '90000',
+            'pricing_exchange_rate' => '0.01298701',
+            'pricing_rate_effective_date' => $today,
+            'final_sale_price' => '1200',
+        ]),
+        $actorUserId,
+        $accessibleBranchIds
+    );
+    $mixedService = $serviceRepository->findServiceById((int) (($mixedCreate['service'] ?? [])['id'] ?? 0)) ?? [];
+    $mixedUpdate = $serviceWorkspace->saveService(
+        $serviceInput(
+            $bookingId,
+            (int) ($mixedService['id'] ?? 0),
+            $newSupplierName,
+            'Mixed Currency Supplier Correction Passenger',
+            [
+                'currency' => 'AED',
+                'cost_currency' => 'PKR',
+                'sale_price' => '90000',
+                'purchase_cost' => '90000',
+                'pricing_exchange_rate' => '',
+                'pricing_rate_effective_date' => '',
+                'service_updated_at' => (string) ($mixedService['updated_at'] ?? ''),
+                'final_sale_price' => '1200',
+            ]
+        ),
+        $actorUserId,
+        $accessibleBranchIds
+    );
+    $mixedCorrectedService = $serviceRepository->findServiceById((int) ($mixedService['id'] ?? 0)) ?? [];
+    $check(
+        'Supplier-only correction reuses the saved pricing FX on mixed-currency services',
+        (int) ($mixedCorrectedService['supplier_id'] ?? 0) > 0
+        && abs((float) ($mixedCorrectedService['pricing_exchange_rate'] ?? 0) - 0.01298701) <= 0.00000001
+        && (string) ($mixedCorrectedService['supplier_name_snapshot'] ?? '') === $newSupplierName
+        && (string) ($mixedUpdate['action'] ?? '') === 'updated'
     );
 
     // Case 2: paid cash stays with the prior supplier as reusable credit.
@@ -200,7 +246,9 @@ try {
     ]);
 
     $paidUpdate = $serviceWorkspace->saveService(
-        $serviceInput($bookingId, $paidServiceId, $newSupplierName, 'Paid Supplier Correction Passenger'),
+        $serviceInput($bookingId, $paidServiceId, $newSupplierName, 'Paid Supplier Correction Passenger', [
+            'service_updated_at' => (string) ($paidService['updated_at'] ?? ''),
+        ]),
         $actorUserId,
         $accessibleBranchIds
     );
@@ -285,6 +333,60 @@ try {
             'line' => $row['service_line_reference'] ?? null,
             'payment_id' => $row['supplier_payment_id'] ?? null,
         ], $supplierLedgerRows), JSON_UNESCAPED_SLASHES)
+    );
+
+    // Case 3: changing only the supplier must not re-demand the reason for an
+    // already-approved loss sale.
+    $lossCreateInput = $serviceInput(
+        $bookingId,
+        0,
+        $oldSupplierName,
+        'Loss Sale Supplier Correction Passenger'
+    );
+    $lossCreateInput['final_sale_price'] = '900.00';
+
+    $newLossWasRejected = false;
+    try {
+        $serviceWorkspace->saveService(
+            $lossCreateInput,
+            $actorUserId,
+            $accessibleBranchIds
+        );
+    } catch (RuntimeException $exception) {
+        $newLossWasRejected = $exception->getMessage()
+            === 'Reason for loss is required when a service line is sold below cost.';
+    }
+    $check(
+        'A new below-cost service still requires an explicit loss reason',
+        $newLossWasRejected
+    );
+
+    $lossCreateInput['loss_reason'] = 'Approved commercial loss sale';
+    $lossCreate = $serviceWorkspace->saveService(
+        $lossCreateInput,
+        $actorUserId,
+        $accessibleBranchIds
+    );
+    $lossServiceId = (int) ($lossCreate['service']['id'] ?? 0);
+
+    $lossSupplierUpdateInput = $lossCreateInput;
+    $lossSupplierUpdateInput['service_id'] = $lossServiceId;
+    $lossSupplierUpdateInput['supplier_name'] = $newSupplierName;
+    $lossSupplierUpdateInput['service_updated_at'] = (string) (($lossCreate['service']['updated_at'] ?? ''));
+    unset($lossSupplierUpdateInput['loss_reason']);
+
+    $lossUpdate = $serviceWorkspace->saveService(
+        $lossSupplierUpdateInput,
+        $actorUserId,
+        $accessibleBranchIds
+    );
+    $lossCorrectedService = $serviceRepository->findServiceById($lossServiceId) ?? [];
+    $check(
+        'Supplier-only correction preserves an already-approved loss sale without asking again',
+        (int) ($lossUpdate['service']['id'] ?? 0) === $lossServiceId
+        && (string) ($lossCorrectedService['supplier_name_snapshot'] ?? '') === $newSupplierName
+        && (string) ($lossCorrectedService['loss_reason'] ?? '') === 'Approved commercial loss sale'
+        && abs((float) ($lossCorrectedService['final_sale_price'] ?? 0) - 900.00) <= 0.005
     );
 
     $journalBalanceStatement = $db->prepare(

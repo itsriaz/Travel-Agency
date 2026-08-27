@@ -18,7 +18,10 @@ final class TravelerWorkspaceService extends Service
     public function travelerState(?int $bookingId, array $accessibleBranchIds, string $searchTerm): array
     {
         $travelers = [];
-        $searchResults = (new TravelerRepository($this->app))->searchTravelers($searchTerm, $accessibleBranchIds, 200);
+        $travelerRepository = new TravelerRepository($this->app);
+        $searchResults = trim($searchTerm) === ''
+            ? $travelerRepository->travelersForBranches($accessibleBranchIds)
+            : $travelerRepository->searchTravelers($searchTerm, $accessibleBranchIds, 200);
 
         if ($bookingId !== null && $bookingId > 0) {
             $bookingRepository = new BookingRepository($this->app);
@@ -26,7 +29,7 @@ final class TravelerWorkspaceService extends Service
                 throw new RuntimeException('The selected booking is outside your accessible branches.');
             }
 
-            $travelers = (new TravelerRepository($this->app))->travelersForBooking($bookingId);
+            $travelers = $travelerRepository->travelersForBooking($bookingId);
         }
 
         return [

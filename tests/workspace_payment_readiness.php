@@ -298,9 +298,8 @@ $check(
             'initializePricingCurrencyTracking',
             'convertEnteredAmountsForCurrencyChange',
             'invoiceCurrencyChanged || costCurrencyChanged',
-            'Changing Cost',
             '[airlinePayableFinancialField, ticketValueField]',
-            'formatMoney(convertedPayable)',
+            'formatCurrencyAmount(costCurrency, supplierPayable)',
             'currentFinancialSummaryCurrencyCode',
             'data-financial-summary-currency',
             'financialSummaryAmount',
@@ -318,9 +317,10 @@ $check(
             'setPricingExchangeModalOpen(false)',
             'restoreOnFailure: true',
             "pricingExchangeModal?.addEventListener('keydown', confirmPricingExchangeOnEnter, true)",
-            'key: `amount-currency:${role}:${previousCurrency}->${selectedCurrency}`',
-            'roundToTwo(originalAmount * sourceToSelectedRate)',
-            "mode: 'pricing-amount-currency-transition'",
+            'requestFinancialCurrencyDecision(',
+            "decision.action === 'convert'",
+            'roundToTwo(toNumber(entry.field.value || 0) * decision.conversionRate)',
+            "label: role === 'cost' ? 'Market Fare' : 'Service Amount'",
             'A blank amount does not prove that two different currencies have a',
             'supplier-cost-amount-entered',
             'agency-amount-entered',
@@ -337,10 +337,10 @@ $check(
     $containsAll($workspaceJs, [
         'serviceChargeCurrencyChanged',
         'invoiceCurrencyChanged || costCurrencyChanged',
-        'Mkt.Fare is the supplier\'s nominal amount',
         'const currentFinancialSummaryCurrencyCode = () => currentServiceChargeCurrencyCode();',
         'costCurrencyChanged || serviceChargeCurrencyChanged || supplierCostAmountChanged',
-        'formatMoney(convertedPayable)',
+        'const supplierPayableDisplay = formatCurrencyAmount(costCurrency, supplierPayable);',
+        'node.value = supplierPayableDisplay;',
         "refreshProfit('branch-context-updated')",
         'syncFinancialSummaryCurrencyLabel();',
     ])
@@ -348,6 +348,15 @@ $check(
             $workspaceJs,
             '(costCurrencyChanged || serviceChargeCurrencyChanged)\n                    && previousPricingCurrency !== selectedPricingCurrency'
         )
+);
+$check(
+    'A loaded saved service is clean before posting a customer payment',
+    $containsAll($workspaceJs, [
+        'if (currentBookingId() > 0 && invoiceForm instanceof HTMLFormElement)',
+        'lastInvoiceAutosaveKey = serializeForm(invoiceForm);',
+        'if (currentPersistedServiceId() > 0 && serviceForm instanceof HTMLFormElement)',
+        'lastServiceAutosaveKey = serializeForm(serviceForm);',
+    ])
 );
 $check(
     'Workspace restore flow is present',

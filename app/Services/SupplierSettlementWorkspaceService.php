@@ -26,11 +26,9 @@ final class SupplierSettlementWorkspaceService extends Service
         $booking = $this->loadBooking((int) ($input['booking_id'] ?? 0), $accessibleBranchIds);
         $supplier = $this->resolveSupplier($input, $accessibleBranchIds);
         $payload = $this->validatedPaymentPayload($input);
-        $payload['treasury_account_id'] = $this->resolveSupplierPaymentTreasuryAccountId(
-            $payload,
-            (int) $booking['branch_id'],
-            (int) ($input['supplier_treasury_account_id'] ?? 0)
-        );
+        $funding = $this->resolveSupplierPaymentFundingContext($input, $payload, (int) $booking['branch_id']);
+        $payload['treasury_account_id'] = $funding['treasury_account_id'];
+        $payload['exchange_rate_to_booking'] = $funding['exchange_rate_to_booking'];
         if ($payload['status'] === 'void') {
             $this->assertFinancialAdminActor($actorUserId, 'Only super admin or branch admin can create a void supplier payment.');
         }
@@ -67,6 +65,8 @@ final class SupplierSettlementWorkspaceService extends Service
                     'treasury_account_id' => $payload['treasury_account_id'],
                     'entry_date' => $payload['payment_date'],
                     'currency' => $payload['currency'],
+                    'treasury_currency' => $funding['treasury_currency'],
+                    'treasury_amount' => $funding['treasury_amount'],
                     'actor_user_id' => $actorUserId,
                 ]);
             }
@@ -141,11 +141,6 @@ final class SupplierSettlementWorkspaceService extends Service
                 }
 
                 $selectedCurrency = (string) $currencies[0];
-                $postedCurrency = $this->normalizeCurrency((string) ($input['supplier_payment_currency'] ?? $selectedCurrency));
-                if ($postedCurrency !== $selectedCurrency) {
-                    throw new RuntimeException('Payment currency must match the selected supplier payable currency.');
-                }
-
                 $paidAmount = $this->positiveMoney($input['supplier_paid_amount'] ?? 0, 'Supplier paid amount');
                 $selectedOutstandingTotal = round(array_sum(array_map(
                     static fn (array $row): float => (float) ($row['net_payable_amount'] ?? 0),
@@ -169,14 +164,16 @@ final class SupplierSettlementWorkspaceService extends Service
                     'bank_card_detail' => $this->optionalText($input['supplier_bank_card_detail'] ?? null, 190),
                     'charges_amount' => 0.0,
                     'status' => 'paid',
-                    'exchange_rate_to_booking' => null,
+                    'exchange_rate_to_booking' => $this->normalizeOptionalExchangeRate((string) ($input['supplier_exchange_rate_to_booking'] ?? '')),
                     'remarks' => $this->optionalText($input['supplier_payment_remarks'] ?? null, 4000),
                 ];
-                $paymentPayload['treasury_account_id'] = $this->resolveSupplierPaymentTreasuryAccountId(
+                $funding = $this->resolveSupplierPaymentFundingContext(
+                    $input,
                     array_merge($paymentPayload, ['paid_amount' => $paidAmount]),
-                    (int) $booking['branch_id'],
-                    (int) ($input['supplier_treasury_account_id'] ?? 0)
+                    (int) $booking['branch_id']
                 );
+                $paymentPayload['treasury_account_id'] = $funding['treasury_account_id'];
+                $paymentPayload['exchange_rate_to_booking'] = $funding['exchange_rate_to_booking'];
 
                 $remainingAmount = $paidAmount;
                 $allocationPlans = [];
@@ -223,8 +220,12 @@ final class SupplierSettlementWorkspaceService extends Service
                 $paymentCount = 0;
                 $allocationCount = 0;
                 $payments = [];
+                $remainingTreasuryAmount = $funding['treasury_amount'];
+                $supplierGroupCount = count($allocationsBySupplier);
+                $supplierGroupIndex = 0;
 
                 foreach ($allocationsBySupplier as $supplierId => $supplierPlans) {
+                    $supplierGroupIndex++;
                     $supplierAllocatedAmount = round(array_sum(array_map(
                         static fn (array $plan): float => (float) $plan['amount'],
                         $supplierPlans
@@ -237,6 +238,15 @@ final class SupplierSettlementWorkspaceService extends Service
                     if ($unallocatedAmount > 0.005 && count($allocationsBySupplier) === 1) {
                         $paymentAmount = round($paymentAmount + $unallocatedAmount, 2);
                     }
+                    $treasuryAmount = $supplierGroupIndex === $supplierGroupCount
+                        ? $remainingTreasuryAmount
+                        : $this->convertSupplierFundingAmount(
+                            $paymentAmount,
+                            $paymentPayload['currency'],
+                            $funding['treasury_currency'],
+                            $paymentPayload['exchange_rate_to_booking']
+                        );
+                    $remainingTreasuryAmount = round(max(0, $remainingTreasuryAmount - $treasuryAmount), 2);
 
                     $paymentNo = $repository->nextSupplierPaymentNumber();
                     $paymentId = $repository->createSupplierPayment(array_merge($paymentPayload, [
@@ -259,6 +269,8 @@ final class SupplierSettlementWorkspaceService extends Service
                         'treasury_account_id' => $paymentPayload['treasury_account_id'],
                         'entry_date' => $paymentPayload['payment_date'],
                         'currency' => $paymentPayload['currency'],
+                        'treasury_currency' => $funding['treasury_currency'],
+                        'treasury_amount' => $treasuryAmount,
                         'actor_user_id' => $actorUserId,
                     ]);
 
@@ -337,14 +349,16 @@ final class SupplierSettlementWorkspaceService extends Service
             'bank_card_detail' => $this->optionalText($input['supplier_bank_card_detail'] ?? null, 190),
             'charges_amount' => 0.0,
             'status' => 'paid',
-            'exchange_rate_to_booking' => null,
+            'exchange_rate_to_booking' => $this->normalizeOptionalExchangeRate((string) ($input['supplier_exchange_rate_to_booking'] ?? '')),
             'remarks' => $this->optionalText($input['supplier_payment_remarks'] ?? null, 4000),
         ];
-        $paymentPayload['treasury_account_id'] = $this->resolveSupplierPaymentTreasuryAccountId(
+        $funding = $this->resolveSupplierPaymentFundingContext(
+            $input,
             array_merge($paymentPayload, ['paid_amount' => $paidAmount]),
-            $branchId,
-            (int) ($input['supplier_treasury_account_id'] ?? 0)
+            $branchId
         );
+        $paymentPayload['treasury_account_id'] = $funding['treasury_account_id'];
+        $paymentPayload['exchange_rate_to_booking'] = $funding['exchange_rate_to_booking'];
 
         /** @var PDO $db */
         $db = $this->app->get('db');
@@ -357,7 +371,7 @@ final class SupplierSettlementWorkspaceService extends Service
 
         try {
             $obligations = $repository->openSupplierAccountObligationsForSettlement(
-                $branchId,
+                $accessibleBranchIds,
                 $supplierId,
                 $currency
             );
@@ -383,6 +397,8 @@ final class SupplierSettlementWorkspaceService extends Service
                 'treasury_account_id' => $paymentPayload['treasury_account_id'],
                 'entry_date' => $paymentPayload['payment_date'],
                 'currency' => $currency,
+                'treasury_currency' => $funding['treasury_currency'],
+                'treasury_amount' => $funding['treasury_amount'],
                 'actor_user_id' => $actorUserId,
                 'narration' => 'Supplier payment recorded',
             ]);
@@ -417,7 +433,7 @@ final class SupplierSettlementWorkspaceService extends Service
 
                 $bookingReference = (string) ($obligation['booking_reference'] ?? '');
                 $accounting->postSupplierPaymentAllocation([
-                    'branch_id' => $branchId,
+                    'branch_id' => (int) ($obligation['branch_id'] ?? $branchId),
                     'booking_reference' => $bookingReference,
                     'source_reference' => $paymentNo . '-ALLOC-' . $allocationId,
                     'service_line_reference' => (string) ($obligation['service_line_reference'] ?? '') !== '' ? (string) $obligation['service_line_reference'] : null,
@@ -1426,7 +1442,7 @@ final class SupplierSettlementWorkspaceService extends Service
             ]);
 
             $reconciliation = $this->applyAvailableSupplierAdvancesToOpenPayables(
-                [(int) $booking['branch_id']],
+                $accessibleBranchIds,
                 $actorUserId,
                 (int) $supplier['id'],
                 $currency,
@@ -1517,7 +1533,7 @@ final class SupplierSettlementWorkspaceService extends Service
             $repository->attachAdvanceJournal($advanceId, $journalEntryId);
 
             $reconciliation = $this->applyAvailableSupplierAdvancesToOpenPayables(
-                [$branchId],
+                $accessibleBranchIds,
                 $actorUserId,
                 (int) $supplier['id'],
                 $currency,
@@ -1683,7 +1699,8 @@ final class SupplierSettlementWorkspaceService extends Service
         }
 
         $branchId = $this->resolveAccessibleBranchId((int) ($old['branch_id'] ?? 0), $accessibleBranchIds);
-        $currency = $this->normalizeCurrency((string) ($old['currency'] ?? 'PKR'));
+        $oldCurrency = $this->normalizeCurrency((string) ($old['currency'] ?? 'PKR'));
+        $currency = $this->normalizeCurrency((string) ($input['advance_currency'] ?? $oldCurrency));
         $oldSupplierId = (int) ($old['supplier_id'] ?? 0);
         $newSupplierId = (int) ($input['supplier_id'] ?? $oldSupplierId);
         $newSupplier = $repository->findSupplierById($newSupplierId);
@@ -1701,6 +1718,13 @@ final class SupplierSettlementWorkspaceService extends Service
             (float) ($old['deposit_amount'] ?? 0) - (float) ($old['available_amount'] ?? 0),
             2
         );
+        if ($currency !== $oldCurrency && $usedAmount > 0.005) {
+            throw new RuntimeException(
+                'Advance currency cannot be changed because '
+                . $oldCurrency . ' ' . number_format($usedAmount, 2)
+                . ' has already been applied to supplier invoices.'
+            );
+        }
         if ($newSupplierId !== $oldSupplierId && $usedAmount > 0.005) {
             throw new RuntimeException(
                 'The supplier cannot be changed because '
@@ -1757,7 +1781,7 @@ final class SupplierSettlementWorkspaceService extends Service
                     'source_type' => 'supplier_advance_correction_reversal',
                     'source_reference' => 'SADV-CORR-REV-' . $advanceId,
                     'entry_date' => $paymentDate,
-                    'currency' => $currency,
+                    'currency' => $oldCurrency,
                     'narration' => 'Reversal before prepaid supplier payment correction: ' . $reason,
                     'actor_user_id' => $actorUserId,
                 ])
@@ -1781,6 +1805,7 @@ final class SupplierSettlementWorkspaceService extends Service
             $repository->correctAdvance([
                 'id' => $advanceId,
                 'supplier_id' => $newSupplierId,
+                'currency' => $currency,
                 'deposit_amount' => $newAmount,
                 'available_amount' => round($newAmount - $usedAmount, 2),
                 'received_at' => $paymentDate,
@@ -1798,6 +1823,8 @@ final class SupplierSettlementWorkspaceService extends Service
                 'new_supplier_id' => $newSupplierId,
                 'old_payment_date' => $old['received_at'] ?? null,
                 'new_payment_date' => $paymentDate,
+                'old_currency' => $oldCurrency,
+                'new_currency' => $currency,
                 'old_amount' => $old['deposit_amount'] ?? 0,
                 'new_amount' => $newAmount,
                 'old_payment_method' => $old['payment_method'] ?? null,
@@ -2163,7 +2190,10 @@ final class SupplierSettlementWorkspaceService extends Service
             $selectedTreasuryAccountId,
             $branchId,
             $currency,
-            $method
+            $method,
+            true,
+            true,
+            true
         );
 
         $availableBalance = $treasuryRepository->currentBalanceForAccountId((int) $account['id']);
@@ -2176,6 +2206,86 @@ final class SupplierSettlementWorkspaceService extends Service
         }
 
         return (int) $account['id'];
+    }
+
+    private function resolveSupplierPaymentFundingContext(array $input, array $payload, int $branchId): array
+    {
+        $method = (string) ($payload['payment_method'] ?? '');
+        $paymentCurrency = $this->normalizeCurrency((string) ($payload['currency'] ?? 'PKR'));
+        $targetAmount = round((float) ($payload['paid_amount'] ?? 0) + (float) ($payload['charges_amount'] ?? 0), 2);
+
+        if (! in_array($method, ['cash', 'bank_transfer'], true)) {
+            return [
+                'treasury_account_id' => null,
+                'treasury_currency' => $paymentCurrency,
+                'treasury_amount' => $targetAmount,
+                'exchange_rate_to_booking' => null,
+            ];
+        }
+
+        $selectedTreasuryAccountId = max(0, (int) ($input['supplier_treasury_account_id'] ?? 0), (int) ($payload['treasury_account_id'] ?? 0));
+        $treasuryRepository = new TreasuryRepository($this->app);
+        $account = $treasuryRepository->validatePaymentTreasuryAccount(
+            $selectedTreasuryAccountId,
+            $branchId,
+            $paymentCurrency,
+            $method,
+            true,
+            true,
+            true
+        );
+
+        $treasuryCurrency = $this->normalizeCurrency((string) ($account['currency'] ?? $paymentCurrency));
+        $exchangeRate = $treasuryCurrency === $paymentCurrency
+            ? null
+            : $this->normalizeOptionalExchangeRate((string) ($payload['exchange_rate_to_booking'] ?? $input['supplier_exchange_rate_to_booking'] ?? ''));
+
+        if ($treasuryCurrency !== $paymentCurrency && $exchangeRate === null) {
+            throw new RuntimeException(sprintf(
+                'FX_RATE_REQUIRED: Enter today\'s rate as 1 %s = how many %s for this supplier payment.',
+                $treasuryCurrency,
+                $paymentCurrency
+            ));
+        }
+
+        $treasuryAmount = $this->convertSupplierFundingAmount(
+            $targetAmount,
+            $paymentCurrency,
+            $treasuryCurrency,
+            $exchangeRate
+        );
+        $availableBalance = $treasuryRepository->currentBalanceForAccountId((int) $account['id']);
+        if (round($availableBalance + 0.005, 2) < $treasuryAmount) {
+            throw new RuntimeException(
+                'Selected supplier payment source account does not have enough balance. Available: '
+                . number_format($availableBalance, 2)
+                . ' ' . $treasuryCurrency . '.'
+            );
+        }
+
+        return [
+            'treasury_account_id' => (int) $account['id'],
+            'treasury_currency' => $treasuryCurrency,
+            'treasury_amount' => $treasuryAmount,
+            'exchange_rate_to_booking' => $exchangeRate,
+        ];
+    }
+
+    private function convertSupplierFundingAmount(
+        float $targetAmount,
+        string $paymentCurrency,
+        string $treasuryCurrency,
+        ?float $exchangeRate
+    ): float {
+        if ($treasuryCurrency === $paymentCurrency) {
+            return round($targetAmount, 2);
+        }
+
+        if ($exchangeRate === null || $exchangeRate <= 0) {
+            throw new RuntimeException('Supplier exchange rate must be greater than zero.');
+        }
+
+        return round($targetAmount / $exchangeRate, 2);
     }
 
     private function activePaymentMethodCodes(): array

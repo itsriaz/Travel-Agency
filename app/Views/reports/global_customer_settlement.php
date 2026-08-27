@@ -2,9 +2,11 @@
 
 $branchOptions = is_array($branchOptions ?? null) ? $branchOptions : [];
 $customerOptions = is_array($customerOptions ?? null) ? $customerOptions : [];
+$businessSourceOptions = is_array($businessSourceOptions ?? null) ? $businessSourceOptions : [];
 $currencyOptions = is_array($currencyOptions ?? null) ? $currencyOptions : [];
 $openReceivables = is_array($openReceivables ?? null) ? $openReceivables : [];
 $availableAdvances = is_array($availableAdvances ?? null) ? $availableAdvances : [];
+$supplierOptions = is_array($supplierOptions ?? null) ? $supplierOptions : [];
 $treasuryAccounts = is_array($treasuryAccounts ?? null) ? $treasuryAccounts : [];
 $paymentMethods = is_array($paymentMethods ?? null) ? $paymentMethods : [];
 $selectedBranchId = (int) ($selectedBranchId ?? 0);
@@ -90,7 +92,7 @@ $totalOutstanding = array_sum(array_map(static fn (array $row): float => (float)
             <table class="dense-table">
                 <thead>
                 <tr>
-                    <th><label class="global-settlement-select-all">Select <input type="checkbox" data-global-receivable-select-all aria-label="Select all customer receivables"></label></th>
+                    <th><label class="global-settlement-select-all">Select <input type="checkbox" data-global-receivable-select-all aria-label="Select all customer receivables" <?= $openReceivables !== [] ? 'checked' : '' ?>></label></th>
                     <th>Booking</th>
                     <th>Booking Date</th>
                     <th>Due Date</th>
@@ -105,7 +107,7 @@ $totalOutstanding = array_sum(array_map(static fn (array $row): float => (float)
                 <?php foreach ($openReceivables as $receivable): ?>
                     <?php $balance = (float) ($receivable['outstanding_amount'] ?? 0); ?>
                     <tr>
-                        <td><input type="checkbox" name="global_customer_receivable_id[]" value="<?= e((string) ($receivable['id'] ?? 0)) ?>" data-global-receivable-select data-balance="<?= e(number_format($balance, 2, '.', '')) ?>"></td>
+                        <td><input type="checkbox" name="global_customer_receivable_id[]" value="<?= e((string) ($receivable['id'] ?? 0)) ?>" data-global-receivable-select data-balance="<?= e(number_format($balance, 2, '.', '')) ?>" checked></td>
                         <td><a class="report-booking-link" href="<?= e(url('/workspace?booking_reference=' . rawurlencode((string) ($receivable['booking_reference'] ?? '')) . '#dock-panel-payments')) ?>"><?= e((string) ($receivable['booking_reference'] ?? '')) ?></a></td>
                         <td><?= e((string) ($receivable['booking_date'] ?? '')) ?></td>
                         <td><?= e((string) ($receivable['due_date'] ?? '')) ?></td>
@@ -123,72 +125,158 @@ $totalOutstanding = array_sum(array_map(static fn (array $row): float => (float)
             </table>
         </div>
 
-        <div class="station-form-grid station-form-grid--6 station-form-grid--inline top-gap">
-            <label class="station-field span-2">
-                <span>Date</span>
-                <input type="date" name="receipt_date" value="<?= e(date('Y-m-d')) ?>">
-            </label>
-            <label class="station-field span-2">
-                <span>Amount</span>
-                <input type="number" step="0.01" min="0" name="received_amount" value="0.00" data-global-customer-payment-amount>
-            </label>
-            <label class="station-field span-2">
-                <span>Method</span>
-                <select name="payment_method" data-global-customer-payment-method>
-                    <?php foreach ($paymentMethods as $methodCode => $methodLabel): ?>
-                        <option value="<?= e((string) $methodCode) ?>"><?= e((string) $methodLabel) ?></option>
-                    <?php endforeach; ?>
-                </select>
-            </label>
-            <label class="station-field span-3">
-                <span>Deposit Account</span>
-                <select name="treasury_account_id" data-global-customer-treasury-account>
-                    <option value="">Select cash or bank account</option>
-                    <?php foreach ($treasuryAccounts as $account): ?>
-                        <?php $methods = implode(',', array_unique(array_map('strval', (array) ($account['payment_methods'] ?? [])))); ?>
-                        <option value="<?= e((string) ($account['id'] ?? 0)) ?>" data-methods="<?= e($methods) ?>">
-                            <?= e((string) ($account['account_name'] ?? 'Account')) ?> / <?= e((string) ($account['currency'] ?? $selectedCurrency)) ?> / Bal <?= e($formatMoney((float) ($account['current_balance'] ?? 0))) ?><?= (int) ($account['is_default'] ?? 0) === 1 ? ' / Default' : '' ?>
-                        </option>
-                    <?php endforeach; ?>
-                </select>
-            </label>
-            <label class="station-field span-3">
-                <span>Reference</span>
-                <input type="text" name="reference_number" value="" maxlength="100">
-            </label>
-            <label class="station-field span-3">
-                <span>Bank / Card Detail</span>
-                <input type="text" name="bank_card_detail" value="" maxlength="190">
-            </label>
-            <label class="station-field span-3">
-                <span>Remarks</span>
-                <input type="text" name="receipt_remarks" value="" maxlength="4000">
-            </label>
-            <label class="station-field span-3">
-                <span>Use Existing Advance</span>
-                <select name="advance_receipt_id" data-global-customer-advance-select>
-                    <option value="">Select advance credit</option>
-                    <?php foreach ($availableAdvances as $advance): ?>
-                        <option value="<?= e((string) ($advance['id'] ?? 0)) ?>">
-                            <?= e((string) ($advance['receipt_no'] ?? 'Advance')) ?> / <?= e($selectedCurrency) ?> <?= e($formatMoney((float) ($advance['unallocated_amount'] ?? 0))) ?>
-                        </option>
-                    <?php endforeach; ?>
-                </select>
-            </label>
-            <div class="station-command-buttons station-command-buttons--end span-3">
-                <button class="btn btn-sm" type="submit" name="settlement_action_button" value="apply_advance" data-apply-customer-advance <?= $availableAdvances === [] || $openReceivables === [] ? 'disabled' : '' ?>>Apply Advance</button>
+        <section class="global-settlement-payment-entry">
+            <div class="global-settlement-payment-entry__header">
+                <div>
+                    <strong>Payment Details</strong>
+                    <span>All selected receivables will be auto-allocated. Use Paid Supplier when the customer pays a supplier suggested by the agency.</span>
+                </div>
+                <span class="global-settlement-payment-entry__currency">
+                    <?= e($selectedCurrency) ?> / <span data-global-customer-selected-count><?= e((string) count($openReceivables)) ?></span> item(s)
+                </span>
             </div>
-        </div>
 
-        <div class="supplier-simple-payment-summary top-gap">
-            <span>Selected outstanding total:</span>
-            <strong data-global-customer-selected-total>0.00</strong>
-            <span data-global-customer-credit-note hidden></span>
-        </div>
+            <div class="station-form-grid station-form-grid--6 station-form-grid--inline global-settlement-payment-fields">
+                <label class="station-field span-2">
+                    <span>Date</span>
+                    <input type="date" name="receipt_date" value="<?= e(date('Y-m-d')) ?>">
+                </label>
+                <label class="station-field span-2">
+                    <span>Amount</span>
+                    <input type="number" step="0.01" min="0" name="received_amount" value="0.00" data-global-customer-payment-amount>
+                </label>
+                <label class="station-field span-2">
+                    <span>Method</span>
+                    <select name="payment_method" data-global-customer-payment-method>
+                        <?php foreach ($paymentMethods as $methodCode => $methodLabel): ?>
+                            <option value="<?= e((string) $methodCode) ?>"><?= e((string) $methodLabel) ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </label>
+                <input type="hidden" name="account_balance_mode" value="" data-global-account-balance-mode>
+                <label class="station-field span-2">
+                    <span>Account Holder</span>
+                    <select name="account_balance_business_source_id" data-global-account-balance-business-source>
+                        <option value="">Do not use account balance</option>
+                        <?php foreach ($businessSourceOptions as $businessSource): ?>
+                            <option value="<?= e((string) ($businessSource['id'] ?? 0)) ?>">
+                                <?= e((string) ($businessSource['name'] ?? 'Account Holder')) ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                </label>
+                <label class="station-field span-2" data-global-account-balance-source-row hidden>
+                    <span>Use Account Balance</span>
+                    <select name="account_balance_source_currency" data-global-account-balance-currency>
+                        <option value="">No account balance</option>
+                    </select>
+                </label>
+                <label class="station-field span-2" data-global-account-balance-rate-row hidden>
+                    <span>FX Rate</span>
+                    <input type="number" step="0.00000001" min="0.00000001" name="account_balance_exchange_rate" value="" placeholder="1 source = ? <?= e($selectedCurrency) ?>">
+                </label>
+                <label class="station-field span-3" data-global-customer-treasury-row>
+                    <span>Deposit Account</span>
+                    <select name="treasury_account_id" data-global-customer-treasury-account>
+                        <option value="">Select cash or bank account</option>
+                        <?php foreach ($treasuryAccounts as $account): ?>
+                            <?php $methods = implode(',', array_unique(array_map('strval', (array) ($account['payment_methods'] ?? [])))); ?>
+                            <option value="<?= e((string) ($account['id'] ?? 0)) ?>" data-methods="<?= e($methods) ?>">
+                                <?= e((string) ($account['account_name'] ?? 'Account')) ?> / <?= e((string) ($account['currency'] ?? $selectedCurrency)) ?> / Bal <?= e($formatMoney((float) ($account['current_balance'] ?? 0))) ?><?= (int) ($account['is_default'] ?? 0) === 1 ? ' / Default' : '' ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                </label>
+                <label class="station-field span-3">
+                    <span>Reference</span>
+                    <input type="text" name="reference_number" value="" maxlength="100" placeholder="Cheque no., transfer ref, transaction id">
+                </label>
+                <label class="station-field span-4">
+                    <span>Bank / Card Detail</span>
+                    <input type="text" name="bank_card_detail" value="" maxlength="190" placeholder="Bank name, slip no., transfer note, card note">
+                </label>
+                <label class="station-field span-6">
+                    <span>Remarks</span>
+                    <input type="text" name="receipt_remarks" value="Payment received for selected receivables." maxlength="4000" placeholder="Optional internal note">
+                </label>
+            </div>
+
+            <section class="global-customer-direct-supplier-panel" data-global-direct-supplier-panel hidden>
+                <div class="global-customer-direct-supplier-panel__header">
+                    <div>
+                        <strong>Customer Paid Supplier</strong>
+                    </div>
+                </div>
+                <div class="station-form-grid station-form-grid--6 station-form-grid--inline global-customer-direct-supplier-grid">
+                    <label class="station-field span-2">
+                        <span>Search Supplier</span>
+                        <input type="text" value="" placeholder="Type supplier name or payable note" data-global-supplier-search>
+                    </label>
+                    <label class="station-field span-4">
+                        <span>Select Supplier</span>
+                        <select name="direct_supplier_id" size="6" data-global-direct-supplier-select>
+                            <?php foreach ($supplierOptions as $supplier): ?>
+                                <?php
+                                $supplierName = trim((string) ($supplier['supplier_name'] ?? $supplier['name'] ?? ''));
+                                if ($supplierName === '') {
+                                    $supplierName = trim((string) ($supplier['code'] ?? 'Supplier'));
+                                }
+                                if ($supplierName === '') {
+                                    $supplierName = 'Supplier';
+                                }
+                                $payableCount = (int) ($supplier['open_payable_count'] ?? 0);
+                                $payableAmount = (float) ($supplier['open_payable_amount'] ?? 0);
+                                $label = $supplierName
+                                    . ' | '
+                                    . $selectedCurrency
+                                    . ' '
+                                    . $formatMoney($payableAmount)
+                                    . ' | '
+                                    . $payableCount
+                                    . ' payable(s)';
+                                ?>
+                                <option
+                                    value="<?= e((string) ($supplier['id'] ?? 0)) ?>"
+                                    data-supplier-name="<?= e($supplierName) ?>"
+                                    data-payable-count="<?= e((string) $payableCount) ?>"
+                                    data-payable-amount="<?= e(number_format($payableAmount, 2, '.', '')) ?>"
+                                ><?= e($label) ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </label>
+                </div>
+                <div class="supplier-payment-live-summary global-customer-direct-supplier-summary">
+                    <div class="supplier-payment-summary-card--allocated">
+                        <small>Selected Supplier</small>
+                        <strong data-global-direct-supplier-name>No supplier selected</strong>
+                        <span>Any branch supplier can be chosen here.</span>
+                    </div>
+                    <div class="supplier-payment-summary-card--payable">
+                        <small>Open Payables</small>
+                        <strong data-global-direct-supplier-payables>0 item(s)</strong>
+                        <span>Existing supplier dues that will be consumed first.</span>
+                    </div>
+                    <div class="supplier-payment-summary-card--paid">
+                        <small>Open Amount</small>
+                        <strong data-global-direct-supplier-amount><?= e($selectedCurrency) ?> 0.00</strong>
+                        <span>Only the remaining excess becomes supplier advance.</span>
+                    </div>
+                </div>
+            </section>
+
+            <div class="supplier-simple-payment-summary top-gap">
+                <span>Review:</span>
+                <strong data-global-customer-summary-caption>Selected receivables will be settled automatically from this payment.</strong>
+                <span data-global-account-balance-summary hidden></span>
+                <span data-global-customer-credit-note hidden></span>
+            </div>
+
+            <div class="global-settlement-payment-actions station-command-buttons">
+                <button class="btn btn-primary btn-sm" type="submit" <?= $openReceivables === [] ? 'disabled' : '' ?>>Save Payment</button>
+            </div>
+        </section>
+
         <div class="workspace-feedback workspace-feedback--inline top-gap" data-global-customer-feedback hidden></div>
-        <div class="station-command-buttons top-gap">
-            <button class="btn btn-primary btn-sm" type="submit" <?= $openReceivables === [] ? 'disabled' : '' ?>>Post Lumpsum Customer Payment</button>
-        </div>
     </form>
 </section>
 
@@ -230,25 +318,153 @@ $totalOutstanding = array_sum(array_map(static fn (array $row): float => (float)
         const feedback = form.querySelector('[data-global-customer-feedback]');
         const methodField = form.querySelector('[data-global-customer-payment-method]');
         const treasuryField = form.querySelector('[data-global-customer-treasury-account]');
+        const treasuryRow = form.querySelector('[data-global-customer-treasury-row]');
+        const accountBalanceModeField = form.querySelector('[data-global-account-balance-mode]');
+        const accountBalanceBusinessSourceField = form.querySelector('[data-global-account-balance-business-source]');
+        const accountBalanceSourceRow = form.querySelector('[data-global-account-balance-source-row]');
+        const accountBalanceCurrencyField = form.querySelector('[data-global-account-balance-currency]');
+        const accountBalanceRateRow = form.querySelector('[data-global-account-balance-rate-row]');
+        const accountBalanceRateField = form.querySelector('input[name="account_balance_exchange_rate"]');
+        const accountBalanceSummary = form.querySelector('[data-global-account-balance-summary]');
         const actionField = form.querySelector('[data-global-customer-settlement-action]');
-        const advanceField = form.querySelector('[data-global-customer-advance-select]');
-        const applyAdvanceButton = form.querySelector('[data-apply-customer-advance]');
+        const selectedCountNode = form.querySelector('[data-global-customer-selected-count]');
+        const directSupplierPanel = form.querySelector('[data-global-direct-supplier-panel]');
+        const directSupplierSearch = form.querySelector('[data-global-supplier-search]');
+        const directSupplierSelect = form.querySelector('[data-global-direct-supplier-select]');
+        const directSupplierName = form.querySelector('[data-global-direct-supplier-name]');
+        const directSupplierPayables = form.querySelector('[data-global-direct-supplier-payables]');
+        const directSupplierAmount = form.querySelector('[data-global-direct-supplier-amount]');
+        const summaryCaption = form.querySelector('[data-global-customer-summary-caption]');
+        const accountBalanceLookupUrl = '<?= e(url('/workspace/payments/account-holder-balances')) ?>';
 
         const money = (value) => Number(value || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
         const selectedTotal = () => checkboxes.reduce((sum, box) => box.checked ? sum + Number(box.dataset.balance || 0) : sum, 0);
+        const selectedCount = () => checkboxes.filter((box) => box.checked).length;
+        const isDirectSupplierMethod = () => String(methodField?.value || '') === 'customer_paid_supplier';
+        const isAccountBalanceMethod = () => String(methodField?.value || '') === 'account_holder_balance';
+        const syncAccountBalanceRate = () => {
+            if (!(accountBalanceRateRow instanceof HTMLElement) || !(accountBalanceCurrencyField instanceof HTMLSelectElement)) {
+                return;
+            }
+
+            const sourceCurrency = String(accountBalanceCurrencyField.value || '').trim().toUpperCase();
+            const needsRate = sourceCurrency !== '' && sourceCurrency !== '<?= e($selectedCurrency) ?>';
+            accountBalanceRateRow.hidden = !needsRate;
+            if (!needsRate && accountBalanceRateField instanceof HTMLInputElement) {
+                accountBalanceRateField.value = '';
+            }
+        };
+        const syncAccountBalanceSummary = () => {
+            if (!(accountBalanceSummary instanceof HTMLElement) || !(accountBalanceCurrencyField instanceof HTMLSelectElement)) {
+                return;
+            }
+
+            const selectedOption = accountBalanceCurrencyField.selectedOptions?.[0] || null;
+            const selectedCurrency = String(selectedOption?.value || '').trim().toUpperCase();
+            if (!isAccountBalanceMethod() || selectedCurrency === '') {
+                accountBalanceSummary.hidden = true;
+                accountBalanceSummary.textContent = '';
+                if (accountBalanceModeField instanceof HTMLInputElement) {
+                    accountBalanceModeField.value = '';
+                }
+                return;
+            }
+
+            const available = Number(selectedOption?.dataset.availableAmount || 0);
+            accountBalanceSummary.hidden = false;
+            accountBalanceSummary.textContent = `Account balance selected: ${selectedCurrency} ${money(available)} available.`;
+            if (accountBalanceModeField instanceof HTMLInputElement) {
+                accountBalanceModeField.value = 'account_holder_balance';
+            }
+        };
+        const syncFundingVsTreasury = () => {
+            const usingAccountBalance = isAccountBalanceMethod();
+            if (accountBalanceBusinessSourceField instanceof HTMLSelectElement) {
+                accountBalanceBusinessSourceField.disabled = isDirectSupplierMethod();
+            }
+            if (accountBalanceSourceRow instanceof HTMLElement) {
+                accountBalanceSourceRow.hidden = !usingAccountBalance || isDirectSupplierMethod();
+            }
+            if (accountBalanceCurrencyField instanceof HTMLSelectElement) {
+                if (isDirectSupplierMethod()) {
+                    accountBalanceCurrencyField.value = '';
+                }
+                accountBalanceCurrencyField.disabled = !usingAccountBalance || isDirectSupplierMethod();
+            }
+            if (treasuryRow instanceof HTMLElement) {
+                treasuryRow.hidden = usingAccountBalance || isDirectSupplierMethod();
+            }
+            if (treasuryField instanceof HTMLSelectElement) {
+                treasuryField.disabled = usingAccountBalance || isDirectSupplierMethod();
+                if (usingAccountBalance) {
+                    treasuryField.value = '';
+                }
+            }
+            syncAccountBalanceRate();
+            syncAccountBalanceSummary();
+        };
+        const populateAccountBalanceCurrencies = (rows) => {
+            if (!(accountBalanceCurrencyField instanceof HTMLSelectElement)) {
+                return;
+            }
+
+            const previousValue = String(accountBalanceCurrencyField.value || '').trim().toUpperCase();
+            accountBalanceCurrencyField.innerHTML = '<option value="">No account balance</option>';
+            (Array.isArray(rows) ? rows : []).forEach((row) => {
+                const currency = String(row?.currency || '').trim().toUpperCase();
+                if (currency === '') {
+                    return;
+                }
+                const option = document.createElement('option');
+                option.value = currency;
+                option.dataset.availableAmount = String(Number(row?.available_amount || 0));
+                option.textContent = `${currency} / ${money(row?.available_amount || 0)} available`;
+                if (currency === previousValue) {
+                    option.selected = true;
+                }
+                accountBalanceCurrencyField.appendChild(option);
+            });
+            syncFundingVsTreasury();
+        };
+        const loadAccountBalances = async () => {
+            if (!(accountBalanceBusinessSourceField instanceof HTMLSelectElement) || accountBalanceLookupUrl === '') {
+                return;
+            }
+
+            const businessSourceId = Number.parseInt(String(accountBalanceBusinessSourceField.value || '0'), 10) || 0;
+            if (businessSourceId <= 0) {
+                populateAccountBalanceCurrencies([]);
+                return;
+            }
+
+            const params = new URLSearchParams({
+                branch_id: '<?= e((string) $selectedBranchId) ?>',
+                business_source_id: String(businessSourceId),
+            });
+            const response = await fetch(`${accountBalanceLookupUrl}?${params.toString()}`, {
+                method: 'GET',
+                credentials: 'same-origin',
+                headers: { Accept: 'application/json' },
+            });
+            const payload = await response.json().catch(() => ({ ok: false, balances: [] }));
+            populateAccountBalanceCurrencies(Array.isArray(payload?.balances) ? payload.balances : []);
+        };
         const syncSelectAll = () => {
             if (!(selectAll instanceof HTMLInputElement)) {
                 return;
             }
-            const selectedCount = checkboxes.filter((box) => box.checked).length;
-            selectAll.checked = checkboxes.length > 0 && selectedCount === checkboxes.length;
-            selectAll.indeterminate = selectedCount > 0 && selectedCount < checkboxes.length;
+            const count = selectedCount();
+            selectAll.checked = checkboxes.length > 0 && count === checkboxes.length;
+            selectAll.indeterminate = count > 0 && count < checkboxes.length;
         };
         const syncTotal = () => {
             const total = selectedTotal();
             const amount = Number(amountField?.value || 0);
             if (totalNode) {
                 totalNode.textContent = money(total);
+            }
+            if (selectedCountNode) {
+                selectedCountNode.textContent = String(selectedCount());
             }
             if (amountField && (amount <= 0 || amountField.dataset.autofilled === '1')) {
                 amountField.value = total.toFixed(2);
@@ -260,6 +476,9 @@ $totalOutstanding = array_sum(array_map(static fn (array $row): float => (float)
                 creditNode.hidden = credit <= 0.005;
                 creditNode.textContent = credit > 0.005 ? `Customer credit after allocation: ${money(credit)}` : '';
             }
+            if (summaryCaption) {
+                summaryCaption.textContent = `Selected receivables totaling ${money(total)} ${'<?= e($selectedCurrency) ?>'} will be settled automatically from this payment.`;
+            }
             syncSelectAll();
         };
         const syncTreasuryAccounts = () => {
@@ -267,17 +486,85 @@ $totalOutstanding = array_sum(array_map(static fn (array $row): float => (float)
                 return;
             }
             const method = methodField.value;
+            const directSupplierMode = method === 'customer_paid_supplier';
+            const accountBalanceMode = method === 'account_holder_balance';
+            if (treasuryRow instanceof HTMLElement) {
+                treasuryRow.hidden = directSupplierMode || accountBalanceMode;
+            }
+            treasuryField.disabled = directSupplierMode || accountBalanceMode;
             Array.from(treasuryField.options).forEach((option) => {
                 if (option.value === '') {
                     option.hidden = false;
                     return;
                 }
                 const methods = String(option.dataset.methods || '').split(',');
-                option.hidden = !methods.includes(method);
+                option.hidden = directSupplierMode || !methods.includes(method);
             });
-            if (treasuryField.selectedOptions[0]?.hidden) {
+            if (directSupplierMode || accountBalanceMode || treasuryField.selectedOptions[0]?.hidden) {
                 treasuryField.value = '';
             }
+        };
+        const syncDirectSupplierSummary = () => {
+            if (!(directSupplierSelect instanceof HTMLSelectElement)) {
+                return;
+            }
+            const option = directSupplierSelect.selectedOptions[0] || null;
+            if (!option || option.hidden) {
+                if (directSupplierName) {
+                    directSupplierName.textContent = 'No supplier selected';
+                }
+                if (directSupplierPayables) {
+                    directSupplierPayables.textContent = '0 item(s)';
+                }
+                if (directSupplierAmount) {
+                    directSupplierAmount.textContent = '<?= e($selectedCurrency) ?> 0.00';
+                }
+                return;
+            }
+            if (directSupplierName) {
+                directSupplierName.textContent = String(option.dataset.supplierName || option.textContent || 'Supplier');
+            }
+            if (directSupplierPayables) {
+                directSupplierPayables.textContent = `${Number(option.dataset.payableCount || 0)} item(s)`;
+            }
+            if (directSupplierAmount) {
+                directSupplierAmount.textContent = `<?= e($selectedCurrency) ?> ${money(option.dataset.payableAmount || 0)}`;
+            }
+        };
+        const filterSuppliers = () => {
+            if (!(directSupplierSearch instanceof HTMLInputElement) || !(directSupplierSelect instanceof HTMLSelectElement)) {
+                return;
+            }
+            const term = directSupplierSearch.value.trim().toLowerCase();
+            let firstVisible = null;
+            Array.from(directSupplierSelect.options).forEach((option) => {
+                const haystack = `${option.dataset.supplierName || ''} ${option.textContent || ''}`.toLowerCase();
+                const visible = term === '' || haystack.includes(term);
+                option.hidden = !visible;
+                if (visible && firstVisible === null) {
+                    firstVisible = option;
+                }
+            });
+            if (directSupplierSelect.selectedOptions[0]?.hidden && firstVisible) {
+                firstVisible.selected = true;
+            }
+            syncDirectSupplierSummary();
+        };
+        const syncDirectSupplierMode = () => {
+            const enabled = isDirectSupplierMethod();
+            if (directSupplierPanel instanceof HTMLElement) {
+                directSupplierPanel.hidden = !enabled;
+            }
+            if (directSupplierSelect instanceof HTMLSelectElement) {
+                directSupplierSelect.disabled = !enabled;
+                if (enabled && directSupplierSelect.value === '') {
+                    const firstVisible = Array.from(directSupplierSelect.options).find((option) => !option.hidden);
+                    if (firstVisible) {
+                        firstVisible.selected = true;
+                    }
+                }
+            }
+            syncDirectSupplierSummary();
         };
 
         selectAll?.addEventListener('change', () => {
@@ -292,23 +579,35 @@ $totalOutstanding = array_sum(array_map(static fn (array $row): float => (float)
             amountField.dataset.autofilled = '0';
             syncTotal();
         });
-        methodField?.addEventListener('change', syncTreasuryAccounts);
+        methodField?.addEventListener('change', () => {
+            syncTreasuryAccounts();
+            syncDirectSupplierMode();
+            syncFundingVsTreasury();
+        });
+        accountBalanceBusinessSourceField?.addEventListener('change', () => {
+            loadAccountBalances().catch(() => populateAccountBalanceCurrencies([]));
+        });
+        accountBalanceCurrencyField?.addEventListener('change', () => {
+            syncFundingVsTreasury();
+        });
+        directSupplierSearch?.addEventListener('input', filterSuppliers);
+        directSupplierSelect?.addEventListener('change', syncDirectSupplierSummary);
         form.addEventListener('submit', (event) => {
-            const submitter = event.submitter;
-            const isAdvanceApply = submitter instanceof HTMLElement && submitter.matches('[data-apply-customer-advance]');
             if (actionField instanceof HTMLInputElement) {
-                actionField.value = isAdvanceApply ? 'apply_advance' : 'payment';
+                actionField.value = 'payment';
             }
             const total = selectedTotal();
             const amount = Number(amountField?.value || 0);
             let message = '';
             if (total <= 0) {
                 message = 'Please select at least one customer receivable.';
-            } else if (isAdvanceApply && String(advanceField?.value || '') === '') {
-                message = 'Please select the customer advance to apply.';
-            } else if (!isAdvanceApply && amount <= 0) {
+            } else if (amount <= 0) {
                 message = 'Enter a valid customer payment amount.';
-            } else if (!isAdvanceApply && ['cash', 'bank_transfer'].includes(String(methodField?.value || '')) && String(treasuryField?.value || '') === '') {
+            } else if (isDirectSupplierMethod() && String(directSupplierSelect?.value || '') === '') {
+                message = 'Please select the supplier the customer paid directly.';
+            } else if (String(methodField?.value || '') === 'account_holder_balance' && String(accountBalanceCurrencyField?.value || '') === '') {
+                message = 'Please select the account-balance currency to use for this payment.';
+            } else if (['cash', 'bank_transfer'].includes(String(methodField?.value || '')) && String(treasuryField?.value || '') === '') {
                 message = 'Please select the cash or bank account receiving this payment.';
             }
 
@@ -323,28 +622,9 @@ $totalOutstanding = array_sum(array_map(static fn (array $row): float => (float)
 
         syncTotal();
         syncTreasuryAccounts();
-
-        document.querySelectorAll('[data-global-customer-payment-method]').forEach((methodSelect) => {
-            const formNode = methodSelect.closest('form');
-            const treasurySelect = formNode?.querySelector('[data-global-customer-treasury-account]');
-            const syncFormTreasury = () => {
-                if (!(methodSelect instanceof HTMLSelectElement) || !(treasurySelect instanceof HTMLSelectElement)) {
-                    return;
-                }
-                const method = methodSelect.value;
-                Array.from(treasurySelect.options).forEach((option) => {
-                    if (option.value === '') {
-                        option.hidden = false;
-                        return;
-                    }
-                    option.hidden = !String(option.dataset.methods || '').split(',').includes(method);
-                });
-                if (treasurySelect.selectedOptions[0]?.hidden) {
-                    treasurySelect.value = '';
-                }
-            };
-            methodSelect.addEventListener('change', syncFormTreasury);
-            syncFormTreasury();
-        });
+        filterSuppliers();
+        syncDirectSupplierMode();
+        syncFundingVsTreasury();
+        loadAccountBalances().catch(() => populateAccountBalanceCurrencies([]));
     })();
 </script>

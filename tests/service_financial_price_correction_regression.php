@@ -364,6 +364,56 @@ try {
         json_encode($reducedPosition, JSON_UNESCAPED_SLASHES)
     );
 
+    $serviceWorkspace->correctFinancials([
+        'booking_id' => $bookingId,
+        'service_id' => $serviceId,
+        'corrected_cost_basis' => '350.00',
+        'corrected_service_charge' => '0.00',
+        'corrected_discount_amount' => '0.00',
+        'corrected_final_sale_price' => '300.00',
+        'financial_correction_date' => $today,
+        'financial_correction_reason' => 'Approved below-cost sale after invoice was paid',
+    ], $actorUserId, $accessibleBranchIds);
+
+    $lossService = $serviceRepository->findServiceById($serviceId) ?? [];
+    $lossReceivable = $customerRepository->findReceivableByServiceLine($bookingReference, $lineReference) ?? [];
+    $lossObligation = $supplierRepository->findObligationByServiceLine($bookingReference, $lineReference) ?? [];
+    $lossReceipt = $customerRepository->findReceiptById($receiptId) ?? [];
+    $lossSupplierPayment = $supplierRepository->findSupplierPaymentById($supplierPaymentId) ?? [];
+    $lossPosition = $moneyPosition($bookingReference, $lineReference);
+
+    $check(
+        'Explicit below-cost customer total records the real loss without changing supplier cost',
+        abs((float) ($lossService['purchase_cost'] ?? 0) - 350.00) <= 0.005
+        && abs((float) ($lossService['service_charge'] ?? 0)) <= 0.005
+        && abs((float) ($lossService['final_sale_price'] ?? 0) - 300.00) <= 0.005
+        && abs((float) ($lossService['net_profit_loss'] ?? 0) + 50.00) <= 0.005
+        && (string) ($lossService['loss_reason'] ?? '') === 'Approved below-cost sale after invoice was paid'
+        && abs((float) ($lossObligation['gross_amount'] ?? 0) - 350.00) <= 0.005
+    );
+    $check(
+        'Loss correction releases excess customer allocation but never changes cash received',
+        abs((float) ($lossReceivable['due_amount'] ?? 0) - 300.00) <= 0.005
+        && abs((float) ($lossReceivable['allocated_amount'] ?? 0) - 300.00) <= 0.005
+        && abs((float) ($lossReceivable['outstanding_amount'] ?? 0)) <= 0.005
+        && abs((float) ($lossReceipt['received_amount'] ?? 0) - 750.00) <= 0.005
+        && abs((float) ($lossReceipt['unallocated_amount'] ?? 0) - 450.00) <= 0.005
+    );
+    $check(
+        'Unchanged supplier cost preserves supplier settlement and cash payment exactly',
+        abs($supplierPaymentAllocation($supplierPaymentId, (int) ($lossObligation['id'] ?? 0)) - 350.00) <= 0.005
+        && abs((float) ($lossSupplierPayment['paid_amount'] ?? 0) - 490.00) <= 0.005
+        && abs((float) ($lossSupplierPayment['unallocated_amount'] ?? 0) - 140.00) <= 0.005
+    );
+    $check(
+        'Loss-sale journals recognize corrected revenue and retain the original corrected cost',
+        abs((float) ($lossPosition['AR_CONTROL'] ?? 0)) <= 0.005
+        && abs((float) ($lossPosition['AP_CONTROL'] ?? 0)) <= 0.005
+        && abs((float) ($lossPosition['SERVICE_REVENUE'] ?? 0) + 300.00) <= 0.005
+        && abs((float) ($lossPosition['SERVICE_COST'] ?? 0) - 350.00) <= 0.005,
+        json_encode($lossPosition, JSON_UNESCAPED_SLASHES)
+    );
+
     $correctionStatement = $db->prepare(
         'SELECT COUNT(*)
          FROM service_financial_corrections
@@ -373,7 +423,7 @@ try {
     $correctionStatement->execute(['service_id' => $serviceId]);
     $check(
         'Every new non-air correction audit snapshot keeps the legacy cost mirror synchronized',
-        (int) $correctionStatement->fetchColumn() === 3
+        (int) $correctionStatement->fetchColumn() === 4
     );
 } catch (Throwable $exception) {
     $failures[] = $exception::class . ': ' . $exception->getMessage();

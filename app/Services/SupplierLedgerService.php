@@ -35,11 +35,35 @@ final class SupplierLedgerService extends Service
      */
     public function buildReport(array $rows): array
     {
+        // Applying an existing supplier advance is an allocation between the
+        // supplier-advance asset and AP control; it is not a second payment to
+        // the supplier. The original supplier payment already appears once in
+        // this ledger, while each later invoice consumes that balance. Keeping
+        // the AP application row here would therefore restore the amount just
+        // consumed by the invoice and overstate the remaining advance.
+        // Allocation detail remains available in the Supplier Advance Ledger.
+        $rows = array_values(array_filter(
+            $rows,
+            static fn (mixed $row): bool => ! is_array($row)
+                || (
+                    (string) ($row['entry_type'] ?? '') !== 'Advance Applied'
+                    && ! (
+                        (string) ($row['entry_type'] ?? '') === 'Payable Adjustment'
+                        && (
+                            str_contains((string) ($row['source_reference'] ?? ''), '-CUR-OLD')
+                            || trim((string) ($row['narration'] ?? '')) === 'Original-currency payable reversed by service financial correction'
+                        )
+                    )
+                )
+        ));
         $rows = $this->consolidateSupplierPaymentComponents($rows);
-        $rows = $this->reconcileHistoricalSupplierPayments($rows);
+        $rows = $this->consolidateSupplierPayableState($rows);
+        $rows = $this->dropStaleAdvanceAdjustmentsAfterCurrencyCorrection($rows);
+        $rows = $this->reconcileHistoricalCancellationGross($rows);
+        $paymentRepository = new SupplierRepository($this->app);
+        $paymentCache = [];
         $debitSummary = [];
         $creditSummary = [];
-        $balanceSummary = [];
         $runningBalances = [];
         $reportRows = [];
 
@@ -64,13 +88,16 @@ final class SupplierLedgerService extends Service
             // Swap it here only for the client's supplier-ledger convention.
             $debitAmount = $this->amount($row['credit_amount'] ?? 0);
             $creditAmount = $this->amount($row['debit_amount'] ?? 0);
-            $runningBalances[$ledgerKey] = round(
-                ($runningBalances[$ledgerKey] ?? 0.0) + $debitAmount - $creditAmount,
-                2
-            );
+            $displayDebitAmount = $debitAmount;
+            $displayCreditAmount = $creditAmount;
+            $effectiveDebitAmount = $debitAmount;
+            $effectiveCreditAmount = $creditAmount;
 
             $bookingId = (int) ($row['booking_id'] ?? 0);
             $supplierPaymentId = (int) ($row['supplier_payment_id'] ?? 0);
+            $journalEntryId = (int) ($row['journal_entry_id'] ?? 0);
+            $postedByName = trim((string) ($row['posted_by_name'] ?? ''));
+            $narration = trim((string) ($row['narration'] ?? ''));
             $bookingReferenceHref = '';
             if ($supplierPaymentId > 0) {
                 $bookingReferenceHref = url('/suppliers/settlements/global?posted_payment_id=' . $supplierPaymentId);
@@ -78,11 +105,81 @@ final class SupplierLedgerService extends Service
                 $bookingReferenceHref = url('/workspace?booking_id=' . $bookingId);
             }
 
+            $payment = null;
+            if ($supplierPaymentId > 0) {
+                if (! array_key_exists($supplierPaymentId, $paymentCache)) {
+                    $paymentCache[$supplierPaymentId] = $paymentRepository->findSupplierPaymentById($supplierPaymentId);
+                }
+                $payment = $paymentCache[$supplierPaymentId];
+            }
+
             $sourceEntryType = trim((string) ($row['entry_type'] ?? ''));
             if ($sourceEntryType === '') {
                 $sourceEntryType = 'Supplier Ledger Entry';
             }
-            $entryType = $this->particular($sourceEntryType);
+            $paymentStatus = str_replace(' ', '_', mb_strtolower(trim((string) ($row['payment_status'] ?? $payment['status'] ?? ''))));
+            $isVoidedPayment = $supplierPaymentId > 0
+                && $paymentStatus === 'void'
+                && in_array($sourceEntryType, ['Supplier Payment', 'Supplier Advance / Overpayment', 'Customer Paid Supplier'], true);
+            $isVoidedPaymentReversal = $supplierPaymentId > 0
+                && $paymentStatus === 'void'
+                && $sourceEntryType === 'Supplier Payment Reversed';
+            if ($isVoidedPaymentReversal) {
+                continue;
+            }
+            $entryType = $this->particular($row, $sourceEntryType);
+            $trace = '';
+            $sourceReference = trim((string) ($row['source_reference'] ?? ''));
+            $isSupplierCurrencyCorrection = $sourceEntryType === 'Payable Adjustment'
+                && (
+                    str_contains(mb_strtolower($narration), 'currency correction')
+                    || str_contains(mb_strtolower($narration), 'service financial correction')
+                    || str_contains(mb_strtolower($narration), 'new-currency payable')
+                    || str_contains(mb_strtolower($narration), 'original-currency payable')
+                    || str_contains($sourceReference, '-CUR-')
+                );
+            if (
+                in_array($sourceEntryType, ['Supplier Refund Received', 'Supplier Refund Retained as Credit'], true)
+                && $narration !== ''
+            ) {
+                $trace = $narration;
+            } elseif (
+                in_array($sourceEntryType, ['Supplier Refund Received', 'Supplier Refund Retained as Credit'], true)
+            ) {
+                $trace = 'Cancellation settlement';
+            } elseif ($isSupplierCurrencyCorrection && $postedByName !== '') {
+                $trace = 'Currency correction by ' . $postedByName;
+            } elseif (in_array($sourceEntryType, ['Payable Created', 'Payable Adjustment'], true)) {
+                $trace = 'Default currency ' . $currency;
+            } elseif ($supplierPaymentId > 0) {
+                $trace = 'Payment #' . $supplierPaymentId;
+            } elseif ($bookingId > 0) {
+                $trace = 'Booking #' . $bookingId;
+            } elseif ($narration !== '') {
+                $trace = $narration;
+            }
+            if ($isVoidedPayment) {
+                $effectiveDebitAmount = 0.0;
+                $effectiveCreditAmount = 0.0;
+                $entryType = 'Supplier payment voided';
+                $voidReason = trim((string) ($row['void_reason'] ?? $payment['void_reason'] ?? ''));
+                $voidedAmount = $creditAmount > 0.005 ? $creditAmount : $debitAmount;
+                $traceParts = [];
+                if ($voidReason !== '') {
+                    $traceParts[] = 'Voided: ' . $voidReason;
+                } else {
+                    $traceParts[] = 'Voided payment';
+                }
+                if ($voidedAmount > 0.005) {
+                    $traceParts[] = 'Original amount ' . $currency . ' ' . $this->money($voidedAmount);
+                }
+                $trace = implode(' | ', $traceParts);
+            }
+
+            $runningBalances[$ledgerKey] = round(
+                ($runningBalances[$ledgerKey] ?? 0.0) + $effectiveDebitAmount - $effectiveCreditAmount,
+                2
+            );
 
             $reportRows[] = [
                 'supplier_name' => $supplierName,
@@ -94,30 +191,53 @@ final class SupplierLedgerService extends Service
                 'route' => (string) (($row['route'] ?? '') !== '' ? $row['route'] : 'N/A'),
                 'airline' => (string) (($row['airline'] ?? '') !== '' ? $row['airline'] : 'N/A'),
                 'supplier_payment_id' => $supplierPaymentId,
+                'journal_entry_id' => $journalEntryId,
+                'posted_by_name' => $postedByName !== '' ? $postedByName : 'System',
+                'narration' => $narration,
                 'currency' => $currency,
-                'raw_debit_amount' => $debitAmount,
-                'raw_credit_amount' => $creditAmount,
+                'raw_debit_amount' => $effectiveDebitAmount,
+                'raw_credit_amount' => $effectiveCreditAmount,
                 'raw_balance_amount' => $runningBalances[$ledgerKey],
-                'debit_amount' => $this->money($debitAmount),
-                'credit_amount' => $this->money($creditAmount),
+                'debit_amount' => $this->money($displayDebitAmount),
+                'credit_amount' => $this->money($displayCreditAmount),
                 'balance_amount' => $this->balance($runningBalances[$ledgerKey]),
                 'entry_type' => $entryType,
                 'source_entry_type' => $sourceEntryType,
+                'trace' => $trace,
                 'reconciliation_status' => (string) ($row['reconciliation_status'] ?? ''),
                 'reconciliation_note' => (string) ($row['reconciliation_note'] ?? ''),
-                'exclude_from_footer_totals' => 0,
+                'exclude_from_footer_totals' => $isVoidedPayment ? 1 : 0,
             ];
 
-            if ($this->countsAsOriginalInvoice($sourceEntryType)) {
-                $debitSummary[$currency] = round(($debitSummary[$currency] ?? 0.0) + $debitAmount, 2);
+            if ($isVoidedPayment) {
+                continue;
             }
-            if ($this->countsAsOriginalPayment($sourceEntryType)) {
-                $creditSummary[$currency] = round(($creditSummary[$currency] ?? 0.0) + $creditAmount, 2);
+            switch ($sourceEntryType) {
+                case 'Payable Created':
+                case 'Payable Adjustment':
+                case 'Payable Reversed on Cancellation':
+                case 'Supplier Penalty Retained':
+                    $debitSummary[$currency] = round(
+                        ($debitSummary[$currency] ?? 0.0) + $effectiveDebitAmount - $effectiveCreditAmount,
+                        2
+                    );
+                    break;
+                case 'Supplier Payment':
+                case 'Supplier Advance / Overpayment':
+                case 'Customer Paid Supplier':
+                    $creditSummary[$currency] = round(($creditSummary[$currency] ?? 0.0) + $effectiveCreditAmount, 2);
+                    break;
             }
-            $balanceSummary[$currency] = round(
-                ($balanceSummary[$currency] ?? 0.0) + $debitAmount - $creditAmount,
-                2
-            );
+        }
+
+        $balanceSummary = [];
+        foreach ($runningBalances as $ledgerKey => $balance) {
+            $parts = explode('|', (string) $ledgerKey);
+            $currency = (string) end($parts);
+            if ($currency === '') {
+                $currency = 'PKR';
+            }
+            $balanceSummary[$currency] = round(($balanceSummary[$currency] ?? 0.0) + (float) $balance, 2);
         }
 
         return [
@@ -130,11 +250,15 @@ final class SupplierLedgerService extends Service
         ];
     }
 
-    private function particular(string $sourceEntryType): string
+    private function particular(array $row, string $sourceEntryType): string
     {
+        $customerName = trim((string) ($row['customer_name'] ?? ''));
+
         return match ($sourceEntryType) {
             'Payable Created' => 'Supplier invoice recorded',
-            'Payable Adjustment' => 'Supplier invoice adjustment',
+            'Payable Adjustment' => $this->amount($row['debit_amount'] ?? 0) > $this->amount($row['credit_amount'] ?? 0)
+                ? 'Supplier credit note received'
+                : 'Supplier debit note recorded',
             'Payable Reversed on Cancellation' => 'Supplier invoice reversed on cancellation',
             'Supplier Payment' => 'Supplier payment made',
             'Supplier Credit Applied' => 'Supplier credit applied',
@@ -143,107 +267,13 @@ final class SupplierLedgerService extends Service
             'Supplier Refund Received' => 'Supplier refund received',
             'Supplier Refund Retained as Credit' => 'Supplier refund retained as supplier credit',
             'Advance Applied' => 'Supplier advance applied',
+            'Refund Advance Applied' => 'Supplier refund credit applied',
             'Advance Adjustment' => 'Supplier advance adjustment',
-            'Customer Paid Supplier' => 'Customer paid supplier',
+            'Customer Paid Supplier' => $customerName !== '' ? 'Customer ' . $customerName . ' paid supplier.' : 'Customer paid supplier.',
             'Supplier Advance / Overpayment' => 'Supplier advance paid',
             'Linked Account Balance Adjustment' => 'Linked account balance adjustment',
             default => $sourceEntryType,
         };
-    }
-
-    private function reconcileHistoricalSupplierPayments(array $rows): array
-    {
-        $groups = [];
-
-        foreach ($rows as $index => $row) {
-            if (! is_array($row)) {
-                continue;
-            }
-
-            $key = $this->sourceGroupKey($row);
-            if (! isset($groups[$key])) {
-                $groups[$key] = [
-                    'originalInvoice' => 0.0,
-                    'currentPayment' => 0.0,
-                    'cancellationReversal' => 0.0,
-                    'penalty' => 0.0,
-                    'refundReceived' => 0.0,
-                    'paymentIndexes' => [],
-                    'cancellationIndexes' => [],
-                ];
-            }
-
-            $entryType = (string) ($row['entry_type'] ?? '');
-            $sourceDebit = $this->amount($row['debit_amount'] ?? 0);
-            $sourceCredit = $this->amount($row['credit_amount'] ?? 0);
-
-            if ($this->countsAsOriginalInvoice($entryType)) {
-                $groups[$key]['originalInvoice'] += $sourceCredit;
-            }
-            if ($this->countsAsOriginalPayment($entryType) || $entryType === 'Supplier Credit Applied') {
-                $groups[$key]['currentPayment'] += $sourceDebit;
-                $groups[$key]['paymentIndexes'][] = $index;
-            }
-            if ($entryType === 'Payable Reversed on Cancellation') {
-                $groups[$key]['cancellationReversal'] += $sourceDebit;
-                $groups[$key]['cancellationIndexes'][] = $index;
-            } elseif ($entryType === 'Supplier Penalty Retained') {
-                $groups[$key]['penalty'] += $sourceCredit;
-            } elseif (in_array($entryType, ['Supplier Refund Received', 'Supplier Refund Retained as Credit'], true)) {
-                $groups[$key]['refundReceived'] += $sourceCredit;
-            }
-        }
-
-        foreach ($groups as $group) {
-            $originalInvoice = round((float) $group['originalInvoice'], 2);
-            $currentPayment = round((float) $group['currentPayment'], 2);
-            $cancellationReversal = round((float) $group['cancellationReversal'], 2);
-            $penalty = round((float) $group['penalty'], 2);
-            $refundReceived = round((float) $group['refundReceived'], 2);
-
-            // A cancellation reverses the supplier invoice position that was
-            // established for the service. Historical events can retain only
-            // the penalty as their cost basis after the obligation is reduced,
-            // which would leave the received refund appearing as a false
-            // supplier balance. Restore the reversal to the invoice amount for
-            // this ledger without changing the underlying journals or events.
-            $cancellationIndexes = (array) $group['cancellationIndexes'];
-            if ($originalInvoice > 0.005 && $cancellationIndexes !== []) {
-                $cancellationIndex = (int) end($cancellationIndexes);
-                $rows[$cancellationIndex]['debit_amount'] = $originalInvoice;
-                $cancellationReversal = $originalInvoice;
-            }
-
-            if (
-                $originalInvoice <= 0.005
-                || $cancellationReversal <= 0.005
-                || $currentPayment <= 0.005
-            ) {
-                continue;
-            }
-
-            $refundEvidence = max($refundReceived, $cancellationReversal - $penalty, 0.0);
-            $settlementEvidence = min(round($penalty + $refundEvidence, 2), $originalInvoice);
-            $grossPayment = min(max($currentPayment, $settlementEvidence), $originalInvoice);
-            $reconstructedAmount = round($grossPayment - $currentPayment, 2);
-            if ($reconstructedAmount <= 0.005) {
-                continue;
-            }
-
-            $paymentIndexes = (array) $group['paymentIndexes'];
-            if ($paymentIndexes !== []) {
-                $paymentIndex = (int) end($paymentIndexes);
-                $rows[$paymentIndex]['debit_amount'] = round(
-                    (float) ($rows[$paymentIndex]['debit_amount'] ?? 0) + $reconstructedAmount,
-                    2
-                );
-                $rows[$paymentIndex]['reconciliation_status'] = 'Reconciled - review';
-                $rows[$paymentIndex]['reconciliation_note'] =
-                    'Gross historical supplier payment reconstructed from retained penalty and refundable/refunded value.';
-            }
-        }
-
-        return $rows;
     }
 
     /**
@@ -257,6 +287,7 @@ final class SupplierLedgerService extends Service
         $groups = [];
         $paymentRepository = new SupplierRepository($this->app);
         $paymentCache = [];
+        $liveAllocationIdsCache = [];
 
         foreach ($rows as $index => $row) {
             if (! is_array($row)) {
@@ -267,7 +298,7 @@ final class SupplierLedgerService extends Service
             $entryType = (string) ($row['entry_type'] ?? '');
             if (
                 $paymentId <= 0
-                || ! in_array($entryType, ['Supplier Payment', 'Supplier Advance / Overpayment'], true)
+                || ! in_array($entryType, ['Supplier Payment', 'Supplier Advance / Overpayment', 'Customer Paid Supplier'], true)
             ) {
                 continue;
             }
@@ -277,6 +308,80 @@ final class SupplierLedgerService extends Service
         }
 
         foreach ($groups as $indexes) {
+            $paymentId = (int) ($rows[$indexes[0]]['supplier_payment_id'] ?? 0);
+            $preferredAllocationKeeperIndex = null;
+            if ($paymentId > 0 && ! array_key_exists($paymentId, $liveAllocationIdsCache)) {
+                $liveAllocationIdsCache[$paymentId] = $this->activeAllocationIdsForPayment($paymentId);
+            }
+            $liveAllocationIds = $liveAllocationIdsCache[$paymentId] ?? [];
+
+            $allocationDerivedIndexes = array_values(array_filter(
+                $indexes,
+                fn (int $index): bool => $this->isAllocationDerivedPaymentRow($rows[$index] ?? [])
+            ));
+            if ($allocationDerivedIndexes !== []) {
+                if ($liveAllocationIds === []) {
+                    foreach ($allocationDerivedIndexes as $index) {
+                        unset($rows[$index]);
+                    }
+                    $indexes = array_values(array_filter(
+                        $indexes,
+                        static fn (int $index): bool => isset($rows[$index])
+                    ));
+                    if ($indexes === []) {
+                        continue;
+                    }
+                } else {
+                    $matchedAllocationIndexes = [];
+                    foreach ($allocationDerivedIndexes as $index) {
+                        $allocationId = $this->allocationIdFromPaymentRow($rows[$index] ?? []);
+                        if ($allocationId > 0 && in_array($allocationId, $liveAllocationIds, true)) {
+                            $matchedAllocationIndexes[] = $index;
+                        }
+                    }
+                    if ($matchedAllocationIndexes === []) {
+                        usort($allocationDerivedIndexes, function (int $left, int $right) use ($rows): int {
+                            $leftAllocationId = $this->allocationIdFromPaymentRow($rows[$left] ?? []);
+                            $rightAllocationId = $this->allocationIdFromPaymentRow($rows[$right] ?? []);
+                            if ($leftAllocationId !== $rightAllocationId) {
+                                return $rightAllocationId <=> $leftAllocationId;
+                            }
+
+                            return ((int) ($rows[$right]['journal_entry_id'] ?? 0)) <=> ((int) ($rows[$left]['journal_entry_id'] ?? 0));
+                        });
+                        $matchedAllocationIndexes = array_slice($allocationDerivedIndexes, 0, count($liveAllocationIds));
+                    }
+                    foreach ($allocationDerivedIndexes as $index) {
+                        if (in_array($index, $matchedAllocationIndexes, true)) {
+                            continue;
+                        }
+                        unset($rows[$index]);
+                    }
+                    $indexes = array_values(array_filter(
+                        $indexes,
+                        static fn (int $index): bool => isset($rows[$index])
+                    ));
+                    if ($indexes === []) {
+                        continue;
+                    }
+                }
+
+                $survivingAllocationIndexes = array_values(array_filter(
+                    $indexes,
+                    static fn (int $index): bool => isset($rows[$index])
+                ));
+                if ($survivingAllocationIndexes !== []) {
+                    usort($survivingAllocationIndexes, static function (int $left, int $right) use ($rows): int {
+                        return ((int) ($rows[$right]['journal_entry_id'] ?? 0)) <=> ((int) ($rows[$left]['journal_entry_id'] ?? 0));
+                    });
+                    $preferredAllocationKeeperIndex = $survivingAllocationIndexes[0];
+                }
+            }
+
+            $customerPaidSupplierIndexes = array_values(array_filter(
+                $indexes,
+                static fn (int $index): bool => (string) ($rows[$index]['entry_type'] ?? '') === 'Customer Paid Supplier'
+            ));
             $paymentIndexes = array_values(array_filter(
                 $indexes,
                 static fn (int $index): bool => (string) ($rows[$index]['entry_type'] ?? '') === 'Supplier Payment'
@@ -286,7 +391,7 @@ final class SupplierLedgerService extends Service
                 static fn (int $index): bool => (string) ($rows[$index]['entry_type'] ?? '') === 'Supplier Advance / Overpayment'
             ));
 
-            $keeperIndex = (int) ($paymentIndexes[0] ?? $advanceIndexes[0] ?? $indexes[0]);
+            $keeperIndex = (int) ($customerPaidSupplierIndexes[0] ?? $preferredAllocationKeeperIndex ?? $paymentIndexes[0] ?? $advanceIndexes[0] ?? $indexes[0]);
             $totalDebit = 0.0;
             $totalCredit = 0.0;
             foreach ($indexes as $index) {
@@ -299,14 +404,25 @@ final class SupplierLedgerService extends Service
 
             $rows[$keeperIndex]['debit_amount'] = round($totalDebit, 2);
             $rows[$keeperIndex]['credit_amount'] = round($totalCredit, 2);
-            $rows[$keeperIndex]['entry_type'] = 'Supplier Payment';
+            $hasDirectCustomerPayment = $customerPaidSupplierIndexes !== [];
+            $rows[$keeperIndex]['entry_type'] = $hasDirectCustomerPayment ? 'Customer Paid Supplier' : 'Supplier Payment';
 
-            $paymentId = (int) ($rows[$keeperIndex]['supplier_payment_id'] ?? 0);
             if ($paymentId > 0) {
                 if (! array_key_exists($paymentId, $paymentCache)) {
                     $paymentCache[$paymentId] = $paymentRepository->findSupplierPaymentById($paymentId);
                 }
                 $payment = $paymentCache[$paymentId];
+                $paymentMethod = str_replace(' ', '_', mb_strtolower(trim((string) ($payment['payment_method'] ?? ''))));
+                $paymentRemarks = mb_strtolower(trim((string) ($payment['remarks'] ?? '')));
+                if (
+                    $rows[$keeperIndex]['entry_type'] !== 'Customer Paid Supplier'
+                    && (
+                        $paymentMethod === 'customer_paid_supplier'
+                        || str_contains($paymentRemarks, 'customer paid supplier directly')
+                    )
+                ) {
+                    $rows[$keeperIndex]['entry_type'] = 'Customer Paid Supplier';
+                }
                 $scope = str_replace(' ', '_', mb_strtolower(trim((string) ($payment['payment_scope'] ?? ''))));
                 $paymentBookingReference = strtoupper(trim((string) ($payment['booking_reference'] ?? '')));
                 if ($scope === 'global' || $paymentBookingReference === 'GLOBAL') {
@@ -323,7 +439,270 @@ final class SupplierLedgerService extends Service
         return array_values($rows);
     }
 
-    private function sourceGroupKey(array $row): string
+    private function activeAllocationIdsForPayment(int $paymentId): array
+    {
+        if ($paymentId <= 0) {
+            return [];
+        }
+
+        $db = $this->app->get('db');
+        $statement = $db->prepare(
+            'SELECT id
+             FROM supplier_payment_allocations
+             WHERE supplier_payment_id = :supplier_payment_id
+             ORDER BY id ASC'
+        );
+        $statement->execute(['supplier_payment_id' => $paymentId]);
+
+        return array_values(array_map('intval', $statement->fetchAll(\PDO::FETCH_COLUMN) ?: []));
+    }
+
+    private function isAllocationDerivedPaymentRow(array $row): bool
+    {
+        $sourceReference = trim((string) ($row['source_reference'] ?? ''));
+        $narration = mb_strtolower(trim((string) ($row['narration'] ?? '')));
+
+        return preg_match('/-(?:REALLOC|ALLOC)-\d+$/', $sourceReference) === 1
+            || str_contains($narration, 'allocated to payable')
+            || str_contains($narration, 'reconciled internally');
+    }
+
+    private function allocationIdFromPaymentRow(array $row): int
+    {
+        $sourceReference = trim((string) ($row['source_reference'] ?? ''));
+        if ($sourceReference !== '' && preg_match('/-(?:REALLOC|ALLOC)-(\d+)$/', $sourceReference, $matches) === 1) {
+            return (int) ($matches[1] ?? 0);
+        }
+
+        return 0;
+    }
+
+    /**
+     * A single service line can accumulate multiple payable-state movements:
+     * the original payable plus later delta adjustments. The supplier ledger
+     * should show the net payable state for that line, not only the last
+     * adjustment row, otherwise a later +50 adjustment can wrongly replace an
+     * original 440 payable and leave a fake 50-payable line in the report.
+     */
+    private function consolidateSupplierPayableState(array $rows): array
+    {
+        $groups = [];
+
+        foreach ($rows as $index => $row) {
+            if (! is_array($row)) {
+                continue;
+            }
+
+            $groupKey = implode('|', [
+                (string) ($row['supplier_id'] ?? 0),
+                (string) ($row['booking_reference'] ?? ''),
+                (string) ($row['service_line_reference'] ?? ''),
+            ]);
+            $sourceEntryType = (string) ($row['source_entry_type'] ?? $row['entry_type'] ?? '');
+
+            if (! in_array($sourceEntryType, ['Payable Created', 'Payable Adjustment'], true)) {
+                continue;
+            }
+
+            $groups[$groupKey][] = $index;
+        }
+
+        foreach ($groups as $groupKey => $indexes) {
+            if (count($indexes) <= 1) {
+                continue;
+            }
+
+            $currencyCorrectionNewIndexes = array_values(array_filter(
+                $indexes,
+                static function (int $index) use ($rows): bool {
+                    $sourceReference = (string) ($rows[$index]['source_reference'] ?? '');
+                    $narration = trim((string) ($rows[$index]['narration'] ?? ''));
+
+                    return str_contains($sourceReference, '-CUR-NEW')
+                        || $narration === 'New-currency payable recognized by service financial correction';
+                }
+            ));
+            if ($currencyCorrectionNewIndexes !== []) {
+                $keeperIndex = (int) end($currencyCorrectionNewIndexes);
+                $keeperCurrency = $this->currency($rows[$keeperIndex] ?? []);
+                $keeperJournalEntryId = (int) ($rows[$keeperIndex]['journal_entry_id'] ?? 0);
+
+                foreach ($indexes as $index) {
+                    if ($index === $keeperIndex) {
+                        continue;
+                    }
+
+                    if (
+                        $keeperCurrency !== ''
+                        && $this->currency($rows[$index] ?? []) === $keeperCurrency
+                        && ! $this->isCurrencyCorrectionPayableRow($rows[$index] ?? [])
+                        && (int) ($rows[$index]['journal_entry_id'] ?? 0) > $keeperJournalEntryId
+                    ) {
+                        $rows[$keeperIndex]['debit_amount'] = $this->amount($rows[$keeperIndex]['debit_amount'] ?? 0)
+                            + $this->amount($rows[$index]['debit_amount'] ?? 0);
+                        $rows[$keeperIndex]['credit_amount'] = $this->amount($rows[$keeperIndex]['credit_amount'] ?? 0)
+                            + $this->amount($rows[$index]['credit_amount'] ?? 0);
+                    }
+
+                    unset($rows[$index]);
+                }
+
+                $rows[$keeperIndex]['entry_type'] = 'Payable Created';
+                $rows[$keeperIndex]['source_entry_type'] = 'Payable Created';
+
+                continue;
+            }
+
+            // Keep payable adjustments visible as separate ledger movements so
+            // the supplier ledger matches the accountant-facing source ledger
+            // instead of silently netting debit/credit notes into the invoice.
+            continue;
+        }
+
+        return array_values($rows);
+    }
+
+    /**
+     * When a supplier payable changes currency, older advance-adjustment rows
+     * from the previous payable currency can remain attached to the same
+     * booking/service line. They are reconciliation artifacts, not a second
+     * live payable, and must not survive in the supplier ledger beside the
+     * new-currency payable truth.
+     */
+    private function dropStaleAdvanceAdjustmentsAfterCurrencyCorrection(array $rows): array
+    {
+        $groups = [];
+
+        foreach ($rows as $index => $row) {
+            if (! is_array($row)) {
+                continue;
+            }
+
+            $groupKey = implode('|', [
+                (string) ($row['supplier_id'] ?? 0),
+                (string) ($row['booking_reference'] ?? ''),
+                (string) ($row['service_line_reference'] ?? ''),
+            ]);
+            $groups[$groupKey][] = $index;
+        }
+
+        foreach ($groups as $indexes) {
+            $currencyCorrectionPayableIndexes = array_values(array_filter(
+                $indexes,
+                fn (int $index): bool => $this->isCurrencyCorrectionPayableRow($rows[$index] ?? [])
+            ));
+            if ($currencyCorrectionPayableIndexes === []) {
+                continue;
+            }
+
+            $keeperIndex = (int) end($currencyCorrectionPayableIndexes);
+            $livePayableCurrency = $this->currency($rows[$keeperIndex] ?? []);
+            if ($livePayableCurrency === '') {
+                continue;
+            }
+
+            foreach ($indexes as $index) {
+                $sourceEntryType = (string) ($rows[$index]['source_entry_type'] ?? $rows[$index]['entry_type'] ?? '');
+                if ($sourceEntryType !== 'Advance Adjustment') {
+                    continue;
+                }
+
+                $adjustmentCurrency = $this->currency($rows[$index] ?? []);
+                if ($adjustmentCurrency === $livePayableCurrency) {
+                    continue;
+                }
+
+                unset($rows[$index]);
+            }
+        }
+
+        return array_values($rows);
+    }
+
+    private function isCurrencyCorrectionPayableRow(array $row): bool
+    {
+        $sourceEntryType = (string) ($row['source_entry_type'] ?? $row['entry_type'] ?? '');
+        if (! in_array($sourceEntryType, ['Payable Created', 'Payable Adjustment'], true)) {
+            return false;
+        }
+
+        $sourceReference = (string) ($row['source_reference'] ?? '');
+        $narration = trim((string) ($row['narration'] ?? ''));
+
+        return str_contains($sourceReference, '-CUR-NEW')
+            || $narration === 'New-currency payable recognized by service financial correction';
+    }
+
+    /**
+     * Some older datasets stored cancellation-era supplier payment/reversal
+     * rows as net values after part of the amount had already been classified
+     * into refund or retained-credit movements. For the supplier ledger we
+     * must rebuild the gross money-out and gross payable-reversal values from
+     * the evidenced penalty + refund split so the lifecycle reads correctly.
+     */
+    private function reconcileHistoricalCancellationGross(array $rows): array
+    {
+        $groups = [];
+
+        foreach ($rows as $index => $row) {
+            if (! is_array($row)) {
+                continue;
+            }
+
+            $groups[$this->movementGroupKey($row)][] = $index;
+        }
+
+        foreach ($groups as $indexes) {
+            $paymentIndexes = [];
+            $reversalIndexes = [];
+            $evidencedGross = 0.0;
+
+            foreach ($indexes as $index) {
+                $entryType = (string) ($rows[$index]['source_entry_type'] ?? $rows[$index]['entry_type'] ?? '');
+                if ($entryType === 'Supplier Payment') {
+                    $paymentIndexes[] = $index;
+                    continue;
+                }
+                if ($entryType === 'Payable Reversed on Cancellation') {
+                    $reversalIndexes[] = $index;
+                    continue;
+                }
+                if (in_array($entryType, ['Supplier Penalty Retained', 'Supplier Refund Received', 'Supplier Refund Retained as Credit'], true)) {
+                    $evidencedGross = round($evidencedGross + $this->amount($rows[$index]['credit_amount'] ?? 0), 2);
+                }
+            }
+
+            if ($evidencedGross <= 0.005) {
+                continue;
+            }
+
+            foreach ($paymentIndexes as $index) {
+                $storedGross = $this->amount($rows[$index]['debit_amount'] ?? 0);
+                if ($storedGross + 0.005 >= $evidencedGross) {
+                    continue;
+                }
+
+                $rows[$index]['debit_amount'] = $evidencedGross;
+                $rows[$index]['reconciliation_status'] = 'Reconciled - review';
+                $rows[$index]['reconciliation_note'] = 'Gross supplier payment rebuilt from cancellation penalty and refund evidence.';
+            }
+
+            foreach ($reversalIndexes as $index) {
+                $storedGross = $this->amount($rows[$index]['debit_amount'] ?? 0);
+                if ($storedGross + 0.005 >= $evidencedGross) {
+                    continue;
+                }
+
+                $rows[$index]['debit_amount'] = $evidencedGross;
+                $rows[$index]['reconciliation_status'] = 'Reconciled - review';
+                $rows[$index]['reconciliation_note'] = 'Gross payable reversal rebuilt from cancellation penalty and refund evidence.';
+            }
+        }
+
+        return array_values($rows);
+    }
+
+    private function movementGroupKey(array $row): string
     {
         return implode('|', [
             (string) ($row['supplier_id'] ?? 0),
@@ -331,25 +710,6 @@ final class SupplierLedgerService extends Service
             (string) ($row['service_line_reference'] ?? ''),
             $this->currency($row),
         ]);
-    }
-
-    private function countsAsOriginalInvoice(string $entryType): bool
-    {
-        return in_array($entryType, [
-            'Payable Created',
-            'Payable Adjustment',
-        ], true);
-    }
-
-    private function countsAsOriginalPayment(string $entryType): bool
-    {
-        return in_array($entryType, [
-            'Supplier Payment',
-            'Advance Applied',
-            'Customer Paid Supplier',
-            'Supplier Advance / Overpayment',
-            'Linked Account Balance Adjustment',
-        ], true);
     }
 
     private function summaryCards(string $labelPrefix, array $totals): array

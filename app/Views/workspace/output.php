@@ -19,10 +19,10 @@ $generatedAt = (string) ($generatedAt ?? '');
 $backUrl = (string) ($backUrl ?? url('/workspace'));
 $showOutputDebug = app_debug_tools_enabled() && (string) ($_GET['debug_ui'] ?? '') === '1';
 
-$formatMoney = static fn (float $amount): string => number_format($amount, 2);
+$formatMoney = static fn (float $amount): string => number_format(round($amount, 0), 0);
 $formatCurrencyTotals = static function (array $totals) use ($formatMoney): string {
     if ($totals === []) {
-        return 'PKR 0.00';
+        return 'PKR 0';
     }
 
     $parts = [];

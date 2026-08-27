@@ -49,13 +49,20 @@ final class AccountLedgerService extends Service
             (array) ($data['accountSupplierSettlements'] ?? []),
             static fn (mixed $row): bool => is_array($row)
         ));
+        $linkedSettlementIndex = [];
+        foreach ($accountSupplierSettlements as $settlement) {
+            $linkedSettlementIndex[$this->positionIndexKey($settlement)] = true;
+        }
 
         $rows = [];
         $positionSummaries = [];
+        $positionIndex = [];
 
         foreach ($positions as $position) {
             $summaryKey = $this->summaryKey($position);
             $currency = $this->currency($position);
+            $positionIndex[$this->positionIndexKey($position)] = $position;
+            $hasLinkedSettlement = isset($linkedSettlementIndex[$this->positionIndexKey($position)]);
             $supplierPosition = $position;
             $supplierPosition['currency'] = strtoupper(trim((string) ($position['cost_currency'] ?? $currency))) ?: $currency;
             $supplierSummaryKey = $this->summaryKey($supplierPosition);
@@ -66,10 +73,32 @@ final class AccountLedgerService extends Service
                 $grossSupplierPaid
             );
             $cashSupplierPaid = round(max($grossSupplierPaid - $crossBookingSupplierCredit, 0.0), 2);
+            $originalInvoiceAmount = max($this->amount($position['original_invoice_amount'] ?? 0), 0.0);
+
+            if ($originalInvoiceAmount > 0.005) {
+                $invoiceRow = $this->movementRow(
+                    $position,
+                    (string) ($position['booking_date'] ?? ''),
+                    (string) ($position['booking_reference'] ?? ''),
+                    ucwords((string) ($position['service_type'] ?? 'Service')) . ' invoice',
+                    (string) ($position['customer_name'] ?? 'Customer'),
+                    $originalInvoiceAmount,
+                    0.0,
+                    5,
+                    'Invoiced',
+                    sprintf(
+                        'Original customer invoice recorded for %s %s.',
+                        $currency,
+                        $this->money($originalInvoiceAmount)
+                    )
+                );
+                $invoiceRow['is_financial_position_only'] = true;
+                $rows[] = $invoiceRow;
+            }
 
             if ($cashSupplierPaid > 0.005) {
                 $paymentReference = trim((string) ($position['supplier_payment_references'] ?? ''));
-                $rows[] = $this->movementRow(
+                $supplierPaymentRow = $this->movementRow(
                     $supplierPosition,
                     (string) (($position['supplier_payment_date'] ?? '') !== ''
                         ? $position['supplier_payment_date']
@@ -85,6 +114,8 @@ final class AccountLedgerService extends Service
                     $reconciliation['status'],
                     $reconciliation['note']
                 );
+                $supplierPaymentRow['exclude_from_running_balance'] = true;
+                $rows[] = $supplierPaymentRow;
             }
 
             if ($crossBookingSupplierCredit > 0.005) {
@@ -129,6 +160,33 @@ final class AccountLedgerService extends Service
             );
 
             $hasCancellation = (int) ($position['cancellation_event_id'] ?? 0) > 0;
+            $invoiceReduction = $hasCancellation
+                ? round(max($originalInvoiceAmount - max($this->amount($position['current_customer_due'] ?? 0), 0.0), 0.0), 2)
+                : 0.0;
+            if ($invoiceReduction > 0.005) {
+                $reductionRow = $this->movementRow(
+                    $position,
+                    (string) (($position['cancellation_date'] ?? '') !== ''
+                        ? $position['cancellation_date']
+                        : ($position['booking_date'] ?? '')),
+                    (string) ($position['booking_reference'] ?? ''),
+                    'Cancellation invoice reduction',
+                    (string) ($position['customer_name'] ?? 'Customer'),
+                    0.0,
+                    $invoiceReduction,
+                    13,
+                    'Adjusted',
+                    sprintf(
+                        'Invoice reduced from %s %s to %s %s after cancellation settlement.',
+                        $currency,
+                        $this->money($originalInvoiceAmount),
+                        $currency,
+                        $this->money(max($this->amount($position['current_customer_due'] ?? 0), 0.0))
+                    )
+                );
+                $reductionRow['is_financial_position_only'] = true;
+                $rows[] = $reductionRow;
+            }
             $supplierPenaltyInInvoiceCurrency = $supplierPenalty;
             if ($this->currency($supplierPosition) !== $currency) {
                 $supplierPenaltyInInvoiceCurrency = round(
@@ -136,13 +194,77 @@ final class AccountLedgerService extends Service
                     2
                 );
             }
-            $recognizedProfit = $hasCancellation
+            $customerPenaltyCurrency = strtoupper(trim((string) ($position['customer_penalty_currency'] ?? $currency))) ?: $currency;
+            $supplierPenaltyCurrency = strtoupper(trim((string) ($position['supplier_penalty_currency'] ?? $this->currency($supplierPosition)))) ?: $this->currency($supplierPosition);
+            $hasMixedCurrencyCancellationResult = $hasCancellation
+                && (
+                    $customerPenaltyCurrency !== $currency
+                    || $supplierPenaltyCurrency !== $currency
+                );
+            $recognizedProfit = $hasMixedCurrencyCancellationResult
+                ? 0.0
+                : ($hasCancellation
                 ? round(
                     $this->amount($position['customer_final_charge_amount'] ?? 0)
                     - $supplierPenaltyInInvoiceCurrency,
                     2
                 )
-                : $this->amount($position['original_profit_loss'] ?? 0);
+                : $this->amount($position['original_profit_loss'] ?? 0));
+
+            $customerPenalty = max($this->amount($position['customer_penalty_amount'] ?? 0), 0.0);
+            $earlierProfit = $hasCancellation
+                ? max($this->amount($position['original_profit_loss'] ?? 0), 0.0)
+                : 0.0;
+            if ($hasCancellation && ! $hasLinkedSettlement && $earlierProfit > 0.005) {
+                $earlierProfitRow = $this->movementRow(
+                    $position,
+                    (string) (($position['booking_date'] ?? '') !== ''
+                        ? $position['booking_date']
+                        : ($position['cancellation_date'] ?? '')),
+                    (string) ($position['booking_reference'] ?? ''),
+                    'Earlier service profit recognized',
+                    (string) ($position['customer_name'] ?? 'Customer'),
+                    $earlierProfit,
+                    0.0,
+                    14,
+                    'Adjustment',
+                    sprintf(
+                        '%s %s was already recognized in the original invoice before cancellation.',
+                        $currency,
+                        $this->money($earlierProfit)
+                    )
+                );
+                $earlierProfitRow['is_internal_transfer'] = true;
+                $earlierProfitRow['exclude_from_running_balance'] = true;
+                $earlierProfitRow['include_in_profit_summary'] = $hasMixedCurrencyCancellationResult;
+                $rows[] = $earlierProfitRow;
+            }
+            if ($hasCancellation && ! $hasLinkedSettlement && $customerPenalty > 0.005) {
+                $customerPenaltyPosition = $position;
+                $customerPenaltyPosition['currency'] = $customerPenaltyCurrency;
+                $penaltyRow = $this->movementRow(
+                    $customerPenaltyPosition,
+                    (string) (($position['cancellation_date'] ?? '') !== ''
+                        ? $position['cancellation_date']
+                        : ($position['booking_date'] ?? '')),
+                    (string) ($position['booking_reference'] ?? ''),
+                    'Customer penalty / profit charged',
+                    (string) ($position['customer_name'] ?? 'Customer'),
+                    $customerPenalty,
+                    0.0,
+                    15,
+                    'Adjustment',
+                    sprintf(
+                        '%s %s recognized through cancellation settlement.',
+                        $this->currency($customerPenaltyPosition),
+                        $this->money($customerPenalty)
+                    )
+                );
+                $penaltyRow['is_internal_transfer'] = true;
+                $penaltyRow['exclude_from_running_balance'] = true;
+                $penaltyRow['include_in_profit_summary'] = $hasMixedCurrencyCancellationResult;
+                $rows[] = $penaltyRow;
+            }
 
             if (! isset($positionSummaries[$summaryKey])) {
                 $positionSummaries[$summaryKey] = $this->emptySummary($position, $currency);
@@ -155,8 +277,10 @@ final class AccountLedgerService extends Service
             }
 
             $positionSummaries[$summaryKey]['customerReceivable'] += $customerOutstanding;
-            $positionSummaries[$summaryKey]['invoiceAmount'] += max($this->amount($position['current_customer_due'] ?? 0), 0.0);
-            $positionSummaries[$summaryKey]['totalSaleAmount'] += max($this->amount($position['original_invoice_amount'] ?? 0), 0.0);
+            $latestInvoiceAmount = max($this->amount($position['current_customer_due'] ?? 0), 0.0);
+            $positionSummaries[$summaryKey]['invoiceAmount'] += $latestInvoiceAmount;
+            $positionSummaries[$summaryKey]['totalSaleAmount'] += $latestInvoiceAmount;
+            $positionSummaries[$summaryKey]['netSupplierCredit'] += max($this->amount($position['current_supplier_paid'] ?? 0), 0.0);
             $positionSummaries[$summaryKey]['customerRefundPayable'] += $customerRefundPayable;
             $positionSummaries[$summaryKey]['recognizedProfit'] += $recognizedProfit;
             $positionSummaries[$summaryKey]['invoiceReferences'][(string) ($position['booking_reference'] ?? '')] = true;
@@ -167,7 +291,7 @@ final class AccountLedgerService extends Service
         }
 
         foreach ($customerReceipts as $receipt) {
-            $rows[] = $this->movementRow(
+            $receiptRow = $this->movementRow(
                 $receipt,
                 (string) ($receipt['movement_date'] ?? ''),
                 (string) ($receipt['movement_reference'] ?? ''),
@@ -179,6 +303,10 @@ final class AccountLedgerService extends Service
                 'Received',
                 $this->movementDetail($receipt)
             );
+            // Customer receipts are displayed under Debit / Money In, but they
+            // settle the invoice and therefore reduce the booking running balance.
+            $receiptRow['running_balance_delta'] = -1 * (float) ($receiptRow['raw_debit_amount'] ?? 0);
+            $rows[] = $receiptRow;
         }
 
         foreach ($customerAdvanceMovements as $movement) {
@@ -303,6 +431,88 @@ final class AccountLedgerService extends Service
         }
 
         foreach ($accountSupplierSettlements as $settlement) {
+            $linkedPosition = $positionIndex[$this->positionIndexKey($settlement)] ?? null;
+            if ($linkedPosition !== null && (int) ($linkedPosition['cancellation_event_id'] ?? 0) > 0) {
+                $customerPenalty = max($this->amount($linkedPosition['customer_penalty_amount'] ?? 0), 0.0);
+                $earlierProfit = max($this->amount($linkedPosition['original_profit_loss'] ?? 0), 0.0);
+                $supplierPenalty = round(max(
+                    $this->amount($settlement['allocated_amount'] ?? 0) - $earlierProfit - $customerPenalty,
+                    0.0
+                ), 2);
+
+                if ($supplierPenalty > 0.005) {
+                    $supplierPenaltyRow = $this->movementRow(
+                        $linkedPosition,
+                        (string) (($linkedPosition['cancellation_date'] ?? '') !== ''
+                            ? $linkedPosition['cancellation_date']
+                            : ($settlement['movement_date'] ?? '')),
+                        (string) ($settlement['movement_reference'] ?? ''),
+                        'Supplier penalty retained through linked settlement',
+                        (string) ($linkedPosition['supplier_name'] ?? $settlement['supplier_name'] ?? 'Supplier'),
+                        0.0,
+                        $supplierPenalty,
+                        22,
+                        'Adjusted',
+                        sprintf(
+                            '%s %s supplier penalty retained after cancellation and settled through linked account balance.',
+                            $this->currency($linkedPosition),
+                            $this->money($supplierPenalty)
+                        )
+                    );
+                    $supplierPenaltyRow['is_internal_transfer'] = true;
+                    $supplierPenaltyRow['is_account_supplier_settlement'] = true;
+                    $rows[] = $supplierPenaltyRow;
+                }
+                if ($earlierProfit > 0.005) {
+                    $earlierProfitSettlementRow = $this->movementRow(
+                        $linkedPosition,
+                        (string) (($linkedPosition['cancellation_date'] ?? '') !== ''
+                            ? $linkedPosition['cancellation_date']
+                            : ($settlement['movement_date'] ?? '')),
+                        (string) ($settlement['movement_reference'] ?? ''),
+                        'Earlier service profit settled through linked supplier',
+                        (string) ($settlement['supplier_name'] ?? 'Supplier'),
+                        0.0,
+                        $earlierProfit,
+                        23,
+                        'Adjusted',
+                        sprintf(
+                            '%s %s of earlier service profit was settled through the linked supplier balance.',
+                            $this->currency($linkedPosition),
+                            $this->money($earlierProfit)
+                        )
+                    );
+                    $earlierProfitSettlementRow['is_internal_transfer'] = true;
+                    $earlierProfitSettlementRow['is_account_supplier_settlement'] = true;
+                    $rows[] = $earlierProfitSettlementRow;
+                }
+                if ($customerPenalty > 0.005) {
+                    $customerPenaltySettlementRow = $this->movementRow(
+                        $linkedPosition,
+                        (string) (($linkedPosition['cancellation_date'] ?? '') !== ''
+                            ? $linkedPosition['cancellation_date']
+                            : ($settlement['movement_date'] ?? '')),
+                        (string) ($settlement['movement_reference'] ?? ''),
+                        'Customer penalty / profit settled through linked supplier',
+                        (string) ($settlement['supplier_name'] ?? 'Supplier'),
+                        0.0,
+                        $customerPenalty,
+                        24,
+                        'Adjusted',
+                        sprintf(
+                            '%s %s customer penalty / profit was settled through the linked supplier balance.',
+                            $this->currency($linkedPosition),
+                            $this->money($customerPenalty)
+                        )
+                    );
+                    $customerPenaltySettlementRow['is_internal_transfer'] = true;
+                    $customerPenaltySettlementRow['is_account_supplier_settlement'] = true;
+                    $rows[] = $customerPenaltySettlementRow;
+                }
+
+                continue;
+            }
+
             $row = $this->movementRow(
                 $settlement,
                 (string) ($settlement['movement_date'] ?? ''),
@@ -313,14 +523,41 @@ final class AccountLedgerService extends Service
                 $this->amount($settlement['allocated_amount'] ?? 0),
                 22,
                 'Adjusted',
-                'Non-cash account and supplier balance adjustment'
+                $this->accountSupplierSettlementDetail($settlement, $linkedPosition)
             );
             $row['is_internal_transfer'] = true;
             $row['is_account_supplier_settlement'] = true;
             $rows[] = $row;
         }
 
-        usort($rows, static function (array $left, array $right): int {
+        foreach ($rows as $index => &$row) {
+            $row['__row_id'] = $index;
+        }
+        unset($row);
+
+        $displaySorter = static function (array $left, array $right): int {
+            $dateCompare = strcmp((string) ($left['entry_date_raw'] ?? ''), (string) ($right['entry_date_raw'] ?? ''));
+            if ($dateCompare !== 0) {
+                return $dateCompare;
+            }
+
+            $bookingCompare = (int) ($left['booking_id'] ?? 0) <=> (int) ($right['booking_id'] ?? 0);
+            if ($bookingCompare !== 0) {
+                return $bookingCompare;
+            }
+
+            $sortCompare = (int) ($left['ledger_sort_order'] ?? 50) <=> (int) ($right['ledger_sort_order'] ?? 50);
+            if ($sortCompare !== 0) {
+                return $sortCompare;
+            }
+
+            return strcmp((string) ($left['transaction_reference'] ?? ''), (string) ($right['transaction_reference'] ?? ''));
+        };
+
+        usort($rows, $displaySorter);
+
+        $runningRows = $rows;
+        usort($runningRows, static function (array $left, array $right): int {
             $dateCompare = strcmp((string) ($left['entry_date_raw'] ?? ''), (string) ($right['entry_date_raw'] ?? ''));
             if ($dateCompare !== 0) {
                 return $dateCompare;
@@ -340,21 +577,33 @@ final class AccountLedgerService extends Service
         });
 
         $runningBalances = [];
-        foreach ($rows as &$row) {
+        $rowBalancesById = [];
+        foreach ($runningRows as $row) {
             $summaryKey = (string) ($row['summary_drilldown_key'] ?? '');
+            $affectsRunningBalance = ! (bool) ($row['exclude_from_running_balance'] ?? false);
+            $rowDelta = $affectsRunningBalance
+                ? (array_key_exists('running_balance_delta', $row)
+                    ? (float) $row['running_balance_delta']
+                    : ((float) ($row['raw_debit_amount'] ?? 0) - (float) ($row['raw_credit_amount'] ?? 0)))
+                : 0.0;
             $runningBalances[$summaryKey] = round(
-                (float) ($runningBalances[$summaryKey] ?? 0)
-                + (float) ($row['raw_debit_amount'] ?? 0)
-                - (float) ($row['raw_credit_amount'] ?? 0),
+                (float) ($runningBalances[$summaryKey] ?? 0) + $rowDelta,
                 2
             );
-            $row['raw_balance_amount'] = $runningBalances[$summaryKey];
-            $row['balance_amount'] = $this->balance($runningBalances[$summaryKey]);
+            $rowBalancesById[(int) ($row['__row_id'] ?? 0)] = $runningBalances[$summaryKey];
+        }
+
+        foreach ($rows as &$row) {
+            $rowId = (int) ($row['__row_id'] ?? 0);
+            $rowBalance = (float) ($rowBalancesById[$rowId] ?? 0.0);
+            $summaryKey = (string) ($row['summary_drilldown_key'] ?? '');
+            $row['raw_balance_amount'] = $rowBalance;
+            $row['balance_amount'] = $this->balance($rowBalance);
 
             if (! isset($positionSummaries[$summaryKey])) {
                 $positionSummaries[$summaryKey] = $this->emptySummary($row, $this->currency($row));
             }
-            if (! (bool) ($row['is_internal_transfer'] ?? false)) {
+            if (! (bool) ($row['is_internal_transfer'] ?? false) && ! (bool) ($row['is_financial_position_only'] ?? false)) {
                 $positionSummaries[$summaryKey]['cashDebit'] += (float) ($row['raw_debit_amount'] ?? 0);
                 $positionSummaries[$summaryKey]['cashCredit'] += (float) ($row['raw_credit_amount'] ?? 0);
             } elseif (
@@ -367,6 +616,10 @@ final class AccountLedgerService extends Service
             }
             if ((bool) ($row['is_account_supplier_settlement'] ?? false)) {
                 $positionSummaries[$summaryKey]['accountSupplierSettlement'] += (float) ($row['raw_credit_amount'] ?? 0);
+            }
+            if ((bool) ($row['include_in_profit_summary'] ?? false)) {
+                $positionSummaries[$summaryKey]['recognizedProfit'] += (float) ($row['raw_debit_amount'] ?? 0)
+                    - (float) ($row['raw_credit_amount'] ?? 0);
             }
             switch ((string) ($row['ledger_entry'] ?? '')) {
                 case 'Customer payment received':
@@ -392,6 +645,7 @@ final class AccountLedgerService extends Service
             if ($bookingReference !== '' && strtoupper($bookingReference) !== 'ADVANCE') {
                 $positionSummaries[$summaryKey]['invoiceReferences'][$bookingReference] = true;
             }
+            unset($row['__row_id']);
         }
         unset($row);
 
@@ -423,7 +677,7 @@ final class AccountLedgerService extends Service
                 ];
             }
 
-            $totalsByCurrency[$currency]['sale'] += (float) ($summary['totalSaleAmount'] ?? 0);
+            $totalsByCurrency[$currency]['sale'] += (float) ($summary['totalSaleAmount'] ?? $summary['invoiceAmount'] ?? 0);
             $totalsByCurrency[$currency]['received'] += (float) ($summary['customerPaid'] ?? 0);
             $totalsByCurrency[$currency]['outstanding'] += (float) ($summary['customerReceivable'] ?? 0);
             $totalsByCurrency[$currency]['profit'] += (float) ($summary['recognizedProfit'] ?? 0);
@@ -624,17 +878,25 @@ final class AccountLedgerService extends Service
                 'lead_traveler_name' => (string) ($summary['customerName'] ?? ''),
                 'contact_mobile' => (string) ($summary['contactMobile'] ?? 'N/A'),
                 'currency' => (string) ($summary['currency'] ?? 'PKR'),
+                'raw_total_debit' => round(
+                    (float) ($summary['customerPaid'] ?? 0)
+                    + (float) ($summary['customerAdvanceReceived'] ?? 0),
+                    2
+                ),
+                'raw_total_credit' => round(
+                    (float) ($summary['netSupplierCredit'] ?? $summary['supplierPaid'] ?? 0)
+                    + (float) ($summary['customerAdvanceReturned'] ?? 0),
+                    2
+                ),
                 'total_debit' => $this->money(
                     (float) ($summary['customerPaid'] ?? 0)
                     + (float) ($summary['customerAdvanceReceived'] ?? 0)
-                    + (float) ($summary['customerCreditAppliedIn'] ?? 0)
                 ),
                 'total_credit' => $this->money(
-                    (float) ($summary['supplierPaid'] ?? 0)
+                    (float) ($summary['netSupplierCredit'] ?? $summary['supplierPaid'] ?? 0)
                     + (float) ($summary['customerAdvanceReturned'] ?? 0)
-                    + (float) ($summary['accountSupplierSettlement'] ?? 0)
                 ),
-                'invoice_amount' => $this->money((float) ($summary['invoiceAmount'] ?? 0)),
+                'invoice_amount' => $this->money((float) ($summary['totalSaleAmount'] ?? $summary['invoiceAmount'] ?? 0)),
                 'outstanding_amount' => $this->money((float) ($summary['customerReceivable'] ?? 0)),
                 'customer_paid' => $this->money((float) ($summary['customerPaid'] ?? 0)),
                 'supplier_paid' => $this->money((float) ($summary['supplierPaid'] ?? 0)),
@@ -755,6 +1017,7 @@ final class AccountLedgerService extends Service
             'customerCreditAppliedIn' => 0.0,
             'accountSupplierSettlement' => 0.0,
             'supplierPaid' => 0.0,
+            'netSupplierCredit' => 0.0,
             'supplierRefundReceived' => 0.0,
             'customerRefundPaid' => 0.0,
             'recognizedProfit' => 0.0,
@@ -777,6 +1040,44 @@ final class AccountLedgerService extends Service
         ]);
     }
 
+    private function positionIndexKey(array $row): string
+    {
+        return implode('|', [
+            mb_strtolower(trim((string) ($row['booking_reference'] ?? ''))),
+            mb_strtolower(trim((string) ($row['service_line_reference'] ?? ''))),
+            $this->currency($row),
+        ]);
+    }
+
+    private function accountSupplierSettlementDetail(array $settlement, ?array $position): string
+    {
+        $allocatedAmount = max($this->amount($settlement['allocated_amount'] ?? 0), 0.0);
+        if ($position === null || $allocatedAmount <= 0.005) {
+            return 'Non-cash account and supplier balance adjustment';
+        }
+
+        $customerPenalty = max($this->amount($position['customer_penalty_amount'] ?? 0), 0.0);
+        $earlierProfit = max($this->amount($position['original_profit_loss'] ?? 0), 0.0);
+        $supplierPenalty = round(max($allocatedAmount - $earlierProfit - $customerPenalty, 0.0), 2);
+
+        $parts = [];
+        if ($supplierPenalty > 0.005) {
+            $parts[] = 'supplier penalty ' . $this->currency($settlement) . ' ' . $this->money($supplierPenalty);
+        }
+        if ($earlierProfit > 0.005) {
+            $parts[] = 'earlier service profit ' . $this->currency($settlement) . ' ' . $this->money($earlierProfit);
+        }
+        if ($customerPenalty > 0.005) {
+            $parts[] = 'cancellation penalty/profit ' . $this->currency($settlement) . ' ' . $this->money($customerPenalty);
+        }
+
+        if ($parts === []) {
+            return 'Non-cash account and supplier balance adjustment';
+        }
+
+        return 'Non-cash account and supplier balance adjustment. Breakdown: ' . implode(' + ', $parts) . '.';
+    }
+
     private function currency(array $row): string
     {
         $currency = strtoupper(trim((string) ($row['currency'] ?? 'PKR')));
@@ -791,14 +1092,14 @@ final class AccountLedgerService extends Service
 
     private function money(float $amount): string
     {
-        return number_format(round($amount, 2), 2);
+        return number_format(round($amount, 0), 0);
     }
 
     private function balance(float $amount, string $debitLabel = 'Dr', string $creditLabel = 'Cr'): string
     {
         $amount = round($amount, 2);
         if (abs($amount) < 0.005) {
-            return '0.00';
+            return '0';
         }
 
         return $this->money(abs($amount)) . ' ' . ($amount > 0 ? $debitLabel : $creditLabel);

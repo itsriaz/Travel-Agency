@@ -53,3 +53,15 @@ The Mac package embeds `launcher-config.mac.json` as `launcher-config.json`. It 
 - Receipt/PDF windows open normally.
 - Ledger PDF saves under the user's Documents directory.
 - External WhatsApp links open in the default browser.
+
+## Runtime Logs
+
+The launcher now writes a local runtime log on the Mac so failed startup or connection issues can be traced after the fact.
+
+Default log file location:
+
+```text
+~/Library/Application Support/Travel Agency Operations/logs/launcher-runtime.log
+```
+
+If the launcher opens but behaves incorrectly, send that file back for review.

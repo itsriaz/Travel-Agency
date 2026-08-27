@@ -6,6 +6,46 @@ namespace App\Repositories;
 
 final class TravelerRepository extends BaseRepository
 {
+    public function travelersForBranches(array $accessibleBranchIds): array
+    {
+        if ($accessibleBranchIds === []) {
+            return [];
+        }
+
+        $placeholders = implode(', ', array_fill(0, count($accessibleBranchIds), '?'));
+        $statement = $this->db->prepare(
+            "SELECT
+                t.id,
+                t.branch_id,
+                t.first_name,
+                t.last_name,
+                t.full_name,
+                t.passport_number,
+                t.nationality,
+                t.date_of_birth,
+                t.gender,
+                t.passport_expiry,
+                t.mobile,
+                t.address,
+                t.permanent_residence,
+                t.current_residence,
+                t.occupation,
+                t.village,
+                t.district,
+                t.family_id,
+                t.color_tag,
+                t.notes,
+                b.name AS branch_name
+             FROM travelers t
+             INNER JOIN branches b ON b.id = t.branch_id
+             WHERE t.branch_id IN ({$placeholders})
+             ORDER BY t.full_name ASC, t.id DESC"
+        );
+        $statement->execute(array_map('intval', $accessibleBranchIds));
+
+        return $statement->fetchAll() ?: [];
+    }
+
     public function travelersForBooking(int $bookingId): array
     {
         $statement = $this->db->prepare(
@@ -54,6 +94,10 @@ final class TravelerRepository extends BaseRepository
             return [];
         }
 
+        if (trim($query) === '') {
+            return array_slice($this->travelersForBranches($accessibleBranchIds), 0, max(1, $limit));
+        }
+
         $placeholders = implode(', ', array_fill(0, count($accessibleBranchIds), '?'));
         $sql = "SELECT
                     t.id,
@@ -83,39 +127,36 @@ final class TravelerRepository extends BaseRepository
 
         $params = array_map('intval', $accessibleBranchIds);
         $trimmed = trim($query);
-
-         if ($trimmed !== '') {
-             $like = '%' . $trimmed . '%';
-             $searchableColumns = [
-                 't.full_name',
-                 'CAST(t.id AS CHAR)',
-                 'COALESCE(t.passport_number, "")',
-                 'COALESCE(t.mobile, "")',
-                 'COALESCE(t.first_name, "")',
-                 'COALESCE(t.last_name, "")',
-                 'COALESCE(t.family_id, "")',
-                 'COALESCE(t.occupation, "")',
-                 'COALESCE(t.village, "")',
-                 'COALESCE(t.district, "")',
-                 'COALESCE(t.nationality, "")',
-                 'COALESCE(t.address, "")',
-                 'COALESCE(t.current_residence, "")',
-                 'COALESCE(t.permanent_residence, "")',
-                 'COALESCE(t.notes, "")',
-             ];
-             $sql .= '
-                  AND (
-                      ' . implode("
-                      OR ", array_map(
-                          static fn (string $column): string => $column . ' LIKE ?',
-                          $searchableColumns
-                      )) . '
-                  )';
-             $params = array_merge($params, array_fill(0, count($searchableColumns), $like));
-         }
+        $like = '%' . $trimmed . '%';
+        $searchableColumns = [
+            't.full_name',
+            'CAST(t.id AS CHAR)',
+            'COALESCE(t.passport_number, "")',
+            'COALESCE(t.mobile, "")',
+            'COALESCE(t.first_name, "")',
+            'COALESCE(t.last_name, "")',
+            'COALESCE(t.family_id, "")',
+            'COALESCE(t.occupation, "")',
+            'COALESCE(t.village, "")',
+            'COALESCE(t.district, "")',
+            'COALESCE(t.nationality, "")',
+            'COALESCE(t.address, "")',
+            'COALESCE(t.current_residence, "")',
+            'COALESCE(t.permanent_residence, "")',
+            'COALESCE(t.notes, "")',
+        ];
+        $sql .= '
+             AND (
+                 ' . implode("
+                 OR ", array_map(
+                     static fn (string $column): string => $column . ' LIKE ?',
+                     $searchableColumns
+                 )) . '
+             )';
+        $params = array_merge($params, array_fill(0, count($searchableColumns), $like));
 
         $sql .= '
-            ORDER BY t.updated_at DESC, t.id DESC
+            ORDER BY t.full_name ASC, t.id DESC
             LIMIT ' . max(1, $limit);
 
         $statement = $this->db->prepare($sql);

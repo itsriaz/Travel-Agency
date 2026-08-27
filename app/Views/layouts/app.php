@@ -44,6 +44,7 @@ $isCurrentPath = static function (string $path) use ($requestPath): bool {
 <body class="app-shell<?= $shellClass ?>">
     <div class="topbar">
         <div class="brand-block">
+            <div class="brand-kicker"><?= e($isWorkspacePage ? 'Booking Workspace' : 'Operations Console') ?></div>
             <div class="brand-title">Travel Agency Ops</div>
             <div class="brand-subtitle"><?= e($isWorkspacePage ? $branchSubtitle : $adminSubtitle) ?></div>
         </div>
@@ -69,12 +70,16 @@ $isCurrentPath = static function (string $path) use ($requestPath): bool {
     <div class="main-grid">
         <aside class="sidebar">
             <div class="nav-section">
-                <div class="nav-label">Workspace</div>
+                <div class="nav-section-head">
+                    <div class="nav-label">Workspace</div>
+                </div>
                 <a class="nav-link<?= $isCurrentPath('/workspace') ? ' is-current' : '' ?>" href="<?= e(url('/workspace')) ?>">Search / New Booking</a>
                 <a class="nav-link<?= $isCurrentPath('/reports') || $isCurrentPath('/suppliers/settlements') ? ' is-current' : '' ?>" href="<?= e(url('/reports')) ?>">Reports</a>
             </div>
             <div class="nav-section">
-                <div class="nav-label">Control</div>
+                <div class="nav-section-head">
+                    <div class="nav-label">Control</div>
+                </div>
                 <a class="nav-link<?= $isCurrentPath('/') ? ' is-current' : '' ?>" href="<?= e(url('/')) ?>">Dashboard</a>
                 <a class="nav-link<?= $isCurrentPath('/security') ? ' is-current' : '' ?>" href="<?= e(url('/security')) ?>">Security</a>
                 <?php if (\App\Helpers\Auth::isSuperAdmin()): ?>
@@ -98,6 +103,7 @@ $isCurrentPath = static function (string $path) use ($requestPath): bool {
                         </div>
                     </div>
                     <a class="nav-link<?= $isCurrentPath('/expenses') ? ' is-current' : '' ?>" href="<?= e(url('/expenses')) ?>">Business Expenses</a>
+                    <a class="nav-link<?= $isCurrentPath('/salaries') ? ' is-current' : '' ?>" href="<?= e(url('/salaries')) ?>">Salary</a>
                 <?php endif; ?>
             </div>
         </aside>

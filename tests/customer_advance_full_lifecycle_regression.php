@@ -58,8 +58,12 @@ $summaryTotals = static function (array $report, string $currency) use ($money):
         if ((string) ($row['currency'] ?? '') !== $currency) {
             continue;
         }
-        $debit += $money((string) ($row['total_debit'] ?? '0'));
-        $credit += $money((string) ($row['total_credit'] ?? '0'));
+        $debit += array_key_exists('raw_total_debit', $row)
+            ? round((float) ($row['raw_total_debit'] ?? 0), 2)
+            : $money((string) ($row['total_debit'] ?? '0'));
+        $credit += array_key_exists('raw_total_credit', $row)
+            ? round((float) ($row['raw_total_credit'] ?? 0), 2)
+            : $money((string) ($row['total_credit'] ?? '0'));
     }
     return [round($debit, 2), round($credit, 2)];
 };
@@ -94,11 +98,26 @@ try {
         'receipt_remarks' => 'Full lifecycle regression fixture',
     ], $userId, [$branchId]);
 
-    if (abs((float) ($advance['allocated_amount'] ?? 0) - $invoiceOutstanding) > 0.005
-        || (int) ($advance['allocation_count'] ?? 0) !== 1
-        || abs((float) ($advance['unallocated_amount'] ?? 0) - $returnAmount) > 0.005
+    if (abs((float) ($advance['allocated_amount'] ?? 0)) > 0.005
+        || (int) ($advance['allocation_count'] ?? 0) !== 0
+        || abs((float) ($advance['unallocated_amount'] ?? 0) - $advanceAmount) > 0.005
     ) {
-        $failures[] = 'Recording the customer advance did not automatically settle the open invoice first.';
+        $failures[] = 'Recording the customer advance should keep the full amount available until staff manually applies it.';
+    }
+
+    $application = $workspaceService->applyCustomerAdvance([
+        'branch_id' => $branchId,
+        'traveler_id' => $travelerId,
+        'receipt_currency' => $currency,
+        'advance_receipt_id' => (int) $advance['receipt_id'],
+        'global_customer_receivable_id' => [$receivableId],
+        'allocation_date' => date('Y-m-d'),
+    ], $userId, [$branchId]);
+
+    if (abs((float) ($application['allocated_amount'] ?? 0) - $invoiceOutstanding) > 0.005
+        || (int) ($application['allocation_count'] ?? 0) !== 1
+    ) {
+        $failures[] = 'Manual customer advance application did not settle the selected invoice.';
     }
 
     $workspaceService->refundCustomerAdvance([
@@ -216,17 +235,26 @@ try {
         $failures[] = 'The Account Ledger summary inflated the advance when it was applied internally.';
     }
 
-    $advanceAccountRows = array_values(array_filter(
+    $advanceCashRows = array_values(array_filter(
         (array) ($accountReport['rows'] ?? []),
         static fn (array $row): bool => (string) ($row['transaction_reference'] ?? '') === (string) $advance['receipt_no']
-            || str_starts_with((string) ($row['transaction_reference'] ?? ''), 'ADV-XFER-')
-            || ((string) ($row['booking_reference'] ?? '') === $bookingReference
-                && (string) ($row['ledger_entry'] ?? '') === 'Customer advance applied to invoice')
     ));
-    $movementNet = round(array_sum(array_column($advanceAccountRows, 'raw_debit_amount'))
-        - array_sum(array_column($advanceAccountRows, 'raw_credit_amount')), 2);
-    if (abs($movementNet - $invoiceOutstanding) > 0.005) {
-        $failures[] = 'The Account Ledger advance movements did not preserve the net retained cash.';
+    $cashMovementNet = round(array_sum(array_column($advanceCashRows, 'raw_debit_amount'))
+        - array_sum(array_column($advanceCashRows, 'raw_credit_amount')), 2);
+    if (abs($cashMovementNet - $invoiceOutstanding) > 0.005) {
+        $failures[] = 'The Account Ledger cash rows did not preserve the net retained cash after the manual advance refund.';
+    }
+
+    $advanceTransferRows = array_values(array_filter(
+        (array) ($accountReport['rows'] ?? []),
+        static fn (array $row): bool => (bool) ($row['is_customer_advance_transfer'] ?? false)
+            && (string) ($row['ledger_entry'] ?? '') === 'Customer advance applied to invoice'
+            && str_contains((string) ($row['transaction_note'] ?? ''), (string) $advance['receipt_no'])
+    ));
+    if (count($advanceTransferRows) !== 1
+        || abs((float) ($advanceTransferRows[0]['raw_debit_amount'] ?? 0) - $invoiceOutstanding) > 0.005
+    ) {
+        $failures[] = 'The Account Ledger did not expose the manual customer-advance application as one internal transfer row.';
     }
 
     $refundEntry = $db->query(

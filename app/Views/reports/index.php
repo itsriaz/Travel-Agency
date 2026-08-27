@@ -29,18 +29,22 @@ $receivableAgingSummaryRows = is_array($receivableAgingSummaryRows ?? null) ? $r
 $receivableAgingSummaryColumns = is_array($receivableAgingSummaryColumns ?? null) ? $receivableAgingSummaryColumns : [];
 $customerOutstandingSummaryRows = is_array($customerOutstandingSummaryRows ?? null) ? $customerOutstandingSummaryRows : [];
 $customerOutstandingSummaryColumns = is_array($customerOutstandingSummaryColumns ?? null) ? $customerOutstandingSummaryColumns : [];
+$supplierAdvanceSummaryRows = is_array($supplierAdvanceSummaryRows ?? null) ? $supplierAdvanceSummaryRows : [];
+$supplierAdvanceSummaryColumns = is_array($supplierAdvanceSummaryColumns ?? null) ? $supplierAdvanceSummaryColumns : [];
 $businessSourceOptions = is_array($businessSourceOptions ?? null) ? $businessSourceOptions : [];
 $expenseCategoryOptions = is_array($expenseCategoryOptions ?? null) ? $expenseCategoryOptions : [];
+$salaryEmployeeOptions = is_array($salaryEmployeeOptions ?? null) ? $salaryEmployeeOptions : [];
 $customerOptions = is_array($customerOptions ?? null) ? $customerOptions : [];
 $supplierOptions = is_array($supplierOptions ?? null) ? $supplierOptions : [];
 $selectedReport = (string) ($selectedReport ?? 'receivable_aging');
+$showTraceColumn = (bool) ($showTraceColumn ?? false);
 $customerLedgerReports = ['customer_outstanding', 'customer_ledger', 'customer_detail_ledger'];
-$accountFilteredReports = array_merge($customerLedgerReports, ['customer_advance_ledger', 'actual_money_voucher_ledger', 'booking_voucher_ledger', 'financial_correction_register', 'receivable_aging', 'payable_aging', 'supplier_ledger', 'supplier_outstanding', 'supplier_receivable', 'payable_refunds', 'service_profit', 'reminder_hub']);
-$supplierFilteredReports = ['prepaid_supplier_ledger', 'supplier_postpaid_payments', 'supplier_prepaid_payments', 'supplier_all_payments', 'supplier_outstanding', 'supplier_receivable', 'payable_refunds', 'payable_aging', 'supplier_ledger', 'actual_money_voucher_ledger', 'booking_voucher_ledger', 'service_profit'];
-$debitCreditFilteredReports = ['cash_bank_ledger', 'customer_outstanding', 'customer_ledger', 'customer_detail_ledger', 'supplier_ledger', 'booking_voucher_ledger', 'actual_money_voucher_ledger'];
-$customerFilteredReports = ['customer_outstanding', 'receivable_aging', 'customer_ledger', 'customer_detail_ledger', 'customer_advance_ledger', 'actual_money_voucher_ledger', 'booking_voucher_ledger', 'reminder_hub'];
-$wideViewReports = array_merge($customerLedgerReports, ['customer_advance_ledger', 'actual_money_voucher_ledger', 'booking_voucher_ledger', 'receivable_aging', 'airline_payable_report', 'supplier_receivable', 'payable_refunds', 'supplier_ledger', 'supplier_prepaid_payments', 'prepaid_supplier_ledger', 'financial_correction_register', 'expense_register', 'cash_bank_ledger', 'issue_reissue_refund_register', 'reminder_hub']);
-$printableReportKeys = ['receivable_aging', 'customer_outstanding', 'customer_detail_ledger', 'customer_advance_ledger', 'actual_money_voucher_ledger', 'booking_voucher_ledger', 'customer_departure_register', 'expense_register', 'cash_bank_ledger', 'cash_flow', 'cash_bank_position', 'supplier_ledger', 'supplier_outstanding', 'supplier_receivable', 'payable_refunds', 'airline_payable_report', 'supplier_postpaid_payments', 'supplier_prepaid_payments', 'supplier_all_payments', 'prepaid_supplier_ledger'];
+$accountFilteredReports = array_merge($customerLedgerReports, ['customer_advance_ledger', 'actual_money_voucher_ledger', 'booking_voucher_ledger', 'financial_correction_register', 'receivable_aging', 'payable_aging', 'supplier_ledger', 'supplier_outstanding', 'supplier_receivable', 'payable_refunds', 'service_profit', 'loss_report', 'salary_report', 'reminder_hub']);
+$supplierFilteredReports = ['prepaid_supplier_ledger', 'supplier_postpaid_payments', 'supplier_prepaid_payments', 'supplier_all_payments', 'supplier_outstanding', 'supplier_receivable', 'payable_refunds', 'payable_aging', 'supplier_ledger', 'actual_money_voucher_ledger', 'booking_voucher_ledger', 'service_profit', 'loss_report'];
+$debitCreditFilteredReports = ['money_in_out_ledger', 'cash_bank_ledger', 'customer_outstanding', 'customer_ledger', 'customer_detail_ledger', 'supplier_ledger', 'booking_voucher_ledger', 'actual_money_voucher_ledger'];
+$customerFilteredReports = ['customer_outstanding', 'receivable_aging', 'customer_ledger', 'customer_detail_ledger', 'customer_advance_ledger', 'actual_money_voucher_ledger', 'booking_voucher_ledger', 'loss_report', 'reminder_hub'];
+$wideViewReports = array_merge($customerLedgerReports, ['customer_advance_ledger', 'actual_money_voucher_ledger', 'booking_voucher_ledger', 'receivable_aging', 'airline_payable_report', 'supplier_receivable', 'payable_refunds', 'supplier_ledger', 'supplier_prepaid_payments', 'prepaid_supplier_ledger', 'financial_correction_register', 'expense_register', 'salary_report', 'money_in_out_ledger', 'internal_treasury_transfer', 'cash_bank_ledger', 'issue_reissue_refund_register', 'service_profit', 'loss_report', 'reminder_hub']);
+$printableReportKeys = ['receivable_aging', 'customer_outstanding', 'customer_detail_ledger', 'customer_advance_ledger', 'actual_money_voucher_ledger', 'booking_voucher_ledger', 'customer_departure_register', 'expense_register', 'salary_report', 'money_in_out_ledger', 'internal_treasury_transfer', 'cash_bank_ledger', 'cash_flow', 'cash_bank_position', 'supplier_ledger', 'supplier_outstanding', 'supplier_receivable', 'payable_refunds', 'airline_payable_report', 'supplier_postpaid_payments', 'supplier_prepaid_payments', 'supplier_all_payments', 'prepaid_supplier_ledger', 'service_profit', 'loss_report'];
 $canCorrectSupplierAdvances = \App\Helpers\Auth::isFinancialAdmin();
 
 $formatReportDate = static function (?string $value): string {
@@ -72,6 +76,38 @@ $formatReportTableDate = static function (string $columnKey, string $value): str
     return str_contains($normalized, ':')
         ? date('d/m/Y H:i', $timestamp)
         : date('d/m/Y', $timestamp);
+};
+
+$renderReportHeaderLabel = static function (string $reportKey, string $columnKey, string $label): string {
+    if ($reportKey !== 'prepaid_supplier_ledger') {
+        return e($label);
+    }
+
+    $stackedLabels = [
+        'total_advance_paid' => 'Total Advance<br>Paid',
+        'total_advance_used' => 'Advance Used<br>/ Spent',
+        'remaining_advance_balance' => 'Available<br>Balance',
+        'advance_payments_count' => 'Advance<br>Entries',
+        'advance_uses_count' => 'Usage<br>Entries',
+        'last_advance_date' => 'Last Advance<br>Date',
+        'last_used_date' => 'Last Used<br>Date',
+        'payment_date' => 'Payment<br>Date',
+        'customer_name' => 'Customer',
+        'booking_reference' => 'Booking',
+        'deposit_amount' => 'Advance<br>Paid',
+        'used_amount' => 'Advance<br>Used',
+        'available_amount' => 'Available<br>Balance',
+        'advance_no' => 'Advance<br>No.',
+        'payment_method' => 'Payment<br>Method',
+        'treasury_account_name' => 'Source<br>Account',
+        'reference_no' => 'Reference',
+    ];
+
+    if (!isset($stackedLabels[$columnKey])) {
+        return e($label);
+    }
+
+    return '<span class="report-header-stack">' . $stackedLabels[$columnKey] . '</span>';
 };
 
 $normalizePhoneDigits = static function (?string $value, ?string $branchName = null): string {
@@ -150,6 +186,7 @@ $asOfDate = (string) ($filters['asOfDate'] ?? date('Y-m-d'));
 $selectedBranchId = (int) ($filters['branchId'] ?? 0);
 $selectedCurrency = (string) ($filters['currency'] ?? '');
 $selectedBusinessSourceId = (int) ($filters['businessSourceId'] ?? 0);
+$selectedEmployeeUserId = (int) ($filters['employeeUserId'] ?? 0);
 $selectedExpenseCategoryId = (int) ($filters['expenseCategoryId'] ?? 0);
 $selectedCustomerName = (string) ($filters['customerName'] ?? '');
 $selectedSupplierId = (int) ($filters['supplierId'] ?? 0);
@@ -167,8 +204,18 @@ $reminderPriorityOptions = is_array($reminderPriorityOptions ?? null) ? $reminde
 $reminderTypeFilterOptions = is_array($reminderTypeFilterOptions ?? null) ? $reminderTypeFilterOptions : [];
 $reminderServiceTypeOptions = is_array($reminderServiceTypeOptions ?? null) ? $reminderServiceTypeOptions : [];
 $treasurySourceTypeOptions = is_array($treasurySourceTypeOptions ?? null) ? $treasurySourceTypeOptions : [];
+$treasuryTransferTypeOptions = is_array($treasuryTransferTypeOptions ?? null) ? $treasuryTransferTypeOptions : [];
+$treasuryTransferStatusOptions = is_array($treasuryTransferStatusOptions ?? null) ? $treasuryTransferStatusOptions : [];
+$treasuryAccountOptions = is_array($treasuryAccountOptions ?? null) ? $treasuryAccountOptions : [];
 $showAdvanceBalanceViewFilter = in_array($selectedReport, ['prepaid_supplier_ledger', 'supplier_postpaid_payments', 'supplier_prepaid_payments', 'supplier_all_payments'], true);
 $selectedTreasurySourceType = (string) ($filters['treasurySourceType'] ?? 'all');
+$selectedTreasuryTransferType = (string) ($filters['treasuryTransferType'] ?? 'all');
+$selectedTreasuryTransferStatus = (string) ($filters['treasuryTransferStatus'] ?? 'all');
+$selectedSourceTreasuryAccountId = (int) ($filters['sourceTreasuryAccountId'] ?? 0);
+$selectedDestinationTreasuryAccountId = (int) ($filters['destinationTreasuryAccountId'] ?? 0);
+$selectedSourceCurrency = (string) ($filters['sourceCurrency'] ?? '');
+$selectedDestinationCurrency = (string) ($filters['destinationCurrency'] ?? '');
+$selectedTreasuryTransferSearch = (string) ($filters['treasuryTransferSearch'] ?? '');
 $selectedCashBankAmount = $filters['cashBankAmount'] ?? null;
 $selectedDebitAmount = $filters['debitAmount'] ?? null;
 $selectedCreditAmount = $filters['creditAmount'] ?? null;
@@ -333,7 +380,7 @@ if ($selectedReport === 'receivable_aging') {
         . ' | Category: ' . $selectedExpenseCategoryLabel
         . ' | Currency: ' . $currencyLabel
         . ' | Scope: Posted business-expense register with branch, category, payment method, reference, and entered-by trail.';
-} elseif (in_array($selectedReport, ['cash_bank_ledger', 'actual_money_voucher_ledger', 'booking_voucher_ledger'], true)) {
+} elseif (in_array($selectedReport, ['money_in_out_ledger', 'cash_bank_ledger', 'actual_money_voucher_ledger', 'booking_voucher_ledger'], true)) {
     $currencyLabel = $selectedCurrency !== '' ? $selectedCurrency : 'All currencies';
     $sourceLabel = (string) ($treasurySourceTypeOptions[$selectedTreasurySourceType] ?? 'All Sources');
     $reportContextLine = 'Period: ' . $reportPeriodLabel
@@ -356,6 +403,20 @@ if ($selectedReport === 'receivable_aging') {
             ? ' | Date order: ' . ($selectedCashBankDateOrder === 'asc' ? 'Oldest first' : 'Newest first')
             : '')
         . ' | Scope: Financial entries with debit, credit, and running balance.';
+} elseif ($selectedReport === 'internal_treasury_transfer') {
+    $sourceCurrencyLabel = $selectedSourceCurrency !== '' ? $selectedSourceCurrency : 'All source currencies';
+    $destinationCurrencyLabel = $selectedDestinationCurrency !== '' ? $selectedDestinationCurrency : 'All destination currencies';
+    $transferTypeLabel = (string) (($treasuryTransferTypeOptions[$selectedTreasuryTransferType] ?? 'All Transfer Types'));
+    $transferStatusLabel = (string) (($treasuryTransferStatusOptions[$selectedTreasuryTransferStatus] ?? 'All Statuses'));
+    $transferSearchLabel = $selectedTreasuryTransferSearch !== '' ? $selectedTreasuryTransferSearch : 'All references and remarks';
+    $reportContextLine = 'Period: ' . $reportPeriodLabel
+        . ' | Branch: ' . $selectedBranchLabel
+        . ' | Type: ' . $transferTypeLabel
+        . ' | Status: ' . $transferStatusLabel
+        . ' | Sent Currency: ' . $sourceCurrencyLabel
+        . ' | Received Currency: ' . $destinationCurrencyLabel
+        . ' | Search: ' . $transferSearchLabel
+        . ' | Scope: Internal treasury transfers with source account, destination account, currencies, FX rate, and audit trail.';
 } elseif (in_array($selectedReport, ['supplier_receivable', 'supplier_ledger'], true)) {
     $currencyLabel = $selectedCurrency !== '' ? $selectedCurrency : 'All currencies';
     $airlineLabel = $selectedAirline !== '' ? $selectedAirline : 'All airlines';
@@ -402,6 +463,7 @@ $exportQuery = http_build_query([
     'branch_id' => (int) ($filters['branchId'] ?? 0),
     'currency' => (string) ($filters['currency'] ?? ''),
     'business_source_id' => (int) ($filters['businessSourceId'] ?? 0),
+    'employee_user_id' => (int) ($filters['employeeUserId'] ?? 0),
     'expense_category_id' => (int) ($filters['expenseCategoryId'] ?? 0),
     'customer_name' => (string) ($filters['customerName'] ?? ''),
     'supplier_id' => (int) ($filters['supplierId'] ?? 0),
@@ -599,7 +661,7 @@ if ($selectedReport === 'receivable_aging') {
             'balance_amount' => $formatReportTotal($closingBalance),
         ];
     }
-} elseif (in_array($selectedReport, ['cash_bank_ledger', 'actual_money_voucher_ledger', 'booking_voucher_ledger'], true)) {
+} elseif (in_array($selectedReport, ['money_in_out_ledger', 'cash_bank_ledger', 'actual_money_voucher_ledger', 'booking_voucher_ledger'], true)) {
     $ledgerTotalsByCurrency = [];
     foreach ($rows as $row) {
         if ((int) ($row['exclude_from_footer_totals'] ?? 0) === 1) {
@@ -636,7 +698,7 @@ if ($selectedReport === 'receivable_aging') {
             'balance_amount' => $formatReportTotal($debitTotal - $creditTotal),
         ];
     }
-} elseif ($selectedReport === 'service_profit') {
+} elseif (in_array($selectedReport, ['service_profit', 'loss_report'], true)) {
     // Currency-aware footer rows are prepared by ReportService.
 } elseif ($selectedReport !== 'supplier_ledger') {
     $reportFooterTotals = [];
@@ -1067,6 +1129,84 @@ if ($selectedReport === 'receivable_aging') {
         white-space: nowrap;
     }
 
+    .supplier-ledger-trace-table {
+        min-width: 1180px;
+        table-layout: fixed;
+    }
+
+    .supplier-ledger-trace-table th,
+    .supplier-ledger-trace-table td {
+        padding: 7px 8px;
+    }
+
+    .supplier-ledger-trace-table th:nth-child(1),
+    .supplier-ledger-trace-table td:nth-child(1) {
+        min-width: 210px;
+        width: 210px;
+    }
+
+    .supplier-ledger-trace-table th:nth-child(2),
+    .supplier-ledger-trace-table td:nth-child(2) {
+        min-width: 96px;
+        width: 96px;
+    }
+
+    .supplier-ledger-trace-table th:nth-child(3),
+    .supplier-ledger-trace-table td:nth-child(3) {
+        min-width: 130px;
+        width: 130px;
+    }
+
+    .supplier-ledger-trace-table th:nth-child(4),
+    .supplier-ledger-trace-table td:nth-child(4) {
+        min-width: 220px;
+        width: 220px;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+        line-height: 1.2;
+    }
+
+    .supplier-ledger-trace-table th:nth-child(5),
+    .supplier-ledger-trace-table td:nth-child(5) {
+        min-width: 105px;
+        width: 105px;
+    }
+
+    .supplier-ledger-trace-table th:nth-child(6),
+    .supplier-ledger-trace-table td:nth-child(6) {
+        min-width: 82px;
+        width: 82px;
+    }
+
+    .supplier-ledger-trace-table th:nth-child(7),
+    .supplier-ledger-trace-table td:nth-child(7) {
+        min-width: 58px;
+        width: 58px;
+    }
+
+    .supplier-ledger-trace-table th:nth-child(8),
+    .supplier-ledger-trace-table td:nth-child(8),
+    .supplier-ledger-trace-table th:nth-child(9),
+    .supplier-ledger-trace-table td:nth-child(9),
+    .supplier-ledger-trace-table th:nth-child(10),
+    .supplier-ledger-trace-table td:nth-child(10) {
+        min-width: 88px;
+        width: 88px;
+    }
+
+    .supplier-ledger-trace-table th:last-child,
+    .supplier-ledger-trace-table td:last-child {
+        box-sizing: border-box;
+        min-width: 150px;
+        width: 150px;
+        max-width: 150px;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+        line-height: 1.2;
+    }
+
     .customer-advance-ledger-table {
         min-width: 1540px;
     }
@@ -1077,6 +1217,268 @@ if ($selectedReport === 'receivable_aging') {
         min-width: 280px;
         width: 280px;
         white-space: nowrap;
+    }
+
+    .supplier-prepaid-report-table {
+        min-width: 1360px;
+        table-layout: fixed;
+    }
+
+    .supplier-prepaid-report-table th,
+    .supplier-prepaid-report-table td {
+        padding: 6px 6px;
+        white-space: nowrap;
+    }
+
+    .supplier-prepaid-report-table th {
+        white-space: normal;
+        line-height: 1.1;
+        word-break: keep-all;
+        overflow-wrap: normal;
+        hyphens: none;
+    }
+
+    .supplier-advance-summary-table th {
+        white-space: normal;
+        line-height: 1.12;
+        word-break: keep-all;
+        overflow-wrap: normal;
+        hyphens: none;
+        vertical-align: middle;
+    }
+
+    .supplier-advance-summary-table {
+        table-layout: fixed;
+        min-width: 1060px;
+    }
+
+    .supplier-advance-summary-table th,
+    .supplier-advance-summary-table td {
+        padding: 6px 7px;
+    }
+
+    .supplier-advance-summary-table th:nth-child(1),
+    .supplier-advance-summary-table td:nth-child(1) {
+        width: 150px;
+        min-width: 150px;
+        white-space: nowrap;
+    }
+    .supplier-advance-summary-table th:nth-child(2),
+    .supplier-advance-summary-table td:nth-child(2) { width: 84px; }
+    .supplier-advance-summary-table th:nth-child(3),
+    .supplier-advance-summary-table td:nth-child(3),
+    .supplier-advance-summary-table th:nth-child(4),
+    .supplier-advance-summary-table td:nth-child(4),
+    .supplier-advance-summary-table th:nth-child(5),
+    .supplier-advance-summary-table td:nth-child(5) { width: 132px; }
+    .supplier-advance-summary-table th:nth-child(6),
+    .supplier-advance-summary-table td:nth-child(6),
+    .supplier-advance-summary-table th:nth-child(7),
+    .supplier-advance-summary-table td:nth-child(7) { width: 120px; }
+    .supplier-advance-summary-table th:nth-child(8),
+    .supplier-advance-summary-table td:nth-child(8),
+    .supplier-advance-summary-table th:nth-child(9),
+    .supplier-advance-summary-table td:nth-child(9) { width: 145px; }
+
+    .report-header-stack {
+        display: inline-block;
+        white-space: normal;
+        line-height: 1.05;
+    }
+
+    .supplier-prepaid-report-table th:nth-child(1),
+    .supplier-prepaid-report-table td:nth-child(1) {
+        min-width: 72px;
+        width: 72px;
+        white-space: normal;
+    }
+
+    .supplier-prepaid-report-table th:nth-child(2),
+    .supplier-prepaid-report-table td:nth-child(2) {
+        min-width: 88px;
+        width: 88px;
+    }
+
+    .supplier-prepaid-report-table th:nth-child(3),
+    .supplier-prepaid-report-table td:nth-child(3) {
+        min-width: 150px;
+        width: 150px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        line-height: 1.1;
+    }
+
+    .supplier-prepaid-report-table th:nth-child(4),
+    .supplier-prepaid-report-table td:nth-child(4) {
+        min-width: 104px;
+        width: 104px;
+    }
+
+    .supplier-prepaid-report-table th:nth-child(5),
+    .supplier-prepaid-report-table td:nth-child(5) {
+        min-width: 84px;
+        width: 84px;
+    }
+
+    .supplier-prepaid-report-table th:nth-child(6),
+    .supplier-prepaid-report-table td:nth-child(6),
+    .supplier-prepaid-report-table th:nth-child(7),
+    .supplier-prepaid-report-table td:nth-child(7) {
+        min-width: 68px;
+        width: 68px;
+    }
+
+    .supplier-prepaid-report-table th:nth-child(8),
+    .supplier-prepaid-report-table td:nth-child(8),
+    .supplier-prepaid-report-table th:nth-child(9),
+    .supplier-prepaid-report-table td:nth-child(9),
+    .supplier-prepaid-report-table th:nth-child(10),
+    .supplier-prepaid-report-table td:nth-child(10) {
+        min-width: 84px;
+        width: 84px;
+    }
+
+    .supplier-prepaid-report-table th:nth-child(11),
+    .supplier-prepaid-report-table td:nth-child(11) {
+        min-width: 82px;
+        width: 82px;
+    }
+
+    .supplier-prepaid-report-table th:nth-child(12),
+    .supplier-prepaid-report-table td:nth-child(12) {
+        min-width: 96px;
+        width: 96px;
+    }
+
+    .supplier-prepaid-report-table th:nth-child(13),
+    .supplier-prepaid-report-table td:nth-child(13) {
+        min-width: 170px;
+        width: 170px;
+    }
+
+    .supplier-prepaid-report-table th:nth-child(14),
+    .supplier-prepaid-report-table td:nth-child(14) {
+        min-width: 84px;
+        width: 84px;
+    }
+
+    .supplier-prepaid-report-table th:nth-child(15),
+    .supplier-prepaid-report-table td:nth-child(15) {
+        min-width: 190px;
+        width: 190px;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+        line-height: 1.1;
+    }
+
+    .supplier-prepaid-report-table th:nth-child(16),
+    .supplier-prepaid-report-table td:nth-child(16) {
+        min-width: 64px;
+        width: 64px;
+    }
+
+    .supplier-all-payments-table {
+        min-width: 1460px;
+        table-layout: fixed;
+    }
+
+    .supplier-all-payments-table th,
+    .supplier-all-payments-table td {
+        padding: 8px 9px;
+    }
+
+    .supplier-all-payments-table th:nth-child(1),
+    .supplier-all-payments-table td:nth-child(1) {
+        min-width: 80px;
+        width: 80px;
+        white-space: nowrap;
+    }
+
+    .supplier-all-payments-table th:nth-child(2),
+    .supplier-all-payments-table td:nth-child(2) {
+        min-width: 90px;
+        width: 90px;
+        white-space: normal;
+    }
+
+    .supplier-all-payments-table th:nth-child(3),
+    .supplier-all-payments-table td:nth-child(3) {
+        min-width: 135px;
+        width: 135px;
+    }
+
+    .supplier-all-payments-table th:nth-child(4),
+    .supplier-all-payments-table td:nth-child(4) {
+        min-width: 190px;
+        width: 190px;
+    }
+
+    .supplier-all-payments-table th:nth-child(5),
+    .supplier-all-payments-table td:nth-child(5) {
+        min-width: 110px;
+        width: 110px;
+        white-space: nowrap;
+    }
+
+    .supplier-all-payments-table th:nth-child(6),
+    .supplier-all-payments-table td:nth-child(6) {
+        min-width: 210px;
+        width: 210px;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+        line-height: 1.15;
+    }
+
+    .supplier-all-payments-table th:nth-child(7),
+    .supplier-all-payments-table td:nth-child(7) {
+        min-width: 90px;
+        width: 90px;
+        white-space: nowrap;
+    }
+
+    .supplier-all-payments-table th:nth-child(8),
+    .supplier-all-payments-table td:nth-child(8),
+    .supplier-all-payments-table th:nth-child(9),
+    .supplier-all-payments-table td:nth-child(9),
+    .supplier-all-payments-table th:nth-child(10),
+    .supplier-all-payments-table td:nth-child(10) {
+        min-width: 115px;
+        width: 115px;
+        white-space: nowrap;
+    }
+
+    .supplier-all-payments-table th:nth-child(11),
+    .supplier-all-payments-table td:nth-child(11) {
+        min-width: 110px;
+        width: 110px;
+        white-space: normal;
+    }
+
+    .supplier-all-payments-table th:nth-child(12),
+    .supplier-all-payments-table td:nth-child(12) {
+        min-width: 90px;
+        width: 90px;
+        white-space: nowrap;
+    }
+
+    .supplier-all-payments-table th:nth-child(13),
+    .supplier-all-payments-table td:nth-child(13) {
+        min-width: 100px;
+        width: 100px;
+        white-space: nowrap;
+    }
+
+    .supplier-all-payments-table th:nth-child(14),
+    .supplier-all-payments-table td:nth-child(14) {
+        min-width: 220px;
+        width: 220px;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+        line-height: 1.15;
     }
 
     .report-total-row strong {
@@ -1652,15 +2054,15 @@ if ($selectedReport === 'receivable_aging') {
         </label>
         <label class="station-field span-2 report-date-field">
             <span>Date From</span>
-            <input type="date" name="date_from" value="<?= e((string) ($filters['dateFrom'] ?? '')) ?>" data-report-filter="debounced">
+            <input type="date" name="date_from" value="<?= e((string) ($filters['dateFrom'] ?? '')) ?>" data-report-filter="debounced-date">
         </label>
         <label class="station-field span-2 report-date-field">
             <span>Date To</span>
-            <input type="date" name="date_to" value="<?= e((string) ($filters['dateTo'] ?? '')) ?>" data-report-filter="debounced">
+            <input type="date" name="date_to" value="<?= e((string) ($filters['dateTo'] ?? '')) ?>" data-report-filter="debounced-date">
         </label>
         <label class="station-field span-2 report-date-field">
             <span>As Of Date</span>
-            <input type="date" name="as_of_date" value="<?= e((string) ($filters['asOfDate'] ?? date('Y-m-d'))) ?>" data-report-filter="debounced">
+            <input type="date" name="as_of_date" value="<?= e((string) ($filters['asOfDate'] ?? date('Y-m-d'))) ?>" data-report-filter="debounced-date">
         </label>
         <label class="station-field span-1">
             <span>Currency</span>
@@ -1692,11 +2094,11 @@ if ($selectedReport === 'receivable_aging') {
                     name="airline"
                     value="<?= e($selectedAirline) ?>"
                     placeholder="All airlines"
-                    data-report-filter="debounced"
+                    data-report-filter="debounced-text"
                 >
             </label>
         <?php endif; ?>
-        <?php if (in_array($selectedReport, ['supplier_ledger', 'customer_ledger', 'customer_detail_ledger', 'receivable_aging', 'payable_aging', 'issue_reissue_refund_register', 'financial_correction_register', 'booking_voucher_ledger', 'actual_money_voucher_ledger', 'payable_refunds'], true)): ?>
+        <?php if (in_array($selectedReport, ['supplier_ledger', 'customer_ledger', 'customer_detail_ledger', 'receivable_aging', 'payable_aging', 'issue_reissue_refund_register', 'financial_correction_register', 'booking_voucher_ledger', 'actual_money_voucher_ledger', 'payable_refunds', 'service_profit', 'loss_report'], true)): ?>
             <label class="station-field span-2">
                 <span>Booking Ref.</span>
                 <input
@@ -1704,7 +2106,7 @@ if ($selectedReport === 'receivable_aging') {
                     name="booking_reference"
                     value="<?= e($selectedBookingReference) ?>"
                     placeholder="BK-000001 or payment ref"
-                    data-report-filter="debounced"
+                    data-report-filter="debounced-reference"
                 >
             </label>
         <?php endif; ?>
@@ -1716,6 +2118,19 @@ if ($selectedReport === 'receivable_aging') {
                     <?php foreach ($businessSourceOptions as $businessSourceOption): ?>
                         <option value="<?= e((string) ($businessSourceOption['id'] ?? 0)) ?>" <?= $selectedBusinessSourceId === (int) ($businessSourceOption['id'] ?? 0) ? 'selected' : '' ?>>
                             <?= e((string) ($businessSourceOption['name'] ?? 'Account')) ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+            </label>
+        <?php endif; ?>
+        <?php if ($selectedReport === 'salary_report'): ?>
+            <label class="station-field span-2">
+                <span>Employee</span>
+                <select name="employee_user_id" data-report-filter="immediate">
+                    <option value="0" <?= $selectedEmployeeUserId <= 0 ? 'selected' : '' ?>>All Employees</option>
+                    <?php foreach ($salaryEmployeeOptions as $salaryEmployeeOption): ?>
+                        <option value="<?= e((string) ($salaryEmployeeOption['user_id'] ?? 0)) ?>" <?= $selectedEmployeeUserId === (int) ($salaryEmployeeOption['user_id'] ?? 0) ? 'selected' : '' ?>>
+                            <?= e((string) ($salaryEmployeeOption['user_name'] ?? 'Employee')) ?>
                         </option>
                     <?php endforeach; ?>
                 </select>
@@ -1734,7 +2149,133 @@ if ($selectedReport === 'receivable_aging') {
                 </select>
             </label>
         <?php endif; ?>
-        <?php if ($selectedReport === 'cash_bank_ledger'): ?>
+<?php if ($selectedReport === 'money_in_out_ledger'): ?>
+    <?php
+    $selectedTreasuryAccountId = max(0, (int) ($_GET['treasury_account_id'] ?? 0));
+    $selectedMoneyDirection = (string) ($_GET['money_direction'] ?? 'all');
+    $selectedDirectTreasurySource = (string) ($_GET['direct_treasury_source'] ?? 'all');
+    ?>
+    <div class="report-filter-field">
+        <label for="treasury_account_id">Cash / Bank Account</label>
+        <select id="treasury_account_id" name="treasury_account_id">
+            <option value="0">All Cash / Bank Accounts</option>
+            <?php foreach (($treasuryAccountOptions ?? []) as $accountOption): ?>
+                <?php
+                $accountId = (int) ($accountOption['id'] ?? 0);
+                $accountLabel = trim((string) ($accountOption['account_name'] ?? ''));
+                $accountCurrency = trim((string) ($accountOption['currency'] ?? ''));
+                $accountBranch = trim((string) ($accountOption['branch_name'] ?? ''));
+                ?>
+                <option value="<?= $accountId ?>" <?= $selectedTreasuryAccountId === $accountId ? 'selected' : '' ?>>
+                    <?= htmlspecialchars($accountLabel . ($accountCurrency !== '' ? ' / ' . $accountCurrency : '') . ($accountBranch !== '' ? ' / ' . $accountBranch : '')) ?>
+                </option>
+            <?php endforeach; ?>
+        </select>
+    </div>
+    <div class="report-filter-field">
+        <label for="money_direction">Direction</label>
+        <select id="money_direction" name="money_direction">
+            <?php foreach (($moneyDirectionOptions ?? []) as $value => $label): ?>
+                <option value="<?= htmlspecialchars((string) $value) ?>" <?= $selectedMoneyDirection === (string) $value ? 'selected' : '' ?>><?= htmlspecialchars((string) $label) ?></option>
+            <?php endforeach; ?>
+        </select>
+    </div>
+    <div class="report-filter-field">
+        <label for="direct_treasury_source">Entry Type</label>
+        <select id="direct_treasury_source" name="direct_treasury_source">
+            <?php foreach (($directTreasurySourceOptions ?? []) as $value => $label): ?>
+                <option value="<?= htmlspecialchars((string) $value) ?>" <?= $selectedDirectTreasurySource === (string) $value ? 'selected' : '' ?>><?= htmlspecialchars((string) $label) ?></option>
+            <?php endforeach; ?>
+        </select>
+    </div>
+<?php endif; ?>
+
+<?php if ($selectedReport === 'internal_treasury_transfer'): ?>
+    <label class="station-field span-2">
+        <span>Transfer Type</span>
+        <select name="treasury_transfer_type" data-report-filter="immediate">
+            <?php foreach (($treasuryTransferTypeOptions ?? []) as $value => $label): ?>
+                <option value="<?= e((string) $value) ?>" <?= $selectedTreasuryTransferType === (string) $value ? 'selected' : '' ?>>
+                    <?= e((string) $label) ?>
+                </option>
+            <?php endforeach; ?>
+        </select>
+    </label>
+    <label class="station-field span-2">
+        <span>Status</span>
+        <select name="treasury_transfer_status" data-report-filter="immediate">
+            <?php foreach (($treasuryTransferStatusOptions ?? []) as $value => $label): ?>
+                <option value="<?= e((string) $value) ?>" <?= $selectedTreasuryTransferStatus === (string) $value ? 'selected' : '' ?>>
+                    <?= e((string) $label) ?>
+                </option>
+            <?php endforeach; ?>
+        </select>
+    </label>
+    <label class="station-field span-2">
+        <span>From Account</span>
+        <select name="source_treasury_account_id" data-report-filter="immediate">
+            <option value="0" <?= $selectedSourceTreasuryAccountId <= 0 ? 'selected' : '' ?>>All Source Accounts</option>
+            <?php foreach (($treasuryAccountOptions ?? []) as $accountOption): ?>
+                <?php
+                $accountId = (int) ($accountOption['id'] ?? 0);
+                $accountLabel = trim((string) ($accountOption['account_name'] ?? ''));
+                $accountCurrency = trim((string) ($accountOption['currency'] ?? ''));
+                $accountBranch = trim((string) ($accountOption['branch_name'] ?? ''));
+                ?>
+                <option value="<?= $accountId ?>" <?= $selectedSourceTreasuryAccountId === $accountId ? 'selected' : '' ?>>
+                    <?= htmlspecialchars($accountLabel . ($accountCurrency !== '' ? ' / ' . $accountCurrency : '') . ($accountBranch !== '' ? ' / ' . $accountBranch : '')) ?>
+                </option>
+            <?php endforeach; ?>
+        </select>
+    </label>
+    <label class="station-field span-2">
+        <span>To Account</span>
+        <select name="destination_treasury_account_id" data-report-filter="immediate">
+            <option value="0" <?= $selectedDestinationTreasuryAccountId <= 0 ? 'selected' : '' ?>>All Destination Accounts</option>
+            <?php foreach (($treasuryAccountOptions ?? []) as $accountOption): ?>
+                <?php
+                $accountId = (int) ($accountOption['id'] ?? 0);
+                $accountLabel = trim((string) ($accountOption['account_name'] ?? ''));
+                $accountCurrency = trim((string) ($accountOption['currency'] ?? ''));
+                $accountBranch = trim((string) ($accountOption['branch_name'] ?? ''));
+                ?>
+                <option value="<?= $accountId ?>" <?= $selectedDestinationTreasuryAccountId === $accountId ? 'selected' : '' ?>>
+                    <?= htmlspecialchars($accountLabel . ($accountCurrency !== '' ? ' / ' . $accountCurrency : '') . ($accountBranch !== '' ? ' / ' . $accountBranch : '')) ?>
+                </option>
+            <?php endforeach; ?>
+        </select>
+    </label>
+    <label class="station-field span-1">
+        <span>Sent Curr.</span>
+        <select name="source_currency" data-report-filter="immediate">
+            <option value="" <?= $selectedSourceCurrency === '' ? 'selected' : '' ?>>All</option>
+            <?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?>
+                <option value="<?= e($currencyOption) ?>" <?= $selectedSourceCurrency === $currencyOption ? 'selected' : '' ?>><?= e($currencyOption) ?></option>
+            <?php endforeach; ?>
+        </select>
+    </label>
+    <label class="station-field span-1">
+        <span>Recv. Curr.</span>
+        <select name="destination_currency" data-report-filter="immediate">
+            <option value="" <?= $selectedDestinationCurrency === '' ? 'selected' : '' ?>>All</option>
+            <?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?>
+                <option value="<?= e($currencyOption) ?>" <?= $selectedDestinationCurrency === $currencyOption ? 'selected' : '' ?>><?= e($currencyOption) ?></option>
+            <?php endforeach; ?>
+        </select>
+    </label>
+    <label class="station-field span-2">
+        <span>Search</span>
+        <input
+            type="text"
+            name="treasury_transfer_search"
+            value="<?= e($selectedTreasuryTransferSearch) ?>"
+            placeholder="Reference, remarks, branch, account"
+            data-report-filter="debounced-text"
+        >
+    </label>
+<?php endif; ?>
+
+<?php if ($selectedReport === 'cash_bank_ledger'): ?>
             <label class="station-field span-2">
                 <span>Source</span>
                 <select name="treasury_source_type" data-report-filter="immediate">
@@ -1857,11 +2398,15 @@ if ($selectedReport === 'receivable_aging') {
             </label>
             <label class="station-field span-3">
                 <span>Search</span>
-                <input type="text" name="reminder_search" value="<?= e($reminderSearch) ?>" placeholder="Customer / mobile / booking / task / supplier" data-report-filter="debounced">
+                <input type="text" name="reminder_search" value="<?= e($reminderSearch) ?>" placeholder="Customer / mobile / booking / task / supplier" data-report-filter="debounced-text">
             </label>
         <?php endif; ?>
         <div class="station-command-buttons span-6 top-gap reports-filter-actions">
             <button class="btn btn-primary btn-sm" type="submit" id="reports-run-button">Run Report</button>
+            <a
+                class="btn btn-sm"
+                href="<?= e(url('/reports?' . http_build_query(['report' => $selectedReport]))) ?>"
+            >Reset Filters</a>
             <?php if ($selectedReport === 'receivable_aging'): ?>
                 <a class="btn btn-sm" href="<?= e(url('/customers/settlements/global')) ?>">Lumpsum Customer Payment</a>
             <?php endif; ?>
@@ -1938,7 +2483,7 @@ if ($selectedReport === 'receivable_aging') {
     <?php endif; ?>
     <?php if ($selectedReport === 'receivable_aging' && $receivableAgingSummaryRows !== []): ?>
         <div class="dense-table-wrap customer-ledger-summary-wrap">
-            <table class="dense-table">
+            <table class="dense-table supplier-advance-summary-table">
                 <thead>
                     <tr>
                         <?php foreach ($receivableAgingSummaryColumns as $column): ?>
@@ -2027,6 +2572,33 @@ if ($selectedReport === 'receivable_aging') {
             </table>
         </div>
     <?php endif; ?>
+    <?php if ($selectedReport === 'prepaid_supplier_ledger' && $supplierAdvanceSummaryRows !== []): ?>
+        <div class="dense-table-wrap customer-ledger-summary-wrap">
+            <table class="dense-table supplier-advance-summary-table">
+                <thead>
+                    <tr>
+                        <?php foreach ($supplierAdvanceSummaryColumns as $column): ?>
+                            <th><?= $renderReportHeaderLabel($selectedReport, (string) ($column['key'] ?? ''), (string) ($column['label'] ?? '')) ?></th>
+                        <?php endforeach; ?>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($supplierAdvanceSummaryRows as $row): ?>
+                        <tr>
+                            <?php foreach ($supplierAdvanceSummaryColumns as $column): ?>
+                                <?php
+                                $summaryColumnKey = (string) ($column['key'] ?? '');
+                                $summaryCellValue = (string) ($row[$summaryColumnKey] ?? '');
+                                $summaryDisplayValue = $formatReportTableDate($summaryColumnKey, $summaryCellValue);
+                                ?>
+                                <td><?= e($summaryDisplayValue) ?></td>
+                            <?php endforeach; ?>
+                        </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+    <?php endif; ?>
     <?php if (in_array($selectedReport, array_merge(['receivable_aging'], $customerLedgerReports), true) && $rows !== []): ?>
         <div class="receivable-aging-filter-bar" id="ledger-detail-filter-bar" hidden>
             <span id="ledger-detail-filter-text">Showing pending invoices for:</span>
@@ -2034,11 +2606,11 @@ if ($selectedReport === 'receivable_aging') {
         </div>
     <?php endif; ?>
     <div class="dense-table-wrap receivable-aging-detail-section" id="ledger-detail-section">
-        <table class="dense-table<?= $selectedReport === 'reminder_hub' ? ' reminder-hub-table' : '' ?><?= in_array($selectedReport, $customerLedgerReports, true) ? ' customer-ledger-table' : '' ?><?= $selectedReport === 'customer_advance_ledger' ? ' customer-advance-ledger-table' : '' ?><?= $selectedReport === 'expense_register' ? ' expense-register-table' : '' ?><?= $selectedReport === 'supplier_prepaid_payments' ? ' supplier-prepaid-report-table' : '' ?>">
+        <table class="dense-table<?= $selectedReport === 'reminder_hub' ? ' reminder-hub-table' : '' ?><?= in_array($selectedReport, $customerLedgerReports, true) ? ' customer-ledger-table' : '' ?><?= $selectedReport === 'customer_advance_ledger' ? ' customer-advance-ledger-table' : '' ?><?= $selectedReport === 'expense_register' ? ' expense-register-table' : '' ?><?= in_array($selectedReport, ['prepaid_supplier_ledger', 'supplier_prepaid_payments'], true) ? ' supplier-prepaid-report-table' : '' ?><?= $selectedReport === 'supplier_all_payments' ? ' supplier-all-payments-table' : '' ?><?= $showTraceColumn ? ' supplier-ledger-trace-table' : '' ?>">
             <thead>
                 <tr>
                     <?php foreach ($columns as $column): ?>
-                        <th<?= $selectedReport === 'reminder_hub' ? ' class="reminder-column--' . e((string) ($column['key'] ?? '')) . '"' : '' ?>><?= e((string) $column['label']) ?></th>
+                        <th<?= $selectedReport === 'reminder_hub' ? ' class="reminder-column--' . e((string) ($column['key'] ?? '')) . '"' : '' ?>><?= $renderReportHeaderLabel($selectedReport, (string) ($column['key'] ?? ''), (string) ($column['label'] ?? '')) ?></th>
                     <?php endforeach; ?>
                 </tr>
             </thead>
@@ -2082,7 +2654,7 @@ if ($selectedReport === 'receivable_aging') {
                                     $displayCellValue = $formatLedgerBalance($cellValue, $selectedReport);
                                 }
                                 ?>
-                                <?php if ($selectedReport === 'supplier_prepaid_payments' && $columnKey === 'action' && $cellValue !== '' && $canCorrectSupplierAdvances): ?>
+                                <?php if (in_array($selectedReport, ['prepaid_supplier_ledger', 'supplier_prepaid_payments'], true) && $columnKey === 'action' && $cellValue !== '' && $canCorrectSupplierAdvances): ?>
                                     <button
                                         type="button"
                                         class="btn btn-sm"
@@ -2099,7 +2671,19 @@ if ($selectedReport === 'receivable_aging') {
                                         data-reference="<?= e((string) ($row['raw_reference_no'] ?? '')) ?>"
                                         data-remarks="<?= e((string) ($row['raw_remarks'] ?? '')) ?>"
                                     >Edit</button>
-                                <?php elseif ($selectedReport === 'supplier_prepaid_payments' && $columnKey === 'action'): ?>
+                                <?php elseif (in_array($selectedReport, ['prepaid_supplier_ledger', 'supplier_prepaid_payments'], true) && $columnKey === 'action'): ?>
+                                    <span class="muted">—</span>
+                                <?php elseif ($selectedReport === 'internal_treasury_transfer' && $columnKey === 'action' && $cellValue !== '' && $cellValue !== '—'): ?>
+                                    <a
+                                        class="btn btn-sm"
+                                        href="<?= e(url('/treasury/accounts?' . http_build_query([
+                                            'edit_transaction_id' => (int) ($row['treasury_transaction_id'] ?? 0),
+                                            'return_to' => (string) ($_SERVER['REQUEST_URI'] ?? '/reports?report=internal_treasury_transfer'),
+                                        ]))) ?>"
+                                    >
+                                        Edit
+                                    </a>
+                                <?php elseif ($selectedReport === 'internal_treasury_transfer' && $columnKey === 'action'): ?>
                                     <span class="muted">—</span>
                                 <?php elseif ($selectedReport === 'customer_advance_ledger' && $columnKey === 'action' && $cellValue !== ''): ?>
                                     <button
@@ -2213,7 +2797,7 @@ if ($selectedReport === 'receivable_aging') {
     </div>
 </section>
 
-<?php if ($selectedReport === 'supplier_prepaid_payments' && $canCorrectSupplierAdvances): ?>
+<?php if (in_array($selectedReport, ['prepaid_supplier_ledger', 'supplier_prepaid_payments'], true) && $canCorrectSupplierAdvances): ?>
     <section class="advance-correction-modal" data-supplier-advance-correction-modal hidden aria-hidden="true">
         <div class="advance-correction-dialog" role="dialog" aria-modal="true" aria-labelledby="supplier-advance-correction-title">
             <header class="advance-correction-header">
@@ -2225,15 +2809,15 @@ if ($selectedReport === 'receivable_aging') {
             </header>
             <form method="post" action="<?= e(url('/suppliers/advances/correct')) ?>" data-supplier-advance-correction-form>
                 <?= \App\Helpers\Csrf::input() ?>
-                <input type="hidden" name="return_to" value="<?= e((string) ($_SERVER['REQUEST_URI'] ?? '/reports?report=supplier_prepaid_payments')) ?>">
+                <input type="hidden" name="return_to" value="<?= e((string) ($_SERVER['REQUEST_URI'] ?? '/reports?report=prepaid_supplier_ledger')) ?>">
                 <input type="hidden" name="supplier_advance_id" data-sac-advance-id>
                 <input type="hidden" data-sac-branch-id>
-                <input type="hidden" data-sac-currency>
+                
                 <div class="advance-correction-body">
                     <div class="advance-correction-grid">
                         <label>Supplier<input type="text" data-sac-supplier readonly></label>
                         <label>Branch<input type="text" data-sac-branch readonly></label>
-                        <label>Currency<input type="text" data-sac-currency-label readonly></label>
+                        <label>Currency<select name="advance_currency" data-sac-currency required><option value="PKR">PKR</option><option value="AED">AED</option><option value="USD">USD</option></select></label>
                         <label>Payment Date<input type="date" name="advance_date" data-sac-date required></label>
                         <label>Amount Paid<input type="number" name="advance_amount" min="0.01" step="0.01" data-sac-amount required></label>
                         <label>Payment Method<select name="advance_payment_method" data-sac-method required><option value="cash">Cash</option><option value="bank_transfer">Bank Transfer</option></select></label>
@@ -2300,10 +2884,10 @@ if ($selectedReport === 'receivable_aging') {
             buttons.forEach((button) => button.addEventListener('click', () => {
                 form.querySelector('[data-sac-advance-id]').value = button.dataset.advanceId || '';
                 branchIdInput.value = button.dataset.branchId || '';
+                currencyInput.disabled = false;
                 currencyInput.value = button.dataset.currency || '';
                 form.querySelector('[data-sac-supplier]').value = button.dataset.supplierName || 'Supplier';
                 form.querySelector('[data-sac-branch]').value = button.dataset.branchName || '';
-                form.querySelector('[data-sac-currency-label]').value = button.dataset.currency || '';
                 form.querySelector('[data-sac-date]').value = button.dataset.paymentDate || '';
                 form.querySelector('[data-sac-amount]').value = button.dataset.amount || '0';
                 methodSelect.value = button.dataset.paymentMethod || 'cash';
@@ -2318,6 +2902,10 @@ if ($selectedReport === 'receivable_aging') {
             }));
 
             methodSelect.addEventListener('change', () => {
+                requestedAccountId = '';
+                syncAccounts();
+            });
+            currencyInput.addEventListener('change', () => {
                 requestedAccountId = '';
                 syncAccounts();
             });
@@ -2349,7 +2937,7 @@ if ($selectedReport === 'receivable_aging') {
                 <input type="hidden" name="customer_advance_refund_id" data-advance-correction-refund-id value="">
                 <input type="hidden" name="branch_id" data-advance-correction-branch-id value="">
                 <input type="hidden" name="traveler_id" data-advance-correction-traveler-id value="">
-                <input type="hidden" name="currency" data-advance-correction-currency-hidden value="">
+                
                 <div class="advance-correction-body">
                     <div class="advance-correction-grid">
                         <label>
@@ -2362,7 +2950,11 @@ if ($selectedReport === 'receivable_aging') {
                         </label>
                         <label>
                             Currency
-                            <input type="text" data-advance-correction-currency readonly>
+                            <select name="currency" data-advance-correction-currency required>
+                                <option value="PKR">PKR</option>
+                                <option value="AED">AED</option>
+                                <option value="USD">USD</option>
+                            </select>
                         </label>
                         <label>
                             Amount
@@ -2429,7 +3021,6 @@ if ($selectedReport === 'receivable_aging') {
                 customer: form.querySelector('[data-advance-correction-customer]'),
                 date: form.querySelector('[data-advance-correction-date]'),
                 currency: form.querySelector('[data-advance-correction-currency]'),
-                currencyHidden: form.querySelector('[data-advance-correction-currency-hidden]'),
                 amount: form.querySelector('[data-advance-correction-amount]'),
                 method: form.querySelector('[data-advance-correction-method]'),
                 account: form.querySelector('[data-advance-correction-account]'),
@@ -2476,7 +3067,7 @@ if ($selectedReport === 'receivable_aging') {
 
             const refreshAccountOptions = function () {
                 const branchId = Number(fields.branchId.value || 0);
-                const currency = String(fields.currencyHidden.value || '').toUpperCase();
+                const currency = String(fields.currency.value || '').toUpperCase();
                 const method = String(fields.method.value || 'cash');
                 const acceptedTypes = accountTypesForMethod(method);
 
@@ -2544,7 +3135,6 @@ if ($selectedReport === 'receivable_aging') {
                 fields.customer.value = String(button.dataset.customerName || 'Customer');
                 fields.date.value = String(button.dataset.entryDate || '');
                 fields.currency.value = String(button.dataset.currency || 'PKR').toUpperCase();
-                fields.currencyHidden.value = String(button.dataset.currency || 'PKR').toUpperCase();
                 fields.amount.value = String(button.dataset.amount || '0');
                 fields.method.value = String(button.dataset.paymentMethod || 'cash');
                 fields.reference.value = String(button.dataset.referenceNumber || '');
@@ -2567,6 +3157,7 @@ if ($selectedReport === 'receivable_aging') {
             });
 
             fields.method.addEventListener('change', refreshAccountOptions);
+            fields.currency.addEventListener('change', refreshAccountOptions);
             modal.querySelectorAll('[data-advance-correction-close]').forEach(function (button) {
                 button.addEventListener('click', closeModal);
             });

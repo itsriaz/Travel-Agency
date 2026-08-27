@@ -76,6 +76,7 @@ final class AccountLedgerRepository extends BaseRepository
                     b.id AS booking_id, b.booking_reference, b.lead_traveler_id,
                     COALESCE(NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Booking Party") AS customer_name,
                     COALESCE(NULLIF(bp.contact_mobile, ""), NULLIF(t_lead.mobile, ""), "") AS contact_mobile,
+                    cri.service_line_reference,
                     o.currency, aa.allocated_amount, s.name AS supplier_name,
                     COALESCE(NULLIF(t_service.full_name, ""), NULLIF(bs.passenger_name_snapshot, ""), "Passenger") AS passenger_name,
                     COALESCE(NULLIF(sat.pnr, ""), "N/A") AS pnr,
@@ -403,20 +404,35 @@ final class AccountLedgerRepository extends BaseRepository
                     COALESCE(cancel_event.id, 0) AS cancellation_event_id,
                     COALESCE(cancel_event.event_date, "") AS cancellation_date,
                     COALESCE(
+                        CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(cancel_event.payload_json, "$.customer_penalty_source_amount")), "") AS DECIMAL(18,2)),
                         CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(cancel_event.payload_json, "$.customer_penalty_amount")), "") AS DECIMAL(18,2)),
                         cancel_event.penalty_amount,
                         0
                     ) AS customer_penalty_amount,
                     COALESCE(
+                        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(cancel_event.payload_json, "$.customer_penalty_currency")), ""),
+                        cancel_event.currency,
+                        bs.currency,
+                        "PKR"
+                    ) AS customer_penalty_currency,
+                    COALESCE(
+                        CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(cancel_event.payload_json, "$.supplier_penalty_source_amount")), "") AS DECIMAL(18,2)),
                         CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(cancel_event.payload_json, "$.supplier_penalty_amount")), "") AS DECIMAL(18,2)),
                         0
                     ) AS supplier_penalty_amount,
+                    COALESCE(
+                        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(cancel_event.payload_json, "$.supplier_penalty_currency")), ""),
+                        bs.cost_currency,
+                        cancel_event.currency,
+                        "PKR"
+                    ) AS supplier_penalty_currency,
                     COALESCE(
                         CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(cancel_event.payload_json, "$.customer_final_charge_amount")), "") AS DECIMAL(18,2)),
                         receivable.current_due_amount,
                         0
                     ) AS customer_final_charge_amount,
                     COALESCE(
+                        CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(cancel_event.payload_json, "$.expected_supplier_refund_source_amount")), "") AS DECIMAL(18,2)),
                         CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(cancel_event.payload_json, "$.expected_supplier_refund_amount")), "") AS DECIMAL(18,2)),
                         cancel_event.supplier_credit_amount,
                         0

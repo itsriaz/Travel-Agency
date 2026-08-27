@@ -50,6 +50,12 @@ document.addEventListener('DOMContentLoaded', () => {
         openInvoices: [],
         requestToken: 0,
     };
+    let customerAdvancePickerState = {
+        query: '',
+        branchId: 0,
+        rows: [],
+        requestToken: 0,
+    };
     const clientErrorLogUrl = String(station.dataset.clientErrorLogUrl || '').trim();
     const csrfToken = String(station.dataset.csrfToken || '').trim();
     sendWorkspaceClientError = (entry) => {
@@ -89,6 +95,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const pendingFreshWorkspaceActionKey = 'travel_ops_pending_fresh_workspace_action';
     const pendingTreasuryWorkspaceStateKey = 'travel_ops_pending_treasury_workspace_state';
     const pendingServiceEditBookingModalKey = 'travel_ops_pending_service_edit_booking_modal';
+    const pendingServiceEditBookingTabKey = 'travel_ops_pending_service_edit_booking_tab';
     const pendingPenaltyRefundModalKey = 'travel_ops_pending_penalty_refund_modal';
 
     const feedback = station.querySelector('[data-workspace-feedback]');
@@ -149,6 +156,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const customerAdvanceOpenButton = station.querySelector('[data-customer-advance-open]');
     const customerAdvanceModal = station.querySelector('[data-customer-advance-modal]');
     const customerAdvanceAvailableUrl = customerAdvanceModal?.dataset.customerAdvanceAvailableUrl || '';
+    const customerAdvanceCustomersUrl = customerAdvanceModal?.dataset.customerAdvanceCustomersUrl || '';
+    const customerAdvanceDetailUrl = customerAdvanceModal?.dataset.customerAdvanceDetailUrl || '';
     const customerAdvanceCloseButtons = Array.from(station.querySelectorAll('[data-customer-advance-close]'));
     const customerAdvanceForm = station.querySelector('[data-customer-advance-form]');
     const customerAdvanceTravelerId = station.querySelector('[data-customer-advance-traveler-id]');
@@ -156,6 +165,29 @@ document.addEventListener('DOMContentLoaded', () => {
     const customerAdvanceSearchInput = station.querySelector('[data-customer-advance-search]');
     const customerAdvanceResults = station.querySelector('[data-customer-advance-results]');
     const customerAdvanceNewCustomerButton = station.querySelector('[data-customer-advance-new-customer]');
+    const customerAdvanceEditOpenButton = station.querySelector('[data-customer-advance-edit-open]');
+    const customerAdvanceEditCloseButtons = Array.from(station.querySelectorAll('[data-customer-advance-edit-close]'));
+    const customerAdvanceEditForm = station.querySelector('[data-customer-advance-edit-form]');
+    const customerAdvanceEditTravelerId = station.querySelector('[data-customer-advance-edit-traveler-id]');
+    const customerAdvanceEditBranchId = station.querySelector('[data-customer-advance-edit-branch-id]');
+    const customerAdvanceEditReceiptId = station.querySelector('[data-customer-advance-edit-receipt-id]');
+    const customerAdvanceEditBranchFilter = station.querySelector('[data-customer-advance-edit-branch-filter]');
+    const customerAdvanceEditPicker = station.querySelector('[data-customer-advance-edit-picker]');
+    const customerAdvanceEditDate = station.querySelector('[data-customer-advance-edit-date]');
+    const customerAdvanceEditCurrency = station.querySelector('[data-customer-advance-edit-currency]');
+    const customerAdvanceEditAmount = station.querySelector('[data-customer-advance-edit-amount]');
+    const customerAdvanceEditMethod = station.querySelector('[data-customer-advance-edit-method]');
+    const customerAdvanceEditAccount = station.querySelector('[data-customer-advance-edit-account]');
+    const customerAdvanceEditReference = station.querySelector('[data-customer-advance-edit-reference]');
+    const customerAdvanceEditRemarks = station.querySelector('[data-customer-advance-edit-remarks]');
+    const customerAdvanceEditReason = station.querySelector('[data-customer-advance-edit-reason]');
+    const customerAdvanceEditFeedback = station.querySelector('[data-customer-advance-edit-feedback]');
+    const customerAdvancePickerModal = station.querySelector('[data-customer-advance-picker-modal]');
+    const customerAdvancePickerCloseButtons = Array.from(station.querySelectorAll('[data-customer-advance-picker-close]'));
+    const customerAdvancePickerSearch = station.querySelector('[data-customer-advance-picker-search]');
+    const customerAdvancePickerBranch = station.querySelector('[data-customer-advance-picker-branch]');
+    const customerAdvancePickerFeedback = station.querySelector('[data-customer-advance-picker-feedback]');
+    const customerAdvancePickerResults = station.querySelector('[data-customer-advance-picker-results]');
     const customerAdvanceReturnTo = station.querySelector('[data-customer-advance-return-to]');
     const customerAdvancePrintAfterSave = station.querySelector('[data-customer-advance-print-after-save]');
     const customerAdvanceBranch = station.querySelector('[data-customer-advance-branch]');
@@ -216,6 +248,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const supplierPaymentEditPreview = station.querySelector('[data-supplier-payment-edit-preview]');
     const supplierPaymentEditFeedback = station.querySelector('[data-supplier-payment-edit-feedback]');
     const supplierPaymentEditSubmit = station.querySelector('[data-supplier-payment-edit-submit]');
+    const supplierPaymentEditVoidButton = station.querySelector('[data-supplier-payment-edit-void]');
+    const supplierPaymentEditOriginalBranchId = station.querySelector('[data-supplier-payment-edit-original-branch-id]');
+    const supplierPaymentEditOriginalSupplierId = station.querySelector('[data-supplier-payment-edit-original-supplier-id]');
+    const supplierPaymentEditOriginalCurrency = station.querySelector('[data-supplier-payment-edit-original-currency]');
     const prepaidPaymentManagerModal = station.querySelector('[data-prepaid-payment-manager-modal]');
     const prepaidPaymentManagerOpenButton = station.querySelector('[data-prepaid-payment-manager-open]');
     const prepaidPaymentManagerCloseButtons = Array.from(station.querySelectorAll('[data-prepaid-payment-manager-close]'));
@@ -672,6 +708,20 @@ document.addEventListener('DOMContentLoaded', () => {
         ? paymentForm.elements.namedItem('treasury_account_id')
         : null;
     const paymentTreasuryAccountRow = station.querySelector('[data-payment-treasury-row]');
+    const paymentAccountBalanceModeInput = paymentForm?.elements?.namedItem('account_balance_mode') instanceof HTMLInputElement
+        ? paymentForm.elements.namedItem('account_balance_mode')
+        : null;
+    const paymentAccountBalanceBusinessSourceInput = paymentForm?.elements?.namedItem('account_balance_business_source_id') instanceof HTMLInputElement
+        ? paymentForm.elements.namedItem('account_balance_business_source_id')
+        : null;
+    const paymentAccountBalanceRow = station.querySelector('[data-payment-account-balance-row]');
+    const paymentAccountBalanceSelect = paymentForm?.elements?.namedItem('account_balance_source_currency') instanceof HTMLSelectElement
+        ? paymentForm.elements.namedItem('account_balance_source_currency')
+        : null;
+    const paymentAccountBalanceRateRow = station.querySelector('[data-payment-account-balance-rate-row]');
+    const paymentAccountBalanceRateInput = paymentForm?.elements?.namedItem('account_balance_exchange_rate') instanceof HTMLInputElement
+        ? paymentForm.elements.namedItem('account_balance_exchange_rate')
+        : null;
     const directSupplierPaymentRow = station.querySelector('[data-direct-supplier-payment-row]');
     const directSupplierObligationSelect = paymentForm?.elements?.namedItem('direct_supplier_obligation_id') instanceof HTMLSelectElement
         ? paymentForm.elements.namedItem('direct_supplier_obligation_id')
@@ -679,6 +729,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const directSupplierServiceLineReferenceInput = paymentForm?.elements?.namedItem('direct_supplier_service_line_reference') instanceof HTMLInputElement
         ? paymentForm.elements.namedItem('direct_supplier_service_line_reference')
         : null;
+    const directSupplierIdInput = paymentForm?.elements?.namedItem('direct_supplier_id') instanceof HTMLInputElement
+        ? paymentForm.elements.namedItem('direct_supplier_id')
+        : null;
+    const customerPaidSupplierOpenButtons = Array.from(station.querySelectorAll('[data-customer-paid-supplier-open]'));
+    const customerPaidSupplierSummary = station.querySelector('[data-customer-paid-supplier-summary]');
     const paymentReferenceInput = paymentForm?.elements?.namedItem('reference_number') instanceof HTMLInputElement
         ? paymentForm.elements.namedItem('reference_number')
         : null;
@@ -699,6 +754,18 @@ document.addEventListener('DOMContentLoaded', () => {
     const paymentDetailChargesInput = station.querySelector('[data-payment-detail-charges]');
     const paymentDetailRemarksInput = station.querySelector('[data-payment-detail-remarks]');
     const paymentDetailApplyButton = station.querySelector('[data-payment-detail-apply]');
+    const customerPaidSupplierModal = station.querySelector('[data-customer-paid-supplier-modal]');
+    const customerPaidSupplierCloseButtons = Array.from(station.querySelectorAll('[data-customer-paid-supplier-close]'));
+    const customerPaidSupplierSearchInput = station.querySelector('[data-customer-paid-supplier-search]');
+    const customerPaidSupplierAmountInput = station.querySelector('[data-customer-paid-supplier-amount]');
+    const customerPaidSupplierCustomerDueInput = station.querySelector('[data-customer-paid-supplier-customer-due]');
+    const customerPaidSupplierFeedback = station.querySelector('[data-customer-paid-supplier-feedback]');
+    const customerPaidSupplierResultsBody = station.querySelector('[data-customer-paid-supplier-results-body]');
+    const customerPaidSupplierReferenceInput = station.querySelector('[data-customer-paid-supplier-reference]');
+    const customerPaidSupplierBankDetailInput = station.querySelector('[data-customer-paid-supplier-bank-detail]');
+    const customerPaidSupplierChargesInput = station.querySelector('[data-customer-paid-supplier-charges]');
+    const customerPaidSupplierRemarksInput = station.querySelector('[data-customer-paid-supplier-remarks]');
+    const customerPaidSupplierApplyButton = station.querySelector('[data-customer-paid-supplier-apply]');
     const paymentSettlementModeInput = paymentForm?.elements?.namedItem('settlement_mode') instanceof HTMLInputElement
         ? paymentForm.elements.namedItem('settlement_mode')
         : null;
@@ -734,6 +801,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const paymentReturnAmountInput = commercialLookup('commercial-payment-return-amount', '[data-payment-return-amount]');
     const autosaveInvoiceUrl = station.dataset.autosaveInvoiceUrl || '';
     const autosaveServiceUrl = station.dataset.autosaveServiceUrl || '';
+    const customerPaidSupplierOptionsUrl = station.dataset.customerPaidSupplierOptionsUrl || '';
     const invoiceNumberDisplay = station.querySelector('[data-invoice-number-display]');
     const autosaveStatusLabel = station.querySelector('[data-autosave-status]');
     const serviceTableBody = station.querySelector('.legacy-service-table tbody');
@@ -752,6 +820,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let pendingInvoiceAutosaveAllowCreate = false;
     let pendingServiceAutosave = false;
     let pendingServiceAutosaveAllowCreate = false;
+    let allowNativeServiceSubmit = false;
     let autosavedPaymentEligible = false;
     let autosavedPersistedServiceId = 0;
     let autosavedHasSavedService = false;
@@ -808,6 +877,30 @@ document.addEventListener('DOMContentLoaded', () => {
             console.debug('[workspace-enter]', stage, details);
         }
     };
+    const serviceWorkflowDebugStorageKey = 'travel_ops_service_workflow_debug';
+    window.workspaceDebugServiceWorkflow = (stage, details = {}) => {
+        const entry = {
+            stage: String(stage || ''),
+            details,
+            timestamp: new Date().toISOString(),
+            href: window.location.href,
+            scriptInstanceId: workspaceScriptInstanceId,
+        };
+        if (!Array.isArray(window.__travelWorkspaceServiceWorkflowDebug)) {
+            window.__travelWorkspaceServiceWorkflowDebug = [];
+        }
+        window.__travelWorkspaceServiceWorkflowDebug.push(entry);
+        try {
+            const existing = JSON.parse(window.sessionStorage.getItem(serviceWorkflowDebugStorageKey) || '[]');
+            const next = Array.isArray(existing) ? existing.concat([entry]).slice(-120) : [entry];
+            window.sessionStorage.setItem(serviceWorkflowDebugStorageKey, JSON.stringify(next));
+        } catch (error) {
+            // ignore storage failures
+        }
+        if (typeof console !== 'undefined' && typeof console.info === 'function') {
+            console.info('[workspace-service-workflow]', stage, entry);
+        }
+    };
     const paymentSubmitDebug = {
         saveButtonFound: false,
         handlerAttached: false,
@@ -837,6 +930,7 @@ document.addEventListener('DOMContentLoaded', () => {
         return `${paymentRouteBasePath}${normalizedPath}`;
     };
     const paymentExchangeRateSaveUrl = buildWorkspacePathUrl('/workspace/payments/exchange-rate/save');
+    const accountHolderBalancesUrl = station.dataset.accountHolderBalancesUrl || '';
 
     const logWorkflowTrace = (stage, extra = {}) => {
         if (typeof sendWorkspaceClientError !== 'function') {
@@ -1481,7 +1575,7 @@ document.addEventListener('DOMContentLoaded', () => {
         };
 
         filteredCustomers = customerDirectory.slice();
-        filteredAutocompleteCustomers = customerDirectory.slice(0, 12);
+        filteredAutocompleteCustomers = customerDirectory.slice();
     };
 
     const searchOfflineSnapshotBookings = (query) => {
@@ -2016,8 +2110,41 @@ document.addEventListener('DOMContentLoaded', () => {
         return Number.isFinite(parsed) ? parsed : 0;
     };
 
-    const roundMoneyValue = (value) => Math.round(Number(value || 0));
-    const formatNumberInputValue = (value) => String(roundMoneyValue(value));
+    const roundMoneyValue = (value, decimals = 2) => {
+        const numericValue = Number(value || 0);
+        if (!Number.isFinite(numericValue)) {
+            return 0;
+        }
+
+        const precision = Number.isInteger(decimals) && decimals >= 0 ? decimals : 2;
+        const factor = 10 ** precision;
+        return Math.round(numericValue * factor) / factor;
+    };
+    const decimalPlacesFromStep = (stepValue) => {
+        const normalized = String(stepValue ?? '').trim().toLowerCase();
+        if (normalized === '' || normalized === 'any') {
+            return 2;
+        }
+
+        if (!normalized.includes('.')) {
+            return normalized === '1' ? 0 : 2;
+        }
+
+        return normalized.split('.')[1].length;
+    };
+    const inputDecimalPlaces = (field) => {
+        if (!(field instanceof HTMLInputElement) || field.type !== 'number') {
+            return 2;
+        }
+
+        return decimalPlacesFromStep(field.getAttribute('step') ?? field.step);
+    };
+    const formatNumberInputValue = (value, decimals = 2) => {
+        const precision = Number.isInteger(decimals) && decimals >= 0 ? decimals : 2;
+        return roundMoneyValue(value, precision).toFixed(precision);
+    };
+    const roundWholeMoney = (value) => roundMoneyValue(value, 0);
+    const formatWholeNumberInputValue = (value) => formatNumberInputValue(value, 0);
 
     const setLinkDisabled = (link, disabled) => {
         if (!(link instanceof HTMLAnchorElement)) {
@@ -2326,6 +2453,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
     const paymentMethodRequiresTreasurySelection = (method) => ['cash', 'bank_transfer'].includes(String(method || '').trim());
+    const isUsingAccountHolderBalance = () => String(paymentAccountBalanceSelect?.value || '').trim() !== '';
+    const isAccountHolderBalanceMethod = () => String(paymentMethodSelect?.value || '').trim() === 'account_holder_balance';
     const treasuryAccountsUrl = station.dataset.treasuryAccountsUrl || '';
     const paymentTreasuryTypesForMethod = (method) => {
         switch (String(method || '').trim()) {
@@ -2342,6 +2471,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const currency = String(account?.currency || '').trim();
         return currency !== '' ? `${label} (${currency})` : label;
     };
+    const findPaymentTreasuryAccountById = (accountId) => paymentTreasuryAccounts.find((account) => (
+        String(account?.id || '') === String(accountId || '')
+    )) || null;
     const openTreasuryAccountSetup = (method = '') => {
         if (treasuryAccountsUrl === '') {
             return false;
@@ -2492,18 +2624,135 @@ document.addEventListener('DOMContentLoaded', () => {
     };
     const directSupplierPendingOptionValue = '__current_service__';
     let directSupplierOpenObligations = [];
+    let directSupplierSelectedExternalObligation = null;
+    let directSupplierSelectedExternalRows = [];
+    let customerPaidSupplierSearchTimer = 0;
+    let customerPaidSupplierSelectedResult = null;
+    let customerPaidSupplierCollapseToSelected = false;
+    let customerPaidSupplierPendingSave = false;
+    const syncPaymentAccountBalanceRate = () => {
+        if (!(paymentAccountBalanceRateRow instanceof HTMLElement) || !(paymentAccountBalanceSelect instanceof HTMLSelectElement)) {
+            return;
+        }
+
+        const sourceCurrency = String(paymentAccountBalanceSelect.value || '').trim().toUpperCase();
+        const targetCurrency = String(paymentCurrencySelect?.value || paymentCurrentInvoiceInput?.dataset.paymentCurrency || '').trim().toUpperCase();
+        const needsRate = isAccountHolderBalanceMethod() && sourceCurrency !== '' && targetCurrency !== '' && sourceCurrency !== targetCurrency;
+        paymentAccountBalanceRateRow.hidden = !needsRate;
+        if (!needsRate && paymentAccountBalanceRateInput instanceof HTMLInputElement) {
+            paymentAccountBalanceRateInput.value = '';
+        }
+    };
+    const syncPaymentAccountBalanceMode = () => {
+        if (paymentAccountBalanceRow instanceof HTMLElement) {
+            paymentAccountBalanceRow.hidden = !isAccountHolderBalanceMethod();
+        }
+        if (paymentAccountBalanceSelect instanceof HTMLSelectElement) {
+            paymentAccountBalanceSelect.disabled = isDirectSupplierPaymentMethod(paymentMethodSelect?.value || '') || !isAccountHolderBalanceMethod();
+            if (paymentAccountBalanceSelect.disabled) {
+                paymentAccountBalanceSelect.value = '';
+            }
+        }
+        if (paymentAccountBalanceModeInput instanceof HTMLInputElement) {
+            paymentAccountBalanceModeInput.value = isAccountHolderBalanceMethod() && isUsingAccountHolderBalance() ? 'account_holder_balance' : '';
+        }
+        syncPaymentAccountBalanceRate();
+    };
+    const populatePaymentAccountBalanceOptions = (rows = []) => {
+        if (!(paymentAccountBalanceSelect instanceof HTMLSelectElement)) {
+            return;
+        }
+
+        const previousValue = String(paymentAccountBalanceSelect.value || '').trim().toUpperCase();
+        paymentAccountBalanceSelect.innerHTML = '<option value="">No account balance</option>';
+        rows.forEach((row) => {
+            const currency = String(row?.currency || '').trim().toUpperCase();
+            if (currency === '') {
+                return;
+            }
+
+            const option = document.createElement('option');
+            option.value = currency;
+            option.textContent = `${currency} / ${formatMoney(toNumber(row?.available_amount || 0))} available`;
+            if (currency === previousValue) {
+                option.selected = true;
+            }
+            paymentAccountBalanceSelect.appendChild(option);
+        });
+        syncPaymentAccountBalanceMode();
+    };
+    const loadPaymentAccountHolderBalances = async () => {
+        if (!(paymentAccountBalanceSelect instanceof HTMLSelectElement) || accountHolderBalancesUrl === '') {
+            return;
+        }
+
+        const branchField = paymentForm?.elements?.namedItem('branch_id');
+        const branchId = branchField instanceof HTMLInputElement || branchField instanceof HTMLSelectElement
+            ? Number.parseInt(String(branchField.value || '0'), 10) || 0
+            : 0;
+        const businessSourceId = businessSourceInput instanceof HTMLSelectElement
+            ? Number.parseInt(String(businessSourceInput.value || '0'), 10) || 0
+            : (paymentAccountBalanceBusinessSourceInput instanceof HTMLInputElement
+                ? Number.parseInt(String(paymentAccountBalanceBusinessSourceInput.value || '0'), 10) || 0
+                : 0);
+
+        if (paymentAccountBalanceBusinessSourceInput instanceof HTMLInputElement) {
+            paymentAccountBalanceBusinessSourceInput.value = businessSourceId > 0 ? String(businessSourceId) : '';
+        }
+
+        if (branchId <= 0 || businessSourceId <= 0) {
+            populatePaymentAccountBalanceOptions([]);
+            return;
+        }
+
+        const params = new URLSearchParams({
+            branch_id: String(branchId),
+            business_source_id: String(businessSourceId),
+        });
+        const response = await fetch(`${accountHolderBalancesUrl}?${params.toString()}`, {
+            method: 'GET',
+            credentials: 'same-origin',
+            headers: {
+                Accept: 'application/json',
+            },
+        });
+        const payload = await response.json().catch(() => ({ ok: false, balances: [] }));
+        populatePaymentAccountBalanceOptions(Array.isArray(payload?.balances) ? payload.balances : []);
+    };
 
     const normalizeDirectSupplierObligation = (row = {}) => {
         const id = Number.parseInt(String(row?.id || 0), 10) || 0;
+        const supplierId = Number.parseInt(String(row?.supplierId || row?.supplier_id || 0), 10) || 0;
         const supplier = String(row?.supplier || row?.supplier_name || 'Supplier').trim() || 'Supplier';
         const serviceLineReference = String(row?.serviceLineReference || row?.service_line_reference || '').trim();
         const currency = String(row?.currency || '').trim().toUpperCase();
         const balance = Math.max(
-            toNumber(row?.balanceDueAmount ?? row?.netPayableAmount ?? row?.net_payable_amount ?? row?.balance ?? 0),
+            toNumber(row?.balanceDueAmount ?? row?.netPayableAmount ?? row?.net_payable_amount ?? row?.outstanding_amount ?? row?.balance ?? 0),
             0
         );
+        const bookingReference = String(row?.bookingReference || row?.booking_reference || '').trim();
+        const bookingId = Number.parseInt(String(row?.bookingId || row?.booking_id || 0), 10) || 0;
+        const branchId = Number.parseInt(String(row?.branchId || row?.branch_id || 0), 10) || 0;
+        const branchName = String(row?.branchName || row?.branch_name || '').trim();
+        const passengerName = String(row?.passengerName || row?.passenger_name || '').trim();
+        const dueDate = String(row?.dueDate || row?.due_date || '').trim();
+        const serviceType = String(row?.serviceType || row?.service_type || '').trim();
 
-        return { id, supplier, serviceLineReference, currency, balance };
+        return {
+            id,
+            supplierId,
+            supplier,
+            serviceLineReference,
+            currency,
+            balance,
+            bookingReference,
+            bookingId,
+            branchId,
+            branchName,
+            passengerName,
+            dueDate,
+            serviceType,
+        };
     };
 
     const directSupplierOptionsFromSelect = () => {
@@ -2515,14 +2764,99 @@ document.addEventListener('DOMContentLoaded', () => {
             .map((option) => ({
                 id: Number.parseInt(String(option.value || '0'), 10) || 0,
                 supplier: String(option.textContent || 'Supplier').split('/')[0]?.trim() || 'Supplier',
-                serviceLineReference: '',
+                serviceLineReference: String(option.dataset.serviceLineReference || '').trim(),
                 currency: String(option.dataset.currency || '').trim().toUpperCase(),
                 balance: toNumber(option.dataset.balance || 0),
+                bookingReference: String(option.dataset.bookingReference || '').trim(),
             }))
             .filter((row) => row.id > 0);
     };
 
     directSupplierOpenObligations = directSupplierOptionsFromSelect();
+
+    const currentCustomerDueSummary = () => {
+        const receiptScope = paymentReceiptScopeSelect?.value || 'whole_invoice';
+        if (receiptScope === 'passenger_specific') {
+            const selectedOption = paymentTargetReceivableSelect?.selectedOptions?.[0];
+            if (selectedOption && String(selectedOption.value || '').trim() !== '') {
+                return String(selectedOption.textContent || 'Selected passenger due').trim();
+            }
+            return 'Selected passenger due only';
+        }
+
+        return 'Whole invoice / auto split';
+    };
+
+    const formatDirectSupplierSummary = (row) => {
+        if (!row || !row.id) {
+            return 'No supplier payable selected.';
+        }
+
+        return [
+            row.supplier || 'Supplier',
+            row.bookingReference || '',
+            row.serviceLineReference || '',
+            `${row.currency || 'PKR'} ${formatMoney(toNumber(row.balance || 0))}`,
+        ].filter(Boolean).join(' / ');
+    };
+    const directSupplierSelectedSupplierId = () => {
+        if (customerPaidSupplierSelectedResult && Number(customerPaidSupplierSelectedResult.supplierId || 0) > 0) {
+            return Number(customerPaidSupplierSelectedResult.supplierId || 0);
+        }
+        if (directSupplierSelectedExternalObligation && Number(directSupplierSelectedExternalObligation.supplierId || 0) > 0) {
+            return Number(directSupplierSelectedExternalObligation.supplierId || 0);
+        }
+
+        return 0;
+    };
+    const setDirectSupplierHiddenFields = (selectedRow = null, selectedRows = []) => {
+        if (directSupplierIdInput) {
+            directSupplierIdInput.value = selectedRow && Number(selectedRow.supplierId || 0) > 0
+                ? String(Number(selectedRow.supplierId || 0))
+                : '';
+        }
+        if (directSupplierServiceLineReferenceInput) {
+            const firstLine = Array.isArray(selectedRows)
+                ? String(selectedRows.find((row) => String(row?.serviceLineReference || '').trim() !== '')?.serviceLineReference || '')
+                : '';
+            directSupplierServiceLineReferenceInput.value = firstLine;
+        }
+        if (directSupplierObligationSelect) {
+            const obligationId = selectedRow && Number(selectedRow.id || 0) > 0
+                ? String(Number(selectedRow.id || 0))
+                : '';
+            directSupplierObligationSelect.value = obligationId;
+        }
+    };
+
+    const updateDirectSupplierSelectionSummary = () => {
+        if (!(customerPaidSupplierSummary instanceof HTMLElement)) {
+            return;
+        }
+
+        let selected = directSupplierSelectedExternalObligation;
+        if ((!selected || !selected.id) && directSupplierObligationSelect) {
+            const option = directSupplierObligationSelect.selectedOptions?.[0];
+            if (option && String(option.value || '').trim() !== '') {
+                selected = normalizeDirectSupplierObligation({
+                    id: option.value,
+                    supplier_name: option.textContent,
+                    service_line_reference: option.dataset.serviceLineReference || '',
+                    currency: option.dataset.currency || '',
+                    balance: option.dataset.balance || 0,
+                    booking_reference: option.dataset.bookingReference || '',
+                });
+            }
+        }
+
+        const selectedCount = Array.isArray(directSupplierSelectedExternalRows) ? directSupplierSelectedExternalRows.length : 0;
+        const selectedAmount = Array.isArray(directSupplierSelectedExternalRows)
+            ? directSupplierSelectedExternalRows.reduce((total, row) => total + toNumber(row?.balance || 0), 0)
+            : 0;
+        customerPaidSupplierSummary.textContent = selected && selected.id
+            ? `${formatDirectSupplierSummary(selected)}${selectedCount > 1 ? ` / ${selectedCount} supplier invoices auto-selected / ${selected.currency || 'PKR'} ${formatMoney(selectedAmount)}` : ''}`
+            : formatDirectSupplierSummary(selected);
+    };
 
     const updateDirectSupplierServiceLineReference = (payload = {}) => {
         if (!directSupplierServiceLineReferenceInput) {
@@ -2554,8 +2888,22 @@ document.addEventListener('DOMContentLoaded', () => {
                 .filter((row) => row.id > 0 && row.balance > 0.005);
         }
 
+        if (directSupplierSelectedExternalObligation && directSupplierSelectedExternalObligation.id > 0) {
+            const exists = directSupplierOpenObligations.some((row) => row.id === directSupplierSelectedExternalObligation.id);
+            if (!exists) {
+                directSupplierOpenObligations.push(directSupplierSelectedExternalObligation);
+            }
+        }
+
         const selectedBefore = String(directSupplierObligationSelect.value || '').trim();
         const paymentCurrency = String(paymentCurrencySelect?.value || paymentCurrentInvoiceInput?.dataset.paymentCurrency || 'PKR').trim().toUpperCase();
+        if (directSupplierSelectedExternalObligation
+            && directSupplierSelectedExternalObligation.id > 0
+            && paymentCurrency !== ''
+            && directSupplierSelectedExternalObligation.currency !== paymentCurrency
+        ) {
+            directSupplierSelectedExternalObligation = null;
+        }
         const eligible = directSupplierOpenObligations.filter((row) => {
             return paymentCurrency === '' || row.currency === paymentCurrency;
         });
@@ -2572,8 +2920,10 @@ document.addEventListener('DOMContentLoaded', () => {
             option.dataset.currency = row.currency;
             option.dataset.balance = String(row.balance);
             option.dataset.serviceLineReference = row.serviceLineReference;
+            option.dataset.bookingReference = row.bookingReference || '';
             option.textContent = [
                 row.supplier,
+                row.bookingReference,
                 row.serviceLineReference,
                 `${row.currency || paymentCurrency || 'PKR'} ${formatMoney(row.balance)}`,
             ].filter(Boolean).join(' / ');
@@ -2613,6 +2963,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         directSupplierObligationSelect.value = nextValue;
+        updateDirectSupplierSelectionSummary();
     };
 
     const syncPaymentTreasurySelector = () => {
@@ -2628,9 +2979,13 @@ document.addEventListener('DOMContentLoaded', () => {
             directSupplierObligationSelect.disabled = !isDirectSupplierPayment;
             if (!isDirectSupplierPayment) {
                 directSupplierObligationSelect.value = '';
+                directSupplierSelectedExternalObligation = null;
+                closeCustomerPaidSupplierModal();
             }
+            updateDirectSupplierSelectionSummary();
         }
         const methodRequiresTreasury = paymentMethodRequiresTreasurySelection(method);
+        const usingAccountBalance = isAccountHolderBalanceMethod();
         const hasNewCashPayment = Math.max(toNumber(receivedNowInput?.value || 0), 0) > 0.005;
         const eligibleAccounts = methodRequiresTreasury ? eligiblePaymentTreasuryAccounts() : [];
         const selectedBefore = String(paymentTreasuryAccountSelect.value || paymentTreasuryAccountSelect.dataset.initialValue || '').trim();
@@ -2638,7 +2993,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         paymentTreasuryAccountSelect.innerHTML = '';
 
-        if (!methodRequiresTreasury) {
+        if (!methodRequiresTreasury || usingAccountBalance) {
             paymentTreasuryAccountSelect.dataset.initialValue = '';
             paymentTreasuryAccountSelect.disabled = true;
             paymentTreasuryAccountRow.hidden = true;
@@ -2688,6 +3043,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!paymentMethodRequiresTreasurySelection(normalizedMethod)) {
             return false;
         }
+        if (isAccountHolderBalanceMethod()) {
+            return false;
+        }
 
         if (
             paymentTreasuryAccountSelect
@@ -2730,11 +3088,215 @@ document.addEventListener('DOMContentLoaded', () => {
             return false;
         }
 
-        showFeedback('Select the supplier payable that the customer paid directly.');
-        if (directSupplierObligationSelect) {
-            directSupplierObligationSelect.focus();
+        showFeedback('Select the supplier the customer paid directly.');
+        if (openCustomerPaidSupplierModal()) {
+            return true;
+        }
+        if (customerPaidSupplierOpenButtons[0] instanceof HTMLElement) {
+            customerPaidSupplierOpenButtons[0].focus();
         }
 
+        return true;
+    };
+    const showCustomerPaidSupplierFeedback = (message, isError = false) => {
+        if (!(customerPaidSupplierFeedback instanceof HTMLElement)) {
+            return;
+        }
+
+        customerPaidSupplierFeedback.hidden = !message;
+        customerPaidSupplierFeedback.textContent = message || '';
+        customerPaidSupplierFeedback.classList.toggle('is-error', Boolean(isError));
+        customerPaidSupplierFeedback.classList.toggle('is-success', Boolean(message) && !isError);
+    };
+    const renderCustomerPaidSupplierResults = (rows = []) => {
+        if (!(customerPaidSupplierResultsBody instanceof HTMLElement)) {
+            return;
+        }
+
+        if (!Array.isArray(rows) || rows.length === 0) {
+            customerPaidSupplierResultsBody.innerHTML = '<tr><td colspan="8" class="empty-cell">No supplier matched this search.</td></tr>';
+            return;
+        }
+
+        const selectedSupplierId = directSupplierSelectedSupplierId();
+        const visibleRows = customerPaidSupplierCollapseToSelected && selectedSupplierId > 0
+            ? rows.filter((row) => Number(row.supplierId || 0) === selectedSupplierId)
+            : rows;
+
+        customerPaidSupplierResultsBody.innerHTML = visibleRows.map((row, index) => {
+            const isSelected = selectedSupplierId > 0 && Number(row.supplierId || 0) === selectedSupplierId;
+            return `<tr>
+                <td>${escapeHtml(String(row.supplier || 'Supplier'))}</td>
+                <td>${escapeHtml(String(row.bookingReference || ''))}</td>
+                <td>${escapeHtml(String(row.passengerName || ''))}</td>
+                <td>${escapeHtml(String(row.serviceLineReference || row.serviceType || ''))}</td>
+                <td>${escapeHtml(String(row.dueDate || ''))}</td>
+                <td>${escapeHtml(String(row.currency || 'PKR'))}</td>
+                <td>${escapeHtml(formatCurrencyAmount(String(row.currency || 'PKR'), toNumber(row.balance || 0)))}</td>
+                <td><button class="btn btn-sm${isSelected ? ' btn-primary' : ''}" type="button" data-customer-paid-supplier-pick="${escapeHtml(String(rows.indexOf(row)))}">${isSelected ? 'Selected' : 'Select'}</button></td>
+            </tr>`;
+        }).join('');
+    };
+    const autoSelectCustomerPaidSupplierRows = (rows = [], preferredSupplierId = 0) => {
+        if (!Array.isArray(rows) || rows.length === 0) {
+            customerPaidSupplierSelectedResult = null;
+            directSupplierSelectedExternalRows = [];
+            customerPaidSupplierCollapseToSelected = false;
+            return false;
+        }
+
+        let supplierId = Number(preferredSupplierId || 0);
+        if (supplierId <= 0 && customerPaidSupplierSelectedResult && Number(customerPaidSupplierSelectedResult.supplierId || 0) > 0) {
+            supplierId = Number(customerPaidSupplierSelectedResult.supplierId || 0);
+        }
+
+        if (supplierId <= 0) {
+            const uniqueSupplierIds = Array.from(new Set(rows.map((row) => Number(row.supplierId || 0)).filter((id) => id > 0)));
+            if (uniqueSupplierIds.length === 1) {
+                supplierId = uniqueSupplierIds[0];
+            }
+        }
+
+        if (supplierId <= 0) {
+            customerPaidSupplierSelectedResult = null;
+            directSupplierSelectedExternalRows = [];
+            customerPaidSupplierCollapseToSelected = false;
+            return false;
+        }
+
+        const selectedRows = rows.filter((row) => Number(row.supplierId || 0) === supplierId);
+        if (selectedRows.length === 0) {
+            customerPaidSupplierSelectedResult = null;
+            directSupplierSelectedExternalRows = [];
+            customerPaidSupplierCollapseToSelected = false;
+            return false;
+        }
+
+        customerPaidSupplierSelectedResult = selectedRows[0];
+        directSupplierSelectedExternalRows = selectedRows;
+        return true;
+    };
+    const customerPaidSupplierModalBranchId = () => {
+        const branchField = invoiceForm?.elements?.namedItem('branch_id');
+        if (branchField instanceof HTMLSelectElement || branchField instanceof HTMLInputElement) {
+            return Number.parseInt(String(branchField.value || '0'), 10) || 0;
+        }
+
+        return Number.parseInt(String(station.dataset.branchId || currentBookingId() || 0), 10) || 0;
+    };
+    const syncCustomerPaidSupplierModalHeader = () => {
+        if (customerPaidSupplierAmountInput instanceof HTMLInputElement) {
+            const paymentCurrency = String(paymentCurrencySelect?.value || 'PKR').trim().toUpperCase() || 'PKR';
+            customerPaidSupplierAmountInput.value = formatCurrencyAmount(paymentCurrency, Math.max(toNumber(receivedNowInput?.value || 0), 0));
+        }
+        if (customerPaidSupplierCustomerDueInput instanceof HTMLInputElement) {
+            customerPaidSupplierCustomerDueInput.value = currentCustomerDueSummary();
+        }
+    };
+    const loadCustomerPaidSupplierOptions = async (query = '') => {
+        if (!customerPaidSupplierOptionsUrl) {
+            showCustomerPaidSupplierFeedback('Paid Supplier lookup is not configured yet.', true);
+            return;
+        }
+
+        const branchId = customerPaidSupplierModalBranchId();
+        const currency = String(paymentCurrencySelect?.value || '').trim().toUpperCase();
+        if (branchId <= 0) {
+            showCustomerPaidSupplierFeedback('Save or select a valid booking branch first.', true);
+            return;
+        }
+        if (currency === '') {
+            showCustomerPaidSupplierFeedback('Select payment currency first.', true);
+            return;
+        }
+
+        customerPaidSupplierCollapseToSelected = false;
+        showCustomerPaidSupplierFeedback('Loading suppliers...');
+        const url = new URL(customerPaidSupplierOptionsUrl, window.location.origin);
+        url.searchParams.set('branch_id', String(branchId));
+        url.searchParams.set('currency', currency);
+        if (query.trim() !== '') {
+            url.searchParams.set('q', query.trim());
+        }
+
+        try {
+            const response = await fetch(url.toString(), {
+                method: 'GET',
+                credentials: 'same-origin',
+                headers: {
+                    Accept: 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest',
+                },
+            });
+            const payload = await response.json().catch(() => ({ ok: false, message: 'The server returned an invalid Paid Supplier lookup response.' }));
+            if (!response.ok || payload.ok === false) {
+                throw new Error(String(payload.message || 'Supplier payable lookup failed.'));
+            }
+
+            const rows = Array.isArray(payload.results) ? payload.results : [];
+            const normalizedRows = rows.map((row) => normalizeDirectSupplierObligation(row));
+            const selectedChanged = autoSelectCustomerPaidSupplierRows(normalizedRows);
+            renderCustomerPaidSupplierResults(normalizedRows);
+            if (selectedChanged && customerPaidSupplierSelectedResult) {
+                const selectedSupplierName = String(customerPaidSupplierSelectedResult.supplier || 'Supplier');
+                showCustomerPaidSupplierFeedback(`${selectedSupplierName} auto-selected. Matching supplier invoices will be allocated oldest first.`, false);
+            } else {
+                showCustomerPaidSupplierFeedback(String(payload.message || ''), false);
+            }
+
+            customerPaidSupplierResultsBody?.querySelectorAll('[data-customer-paid-supplier-pick]').forEach((button) => {
+                button.addEventListener('click', () => {
+                    const index = Number.parseInt(String(button.getAttribute('data-customer-paid-supplier-pick') || '-1'), 10);
+                    const picked = normalizedRows[index] || null;
+                    const selectedSupplierId = Number(picked?.supplierId || 0);
+                    autoSelectCustomerPaidSupplierRows(normalizedRows, selectedSupplierId);
+                    customerPaidSupplierCollapseToSelected = Boolean(picked && selectedSupplierId > 0);
+                    renderCustomerPaidSupplierResults(normalizedRows);
+                    if (picked && customerPaidSupplierSelectedResult) {
+                        showCustomerPaidSupplierFeedback(`${customerPaidSupplierSelectedResult.supplier || 'Supplier'} selected. ${directSupplierSelectedExternalRows.length} supplier invoice(s) will be allocated automatically.`, false);
+                    }
+                });
+            });
+        } catch (error) {
+            renderCustomerPaidSupplierResults([]);
+            showCustomerPaidSupplierFeedback(error instanceof Error ? error.message : 'Supplier payable lookup failed.', true);
+        }
+    };
+    const closeCustomerPaidSupplierModal = () => {
+        if (!(customerPaidSupplierModal instanceof HTMLElement)) {
+            return;
+        }
+
+        customerPaidSupplierModal.hidden = true;
+        customerPaidSupplierModal.setAttribute('aria-hidden', 'true');
+    };
+    const openCustomerPaidSupplierModal = () => {
+        if (!(customerPaidSupplierModal instanceof HTMLElement) || !isDirectSupplierPaymentMethod(paymentMethodSelect?.value || '')) {
+            return false;
+        }
+
+        syncCustomerPaidSupplierModalHeader();
+        customerPaidSupplierCollapseToSelected = false;
+        customerPaidSupplierSelectedResult = directSupplierSelectedExternalObligation && directSupplierSelectedExternalObligation.id > 0
+            ? directSupplierSelectedExternalObligation
+            : null;
+        directSupplierSelectedExternalRows = customerPaidSupplierSelectedResult ? [customerPaidSupplierSelectedResult] : [];
+        if (customerPaidSupplierReferenceInput instanceof HTMLInputElement) {
+            customerPaidSupplierReferenceInput.value = paymentReferenceInput?.value || '';
+        }
+        if (customerPaidSupplierBankDetailInput instanceof HTMLInputElement) {
+            customerPaidSupplierBankDetailInput.value = paymentBankCardDetailInput?.value || '';
+        }
+        if (customerPaidSupplierChargesInput instanceof HTMLInputElement) {
+            customerPaidSupplierChargesInput.value = paymentChargesAmountInput?.value || '0';
+        }
+        if (customerPaidSupplierRemarksInput instanceof HTMLInputElement) {
+            customerPaidSupplierRemarksInput.value = paymentRemarksInput?.value || '';
+        }
+        customerPaidSupplierModal.hidden = false;
+        customerPaidSupplierModal.setAttribute('aria-hidden', 'false');
+        void loadCustomerPaidSupplierOptions(customerPaidSupplierSearchInput instanceof HTMLInputElement ? customerPaidSupplierSearchInput.value : '');
+        window.setTimeout(() => customerPaidSupplierSearchInput?.focus(), 60);
         return true;
     };
     const supplierTreasuryContext = (form) => {
@@ -2757,12 +3319,54 @@ document.addEventListener('DOMContentLoaded', () => {
     const eligibleSupplierTreasuryAccounts = (form) => {
         const context = supplierTreasuryContext(form);
         const compatibleTypes = paymentTreasuryTypesForMethod(context.method);
+        const supplierCompatibleTypes = context.method === 'cash'
+            ? Array.from(new Set([...compatibleTypes, 'bank']))
+            : compatibleTypes;
 
-        return paymentTreasuryAccounts.filter((account) => {
-            return (context.branchId <= 0 || Number.parseInt(String(account?.branchId || 0), 10) === context.branchId)
-                && compatibleTypes.includes(String(account?.accountType || '').trim())
-                && String(account?.currency || '').trim().toUpperCase() === context.currency;
-        });
+        return paymentTreasuryAccounts.filter((account) => supplierCompatibleTypes.includes(String(account?.accountType || '').trim()));
+    };
+    const supplierExchangeContext = (form) => {
+        const exchangeRow = form?.querySelector('[data-supplier-exchange-row]');
+        const exchangeInput = form?.querySelector('[data-supplier-exchange-input]');
+        const exchangeNote = form?.querySelector('[data-supplier-exchange-note]');
+        const treasurySelect = form?.elements?.namedItem('supplier_treasury_account_id');
+        const paymentCurrency = String(supplierTreasuryContext(form).currency || '').trim().toUpperCase();
+        const selectedAccountId = treasurySelect instanceof HTMLSelectElement
+            ? Number.parseInt(String(treasurySelect.value || '0'), 10) || 0
+            : 0;
+        const selectedAccount = selectedAccountId > 0
+            ? paymentTreasuryAccounts.find((account) => Number.parseInt(String(account?.id || 0), 10) === selectedAccountId) || null
+            : null;
+        const sourceCurrency = String(selectedAccount?.currency || '').trim().toUpperCase();
+        const requiresRate = sourceCurrency !== '' && paymentCurrency !== '' && sourceCurrency !== paymentCurrency;
+
+        return {
+            exchangeRow,
+            exchangeInput,
+            exchangeNote,
+            sourceCurrency,
+            paymentCurrency,
+            requiresRate,
+        };
+    };
+    const syncSupplierExchangeField = (form) => {
+        const context = supplierExchangeContext(form);
+        if (context.exchangeRow instanceof HTMLElement) {
+            context.exchangeRow.hidden = !context.requiresRate;
+        }
+        if (context.exchangeInput instanceof HTMLInputElement) {
+            if (context.requiresRate) {
+                context.exchangeInput.placeholder = `1 ${context.sourceCurrency} = ? ${context.paymentCurrency}`;
+            } else {
+                context.exchangeInput.value = '';
+                context.exchangeInput.placeholder = '1 source = ? payable';
+            }
+        }
+        if (context.exchangeNote instanceof HTMLElement) {
+            context.exchangeNote.textContent = context.requiresRate
+                ? `Enter today's exact rate: 1 ${context.sourceCurrency} = how many ${context.paymentCurrency}.`
+                : 'Enter the exact source-to-payment rate.';
+        }
     };
     const syncSupplierTreasurySelector = (select) => {
         if (!(select instanceof HTMLSelectElement)) {
@@ -2782,7 +3386,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const promptOption = document.createElement('option');
         promptOption.value = '';
         promptOption.textContent = eligibleAccounts.length > 0
-            ? (context.method === 'cash' ? 'Select cash account' : 'Select bank account')
+            ? 'Select source account'
             : 'No eligible source account configured';
         select.appendChild(promptOption);
 
@@ -2790,6 +3394,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const option = document.createElement('option');
             option.value = String(account.id || '');
             option.textContent = buildPaymentTreasuryLabel(account);
+            option.dataset.currency = String(account.currency || '').trim().toUpperCase();
             select.appendChild(option);
         });
 
@@ -2804,6 +3409,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (row instanceof HTMLElement) {
             row.hidden = !requiresTreasury;
         }
+        syncSupplierExchangeField(form);
     };
     const syncSupplierTreasurySelectors = () => {
         supplierTreasurySelects.forEach(syncSupplierTreasurySelector);
@@ -2816,11 +3422,27 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const select = form?.elements?.namedItem('supplier_treasury_account_id');
         if (select instanceof HTMLSelectElement && String(select.value || '').trim() !== '') {
-            return true;
+            const exchangeContext = supplierExchangeContext(form);
+            if (!exchangeContext.requiresRate) {
+                return true;
+            }
+
+            const rateValue = exchangeContext.exchangeInput instanceof HTMLInputElement
+                ? Number.parseFloat(String(exchangeContext.exchangeInput.value || '').trim())
+                : 0;
+            if (Number.isFinite(rateValue) && rateValue > 0) {
+                return true;
+            }
+
+            showFeedback(`Enter a valid exchange rate: 1 ${exchangeContext.sourceCurrency} = ? ${exchangeContext.paymentCurrency}.`);
+            if (exchangeContext.exchangeInput instanceof HTMLInputElement) {
+                exchangeContext.exchangeInput.focus();
+                exchangeContext.exchangeInput.select();
+            }
+            return false;
         }
 
-        const accountLabel = context.method === 'cash' ? 'cash account' : 'bank account';
-        showFeedback(`Select a supplier payment source ${accountLabel} before saving.`);
+        showFeedback('Select a supplier payment source account before saving.');
         if (select instanceof HTMLSelectElement) {
             select.focus();
         }
@@ -2974,7 +3596,13 @@ document.addEventListener('DOMContentLoaded', () => {
         if (Math.max(toNumber(receivedNowInput?.value || 0), 0) <= 0.005) {
             return true;
         }
-        if (!paymentMethodSelect || !isNonCashPaymentMethod(paymentMethodSelect.value)) {
+        if (!paymentMethodSelect) {
+            return true;
+        }
+
+        const requiresPaymentDetails = isNonCashPaymentMethod(paymentMethodSelect.value)
+            || isDirectSupplierPaymentMethod(paymentMethodSelect.value);
+        if (!requiresPaymentDetails) {
             return true;
         }
 
@@ -3606,17 +4234,18 @@ document.addEventListener('DOMContentLoaded', () => {
             ? creditMap
             : parseBalanceMap(paymentCustomerCreditInput.dataset.paymentCustomerCreditMap || '{}');
         const sameCurrencyCredit = Math.max(toNumber(resolvedCreditMap[invoiceCurrency] || 0), 0);
+        const displayCredit = Math.max(Math.round(sameCurrencyCredit), 0);
 
         paymentCustomerCreditInput.dataset.paymentCustomerCredit = String(sameCurrencyCredit);
         paymentCustomerCreditInput.dataset.paymentCustomerCreditMap = JSON.stringify(resolvedCreditMap);
-        paymentCustomerCreditInput.value = formatCurrencyAmount(invoiceCurrency, sameCurrencyCredit);
+        paymentCustomerCreditInput.value = formatCurrencyAmount(invoiceCurrency, displayCredit);
 
         if (paymentCustomerCreditRow) {
-            paymentCustomerCreditRow.hidden = sameCurrencyCredit <= 0.005;
+            paymentCustomerCreditRow.hidden = displayCredit <= 0;
         }
     };
 
-    const roundToTwo = (value) => roundMoneyValue(value);
+    const roundToTwo = (value) => roundMoneyValue(value, 2);
     const roundExchangeRate = (value) => Math.round(toNumber(value || 0) * 100000000) / 100000000;
 
     const preferredSettlementQuote = (targetCurrency, paymentCurrency, ratesMap, effectiveDate) => {
@@ -4179,8 +4808,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
-    const settlementFieldShouldSync = (field, switchedServiceLine) => {
-        if (!(field instanceof HTMLInputElement)) {
+    const settlementControlShouldSync = (field, switchedServiceLine) => {
+        if (!(field instanceof HTMLInputElement) && !(field instanceof HTMLSelectElement) && !(field instanceof HTMLTextAreaElement)) {
             return false;
         }
 
@@ -4215,6 +4844,340 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
+    const bindSettlementControlDraftBehavior = (field) => {
+        if (!(field instanceof HTMLInputElement) && !(field instanceof HTMLSelectElement) && !(field instanceof HTMLTextAreaElement)) {
+            return;
+        }
+        if (field instanceof HTMLInputElement) {
+            bindSettlementFieldDraftBehavior(field);
+            return;
+        }
+        if (field.dataset.settlementFieldBound === '1') {
+            return;
+        }
+
+        field.dataset.settlementFieldBound = '1';
+        const markDirty = () => {
+            field.dataset.settlementDirty = '1';
+        };
+
+        field.addEventListener('input', markDirty);
+        field.addEventListener('change', markDirty);
+    };
+
+    const settlementSupplierCostInBookingCurrency = (serviceLine, invoiceCurrency) => {
+        const normalizedInvoiceCurrency = String(invoiceCurrency || serviceLine?.currency || 'PKR').trim().toUpperCase() || 'PKR';
+        const rawSupplierCost = toNumber(serviceLine?.purchaseCost || serviceLine?.supplierCost || 0);
+        const rawCostCurrency = String(serviceLine?.costCurrency || normalizedInvoiceCurrency).trim().toUpperCase() || normalizedInvoiceCurrency;
+        const rawPricingExchangeRate = Math.max(toNumber(serviceLine?.pricingExchangeRate || 1), 0);
+        if (rawSupplierCost <= 0.005) {
+            return 0;
+        }
+        if (rawCostCurrency === normalizedInvoiceCurrency) {
+            return rawSupplierCost;
+        }
+        if (rawPricingExchangeRate > 0.00000001) {
+            return roundToTwo(rawSupplierCost * rawPricingExchangeRate);
+        }
+        return rawSupplierCost;
+    };
+
+    const setupSettlementCurrencyForm = (form, options = {}) => {
+        if (!(form instanceof HTMLFormElement)) {
+            return null;
+        }
+
+        const currencySelect = form.querySelector('[data-settlement-currency]');
+        const exchangeRateField = form.querySelector('[data-settlement-exchange-rate]');
+        const customerPenaltyField = form.elements.namedItem('customer_penalty_amount');
+        const customerPenaltyCurrencyField = form.elements.namedItem('customer_penalty_currency');
+        const customerPenaltyExchangeRateField = form.elements.namedItem('customer_penalty_exchange_rate');
+        const expectedSupplierRefundField = form.elements.namedItem('expected_supplier_refund_amount');
+        const expectedSupplierRefundCurrencyField = form.elements.namedItem('expected_supplier_refund_currency');
+        const expectedSupplierRefundExchangeRateField = form.elements.namedItem('expected_supplier_refund_exchange_rate');
+        const agencyFeeRefundField = form.elements.namedItem('agency_fee_refund_amount');
+        const supplierPenaltyField = form.elements.namedItem('supplier_penalty_amount');
+        const supplierPenaltyCurrencyField = form.elements.namedItem('supplier_penalty_currency');
+        const supplierPenaltyExchangeRateField = form.elements.namedItem('supplier_penalty_exchange_rate');
+        const customerRefundDueField = form.querySelector('[data-settlement-customer-refund-due]');
+        const moneyLabelNodes = Array.from(form.querySelectorAll('[data-settlement-money-label]'));
+        const chargedLabelNodes = Array.from(form.querySelectorAll('[data-settlement-charged-label]'));
+        const bookingCurrency = String(options.bookingCurrency || currentInvoiceSnapshot().invoiceCurrency || 'PKR').trim().toUpperCase() || 'PKR';
+        const supplierCostAmount = Math.max(toNumber(options.supplierCostAmount || 0), 0);
+        const agencyFeeChargedAmount = Math.max(toNumber(options.agencyFeeChargedAmount || 0), 0);
+        if (!(currencySelect instanceof HTMLSelectElement) || !(exchangeRateField instanceof HTMLInputElement)) {
+            return null;
+        }
+
+        if (!currencySelect.dataset.lastCurrency) {
+            currencySelect.dataset.lastCurrency = bookingCurrency;
+        }
+        const effectiveDateField = form.elements.namedItem('settlement_event_date') || form.elements.namedItem('correction_event_date');
+        const effectiveDate = () => normalizeLooseDate(effectiveDateField?.value || '') || todayIso();
+        const createSettlementMoneyState = (amountField, fieldCurrencySelect, fieldExchangeRateField, fieldKey) => {
+            if (!(amountField instanceof HTMLInputElement) || !(fieldCurrencySelect instanceof HTMLSelectElement) || !(fieldExchangeRateField instanceof HTMLInputElement)) {
+                return null;
+            }
+            const fieldLabels = {
+                customer_penalty: 'Customer Penalty',
+                expected_supplier_refund: 'Expected Supplier Refund',
+                supplier_penalty: 'Supplier Penalty',
+            };
+            if (!fieldCurrencySelect.dataset.lastCurrency) {
+                fieldCurrencySelect.dataset.lastCurrency = String(fieldCurrencySelect.value || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+            }
+            const selectedCurrencyForField = () => String(fieldCurrencySelect.value || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+            const rateToBookingForField = () => {
+                const selected = selectedCurrencyForField();
+                if (selected === bookingCurrency) {
+                    return 1;
+                }
+                return Math.max(toNumber(fieldExchangeRateField.value || 0), 0);
+            };
+            const bookingToSelectedForField = (amountInBooking) => {
+                const rate = rateToBookingForField();
+                if (selectedCurrencyForField() === bookingCurrency || rate <= 0.00000001) {
+                    return roundToTwo(amountInBooking);
+                }
+                return roundToTwo(amountInBooking / rate);
+            };
+            const selectedToBookingForField = (amountInSelected) => {
+                const rate = rateToBookingForField();
+                if (selectedCurrencyForField() === bookingCurrency || rate <= 0.00000001) {
+                    return roundToTwo(amountInSelected);
+                }
+                return roundToTwo(amountInSelected * rate);
+            };
+            const convertDisplayedValue = async (dialogTitle, dialogSubtitle) => {
+                const previousCurrency = String(fieldCurrencySelect.dataset.lastCurrency || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+                const nextCurrency = selectedCurrencyForField();
+                if (nextCurrency === previousCurrency) {
+                    return true;
+                }
+                const liveAmount = Math.max(toNumber(amountField.value || 0), 0);
+                const previousRateToBooking = previousCurrency === bookingCurrency
+                    ? 1
+                    : Math.max(toNumber(fieldExchangeRateField.value || 0), 0);
+                const currencyDecision = await requestFinancialCurrencyDecision(
+                    'cost',
+                    previousCurrency,
+                    nextCurrency,
+                    liveAmount,
+                    {
+                        effectiveDate: effectiveDate(),
+                        label: fieldLabels[fieldKey] || fieldKey.replace(/_/g, ' '),
+                    }
+                );
+                if (!currencyDecision) {
+                    fieldCurrencySelect.value = previousCurrency;
+                    return false;
+                }
+                if (currencyDecision.action === 'convert') {
+                    amountField.value = formatNumberInputValue(currencyDecision.convertedAmount);
+                } else if (currencyDecision.action === 'keep') {
+                    amountField.value = formatNumberInputValue(liveAmount);
+                }
+                amountField.dataset.settlementDirty = '1';
+                const derivedRateToBooking = nextCurrency === bookingCurrency
+                    ? 1
+                    : (
+                        previousRateToBooking > 0.00000001 && currencyDecision.conversionRate > 0.00000001
+                            ? roundExchangeRate(previousRateToBooking / currencyDecision.conversionRate)
+                            : roundExchangeRate(resolvePricingExchangeRateFromMap(nextCurrency, bookingCurrency, effectiveDate()) || 0)
+                    );
+                fieldExchangeRateField.value = String(derivedRateToBooking);
+                if (nextCurrency !== bookingCurrency && derivedRateToBooking <= 0.00000001) {
+                    fieldCurrencySelect.value = previousCurrency;
+                    return false;
+                }
+                fieldCurrencySelect.dataset.lastCurrency = nextCurrency;
+                if (typeof dialogTitle === 'string' && typeof dialogSubtitle === 'string') {
+                    void dialogTitle;
+                    void dialogSubtitle;
+                }
+                return true;
+            };
+            return {
+                amountField,
+                currencySelect: fieldCurrencySelect,
+                exchangeRateField: fieldExchangeRateField,
+                selectedCurrency: selectedCurrencyForField,
+                rateToBooking: rateToBookingForField,
+                bookingToSelected: bookingToSelectedForField,
+                selectedToBooking: selectedToBookingForField,
+                convertDisplayedValue,
+            };
+        };
+        const selectedCurrency = () => String(currencySelect.value || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+        const rateToBooking = () => {
+            const selected = selectedCurrency();
+            if (selected === bookingCurrency) {
+                return 1;
+            }
+            return Math.max(toNumber(exchangeRateField.value || 0), 0);
+        };
+        const bookingToSelected = (amountInBooking) => {
+            const rate = rateToBooking();
+            if (selectedCurrency() === bookingCurrency || rate <= 0.00000001) {
+                return roundToTwo(amountInBooking);
+            }
+            return roundToTwo(amountInBooking / rate);
+        };
+        const selectedToBooking = (amountInSelected) => {
+            const rate = rateToBooking();
+            if (selectedCurrency() === bookingCurrency || rate <= 0.00000001) {
+                return roundToTwo(amountInSelected);
+            }
+            return roundToTwo(amountInSelected * rate);
+        };
+        const customerPenaltyCurrencyState = createSettlementMoneyState(
+            customerPenaltyField,
+            customerPenaltyCurrencyField,
+            customerPenaltyExchangeRateField,
+            'customer_penalty'
+        );
+        const expectedSupplierRefundCurrencyState = createSettlementMoneyState(
+            expectedSupplierRefundField,
+            expectedSupplierRefundCurrencyField,
+            expectedSupplierRefundExchangeRateField,
+            'expected_supplier_refund'
+        );
+        const supplierPenaltyCurrencyState = createSettlementMoneyState(
+            supplierPenaltyField,
+            supplierPenaltyCurrencyField,
+            supplierPenaltyExchangeRateField,
+            'supplier_penalty'
+        );
+        const applySettlementDisplayCurrency = (nextCurrency, nextRateToBooking = 1) => {
+            const normalizedCurrency = String(nextCurrency || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+            const normalizedRate = Math.max(toNumber(nextRateToBooking || 0), 0);
+            currencySelect.value = normalizedCurrency;
+            exchangeRateField.value = normalizedCurrency === bookingCurrency
+                ? '1'
+                : String(roundExchangeRate(normalizedRate > 0.00000001 ? normalizedRate : (resolvePricingExchangeRateFromMap(bookingCurrency, normalizedCurrency, effectiveDate()) || 0)));
+            currencySelect.dataset.lastCurrency = normalizedCurrency;
+            relabel();
+        };
+        const syncSupplierPenaltyToExpectedRefundCurrency = () => {
+            if (!expectedSupplierRefundCurrencyState || !supplierPenaltyCurrencyState) {
+                return;
+            }
+            const syncedCurrency = expectedSupplierRefundCurrencyState.selectedCurrency();
+            supplierPenaltyCurrencyState.currencySelect.value = syncedCurrency;
+            supplierPenaltyCurrencyState.currencySelect.dataset.lastCurrency = syncedCurrency;
+            supplierPenaltyCurrencyState.exchangeRateField.value = syncedCurrency === bookingCurrency
+                ? '1'
+                : String(roundExchangeRate(expectedSupplierRefundCurrencyState.rateToBooking()));
+        };
+        const relabel = () => {
+            const curr = selectedCurrency();
+            const labelMap = {
+                customer_penalty: 'Customer Penalty',
+                expected_supplier_refund: 'Expected Supplier Refund',
+                agency_fee_refund: 'Service Amount',
+                customer_refund_due: 'Customer Refund Due',
+                supplier_penalty: 'Supplier Penalty',
+            };
+            moneyLabelNodes.forEach((node) => {
+                const key = String(node.dataset.settlementMoneyLabel || '');
+                if (key === 'agency_fee_refund') {
+                    node.textContent = `${labelMap[key]} (${bookingCurrency} ${formatMoney(agencyFeeChargedAmount)})`;
+                } else if (key === 'supplier_penalty') {
+                    const supplierPenaltyCurrency = supplierPenaltyCurrencyState
+                        ? supplierPenaltyCurrencyState.selectedCurrency()
+                        : curr;
+                    node.textContent = `Supplier Penalty (${supplierPenaltyCurrency})`;
+                } else if (key === 'customer_refund_due') {
+                    node.textContent = `${labelMap[key]} (${curr})`;
+                } else if (labelMap[key]) {
+                    node.textContent = labelMap[key];
+                }
+            });
+            chargedLabelNodes.forEach((node) => {
+                node.textContent = `Charged: ${bookingCurrency} ${formatMoney(agencyFeeChargedAmount)}`;
+            });
+        };
+        const convertDisplayedValues = async (nextCurrency) => {
+            const previousCurrency = String(currencySelect.dataset.lastCurrency || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+            if (nextCurrency === previousCurrency) {
+                return true;
+            }
+            const amountFields = [agencyFeeRefundField]
+                .filter((field) => field instanceof HTMLInputElement);
+            const liveAmounts = amountFields.map((field) => ({
+                field,
+                label: field.name,
+                amount: Math.max(toNumber(field.value || 0), 0),
+            }));
+            const signature = `settlement-currency:${previousCurrency}->${nextCurrency}:${effectiveDate()}:${liveAmounts.map((entry) => `${entry.label}:${entry.amount}`).join('|')}`;
+            const requirement = {
+                key: `settlement-${previousCurrency}-${nextCurrency}`,
+                sourceCurrency: previousCurrency,
+                invoiceCurrency: nextCurrency,
+                promptFromCurrency: pricingPromptPair(previousCurrency, nextCurrency).from,
+                promptToCurrency: pricingPromptPair(previousCurrency, nextCurrency).to,
+                effectiveDate: effectiveDate(),
+                previewLabel: `Settlement value in ${nextCurrency}`,
+                components: liveAmounts.length > 0
+                    ? liveAmounts.map((entry) => ({
+                        label: entry.label,
+                        sourceCurrency: previousCurrency,
+                        amount: entry.amount,
+                        rateField: null,
+                        dateField: null,
+                        applyConvertedAmount: (sourceToTargetRate) => {
+                            entry.field.value = formatNumberInputValue(roundToTwo(entry.amount * sourceToTargetRate));
+                        },
+                    }))
+                    : [{
+                        label: 'Refund settlement',
+                        sourceCurrency: previousCurrency,
+                        amount: 1,
+                        rateField: null,
+                        dateField: null,
+                    }],
+            };
+            const confirmed = previousCurrency === bookingCurrency && nextCurrency === bookingCurrency
+                ? true
+                : await openPricingExchangeModal([requirement], signature, {
+                    title: 'Confirm Refund Currency',
+                    subtitle: `These refund settlement values will be entered in ${nextCurrency}. Confirm the exchange rate so booking-currency truth stays correct.`,
+                    currencyLabel: 'Refund Currency',
+                });
+            if (!confirmed) {
+                currencySelect.value = previousCurrency;
+                return false;
+            }
+            const resolvedRate = resolvePricingExchangeRateFromMap(nextCurrency, bookingCurrency, effectiveDate());
+            exchangeRateField.value = nextCurrency === bookingCurrency ? '1' : String(roundExchangeRate(resolvedRate || 0));
+            currencySelect.dataset.lastCurrency = nextCurrency;
+            relabel();
+            return true;
+        };
+        return {
+            currencySelect,
+            exchangeRateField,
+            customerPenaltyField,
+            expectedSupplierRefundField,
+            agencyFeeRefundField,
+            supplierPenaltyField,
+            customerRefundDueField,
+            customerPenaltyCurrencyState,
+            expectedSupplierRefundCurrencyState,
+            supplierPenaltyCurrencyState,
+            selectedCurrency,
+            bookingToSelected,
+            selectedToBooking,
+            relabel,
+            convertDisplayedValues,
+            applySettlementDisplayCurrency,
+            syncSupplierPenaltyToExpectedRefundCurrency,
+            bookingCurrency,
+            supplierCostAmount,
+            agencyFeeChargedAmount,
+        };
+    };
+
     const syncSettlementFormFromServiceLine = (serviceLine) => {
         if (!(serviceEventBars.settlement instanceof HTMLFormElement)) {
             return;
@@ -4238,79 +5201,235 @@ document.addEventListener('DOMContentLoaded', () => {
         const switchedServiceLine = serviceLineKey !== previousServiceLineKey;
         serviceEventBars.settlement.dataset.settlementServiceKey = serviceLineKey;
 
+        const invoiceCurrency = String(serviceLine?.currency || currentInvoiceSnapshot().invoiceCurrency || 'PKR').toUpperCase();
+        const supplierBaseCurrency = String(
+            serviceLine?.supplierTruthCurrency
+            || serviceLine?.costCurrency
+            || invoiceCurrency
+        ).toUpperCase();
         const customerPenaltyAmount = toNumber(serviceLine?.latestCancelCustomerPenaltyAmount || 0);
         const supplierPenaltyAmount = toNumber(serviceLine?.latestCancelSupplierPenaltyAmount || 0);
-        const supplierCostAmount = toNumber(serviceLine?.purchaseCost || serviceLine?.supplierCost || 0);
+        const supplierCostAmount = settlementSupplierCostInBookingCurrency(serviceLine, invoiceCurrency);
         const agencyFeeChargedAmount = Math.max(toNumber(serviceLine?.serviceCharge || 0), 0);
         const agencyFeeRefundAmount = Math.min(Math.max(toNumber(serviceLine?.latestCancelAgencyFeeRefundAmount || 0), 0), agencyFeeChargedAmount);
+        const currentCustomerReceivedAmount = Math.max(toNumber(serviceLine?.currentCustomerReceivedAmount || 0), 0);
         const expectedSupplierRefundAmount = toNumber(
             serviceLine?.latestCancelExpectedSupplierRefundAmount
             || Math.max(supplierCostAmount - supplierPenaltyAmount, 0)
         );
+        const customerPenaltyCurrency = String(serviceLine?.latestCancelCustomerPenaltyCurrency || invoiceCurrency).toUpperCase();
+        const customerPenaltySourceAmount = toNumber(serviceLine?.latestCancelCustomerPenaltySourceAmount || 0);
+        const customerPenaltyExchangeRate = Math.max(toNumber(serviceLine?.latestCancelCustomerPenaltyExchangeRate || 1), 0.00000001);
+        const expectedSupplierRefundCurrency = String(serviceLine?.latestCancelExpectedSupplierRefundCurrency || supplierBaseCurrency).toUpperCase();
+        const expectedSupplierRefundSourceAmount = toNumber(serviceLine?.latestCancelExpectedSupplierRefundSourceAmount || 0);
+        const expectedSupplierRefundExchangeRate = Math.max(toNumber(serviceLine?.latestCancelExpectedSupplierRefundExchangeRate || 1), 0.00000001);
+        const supplierPenaltyCurrency = String(serviceLine?.latestCancelSupplierPenaltyCurrency || supplierBaseCurrency).toUpperCase();
+        const supplierPenaltySourceAmount = toNumber(serviceLine?.latestCancelSupplierPenaltySourceAmount || 0);
+        const supplierPenaltyExchangeRate = Math.max(toNumber(serviceLine?.latestCancelSupplierPenaltyExchangeRate || 1), 0.00000001);
+        const supplierSourceCostAmount = supplierBaseCurrency === String(serviceLine?.costCurrency || supplierBaseCurrency).toUpperCase()
+            ? Math.max(toNumber(serviceLine?.purchaseCost || serviceLine?.supplierCost || 0), 0)
+            : 0;
+        const supplierSourceTruthCurrency = expectedSupplierRefundCurrency === supplierPenaltyCurrency
+            ? expectedSupplierRefundCurrency
+            : '';
+        const supplierSourceTruthTotal = supplierSourceTruthCurrency !== ''
+            ? Math.max(
+                expectedSupplierRefundSourceAmount + supplierPenaltySourceAmount,
+                supplierSourceCostAmount,
+                0
+            )
+            : 0;
         const customerRefundCredit = toNumber(serviceLine?.latestCancelReleasedCustomerCreditAmount || 0);
         const supplierRefundCredit = toNumber(serviceLine?.latestCancelReleasedSupplierCreditAmount || 0);
-        const invoiceCurrency = String(serviceLine?.currency || currentInvoiceSnapshot().invoiceCurrency || 'PKR').toUpperCase();
+        const settlementCurrencyState = setupSettlementCurrencyForm(serviceEventBars.settlement, {
+            bookingCurrency: invoiceCurrency,
+            supplierCostAmount,
+            agencyFeeChargedAmount,
+        });
+        if (settlementCurrencyState) {
+            bindSettlementControlDraftBehavior(settlementCurrencyState.currencySelect);
+            bindSettlementControlDraftBehavior(settlementCurrencyState.exchangeRateField);
+            if (settlementControlShouldSync(settlementCurrencyState.currencySelect, switchedServiceLine)) {
+                settlementCurrencyState.currencySelect.value = invoiceCurrency;
+                settlementCurrencyState.currencySelect.dataset.lastCurrency = invoiceCurrency;
+            }
+            if (settlementControlShouldSync(settlementCurrencyState.exchangeRateField, switchedServiceLine)) {
+                settlementCurrencyState.exchangeRateField.value = '1';
+            }
+            if (settlementCurrencyState.customerPenaltyCurrencyState) {
+                bindSettlementControlDraftBehavior(settlementCurrencyState.customerPenaltyCurrencyState.currencySelect);
+                bindSettlementControlDraftBehavior(settlementCurrencyState.customerPenaltyCurrencyState.exchangeRateField);
+                if (settlementControlShouldSync(settlementCurrencyState.customerPenaltyCurrencyState.currencySelect, switchedServiceLine)) {
+                    settlementCurrencyState.customerPenaltyCurrencyState.currencySelect.value = customerPenaltyCurrency;
+                    settlementCurrencyState.customerPenaltyCurrencyState.currencySelect.dataset.lastCurrency = customerPenaltyCurrency;
+                }
+                if (settlementControlShouldSync(settlementCurrencyState.customerPenaltyCurrencyState.exchangeRateField, switchedServiceLine)) {
+                    settlementCurrencyState.customerPenaltyCurrencyState.exchangeRateField.value = customerPenaltyCurrency === invoiceCurrency ? '1' : String(roundExchangeRate(customerPenaltyExchangeRate));
+                }
+            }
+            if (settlementCurrencyState.expectedSupplierRefundCurrencyState) {
+                bindSettlementControlDraftBehavior(settlementCurrencyState.expectedSupplierRefundCurrencyState.currencySelect);
+                bindSettlementControlDraftBehavior(settlementCurrencyState.expectedSupplierRefundCurrencyState.exchangeRateField);
+                if (settlementControlShouldSync(settlementCurrencyState.expectedSupplierRefundCurrencyState.currencySelect, switchedServiceLine)) {
+                    settlementCurrencyState.expectedSupplierRefundCurrencyState.currencySelect.value = expectedSupplierRefundCurrency;
+                    settlementCurrencyState.expectedSupplierRefundCurrencyState.currencySelect.dataset.lastCurrency = expectedSupplierRefundCurrency;
+                }
+                if (settlementControlShouldSync(settlementCurrencyState.expectedSupplierRefundCurrencyState.exchangeRateField, switchedServiceLine)) {
+                    settlementCurrencyState.expectedSupplierRefundCurrencyState.exchangeRateField.value = expectedSupplierRefundCurrency === invoiceCurrency ? '1' : String(roundExchangeRate(expectedSupplierRefundExchangeRate));
+                }
+            }
+            if (settlementCurrencyState.supplierPenaltyCurrencyState) {
+                bindSettlementControlDraftBehavior(settlementCurrencyState.supplierPenaltyCurrencyState.currencySelect);
+                bindSettlementControlDraftBehavior(settlementCurrencyState.supplierPenaltyCurrencyState.exchangeRateField);
+                if (settlementControlShouldSync(settlementCurrencyState.supplierPenaltyCurrencyState.currencySelect, switchedServiceLine)) {
+                    settlementCurrencyState.supplierPenaltyCurrencyState.currencySelect.value = supplierPenaltyCurrency;
+                    settlementCurrencyState.supplierPenaltyCurrencyState.currencySelect.dataset.lastCurrency = supplierPenaltyCurrency;
+                }
+                if (settlementControlShouldSync(settlementCurrencyState.supplierPenaltyCurrencyState.exchangeRateField, switchedServiceLine)) {
+                    settlementCurrencyState.supplierPenaltyCurrencyState.exchangeRateField.value = supplierPenaltyCurrency === invoiceCurrency ? '1' : String(roundExchangeRate(supplierPenaltyExchangeRate));
+                }
+            }
+            settlementCurrencyState.syncSupplierPenaltyToExpectedRefundCurrency();
+            if (expectedSupplierRefundCurrency !== invoiceCurrency) {
+                settlementCurrencyState.applySettlementDisplayCurrency(
+                    expectedSupplierRefundCurrency,
+                    roundExchangeRate(Math.max(settlementCurrencyState.expectedSupplierRefundCurrencyState?.rateToBooking() || expectedSupplierRefundExchangeRate || 0, 0.00000001))
+                );
+            } else if (customerPenaltyCurrency !== invoiceCurrency) {
+                settlementCurrencyState.applySettlementDisplayCurrency(
+                    customerPenaltyCurrency,
+                    roundExchangeRate(Math.max(settlementCurrencyState.customerPenaltyCurrencyState?.rateToBooking() || customerPenaltyExchangeRate || 0, 0.00000001))
+                );
+            }
+        }
 
         if (customerPenaltyField instanceof HTMLInputElement) {
             bindSettlementFieldDraftBehavior(customerPenaltyField, { selectZeroOnFocus: true });
-            if (settlementFieldShouldSync(customerPenaltyField, switchedServiceLine)) {
-                customerPenaltyField.value = formatNumberInputValue(customerPenaltyAmount);
+            if (settlementControlShouldSync(customerPenaltyField, switchedServiceLine)) {
+                const useSavedSourceAmount = customerPenaltyCurrency !== invoiceCurrency || customerPenaltySourceAmount > 0.005;
+                customerPenaltyField.value = formatNumberInputValue(
+                    useSavedSourceAmount
+                        ? customerPenaltySourceAmount
+                        : (settlementCurrencyState?.customerPenaltyCurrencyState
+                            ? settlementCurrencyState.customerPenaltyCurrencyState.bookingToSelected(customerPenaltyAmount)
+                            : customerPenaltyAmount)
+                );
             }
         }
         if (expectedSupplierRefundField instanceof HTMLInputElement) {
             bindSettlementFieldDraftBehavior(expectedSupplierRefundField, { selectZeroOnFocus: true });
-            if (settlementFieldShouldSync(expectedSupplierRefundField, switchedServiceLine)) {
-                expectedSupplierRefundField.value = formatNumberInputValue(expectedSupplierRefundAmount);
+            if (settlementControlShouldSync(expectedSupplierRefundField, switchedServiceLine)) {
+                const useSavedSourceAmount = expectedSupplierRefundCurrency !== invoiceCurrency || expectedSupplierRefundSourceAmount > 0.005;
+                expectedSupplierRefundField.value = formatNumberInputValue(
+                    useSavedSourceAmount
+                        ? expectedSupplierRefundSourceAmount
+                        : (settlementCurrencyState?.expectedSupplierRefundCurrencyState
+                            ? settlementCurrencyState.expectedSupplierRefundCurrencyState.bookingToSelected(expectedSupplierRefundAmount)
+                            : expectedSupplierRefundAmount)
+                );
             }
         }
         if (agencyFeeRefundField instanceof HTMLInputElement) {
             bindSettlementFieldDraftBehavior(agencyFeeRefundField, { selectZeroOnFocus: true });
-            agencyFeeRefundField.max = formatNumberInputValue(agencyFeeChargedAmount);
-            if (settlementFieldShouldSync(agencyFeeRefundField, switchedServiceLine)) {
-                agencyFeeRefundField.value = formatNumberInputValue(agencyFeeRefundAmount);
+            agencyFeeRefundField.max = formatNumberInputValue(settlementCurrencyState ? settlementCurrencyState.bookingToSelected(agencyFeeChargedAmount) : agencyFeeChargedAmount);
+            if (settlementControlShouldSync(agencyFeeRefundField, switchedServiceLine)) {
+                agencyFeeRefundField.value = formatNumberInputValue(settlementCurrencyState ? settlementCurrencyState.bookingToSelected(agencyFeeRefundAmount) : agencyFeeRefundAmount);
             }
         }
         if (supplierPenaltyField instanceof HTMLInputElement) {
             bindSettlementFieldDraftBehavior(supplierPenaltyField);
-            if (settlementFieldShouldSync(supplierPenaltyField, switchedServiceLine)) {
-                supplierPenaltyField.value = formatNumberInputValue(Math.max(supplierCostAmount - expectedSupplierRefundAmount, 0));
+            if (settlementControlShouldSync(supplierPenaltyField, switchedServiceLine)) {
+                const derivedSupplierPenalty = Math.max(supplierCostAmount - expectedSupplierRefundAmount, 0);
+                const useSavedSourceAmount = supplierPenaltyCurrency !== invoiceCurrency || supplierPenaltySourceAmount > 0.005;
+                supplierPenaltyField.value = formatNumberInputValue(
+                    useSavedSourceAmount
+                        ? supplierPenaltySourceAmount
+                        : (settlementCurrencyState?.supplierPenaltyCurrencyState
+                            ? settlementCurrencyState.supplierPenaltyCurrencyState.bookingToSelected(derivedSupplierPenalty)
+                            : derivedSupplierPenalty)
+                );
             }
         }
         if (settlementReasonField instanceof HTMLInputElement) {
             bindSettlementFieldDraftBehavior(settlementReasonField);
-            if (settlementFieldShouldSync(settlementReasonField, switchedServiceLine)) {
+            if (settlementControlShouldSync(settlementReasonField, switchedServiceLine)) {
                 settlementReasonField.value = String(serviceLine?.latestCancelReason || '');
             }
         }
         if (settlementDateField instanceof HTMLInputElement) {
             bindSettlementFieldDraftBehavior(settlementDateField);
-            if (settlementFieldShouldSync(settlementDateField, switchedServiceLine)) {
+            if (settlementControlShouldSync(settlementDateField, switchedServiceLine)) {
                 settlementDateField.value = String(serviceLine?.latestCancelEventDate || '') || settlementDateField.value || todayIso();
             }
         }
         const syncSettlementDerivedAmounts = () => {
-            const liveCustomerPenaltyAmount = toNumber(customerPenaltyField?.value || 0);
+            const liveCustomerPenaltyAmount = settlementCurrencyState?.customerPenaltyCurrencyState
+                ? settlementCurrencyState.customerPenaltyCurrencyState.selectedToBooking(toNumber(customerPenaltyField?.value || 0))
+                : toNumber(customerPenaltyField?.value || 0);
             const liveExpectedSupplierRefundAmount = Math.min(
-                Math.max(toNumber(expectedSupplierRefundField?.value || 0), 0),
+                Math.max(settlementCurrencyState?.expectedSupplierRefundCurrencyState
+                    ? settlementCurrencyState.expectedSupplierRefundCurrencyState.selectedToBooking(toNumber(expectedSupplierRefundField?.value || 0))
+                    : toNumber(expectedSupplierRefundField?.value || 0), 0),
                 Math.max(supplierCostAmount, 0)
             );
             const liveSupplierPenaltyAmount = Math.max(supplierCostAmount - liveExpectedSupplierRefundAmount, 0);
             const liveAgencyFeeRefundAmount = Math.min(
-                Math.max(toNumber(agencyFeeRefundField?.value || 0), 0),
+                Math.max(settlementCurrencyState
+                    ? settlementCurrencyState.selectedToBooking(toNumber(agencyFeeRefundField?.value || 0))
+                    : toNumber(agencyFeeRefundField?.value || 0), 0),
                 agencyFeeChargedAmount
             );
-            const liveCustomerRefundDue = Math.max(
-                liveExpectedSupplierRefundAmount - liveCustomerPenaltyAmount + liveAgencyFeeRefundAmount,
+            const liveRetainedAgencyFeeAmount = Math.max(agencyFeeChargedAmount - liveAgencyFeeRefundAmount, 0);
+            const liveCustomerFinalChargeAmount = Math.max(
+                liveCustomerPenaltyAmount + liveSupplierPenaltyAmount + liveRetainedAgencyFeeAmount,
                 0
             );
+            const liveCustomerRefundDueBooking = Math.max(currentCustomerReceivedAmount - liveCustomerFinalChargeAmount, 0);
+            const customerPenaltySelectedCurrency = settlementCurrencyState?.customerPenaltyCurrencyState
+                ? settlementCurrencyState.customerPenaltyCurrencyState.selectedCurrency()
+                : customerPenaltyCurrency;
+            const supplierPenaltySelectedCurrency = settlementCurrencyState?.supplierPenaltyCurrencyState
+                ? settlementCurrencyState.supplierPenaltyCurrencyState.selectedCurrency()
+                : supplierPenaltyCurrency;
+            const expectedRefundSelectedCurrency = settlementCurrencyState?.expectedSupplierRefundCurrencyState
+                ? settlementCurrencyState.expectedSupplierRefundCurrencyState.selectedCurrency()
+                : expectedSupplierRefundCurrency;
+            const settlementDisplayCurrency = settlementCurrencyState
+                ? settlementCurrencyState.selectedCurrency()
+                : invoiceCurrency;
+            const liveCustomerPenaltySourceAmount = Math.max(toNumber(customerPenaltyField?.value || 0), 0);
+            const liveExpectedSupplierRefundSourceAmount = Math.max(toNumber(expectedSupplierRefundField?.value || 0), 0);
+            const directCustomerSourceDerivationAllowed = customerPenaltySelectedCurrency !== ''
+                && customerPenaltySelectedCurrency === expectedRefundSelectedCurrency;
+            const directSupplierSourceDerivationAllowed = supplierSourceTruthCurrency !== ''
+                && supplierPenaltySelectedCurrency === expectedRefundSelectedCurrency
+                && expectedRefundSelectedCurrency === supplierSourceTruthCurrency;
+            if (directCustomerSourceDerivationAllowed && settlementCurrencyState && settlementDisplayCurrency !== expectedRefundSelectedCurrency) {
+                const matchingDisplayRate = Math.max(
+                    settlementCurrencyState.expectedSupplierRefundCurrencyState?.rateToBooking()
+                    || settlementCurrencyState.customerPenaltyCurrencyState?.rateToBooking()
+                    || 1,
+                    0.00000001
+                );
+                settlementCurrencyState.applySettlementDisplayCurrency(expectedRefundSelectedCurrency, roundExchangeRate(matchingDisplayRate));
+            }
             if (agencyFeeRefundField instanceof HTMLInputElement) {
-                agencyFeeRefundField.value = formatNumberInputValue(liveAgencyFeeRefundAmount);
+                agencyFeeRefundField.max = formatNumberInputValue(settlementCurrencyState ? settlementCurrencyState.bookingToSelected(agencyFeeChargedAmount) : agencyFeeChargedAmount);
             }
             if (customerRefundDueField instanceof HTMLInputElement) {
-                customerRefundDueField.value = formatNumberInputValue(liveCustomerRefundDue);
+                const displayedRefundDue = settlementCurrencyState
+                    ? settlementCurrencyState.bookingToSelected(liveCustomerRefundDueBooking)
+                    : liveCustomerRefundDueBooking;
+                customerRefundDueField.value = formatNumberInputValue(Math.round(displayedRefundDue), 0);
             }
             if (supplierPenaltyField instanceof HTMLInputElement) {
-                supplierPenaltyField.value = formatNumberInputValue(liveSupplierPenaltyAmount);
+                supplierPenaltyField.value = formatNumberInputValue(
+                    directSupplierSourceDerivationAllowed
+                        ? Math.max(Math.round(supplierSourceTruthTotal - liveExpectedSupplierRefundSourceAmount), 0)
+                        : (settlementCurrencyState?.supplierPenaltyCurrencyState
+                            ? settlementCurrencyState.supplierPenaltyCurrencyState.bookingToSelected(liveSupplierPenaltyAmount)
+                            : liveSupplierPenaltyAmount)
+                );
             }
             if (!(settlementSummaryNote instanceof HTMLElement)) {
                 return;
@@ -4323,10 +5442,10 @@ document.addEventListener('DOMContentLoaded', () => {
             settlementSummaryNote.hidden = !hasSummary;
             if (hasSummary) {
                 settlementSummaryNote.textContent = [
-                    `Customer penalty: ${formatCurrencyAmount(invoiceCurrency, liveCustomerPenaltyAmount)}.`,
-                    `Expected supplier refund: ${formatCurrencyAmount(invoiceCurrency, liveExpectedSupplierRefundAmount)}.`,
-                    `Agency fee refunded: ${formatCurrencyAmount(invoiceCurrency, liveAgencyFeeRefundAmount)}.`,
-                    `Supplier penalty: ${formatCurrencyAmount(invoiceCurrency, liveSupplierPenaltyAmount)}.`,
+                    `Customer penalty: ${formatCurrencyAmount(settlementCurrencyState?.customerPenaltyCurrencyState ? settlementCurrencyState.customerPenaltyCurrencyState.selectedCurrency() : invoiceCurrency, settlementCurrencyState?.customerPenaltyCurrencyState ? settlementCurrencyState.customerPenaltyCurrencyState.bookingToSelected(liveCustomerPenaltyAmount) : liveCustomerPenaltyAmount)}.`,
+                    `Expected supplier refund: ${formatCurrencyAmount(settlementCurrencyState?.expectedSupplierRefundCurrencyState ? settlementCurrencyState.expectedSupplierRefundCurrencyState.selectedCurrency() : invoiceCurrency, settlementCurrencyState?.expectedSupplierRefundCurrencyState ? settlementCurrencyState.expectedSupplierRefundCurrencyState.bookingToSelected(liveExpectedSupplierRefundAmount) : liveExpectedSupplierRefundAmount)}.`,
+                    `Agency fee refunded: ${formatCurrencyAmount(settlementCurrencyState ? settlementCurrencyState.selectedCurrency() : invoiceCurrency, settlementCurrencyState ? settlementCurrencyState.bookingToSelected(liveAgencyFeeRefundAmount) : liveAgencyFeeRefundAmount)}.`,
+                    `Supplier penalty: ${formatCurrencyAmount(settlementCurrencyState?.supplierPenaltyCurrencyState ? settlementCurrencyState.supplierPenaltyCurrencyState.selectedCurrency() : invoiceCurrency, settlementCurrencyState?.supplierPenaltyCurrencyState ? settlementCurrencyState.supplierPenaltyCurrencyState.bookingToSelected(liveSupplierPenaltyAmount) : liveSupplierPenaltyAmount)}.`,
                     `Customer refund credit released: ${formatCurrencyAmount(invoiceCurrency, customerRefundCredit)}.`,
                     `Supplier refundable credit released: ${formatCurrencyAmount(invoiceCurrency, supplierRefundCredit)}.`,
                 ].join(' ');
@@ -4337,6 +5456,46 @@ document.addEventListener('DOMContentLoaded', () => {
         customerPenaltyField?.addEventListener('input', syncSettlementDerivedAmounts);
         expectedSupplierRefundField?.addEventListener('input', syncSettlementDerivedAmounts);
         agencyFeeRefundField?.addEventListener('input', syncSettlementDerivedAmounts);
+        settlementCurrencyState?.customerPenaltyCurrencyState?.currencySelect.addEventListener('change', () => {
+            void settlementCurrencyState.customerPenaltyCurrencyState.convertDisplayedValue(
+                'Confirm Customer Penalty Currency',
+                `This customer penalty will be entered in ${settlementCurrencyState.customerPenaltyCurrencyState.selectedCurrency()}. Confirm the exact rate so booking-currency truth stays correct.`
+            ).then((changed) => {
+                if (changed) {
+                    settlementCurrencyState.applySettlementDisplayCurrency(
+                        settlementCurrencyState.customerPenaltyCurrencyState.selectedCurrency(),
+                        roundExchangeRate(Math.max(settlementCurrencyState.customerPenaltyCurrencyState.rateToBooking(), 0.00000001))
+                    );
+                    settlementCurrencyState.relabel();
+                    syncSettlementDerivedAmounts();
+                }
+            });
+        });
+        settlementCurrencyState?.expectedSupplierRefundCurrencyState?.currencySelect.addEventListener('change', () => {
+            void settlementCurrencyState.expectedSupplierRefundCurrencyState.convertDisplayedValue(
+                'Confirm Expected Supplier Refund Currency',
+                `This supplier refund value will be entered in ${settlementCurrencyState.expectedSupplierRefundCurrencyState.selectedCurrency()}. Confirm the exact rate so booking-currency truth stays correct.`
+            ).then((changed) => {
+                if (changed) {
+                    settlementCurrencyState.syncSupplierPenaltyToExpectedRefundCurrency();
+                    settlementCurrencyState.applySettlementDisplayCurrency(
+                        settlementCurrencyState.expectedSupplierRefundCurrencyState.selectedCurrency(),
+                        roundExchangeRate(Math.max(settlementCurrencyState.expectedSupplierRefundCurrencyState.rateToBooking(), 0.00000001))
+                    );
+                    settlementCurrencyState.relabel();
+                    syncSettlementDerivedAmounts();
+                }
+            });
+        });
+        settlementCurrencyState?.currencySelect.addEventListener('change', () => {
+            const nextCurrency = settlementCurrencyState.selectedCurrency();
+            void settlementCurrencyState.convertDisplayedValues(nextCurrency).then((changed) => {
+                if (changed) {
+                    syncSettlementDerivedAmounts();
+                }
+            });
+        });
+        settlementCurrencyState?.relabel();
         syncSettlementDerivedAmounts();
     };
 
@@ -4364,85 +5523,241 @@ document.addEventListener('DOMContentLoaded', () => {
         const switchedServiceLine = serviceLineKey !== previousServiceLineKey;
         serviceCorrectionSettlementForm.dataset.settlementServiceKey = serviceLineKey;
 
+        const invoiceCurrency = String(serviceLine?.currency || currentInvoiceSnapshot().invoiceCurrency || 'PKR').toUpperCase();
+        const supplierBaseCurrency = String(
+            serviceLine?.supplierTruthCurrency
+            || serviceLine?.costCurrency
+            || invoiceCurrency
+        ).toUpperCase();
         const customerPenaltyAmount = toNumber(serviceLine?.latestCancelCustomerPenaltyAmount || 0);
         const supplierPenaltyAmount = toNumber(serviceLine?.latestCancelSupplierPenaltyAmount || 0);
-        const supplierCostAmount = toNumber(serviceLine?.purchaseCost || serviceLine?.supplierCost || 0);
+        const supplierCostAmount = settlementSupplierCostInBookingCurrency(serviceLine, invoiceCurrency);
         const agencyFeeChargedAmount = Math.max(toNumber(serviceLine?.serviceCharge || 0), 0);
         const agencyFeeRefundAmount = Math.min(Math.max(toNumber(serviceLine?.latestCancelAgencyFeeRefundAmount || 0), 0), agencyFeeChargedAmount);
+        const currentCustomerReceivedAmount = Math.max(toNumber(serviceLine?.currentCustomerReceivedAmount || 0), 0);
         const expectedSupplierRefundAmount = toNumber(
             serviceLine?.latestCancelExpectedSupplierRefundAmount
             || Math.max(supplierCostAmount - supplierPenaltyAmount, 0)
         );
+        const customerPenaltyCurrency = String(serviceLine?.latestCancelCustomerPenaltyCurrency || invoiceCurrency).toUpperCase();
+        const customerPenaltySourceAmount = toNumber(serviceLine?.latestCancelCustomerPenaltySourceAmount || 0);
+        const customerPenaltyExchangeRate = Math.max(toNumber(serviceLine?.latestCancelCustomerPenaltyExchangeRate || 1), 0.00000001);
+        const expectedSupplierRefundCurrency = String(serviceLine?.latestCancelExpectedSupplierRefundCurrency || supplierBaseCurrency).toUpperCase();
+        const expectedSupplierRefundSourceAmount = toNumber(serviceLine?.latestCancelExpectedSupplierRefundSourceAmount || 0);
+        const expectedSupplierRefundExchangeRate = Math.max(toNumber(serviceLine?.latestCancelExpectedSupplierRefundExchangeRate || 1), 0.00000001);
+        const supplierPenaltyCurrency = String(serviceLine?.latestCancelSupplierPenaltyCurrency || supplierBaseCurrency).toUpperCase();
+        const supplierPenaltySourceAmount = toNumber(serviceLine?.latestCancelSupplierPenaltySourceAmount || 0);
+        const supplierPenaltyExchangeRate = Math.max(toNumber(serviceLine?.latestCancelSupplierPenaltyExchangeRate || 1), 0.00000001);
+        const supplierSourceCostAmount = supplierBaseCurrency === String(serviceLine?.costCurrency || supplierBaseCurrency).toUpperCase()
+            ? Math.max(toNumber(serviceLine?.purchaseCost || serviceLine?.supplierCost || 0), 0)
+            : 0;
+        const supplierSourceTruthCurrency = expectedSupplierRefundCurrency === supplierPenaltyCurrency
+            ? expectedSupplierRefundCurrency
+            : '';
+        const supplierSourceTruthTotal = supplierSourceTruthCurrency !== ''
+            ? Math.max(
+                expectedSupplierRefundSourceAmount + supplierPenaltySourceAmount,
+                supplierSourceCostAmount,
+                0
+            )
+            : 0;
         const customerRefundCredit = toNumber(serviceLine?.latestCancelReleasedCustomerCreditAmount || 0);
         const supplierRefundCredit = toNumber(serviceLine?.latestCancelReleasedSupplierCreditAmount || 0);
-        const invoiceCurrency = String(serviceLine?.currency || currentInvoiceSnapshot().invoiceCurrency || 'PKR').toUpperCase();
+        const settlementCurrencyState = setupSettlementCurrencyForm(serviceCorrectionSettlementForm, {
+            bookingCurrency: invoiceCurrency,
+            supplierCostAmount,
+            agencyFeeChargedAmount,
+        });
+        if (settlementCurrencyState) {
+            bindSettlementControlDraftBehavior(settlementCurrencyState.currencySelect);
+            bindSettlementControlDraftBehavior(settlementCurrencyState.exchangeRateField);
+            if (settlementControlShouldSync(settlementCurrencyState.currencySelect, switchedServiceLine)) {
+                settlementCurrencyState.currencySelect.value = invoiceCurrency;
+                settlementCurrencyState.currencySelect.dataset.lastCurrency = invoiceCurrency;
+            }
+            if (settlementControlShouldSync(settlementCurrencyState.exchangeRateField, switchedServiceLine)) {
+                settlementCurrencyState.exchangeRateField.value = '1';
+            }
+            if (settlementCurrencyState.customerPenaltyCurrencyState) {
+                bindSettlementControlDraftBehavior(settlementCurrencyState.customerPenaltyCurrencyState.currencySelect);
+                bindSettlementControlDraftBehavior(settlementCurrencyState.customerPenaltyCurrencyState.exchangeRateField);
+                if (settlementControlShouldSync(settlementCurrencyState.customerPenaltyCurrencyState.currencySelect, switchedServiceLine)) {
+                    settlementCurrencyState.customerPenaltyCurrencyState.currencySelect.value = customerPenaltyCurrency;
+                    settlementCurrencyState.customerPenaltyCurrencyState.currencySelect.dataset.lastCurrency = customerPenaltyCurrency;
+                }
+                if (settlementControlShouldSync(settlementCurrencyState.customerPenaltyCurrencyState.exchangeRateField, switchedServiceLine)) {
+                    settlementCurrencyState.customerPenaltyCurrencyState.exchangeRateField.value = customerPenaltyCurrency === invoiceCurrency ? '1' : String(roundExchangeRate(customerPenaltyExchangeRate));
+                }
+            }
+            if (settlementCurrencyState.expectedSupplierRefundCurrencyState) {
+                bindSettlementControlDraftBehavior(settlementCurrencyState.expectedSupplierRefundCurrencyState.currencySelect);
+                bindSettlementControlDraftBehavior(settlementCurrencyState.expectedSupplierRefundCurrencyState.exchangeRateField);
+                if (settlementControlShouldSync(settlementCurrencyState.expectedSupplierRefundCurrencyState.currencySelect, switchedServiceLine)) {
+                    settlementCurrencyState.expectedSupplierRefundCurrencyState.currencySelect.value = expectedSupplierRefundCurrency;
+                    settlementCurrencyState.expectedSupplierRefundCurrencyState.currencySelect.dataset.lastCurrency = expectedSupplierRefundCurrency;
+                }
+                if (settlementControlShouldSync(settlementCurrencyState.expectedSupplierRefundCurrencyState.exchangeRateField, switchedServiceLine)) {
+                    settlementCurrencyState.expectedSupplierRefundCurrencyState.exchangeRateField.value = expectedSupplierRefundCurrency === invoiceCurrency ? '1' : String(roundExchangeRate(expectedSupplierRefundExchangeRate));
+                }
+            }
+            if (settlementCurrencyState.supplierPenaltyCurrencyState) {
+                bindSettlementControlDraftBehavior(settlementCurrencyState.supplierPenaltyCurrencyState.currencySelect);
+                bindSettlementControlDraftBehavior(settlementCurrencyState.supplierPenaltyCurrencyState.exchangeRateField);
+                if (settlementControlShouldSync(settlementCurrencyState.supplierPenaltyCurrencyState.currencySelect, switchedServiceLine)) {
+                    settlementCurrencyState.supplierPenaltyCurrencyState.currencySelect.value = supplierPenaltyCurrency;
+                    settlementCurrencyState.supplierPenaltyCurrencyState.currencySelect.dataset.lastCurrency = supplierPenaltyCurrency;
+                }
+                if (settlementControlShouldSync(settlementCurrencyState.supplierPenaltyCurrencyState.exchangeRateField, switchedServiceLine)) {
+                    settlementCurrencyState.supplierPenaltyCurrencyState.exchangeRateField.value = supplierPenaltyCurrency === invoiceCurrency ? '1' : String(roundExchangeRate(supplierPenaltyExchangeRate));
+                }
+            }
+            settlementCurrencyState.syncSupplierPenaltyToExpectedRefundCurrency();
+            if (expectedSupplierRefundCurrency !== invoiceCurrency) {
+                settlementCurrencyState.applySettlementDisplayCurrency(
+                    expectedSupplierRefundCurrency,
+                    roundExchangeRate(Math.max(settlementCurrencyState.expectedSupplierRefundCurrencyState?.rateToBooking() || expectedSupplierRefundExchangeRate || 0, 0.00000001))
+                );
+            } else if (customerPenaltyCurrency !== invoiceCurrency) {
+                settlementCurrencyState.applySettlementDisplayCurrency(
+                    customerPenaltyCurrency,
+                    roundExchangeRate(Math.max(settlementCurrencyState.customerPenaltyCurrencyState?.rateToBooking() || customerPenaltyExchangeRate || 0, 0.00000001))
+                );
+            }
+        }
 
         if (customerPenaltyField instanceof HTMLInputElement) {
             bindSettlementFieldDraftBehavior(customerPenaltyField, { selectZeroOnFocus: true });
-            if (settlementFieldShouldSync(customerPenaltyField, switchedServiceLine)) {
-                customerPenaltyField.value = formatNumberInputValue(customerPenaltyAmount);
+            if (settlementControlShouldSync(customerPenaltyField, switchedServiceLine)) {
+                const useSavedSourceAmount = customerPenaltyCurrency !== invoiceCurrency || customerPenaltySourceAmount > 0.005;
+                customerPenaltyField.value = formatNumberInputValue(
+                    useSavedSourceAmount
+                        ? customerPenaltySourceAmount
+                        : (settlementCurrencyState?.customerPenaltyCurrencyState
+                            ? settlementCurrencyState.customerPenaltyCurrencyState.bookingToSelected(customerPenaltyAmount)
+                            : customerPenaltyAmount)
+                );
             }
         }
 
         if (expectedSupplierRefundField instanceof HTMLInputElement) {
             bindSettlementFieldDraftBehavior(expectedSupplierRefundField, { selectZeroOnFocus: true });
-            if (settlementFieldShouldSync(expectedSupplierRefundField, switchedServiceLine)) {
-                expectedSupplierRefundField.value = formatNumberInputValue(expectedSupplierRefundAmount);
+            if (settlementControlShouldSync(expectedSupplierRefundField, switchedServiceLine)) {
+                const useSavedSourceAmount = expectedSupplierRefundCurrency !== invoiceCurrency || expectedSupplierRefundSourceAmount > 0.005;
+                expectedSupplierRefundField.value = formatNumberInputValue(
+                    useSavedSourceAmount
+                        ? expectedSupplierRefundSourceAmount
+                        : (settlementCurrencyState?.expectedSupplierRefundCurrencyState
+                            ? settlementCurrencyState.expectedSupplierRefundCurrencyState.bookingToSelected(expectedSupplierRefundAmount)
+                            : expectedSupplierRefundAmount)
+                );
             }
         }
         if (agencyFeeRefundField instanceof HTMLInputElement) {
             bindSettlementFieldDraftBehavior(agencyFeeRefundField, { selectZeroOnFocus: true });
-            agencyFeeRefundField.max = formatNumberInputValue(agencyFeeChargedAmount);
-            if (settlementFieldShouldSync(agencyFeeRefundField, switchedServiceLine)) {
-                agencyFeeRefundField.value = formatNumberInputValue(agencyFeeRefundAmount);
+            agencyFeeRefundField.max = formatNumberInputValue(settlementCurrencyState ? settlementCurrencyState.bookingToSelected(agencyFeeChargedAmount) : agencyFeeChargedAmount);
+            if (settlementControlShouldSync(agencyFeeRefundField, switchedServiceLine)) {
+                agencyFeeRefundField.value = formatNumberInputValue(settlementCurrencyState ? settlementCurrencyState.bookingToSelected(agencyFeeRefundAmount) : agencyFeeRefundAmount);
             }
         }
 
         if (supplierPenaltyField instanceof HTMLInputElement) {
             bindSettlementFieldDraftBehavior(supplierPenaltyField);
-            if (settlementFieldShouldSync(supplierPenaltyField, switchedServiceLine)) {
-                supplierPenaltyField.value = formatNumberInputValue(Math.max(supplierCostAmount - expectedSupplierRefundAmount, 0));
+            if (settlementControlShouldSync(supplierPenaltyField, switchedServiceLine)) {
+                const derivedSupplierPenalty = Math.max(supplierCostAmount - expectedSupplierRefundAmount, 0);
+                const useSavedSourceAmount = supplierPenaltyCurrency !== invoiceCurrency || supplierPenaltySourceAmount > 0.005;
+                supplierPenaltyField.value = formatNumberInputValue(
+                    useSavedSourceAmount
+                        ? supplierPenaltySourceAmount
+                        : (settlementCurrencyState?.supplierPenaltyCurrencyState
+                            ? settlementCurrencyState.supplierPenaltyCurrencyState.bookingToSelected(derivedSupplierPenalty)
+                            : derivedSupplierPenalty)
+                );
             }
         }
 
         if (settlementReasonField instanceof HTMLInputElement) {
             bindSettlementFieldDraftBehavior(settlementReasonField);
-            if (settlementFieldShouldSync(settlementReasonField, switchedServiceLine)) {
+            if (settlementControlShouldSync(settlementReasonField, switchedServiceLine)) {
                 settlementReasonField.value = String(serviceLine?.latestCancelReason || '');
             }
         }
 
         if (settlementDateField instanceof HTMLInputElement) {
             bindSettlementFieldDraftBehavior(settlementDateField);
-            if (settlementFieldShouldSync(settlementDateField, switchedServiceLine)) {
+            if (settlementControlShouldSync(settlementDateField, switchedServiceLine)) {
                 settlementDateField.value = String(serviceLine?.latestCancelEventDate || '') || settlementDateField.value || todayIso();
             }
         }
 
         const syncSettlementCorrectionDerivedAmounts = () => {
-            const liveCustomerPenaltyAmount = Math.max(toNumber(customerPenaltyField?.value || 0), 0);
+            const liveCustomerPenaltyAmount = Math.max(settlementCurrencyState?.customerPenaltyCurrencyState
+                ? settlementCurrencyState.customerPenaltyCurrencyState.selectedToBooking(toNumber(customerPenaltyField?.value || 0))
+                : toNumber(customerPenaltyField?.value || 0), 0);
             const liveExpectedSupplierRefundAmount = Math.min(
-                Math.max(toNumber(expectedSupplierRefundField?.value || 0), 0),
+                Math.max(settlementCurrencyState?.expectedSupplierRefundCurrencyState
+                    ? settlementCurrencyState.expectedSupplierRefundCurrencyState.selectedToBooking(toNumber(expectedSupplierRefundField?.value || 0))
+                    : toNumber(expectedSupplierRefundField?.value || 0), 0),
                 Math.max(supplierCostAmount, 0)
             );
             const liveSupplierPenaltyAmount = Math.max(supplierCostAmount - liveExpectedSupplierRefundAmount, 0);
             const liveAgencyFeeRefundAmount = Math.min(
-                Math.max(toNumber(agencyFeeRefundField?.value || 0), 0),
+                Math.max(settlementCurrencyState
+                    ? settlementCurrencyState.selectedToBooking(toNumber(agencyFeeRefundField?.value || 0))
+                    : toNumber(agencyFeeRefundField?.value || 0), 0),
                 agencyFeeChargedAmount
             );
-            const liveCustomerRefundDue = Math.max(
-                liveExpectedSupplierRefundAmount - liveCustomerPenaltyAmount + liveAgencyFeeRefundAmount,
+            const liveRetainedAgencyFeeAmount = Math.max(agencyFeeChargedAmount - liveAgencyFeeRefundAmount, 0);
+            const liveCustomerFinalChargeAmount = Math.max(
+                liveCustomerPenaltyAmount + liveSupplierPenaltyAmount + liveRetainedAgencyFeeAmount,
                 0
             );
+            const liveCustomerRefundDue = Math.max(currentCustomerReceivedAmount - liveCustomerFinalChargeAmount, 0);
+            const customerPenaltySelectedCurrency = settlementCurrencyState?.customerPenaltyCurrencyState
+                ? settlementCurrencyState.customerPenaltyCurrencyState.selectedCurrency()
+                : customerPenaltyCurrency;
+            const supplierPenaltySelectedCurrency = settlementCurrencyState?.supplierPenaltyCurrencyState
+                ? settlementCurrencyState.supplierPenaltyCurrencyState.selectedCurrency()
+                : supplierPenaltyCurrency;
+            const expectedRefundSelectedCurrency = settlementCurrencyState?.expectedSupplierRefundCurrencyState
+                ? settlementCurrencyState.expectedSupplierRefundCurrencyState.selectedCurrency()
+                : expectedSupplierRefundCurrency;
+            const settlementDisplayCurrency = settlementCurrencyState
+                ? settlementCurrencyState.selectedCurrency()
+                : invoiceCurrency;
+            const liveCustomerPenaltySourceAmount = Math.max(toNumber(customerPenaltyField?.value || 0), 0);
+            const liveExpectedSupplierRefundSourceAmount = Math.max(toNumber(expectedSupplierRefundField?.value || 0), 0);
+            const directCustomerSourceDerivationAllowed = customerPenaltySelectedCurrency !== ''
+                && customerPenaltySelectedCurrency === expectedRefundSelectedCurrency;
+            const directSupplierSourceDerivationAllowed = supplierSourceTruthCurrency !== ''
+                && supplierPenaltySelectedCurrency === expectedRefundSelectedCurrency
+                && expectedRefundSelectedCurrency === supplierSourceTruthCurrency;
+            if (directCustomerSourceDerivationAllowed && settlementCurrencyState && settlementDisplayCurrency !== expectedRefundSelectedCurrency) {
+                const matchingDisplayRate = Math.max(
+                    settlementCurrencyState.expectedSupplierRefundCurrencyState?.rateToBooking()
+                    || settlementCurrencyState.customerPenaltyCurrencyState?.rateToBooking()
+                    || 1,
+                    0.00000001
+                );
+                settlementCurrencyState.applySettlementDisplayCurrency(expectedRefundSelectedCurrency, roundExchangeRate(matchingDisplayRate));
+            }
 
             if (supplierPenaltyField instanceof HTMLInputElement) {
-                supplierPenaltyField.value = formatNumberInputValue(liveSupplierPenaltyAmount);
+                supplierPenaltyField.value = formatNumberInputValue(
+                    directSupplierSourceDerivationAllowed
+                        ? Math.max(Math.round(supplierSourceTruthTotal - liveExpectedSupplierRefundSourceAmount), 0)
+                        : (settlementCurrencyState?.supplierPenaltyCurrencyState
+                            ? settlementCurrencyState.supplierPenaltyCurrencyState.bookingToSelected(liveSupplierPenaltyAmount)
+                            : liveSupplierPenaltyAmount)
+                );
             }
             if (agencyFeeRefundField instanceof HTMLInputElement) {
-                agencyFeeRefundField.value = formatNumberInputValue(liveAgencyFeeRefundAmount);
+                agencyFeeRefundField.max = formatNumberInputValue(settlementCurrencyState ? settlementCurrencyState.bookingToSelected(agencyFeeChargedAmount) : agencyFeeChargedAmount);
             }
             if (customerRefundDueField instanceof HTMLInputElement) {
-                customerRefundDueField.value = formatNumberInputValue(liveCustomerRefundDue);
+                const displayedRefundDue = settlementCurrencyState
+                    ? settlementCurrencyState.bookingToSelected(liveCustomerRefundDue)
+                    : liveCustomerRefundDue;
+                customerRefundDueField.value = formatNumberInputValue(Math.round(displayedRefundDue), 0);
             }
 
             if (!(serviceCorrectionSettlementSummaryNote instanceof HTMLElement)) {
@@ -4458,10 +5773,10 @@ document.addEventListener('DOMContentLoaded', () => {
             serviceCorrectionSettlementSummaryNote.hidden = !hasSummary;
             serviceCorrectionSettlementSummaryNote.textContent = hasSummary
                 ? [
-                    `Customer penalty: ${formatCurrencyAmount(invoiceCurrency, liveCustomerPenaltyAmount)}.`,
-                    `Expected supplier refund: ${formatCurrencyAmount(invoiceCurrency, liveExpectedSupplierRefundAmount)}.`,
-                    `Agency fee refunded: ${formatCurrencyAmount(invoiceCurrency, liveAgencyFeeRefundAmount)}.`,
-                    `Supplier penalty: ${formatCurrencyAmount(invoiceCurrency, liveSupplierPenaltyAmount)}.`,
+                    `Customer penalty: ${formatCurrencyAmount(settlementCurrencyState?.customerPenaltyCurrencyState ? settlementCurrencyState.customerPenaltyCurrencyState.selectedCurrency() : invoiceCurrency, settlementCurrencyState?.customerPenaltyCurrencyState ? settlementCurrencyState.customerPenaltyCurrencyState.bookingToSelected(liveCustomerPenaltyAmount) : liveCustomerPenaltyAmount)}.`,
+                    `Expected supplier refund: ${formatCurrencyAmount(settlementCurrencyState?.expectedSupplierRefundCurrencyState ? settlementCurrencyState.expectedSupplierRefundCurrencyState.selectedCurrency() : invoiceCurrency, settlementCurrencyState?.expectedSupplierRefundCurrencyState ? settlementCurrencyState.expectedSupplierRefundCurrencyState.bookingToSelected(liveExpectedSupplierRefundAmount) : liveExpectedSupplierRefundAmount)}.`,
+                    `Agency fee refunded: ${formatCurrencyAmount(settlementCurrencyState ? settlementCurrencyState.selectedCurrency() : invoiceCurrency, settlementCurrencyState ? settlementCurrencyState.bookingToSelected(liveAgencyFeeRefundAmount) : liveAgencyFeeRefundAmount)}.`,
+                    `Supplier penalty: ${formatCurrencyAmount(settlementCurrencyState?.supplierPenaltyCurrencyState ? settlementCurrencyState.supplierPenaltyCurrencyState.selectedCurrency() : invoiceCurrency, settlementCurrencyState?.supplierPenaltyCurrencyState ? settlementCurrencyState.supplierPenaltyCurrencyState.bookingToSelected(liveSupplierPenaltyAmount) : liveSupplierPenaltyAmount)}.`,
                     `Customer refund credit released: ${formatCurrencyAmount(invoiceCurrency, customerRefundCredit)}.`,
                     `Supplier refundable credit released: ${formatCurrencyAmount(invoiceCurrency, supplierRefundCredit)}.`,
                 ].join(' ')
@@ -4471,6 +5786,46 @@ document.addEventListener('DOMContentLoaded', () => {
         customerPenaltyField?.addEventListener('input', syncSettlementCorrectionDerivedAmounts);
         expectedSupplierRefundField?.addEventListener('input', syncSettlementCorrectionDerivedAmounts);
         agencyFeeRefundField?.addEventListener('input', syncSettlementCorrectionDerivedAmounts);
+        settlementCurrencyState?.customerPenaltyCurrencyState?.currencySelect.addEventListener('change', () => {
+            void settlementCurrencyState.customerPenaltyCurrencyState.convertDisplayedValue(
+                'Confirm Customer Penalty Currency',
+                `This customer penalty will be entered in ${settlementCurrencyState.customerPenaltyCurrencyState.selectedCurrency()}. Confirm the exact rate so booking-currency truth stays correct.`
+            ).then((changed) => {
+                if (changed) {
+                    settlementCurrencyState.applySettlementDisplayCurrency(
+                        settlementCurrencyState.customerPenaltyCurrencyState.selectedCurrency(),
+                        roundExchangeRate(Math.max(settlementCurrencyState.customerPenaltyCurrencyState.rateToBooking(), 0.00000001))
+                    );
+                    settlementCurrencyState.relabel();
+                    syncSettlementCorrectionDerivedAmounts();
+                }
+            });
+        });
+        settlementCurrencyState?.expectedSupplierRefundCurrencyState?.currencySelect.addEventListener('change', () => {
+            void settlementCurrencyState.expectedSupplierRefundCurrencyState.convertDisplayedValue(
+                'Confirm Expected Supplier Refund Currency',
+                `This supplier refund value will be entered in ${settlementCurrencyState.expectedSupplierRefundCurrencyState.selectedCurrency()}. Confirm the exact rate so booking-currency truth stays correct.`
+            ).then((changed) => {
+                if (changed) {
+                    settlementCurrencyState.syncSupplierPenaltyToExpectedRefundCurrency();
+                    settlementCurrencyState.applySettlementDisplayCurrency(
+                        settlementCurrencyState.expectedSupplierRefundCurrencyState.selectedCurrency(),
+                        roundExchangeRate(Math.max(settlementCurrencyState.expectedSupplierRefundCurrencyState.rateToBooking(), 0.00000001))
+                    );
+                    settlementCurrencyState.relabel();
+                    syncSettlementCorrectionDerivedAmounts();
+                }
+            });
+        });
+        settlementCurrencyState?.currencySelect.addEventListener('change', () => {
+            const nextCurrency = settlementCurrencyState.selectedCurrency();
+            void settlementCurrencyState.convertDisplayedValues(nextCurrency).then((changed) => {
+                if (changed) {
+                    syncSettlementCorrectionDerivedAmounts();
+                }
+            });
+        });
+        settlementCurrencyState?.relabel();
         syncSettlementCorrectionDerivedAmounts();
     };
 
@@ -4503,6 +5858,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const supplierRefundDetail = serviceLine?.latestSupplierRefundDetail && typeof serviceLine.latestSupplierRefundDetail === 'object'
             ? serviceLine.latestSupplierRefundDetail
             : {};
+        const customerPreferredDisplay = refundWorkflowCustomerDisplayContext(serviceLine, false);
+        const supplierPreferredDisplay = refundWorkflowSupplierDisplayContext(serviceLine, false);
 
         serviceCorrectionRefundForm.dataset.customerRefundPosted = customerRefundPosted ? '1' : '0';
         serviceCorrectionRefundForm.dataset.supplierRefundPosted = supplierRefundPosted ? '1' : '0';
@@ -4512,6 +5869,16 @@ document.addEventListener('DOMContentLoaded', () => {
         if (serviceCorrectionSupplierRefundStatus instanceof HTMLElement) {
             serviceCorrectionSupplierRefundStatus.hidden = supplierRefundPosted;
         }
+        serviceCorrectionCustomerRefundPostedFields.forEach((fieldRow) => {
+            if (fieldRow instanceof HTMLElement) {
+                fieldRow.hidden = !customerRefundPosted;
+            }
+        });
+        serviceCorrectionSupplierRefundPostedFields.forEach((fieldRow) => {
+            if (fieldRow instanceof HTMLElement) {
+                fieldRow.hidden = !supplierRefundPosted;
+            }
+        });
 
         if (customerRefundAmountField instanceof HTMLInputElement) {
             if (switchedServiceLine || String(customerRefundAmountField.dataset.refundBound || '') !== '1') {
@@ -4527,6 +5894,70 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             supplierRefundAmountField.dataset.refundBound = '1';
             supplierRefundAmountField.disabled = !supplierRefundPosted;
+        }
+
+        if (serviceCorrectionCustomerRefundSourceAmountInput instanceof HTMLInputElement) {
+            if (switchedServiceLine || String(serviceCorrectionCustomerRefundSourceAmountInput.dataset.refundBound || '') !== '1') {
+                serviceCorrectionCustomerRefundSourceAmountInput.value = formatNumberInputValue(toNumber(customerRefundDetail.refund_source_amount || customerRefundAmount));
+            }
+            serviceCorrectionCustomerRefundSourceAmountInput.dataset.refundBound = '1';
+            serviceCorrectionCustomerRefundSourceAmountInput.disabled = !customerRefundPosted;
+        }
+
+        if (serviceCorrectionSupplierRefundSourceAmountInput instanceof HTMLInputElement) {
+            if (switchedServiceLine || String(serviceCorrectionSupplierRefundSourceAmountInput.dataset.refundBound || '') !== '1') {
+                serviceCorrectionSupplierRefundSourceAmountInput.value = formatNumberInputValue(toNumber(supplierRefundDetail.refund_source_amount || supplierRefundAmount));
+            }
+            serviceCorrectionSupplierRefundSourceAmountInput.dataset.refundBound = '1';
+            serviceCorrectionSupplierRefundSourceAmountInput.disabled = !supplierRefundPosted;
+        }
+
+        if (serviceCorrectionCustomerRefundCurrencySelect instanceof HTMLSelectElement) {
+            const selectedCustomerRefundCurrency = String(
+                customerRefundPosted
+                    ? (customerRefundDetail.refund_currency || serviceLine?.currency || currentInvoiceSnapshot().invoiceCurrency || 'PKR')
+                    : customerPreferredDisplay.currency
+            ).trim().toUpperCase() || 'PKR';
+            serviceCorrectionCustomerRefundCurrencySelect.dataset.preferredCurrency = selectedCustomerRefundCurrency;
+            if (Array.from(serviceCorrectionCustomerRefundCurrencySelect.options).some((option) => option.value === selectedCustomerRefundCurrency)) {
+                serviceCorrectionCustomerRefundCurrencySelect.value = selectedCustomerRefundCurrency;
+                serviceCorrectionCustomerRefundCurrencySelect.dataset.lastCurrency = selectedCustomerRefundCurrency;
+            }
+        }
+
+        if (serviceCorrectionSupplierRefundCurrencySelect instanceof HTMLSelectElement) {
+            const selectedSupplierRefundCurrency = String(
+                supplierRefundPosted
+                    ? (supplierRefundDetail.refund_currency || serviceLine?.latestCancelExpectedSupplierRefundCurrency || serviceLine?.supplierTruthCurrency || serviceLine?.costCurrency || serviceLine?.currency || currentInvoiceSnapshot().invoiceCurrency || 'PKR')
+                    : supplierPreferredDisplay.currency
+            ).trim().toUpperCase() || 'PKR';
+            serviceCorrectionSupplierRefundCurrencySelect.dataset.preferredCurrency = selectedSupplierRefundCurrency;
+            if (Array.from(serviceCorrectionSupplierRefundCurrencySelect.options).some((option) => option.value === selectedSupplierRefundCurrency)) {
+                serviceCorrectionSupplierRefundCurrencySelect.value = selectedSupplierRefundCurrency;
+                serviceCorrectionSupplierRefundCurrencySelect.dataset.lastCurrency = selectedSupplierRefundCurrency;
+            }
+        }
+
+        if (serviceCorrectionCustomerRefundRateInput instanceof HTMLInputElement) {
+            if (switchedServiceLine || String(serviceCorrectionCustomerRefundRateInput.dataset.refundBound || '') !== '1') {
+                const customerRate = customerRefundPosted
+                    ? Math.max(toNumber(customerRefundDetail.refund_exchange_rate_to_booking || 1), 0.01)
+                    : Math.max(toNumber(customerPreferredDisplay.rate || 1), 0.01);
+                serviceCorrectionCustomerRefundRateInput.value = roundToTwo(customerRate).toFixed(2);
+            }
+            serviceCorrectionCustomerRefundRateInput.dataset.refundBound = '1';
+            serviceCorrectionCustomerRefundRateInput.disabled = !customerRefundPosted;
+        }
+
+        if (serviceCorrectionSupplierRefundRateInput instanceof HTMLInputElement) {
+            if (switchedServiceLine || String(serviceCorrectionSupplierRefundRateInput.dataset.refundBound || '') !== '1') {
+                const supplierRate = supplierRefundPosted
+                    ? Math.max(toNumber(supplierRefundDetail.refund_exchange_rate_to_booking || 1), 0.01)
+                    : Math.max(toNumber(supplierPreferredDisplay.rate || 1), 0.01);
+                serviceCorrectionSupplierRefundRateInput.value = roundToTwo(supplierRate).toFixed(2);
+            }
+            serviceCorrectionSupplierRefundRateInput.dataset.refundBound = '1';
+            serviceCorrectionSupplierRefundRateInput.disabled = !supplierRefundPosted;
         }
 
         if (serviceCorrectionRefundMethodSelect instanceof HTMLSelectElement) {
@@ -4568,6 +5999,570 @@ document.addEventListener('DOMContentLoaded', () => {
         if (refundDateField instanceof HTMLInputElement && switchedServiceLine) {
             refundDateField.value = refundDateField.value || todayIso();
         }
+
+        syncCorrectionRefundBookedAmounts();
+        markCorrectionRefundFormSaved();
+    };
+
+    const syncCorrectionRefundBookedAmount = (role) => {
+        const bookingCurrency = String(
+            serviceCorrectionRefundCurrencyField?.value
+            || serviceRefundCurrencyField?.value
+            || currentInvoiceSnapshot().invoiceCurrency
+            || 'PKR'
+        ).trim().toUpperCase() || 'PKR';
+        const amountField = role === 'customer'
+            ? serviceCorrectionCustomerRefundAmountInput
+            : serviceCorrectionSupplierRefundAmountInput;
+        const sourceField = role === 'customer'
+            ? serviceCorrectionCustomerRefundSourceAmountInput
+            : serviceCorrectionSupplierRefundSourceAmountInput;
+        const currencyField = role === 'customer'
+            ? serviceCorrectionCustomerRefundCurrencySelect
+            : serviceCorrectionSupplierRefundCurrencySelect;
+        const rateField = role === 'customer'
+            ? serviceCorrectionCustomerRefundRateInput
+            : serviceCorrectionSupplierRefundRateInput;
+
+        if (!(amountField instanceof HTMLInputElement) || !(sourceField instanceof HTMLInputElement)) {
+            return;
+        }
+
+        const sourceAmount = Math.max(toNumber(sourceField.value || 0), 0);
+        const selectedCurrency = String(currencyField?.value || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+        const fxRate = Math.max(toNumber(rateField?.value || 0), 0);
+
+        if (sourceAmount <= 0.005) {
+            amountField.value = '0';
+            if (rateField instanceof HTMLInputElement && selectedCurrency === bookingCurrency) {
+                rateField.value = '1';
+            }
+            return;
+        }
+
+        if (selectedCurrency === bookingCurrency) {
+            amountField.value = formatNumberInputValue(sourceAmount);
+            if (rateField instanceof HTMLInputElement) {
+                rateField.value = '1';
+            }
+            return;
+        }
+
+        if (!(rateField instanceof HTMLInputElement) || fxRate <= 0.00000001) {
+            amountField.value = '0';
+            return;
+        }
+
+        amountField.value = formatNumberInputValue(Math.round(sourceAmount / fxRate));
+    };
+
+    const syncCorrectionRefundBookedAmounts = () => {
+        syncCorrectionRefundBookedAmount('customer');
+        syncCorrectionRefundBookedAmount('supplier');
+    };
+
+    const correctionRefundFormSnapshot = () => serializeForm(serviceCorrectionRefundForm);
+
+    const markCorrectionRefundFormSaved = () => {
+        if (!(serviceCorrectionRefundForm instanceof HTMLFormElement)) {
+            return;
+        }
+
+        serviceCorrectionRefundForm.dataset.lastSavedSnapshot = correctionRefundFormSnapshot();
+    };
+
+    const correctionRefundFormIsDirty = () => {
+        if (!(serviceCorrectionRefundForm instanceof HTMLFormElement)) {
+            return false;
+        }
+
+        return correctionRefundFormSnapshot() !== String(serviceCorrectionRefundForm.dataset.lastSavedSnapshot || '');
+    };
+
+    const saveCorrectionRefundFormIfDirty = async () => {
+        if (!(serviceCorrectionRefundForm instanceof HTMLFormElement)) {
+            return null;
+        }
+
+        syncCorrectionRefundBookedAmounts();
+        if (!correctionRefundFormIsDirty()) {
+            return null;
+        }
+
+        const payload = await postAutosave(serviceCorrectionRefundForm.action || '', serviceCorrectionRefundForm);
+        markCorrectionRefundFormSaved();
+        return payload;
+    };
+
+    const refundWorkflowDisplayCurrency = (serviceLine, invoiceCurrency) => {
+        const bookingCurrency = String(invoiceCurrency || 'PKR').trim().toUpperCase() || 'PKR';
+        const expectedSupplierRefundCurrency = String(serviceLine?.latestCancelExpectedSupplierRefundCurrency || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+        const customerPenaltyCurrency = String(serviceLine?.latestCancelCustomerPenaltyCurrency || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+        const supplierPenaltyCurrency = String(serviceLine?.latestCancelSupplierPenaltyCurrency || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+
+        if (expectedSupplierRefundCurrency !== bookingCurrency) {
+            return expectedSupplierRefundCurrency;
+        }
+        if (customerPenaltyCurrency !== bookingCurrency) {
+            return customerPenaltyCurrency;
+        }
+        if (supplierPenaltyCurrency !== bookingCurrency) {
+            return supplierPenaltyCurrency;
+        }
+
+        return bookingCurrency;
+    };
+
+    const refundWorkflowCustomerDisplayContext = (serviceLine = null, preferCorrectionLive = false) => {
+        const bookingCurrency = refundFxBookingCurrencyCode();
+        const line = serviceLine || currentActiveServiceLineForRefund() || {};
+        const lineExpectedCurrency = String(line?.latestCancelExpectedSupplierRefundCurrency || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+        const lineExpectedRate = Math.max(toNumber(line?.latestCancelExpectedSupplierRefundExchangeRate || 1), 0.00000001);
+        const lineCustomerPenaltyCurrency = String(line?.latestCancelCustomerPenaltyCurrency || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+        const lineCustomerPenaltyRate = Math.max(toNumber(line?.latestCancelCustomerPenaltyExchangeRate || 1), 0.00000001);
+
+        const currentExpectedCurrency = String(
+            serviceCorrectionSettlementForm?.elements?.namedItem('expected_supplier_refund_currency')?.value || lineExpectedCurrency
+        ).trim().toUpperCase() || lineExpectedCurrency;
+        const currentExpectedRate = Math.max(toNumber(
+            serviceCorrectionSettlementForm?.elements?.namedItem('expected_supplier_refund_exchange_rate')?.value || lineExpectedRate
+        ), 0.00000001);
+        const currentCustomerPenaltyCurrency = String(
+            serviceCorrectionSettlementForm?.elements?.namedItem('customer_penalty_currency')?.value || lineCustomerPenaltyCurrency
+        ).trim().toUpperCase() || lineCustomerPenaltyCurrency;
+        const currentCustomerPenaltyRate = Math.max(toNumber(
+            serviceCorrectionSettlementForm?.elements?.namedItem('customer_penalty_exchange_rate')?.value || lineCustomerPenaltyRate
+        ), 0.00000001);
+
+        if (preferCorrectionLive && currentCustomerPenaltyCurrency !== bookingCurrency) {
+            return { currency: currentCustomerPenaltyCurrency, rate: currentCustomerPenaltyRate };
+        }
+        if (preferCorrectionLive && currentExpectedCurrency !== bookingCurrency) {
+            return { currency: currentExpectedCurrency, rate: currentExpectedRate };
+        }
+        if (lineCustomerPenaltyCurrency !== bookingCurrency) {
+            return { currency: lineCustomerPenaltyCurrency, rate: lineCustomerPenaltyRate };
+        }
+        if (lineExpectedCurrency !== bookingCurrency) {
+            return { currency: lineExpectedCurrency, rate: lineExpectedRate };
+        }
+
+        return { currency: bookingCurrency, rate: 1 };
+    };
+
+    const refundWorkflowSupplierDisplayContext = (serviceLine = null, preferCorrectionLive = false) => {
+        const bookingCurrency = refundFxBookingCurrencyCode();
+        const line = serviceLine || currentActiveServiceLineForRefund() || {};
+        const lineExpectedCurrency = String(line?.latestCancelExpectedSupplierRefundCurrency || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+        const lineExpectedRate = Math.max(toNumber(line?.latestCancelExpectedSupplierRefundExchangeRate || 1), 0.00000001);
+
+        const currentExpectedCurrency = String(
+            serviceCorrectionSettlementForm?.elements?.namedItem('expected_supplier_refund_currency')?.value || lineExpectedCurrency
+        ).trim().toUpperCase() || lineExpectedCurrency;
+        const currentExpectedRate = Math.max(toNumber(
+            serviceCorrectionSettlementForm?.elements?.namedItem('expected_supplier_refund_exchange_rate')?.value || lineExpectedRate
+        ), 0.00000001);
+
+        if (preferCorrectionLive && currentExpectedCurrency !== bookingCurrency) {
+            return { currency: currentExpectedCurrency, rate: currentExpectedRate };
+        }
+        if (lineExpectedCurrency !== bookingCurrency) {
+            return { currency: lineExpectedCurrency, rate: lineExpectedRate };
+        }
+
+        return { currency: bookingCurrency, rate: 1 };
+    };
+
+    const refundWorkflowCustomerSourceTruth = (serviceLine = null, displayContext = null) => {
+        const bookingCurrency = refundFxBookingCurrencyCode();
+        const line = serviceLine || currentActiveServiceLineForRefund() || {};
+        const expectedCurrency = String(line?.latestCancelExpectedSupplierRefundCurrency || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+        const expectedSourceAmount = Math.max(toNumber(line?.latestCancelExpectedSupplierRefundSourceAmount || 0), 0);
+        const expectedRate = Math.max(toNumber(line?.latestCancelExpectedSupplierRefundExchangeRate || 1), 0.00000001);
+        const customerPenaltyCurrency = String(line?.latestCancelCustomerPenaltyCurrency || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+        const customerPenaltySourceAmount = Math.max(toNumber(line?.latestCancelCustomerPenaltySourceAmount || 0), 0);
+        const customerPenaltyRate = Math.max(toNumber(line?.latestCancelCustomerPenaltyExchangeRate || 1), 0.00000001);
+        if (
+            expectedCurrency !== bookingCurrency
+            && expectedCurrency === customerPenaltyCurrency
+            && expectedSourceAmount > 0.005
+        ) {
+            const preferredRate = displayContext?.currency === expectedCurrency
+                ? Math.max(toNumber(displayContext?.rate || 0), 0.00000001)
+                : Math.max(expectedRate || customerPenaltyRate || 1, 0.00000001);
+            return {
+                currency: expectedCurrency,
+                amount: Math.max(Math.round(expectedSourceAmount - customerPenaltySourceAmount), 0),
+                rate: preferredRate,
+            };
+        }
+
+        return {
+            currency: bookingCurrency,
+            amount: 0,
+            rate: 1,
+        };
+    };
+
+    const refundWorkflowSupplierSourceTruth = (serviceLine = null, displayContext = null) => {
+        const bookingCurrency = refundFxBookingCurrencyCode();
+        const line = serviceLine || currentActiveServiceLineForRefund() || {};
+        const expectedCurrency = String(line?.latestCancelExpectedSupplierRefundCurrency || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+        const expectedSourceAmount = Math.max(toNumber(line?.latestCancelExpectedSupplierRefundSourceAmount || 0), 0);
+        const expectedRate = Math.max(toNumber(line?.latestCancelExpectedSupplierRefundExchangeRate || 1), 0.00000001);
+        if (expectedCurrency !== bookingCurrency && expectedSourceAmount > 0.005) {
+            const preferredRate = displayContext?.currency === expectedCurrency
+                ? Math.max(toNumber(displayContext?.rate || 0), 0.00000001)
+                : expectedRate;
+            return {
+                currency: expectedCurrency,
+                amount: Math.max(Math.round(expectedSourceAmount), 0),
+                rate: preferredRate,
+            };
+        }
+
+        return {
+            currency: bookingCurrency,
+            amount: 0,
+            rate: 1,
+        };
+    };
+
+    const syncRefundFormFromServiceLine = (serviceLine) => {
+        if (!(serviceRefundForm instanceof HTMLFormElement)) {
+            return;
+        }
+
+        const invoiceCurrency = String(
+            serviceLine?.currency
+            || serviceRefundCurrencyField?.value
+            || currentInvoiceSnapshot().invoiceCurrency
+            || 'PKR'
+        ).trim().toUpperCase() || 'PKR';
+        const serviceLineKey = String(
+            serviceLine?.serviceId
+            || serviceLine?.lineReference
+            || serviceLine?.lineNumber
+            || 'draft'
+        );
+        const previousServiceLineKey = String(serviceRefundForm.dataset.refundServiceKey || '');
+        const switchedServiceLine = serviceLineKey !== previousServiceLineKey;
+        serviceRefundForm.dataset.refundServiceKey = serviceLineKey;
+        const customerPreferredDisplay = refundWorkflowCustomerDisplayContext(serviceLine, false);
+        const supplierPreferredDisplay = refundWorkflowSupplierDisplayContext(serviceLine, false);
+        const customerSourceTruth = refundWorkflowCustomerSourceTruth(serviceLine, customerPreferredDisplay);
+        const supplierSourceTruth = refundWorkflowSupplierSourceTruth(serviceLine, supplierPreferredDisplay);
+        const customerRefundPosted = (Number.parseInt(String(serviceLine?.latestCustomerRefundEventId || 0), 10) || 0) > 0;
+        const supplierRefundPosted = (Number.parseInt(String(serviceLine?.latestSupplierRefundEventId || 0), 10) || 0) > 0;
+        const customerRefundDetail = serviceLine?.latestCustomerRefundDetail && typeof serviceLine.latestCustomerRefundDetail === 'object'
+            ? serviceLine.latestCustomerRefundDetail
+            : {};
+        const supplierRefundDetail = serviceLine?.latestSupplierRefundDetail && typeof serviceLine.latestSupplierRefundDetail === 'object'
+            ? serviceLine.latestSupplierRefundDetail
+            : {};
+        if (serviceRefundCurrencyField instanceof HTMLInputElement) {
+            serviceRefundCurrencyField.value = invoiceCurrency;
+        }
+
+        if (serviceCustomerRefundCurrencyInput instanceof HTMLSelectElement) {
+            const selectedCustomerRefundCurrency = String(
+                customerRefundPosted
+                    ? (customerRefundDetail.refund_currency || invoiceCurrency)
+                    : customerPreferredDisplay.currency
+            ).trim().toUpperCase() || invoiceCurrency;
+            serviceCustomerRefundCurrencyInput.dataset.preferredCurrency = selectedCustomerRefundCurrency;
+            if (Array.from(serviceCustomerRefundCurrencyInput.options).some((option) => option.value === selectedCustomerRefundCurrency)) {
+                serviceCustomerRefundCurrencyInput.value = selectedCustomerRefundCurrency;
+            }
+        }
+        if (serviceCustomerRefundSourceAmountInput instanceof HTMLInputElement && serviceCustomerRefundExchangeRateInput instanceof HTMLInputElement && !customerRefundPosted) {
+            const preferredCurrency = String(serviceCustomerRefundCurrencyInput?.value || invoiceCurrency).trim().toUpperCase() || invoiceCurrency;
+            const sourceFieldEmpty = Math.max(toNumber(serviceCustomerRefundSourceAmountInput.value || 0), 0) <= 0.005;
+            const rateFieldEmpty = Math.max(toNumber(serviceCustomerRefundExchangeRateInput.value || 0), 0) <= 0.00000001;
+            if (preferredCurrency === customerSourceTruth.currency && customerSourceTruth.amount > 0.005 && (switchedServiceLine || sourceFieldEmpty)) {
+                serviceCustomerRefundSourceAmountInput.value = formatNumberInputValue(customerSourceTruth.amount);
+            }
+            if (preferredCurrency === customerSourceTruth.currency && customerSourceTruth.currency !== invoiceCurrency && (switchedServiceLine || rateFieldEmpty)) {
+                serviceCustomerRefundExchangeRateInput.value = String(roundExchangeRate(customerSourceTruth.rate));
+            } else if (preferredCurrency === invoiceCurrency && (switchedServiceLine || rateFieldEmpty)) {
+                serviceCustomerRefundExchangeRateInput.value = '1';
+            }
+        }
+
+        if (serviceSupplierRefundCurrencyInput instanceof HTMLSelectElement) {
+            const selectedSupplierRefundCurrency = String(
+                supplierRefundPosted
+                    ? (supplierRefundDetail.refund_currency || invoiceCurrency)
+                    : supplierPreferredDisplay.currency
+            ).trim().toUpperCase() || invoiceCurrency;
+            serviceSupplierRefundCurrencyInput.dataset.preferredCurrency = selectedSupplierRefundCurrency;
+            if (Array.from(serviceSupplierRefundCurrencyInput.options).some((option) => option.value === selectedSupplierRefundCurrency)) {
+                serviceSupplierRefundCurrencyInput.value = selectedSupplierRefundCurrency;
+            }
+        }
+        if (serviceSupplierRefundSourceAmountInput instanceof HTMLInputElement && serviceSupplierRefundExchangeRateInput instanceof HTMLInputElement && !supplierRefundPosted) {
+            const preferredCurrency = String(serviceSupplierRefundCurrencyInput?.value || invoiceCurrency).trim().toUpperCase() || invoiceCurrency;
+            const sourceFieldEmpty = Math.max(toNumber(serviceSupplierRefundSourceAmountInput.value || 0), 0) <= 0.005;
+            const rateFieldEmpty = Math.max(toNumber(serviceSupplierRefundExchangeRateInput.value || 0), 0) <= 0.00000001;
+            if (preferredCurrency === supplierSourceTruth.currency && supplierSourceTruth.amount > 0.005 && (switchedServiceLine || sourceFieldEmpty)) {
+                serviceSupplierRefundSourceAmountInput.value = formatNumberInputValue(supplierSourceTruth.amount);
+            }
+            if (preferredCurrency === supplierSourceTruth.currency && supplierSourceTruth.currency !== invoiceCurrency && (switchedServiceLine || rateFieldEmpty)) {
+                serviceSupplierRefundExchangeRateInput.value = String(roundExchangeRate(supplierSourceTruth.rate));
+            } else if (preferredCurrency === invoiceCurrency && (switchedServiceLine || rateFieldEmpty)) {
+                serviceSupplierRefundExchangeRateInput.value = '1';
+            }
+        }
+
+        syncRefundProgressNote(serviceLine);
+    };
+
+    const currentActiveServiceLineForRefund = () => {
+        const activeRow = serviceRows.find((row) => row.classList.contains('is-active'));
+        const activeIndex = activeRow instanceof HTMLElement
+            ? Number.parseInt(String(activeRow.dataset.serviceIndex || '-1'), 10)
+            : -1;
+        return activeIndex >= 0 ? (serviceLines[activeIndex] || null) : null;
+    };
+
+    const refundWorkflowDisplayContext = (serviceLine = null, preferCorrectionLive = false) => {
+        const bookingCurrency = refundFxBookingCurrencyCode();
+        const line = serviceLine || currentActiveServiceLineForRefund() || {};
+        const lineExpectedCurrency = String(line?.latestCancelExpectedSupplierRefundCurrency || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+        const lineExpectedRate = Math.max(toNumber(line?.latestCancelExpectedSupplierRefundExchangeRate || 1), 0.00000001);
+        const lineCustomerPenaltyCurrency = String(line?.latestCancelCustomerPenaltyCurrency || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+        const lineCustomerPenaltyRate = Math.max(toNumber(line?.latestCancelCustomerPenaltyExchangeRate || 1), 0.00000001);
+        const lineSupplierPenaltyCurrency = String(line?.latestCancelSupplierPenaltyCurrency || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+        const lineSupplierPenaltyRate = Math.max(toNumber(line?.latestCancelSupplierPenaltyExchangeRate || 1), 0.00000001);
+
+        const currentExpectedCurrency = String(
+            serviceCorrectionSettlementForm?.elements?.namedItem('expected_supplier_refund_currency')?.value || lineExpectedCurrency
+        ).trim().toUpperCase() || lineExpectedCurrency;
+        const currentExpectedRate = Math.max(toNumber(
+            serviceCorrectionSettlementForm?.elements?.namedItem('expected_supplier_refund_exchange_rate')?.value || lineExpectedRate
+        ), 0.00000001);
+        const currentCustomerPenaltyCurrency = String(
+            serviceCorrectionSettlementForm?.elements?.namedItem('customer_penalty_currency')?.value || lineCustomerPenaltyCurrency
+        ).trim().toUpperCase() || lineCustomerPenaltyCurrency;
+        const currentCustomerPenaltyRate = Math.max(toNumber(
+            serviceCorrectionSettlementForm?.elements?.namedItem('customer_penalty_exchange_rate')?.value || lineCustomerPenaltyRate
+        ), 0.00000001);
+        const currentSupplierPenaltyCurrency = String(
+            serviceCorrectionSettlementForm?.elements?.namedItem('supplier_penalty_currency')?.value || lineSupplierPenaltyCurrency
+        ).trim().toUpperCase() || lineSupplierPenaltyCurrency;
+        const currentSupplierPenaltyRate = Math.max(toNumber(
+            serviceCorrectionSettlementForm?.elements?.namedItem('supplier_penalty_exchange_rate')?.value || lineSupplierPenaltyRate
+        ), 0.00000001);
+
+        if (preferCorrectionLive && currentExpectedCurrency !== bookingCurrency) {
+            return { currency: currentExpectedCurrency, rate: currentExpectedRate };
+        }
+        if (preferCorrectionLive && currentCustomerPenaltyCurrency !== bookingCurrency) {
+            return { currency: currentCustomerPenaltyCurrency, rate: currentCustomerPenaltyRate };
+        }
+        if (preferCorrectionLive && currentSupplierPenaltyCurrency !== bookingCurrency) {
+            return { currency: currentSupplierPenaltyCurrency, rate: currentSupplierPenaltyRate };
+        }
+        if (lineExpectedCurrency !== bookingCurrency) {
+            return { currency: lineExpectedCurrency, rate: lineExpectedRate };
+        }
+        if (lineCustomerPenaltyCurrency !== bookingCurrency) {
+            return { currency: lineCustomerPenaltyCurrency, rate: lineCustomerPenaltyRate };
+        }
+        if (lineSupplierPenaltyCurrency !== bookingCurrency) {
+            return { currency: lineSupplierPenaltyCurrency, rate: lineSupplierPenaltyRate };
+        }
+
+        return { currency: bookingCurrency, rate: 1 };
+    };
+
+    const syncRefundProgressNote = (serviceLine = null, preferCorrectionLive = false) => {
+        if (!(serviceRefundProgressNote instanceof HTMLElement)) {
+            return;
+        }
+
+        const line = serviceLine || currentActiveServiceLineForRefund();
+        if (!line) {
+            serviceRefundProgressNote.textContent = '';
+            return;
+        }
+
+        const bookingCurrency = refundFxBookingCurrencyCode();
+        const customerDisplay = refundWorkflowCustomerDisplayContext(line, preferCorrectionLive);
+        const supplierDisplay = refundWorkflowSupplierDisplayContext(line, preferCorrectionLive);
+        const roundRefundDisplayAmount = (amount) => Math.max(Math.round(toNumber(amount || 0)), 0);
+        const convertBookingAmount = (amount, display) => display.currency === bookingCurrency
+            ? roundRefundDisplayAmount(amount)
+            : roundRefundDisplayAmount(amount * Math.max(display.rate || 1, 0.00000001));
+        const convertFieldAmountToDisplay = (amount, fieldCurrency, fieldRate, display) => {
+            const normalizedFieldCurrency = String(fieldCurrency || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+            if (display.currency === normalizedFieldCurrency) {
+                return roundRefundDisplayAmount(amount);
+            }
+            const bookingAmount = normalizedFieldCurrency === bookingCurrency
+                ? roundRefundDisplayAmount(amount)
+                : roundRefundDisplayAmount(amount / Math.max(fieldRate || 1, 0.00000001));
+            return convertBookingAmount(bookingAmount, display);
+        };
+        const customerRefundDetail = line?.latestCustomerRefundDetail && typeof line.latestCustomerRefundDetail === 'object'
+            ? line.latestCustomerRefundDetail
+            : {};
+        const supplierRefundDetail = line?.latestSupplierRefundDetail && typeof line.latestSupplierRefundDetail === 'object'
+            ? line.latestSupplierRefundDetail
+            : {};
+        const lineExpectedSupplierRefundCurrency = String(line?.latestCancelExpectedSupplierRefundCurrency || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+        const lineExpectedSupplierRefundSourceAmount = Math.max(toNumber(line?.latestCancelExpectedSupplierRefundSourceAmount || 0), 0);
+        const lineCustomerPenaltyCurrency = String(line?.latestCancelCustomerPenaltyCurrency || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+        const lineCustomerPenaltySourceAmount = Math.max(toNumber(line?.latestCancelCustomerPenaltySourceAmount || 0), 0);
+        const customerPostedAmount = Math.max(toNumber(customerRefundDetail.refund_source_amount || line.latestCustomerRefundAmountOnly || 0), 0);
+        const customerPostedCurrency = String(customerRefundDetail.refund_currency || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+        const customerPostedRate = Math.max(toNumber(customerRefundDetail.refund_exchange_rate_to_booking || 1), 0.00000001);
+        const supplierPostedAmount = Math.max(toNumber(supplierRefundDetail.refund_source_amount || line.latestSupplierRefundAmountOnly || 0), 0);
+        const supplierPostedCurrency = String(supplierRefundDetail.refund_currency || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+        const supplierPostedRate = Math.max(toNumber(supplierRefundDetail.refund_exchange_rate_to_booking || 1), 0.00000001);
+
+        let customerRefundAvailable = Math.max(toNumber(line.customerRefundableCreditAmount || 0), 0);
+        let supplierRefundExpected = Math.max(toNumber(line.supplierRefundableCreditAmount || 0), 0);
+
+        if (preferCorrectionLive && serviceCorrectionSettlementForm instanceof HTMLFormElement) {
+            const customerRefundDueField = serviceCorrectionSettlementForm.querySelector('[data-settlement-customer-refund-due]');
+            const expectedSupplierRefundField = serviceCorrectionSettlementForm.elements.namedItem('expected_supplier_refund_amount');
+            const expectedSupplierRefundCurrencyField = serviceCorrectionSettlementForm.elements.namedItem('expected_supplier_refund_currency');
+            const expectedSupplierRefundRateField = serviceCorrectionSettlementForm.elements.namedItem('expected_supplier_refund_exchange_rate');
+            const liveExpectedSupplierCurrency = String(
+                expectedSupplierRefundCurrencyField instanceof HTMLSelectElement
+                    ? expectedSupplierRefundCurrencyField.value
+                    : bookingCurrency
+            ).trim().toUpperCase() || bookingCurrency;
+            const liveExpectedSupplierRate = Math.max(
+                toNumber(expectedSupplierRefundRateField instanceof HTMLInputElement ? expectedSupplierRefundRateField.value : 1),
+                0.00000001
+            );
+
+            if (customerRefundDueField instanceof HTMLInputElement) {
+                customerRefundAvailable = Math.max(
+                    convertFieldAmountToDisplay(
+                        toNumber(customerRefundDueField.value || 0),
+                        customerDisplay.currency,
+                        customerDisplay.rate,
+                        customerDisplay
+                    ),
+                    0
+                );
+            } else {
+                customerRefundAvailable = Math.max(convertBookingAmount(customerRefundAvailable, customerDisplay), 0);
+            }
+
+            if (expectedSupplierRefundField instanceof HTMLInputElement) {
+                supplierRefundExpected = Math.max(
+                    convertFieldAmountToDisplay(
+                        toNumber(expectedSupplierRefundField.value || 0),
+                        liveExpectedSupplierCurrency,
+                        liveExpectedSupplierRate,
+                        supplierDisplay
+                    ),
+                    0
+                );
+            } else {
+                supplierRefundExpected = Math.max(convertBookingAmount(supplierRefundExpected, supplierDisplay), 0);
+            }
+        } else {
+            customerRefundAvailable = Math.max(convertBookingAmount(customerRefundAvailable, customerDisplay), 0);
+            supplierRefundExpected = Math.max(convertBookingAmount(supplierRefundExpected, supplierDisplay), 0);
+        }
+
+        const canUseDirectSupplierRefundSourceTruth = !preferCorrectionLive
+            && supplierDisplay.currency === lineExpectedSupplierRefundCurrency
+            && lineExpectedSupplierRefundCurrency !== bookingCurrency
+            && lineExpectedSupplierRefundSourceAmount > 0.005;
+        if (canUseDirectSupplierRefundSourceTruth) {
+            supplierRefundExpected = Math.max(Math.round(lineExpectedSupplierRefundSourceAmount), 0);
+        }
+
+        const parts = [];
+        if (customerRefundAvailable > 0.005) {
+            parts.push(`Customer refund available now: ${formatCurrencyAmount(customerDisplay.currency, customerRefundAvailable)}`);
+        }
+        const customerPostedDisplay = customerPostedAmount > 0.005
+            ? convertFieldAmountToDisplay(customerPostedAmount, customerPostedCurrency, customerPostedRate, customerDisplay)
+            : 0;
+        if (customerPostedDisplay > 0.005) {
+            parts.push(`Customer refund already posted: ${formatCurrencyAmount(customerDisplay.currency, customerPostedDisplay)}`);
+        }
+        if (supplierRefundExpected > 0.005) {
+            parts.push(`Supplier refund still expected: ${formatCurrencyAmount(supplierDisplay.currency, supplierRefundExpected)}`);
+        }
+        const supplierPostedDisplay = supplierPostedAmount > 0.005
+            ? convertFieldAmountToDisplay(supplierPostedAmount, supplierPostedCurrency, supplierPostedRate, supplierDisplay)
+            : 0;
+        if (supplierPostedDisplay > 0.005) {
+            parts.push(`Supplier refund already received: ${formatCurrencyAmount(supplierDisplay.currency, supplierPostedDisplay)}`);
+        }
+
+        serviceRefundProgressNote.textContent = parts.length > 0 ? `${parts.join('. ')}.` : '';
+    };
+
+    const correctionWorkflowDisplayCurrency = () => {
+        const bookingCurrency = refundFxBookingCurrencyCode();
+        const expectedSupplierRefundCurrency = String(
+            serviceCorrectionSettlementForm?.elements?.namedItem('expected_supplier_refund_currency')?.value || bookingCurrency
+        ).trim().toUpperCase() || bookingCurrency;
+        const customerPenaltyCurrency = String(
+            serviceCorrectionSettlementForm?.elements?.namedItem('customer_penalty_currency')?.value || bookingCurrency
+        ).trim().toUpperCase() || bookingCurrency;
+        const supplierPenaltyCurrency = String(
+            serviceCorrectionSettlementForm?.elements?.namedItem('supplier_penalty_currency')?.value || bookingCurrency
+        ).trim().toUpperCase() || bookingCurrency;
+
+        if (expectedSupplierRefundCurrency !== bookingCurrency) {
+            return expectedSupplierRefundCurrency;
+        }
+        if (customerPenaltyCurrency !== bookingCurrency) {
+            return customerPenaltyCurrency;
+        }
+        if (supplierPenaltyCurrency !== bookingCurrency) {
+            return supplierPenaltyCurrency;
+        }
+
+        return bookingCurrency;
+    };
+
+    const syncRefundWorkflowFromCorrectionForm = (scope = '') => {
+        if (!(serviceRefundForm instanceof HTMLFormElement)) {
+            return;
+        }
+
+        const customerDisplay = refundWorkflowCustomerDisplayContext(undefined, true);
+        const supplierDisplay = refundWorkflowSupplierDisplayContext(undefined, true);
+        if (serviceCustomerRefundCurrencyInput instanceof HTMLSelectElement) {
+            serviceCustomerRefundCurrencyInput.dataset.preferredCurrency = customerDisplay.currency;
+            if (Array.from(serviceCustomerRefundCurrencyInput.options).some((option) => option.value === customerDisplay.currency)) {
+                serviceCustomerRefundCurrencyInput.value = customerDisplay.currency;
+                serviceCustomerRefundCurrencyInput.dataset.lastCurrency = customerDisplay.currency;
+            }
+        }
+        if (serviceSupplierRefundCurrencyInput instanceof HTMLSelectElement) {
+            serviceSupplierRefundCurrencyInput.dataset.preferredCurrency = supplierDisplay.currency;
+            if (Array.from(serviceSupplierRefundCurrencyInput.options).some((option) => option.value === supplierDisplay.currency)) {
+                serviceSupplierRefundCurrencyInput.value = supplierDisplay.currency;
+                serviceSupplierRefundCurrencyInput.dataset.lastCurrency = supplierDisplay.currency;
+            }
+        }
+
+        if (scope === 'customer') {
+            const payNowOption = serviceCustomerRefundTreatmentInputs.find((input) => (
+                input instanceof HTMLInputElement && input.value === 'pay_now'
+            ));
+            if (payNowOption instanceof HTMLInputElement) {
+                payNowOption.checked = true;
+            }
+        }
+
+        syncRefundFxDefaults('customer');
+        syncRefundFxDefaults('supplier');
+        syncCustomerRefundTreatment();
+        syncSupplierRefundTreasurySelector();
+        syncRefundProgressNote(undefined, true);
     };
 
     const syncReceiptScopeTargets = () => {
@@ -7829,7 +9824,15 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             syncPaymentTreasurySelector();
+            syncPaymentAccountBalanceMode();
             if (promptTreasuryAccountSetupIfMissing(paymentMethodSelect.value)) {
+                return;
+            }
+
+            if (isDirectSupplierPaymentMethod(paymentMethodSelect.value)
+                && Math.max(toNumber(receivedNowInput?.value || 0), 0) > 0.005
+            ) {
+                openCustomerPaidSupplierModal();
                 return;
             }
 
@@ -7854,11 +9857,15 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             syncPaymentTreasurySelector();
+            syncPaymentAccountBalanceMode();
             if (promptTreasuryAccountSetupIfMissing(paymentMethodSelect.value)) {
                 return;
             }
 
             if (isDirectSupplierPaymentMethod(paymentMethodSelect.value) && directSupplierObligationSelect && !directSupplierObligationSelect.disabled) {
+                if (openCustomerPaidSupplierModal()) {
+                    return;
+                }
                 directSupplierObligationSelect.focus();
                 return;
             }
@@ -7878,16 +9885,131 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         });
     }
+    if (paymentAccountBalanceSelect instanceof HTMLSelectElement) {
+        paymentAccountBalanceSelect.addEventListener('change', () => {
+            syncPaymentAccountBalanceMode();
+            syncPaymentTreasurySelector();
+        });
+    }
+    if (businessSourceInput instanceof HTMLSelectElement) {
+        businessSourceInput.addEventListener('change', () => {
+            loadPaymentAccountHolderBalances()
+                .catch(() => populatePaymentAccountBalanceOptions([]))
+                .finally(() => {
+                    syncPaymentTreasurySelector();
+                });
+        });
+    }
     if (directSupplierObligationSelect) {
+        directSupplierObligationSelect.addEventListener('change', () => {
+            const selectedOption = directSupplierObligationSelect.selectedOptions?.[0];
+            if (selectedOption && String(selectedOption.value || '').trim() !== '' && String(selectedOption.value || '') !== directSupplierPendingOptionValue) {
+                directSupplierSelectedExternalObligation = normalizeDirectSupplierObligation({
+                    id: selectedOption.value,
+                    supplier_name: selectedOption.textContent,
+                    service_line_reference: selectedOption.dataset.serviceLineReference || '',
+                    currency: selectedOption.dataset.currency || '',
+                    balance: selectedOption.dataset.balance || 0,
+                    booking_reference: selectedOption.dataset.bookingReference || '',
+                });
+                if (directSupplierIdInput) {
+                    directSupplierIdInput.value = String(Number(directSupplierSelectedExternalObligation.supplierId || 0) || '');
+                }
+                if (directSupplierSelectedExternalRows.length === 0) {
+                    directSupplierSelectedExternalRows = [directSupplierSelectedExternalObligation];
+                }
+            } else if (String(directSupplierObligationSelect.value || '').trim() === '') {
+                directSupplierSelectedExternalObligation = null;
+                directSupplierSelectedExternalRows = [];
+                if (directSupplierIdInput) {
+                    directSupplierIdInput.value = '';
+                }
+            }
+            updateDirectSupplierSelectionSummary();
+        });
         directSupplierObligationSelect.addEventListener('keydown', (event) => {
             if (event.key !== 'Enter' && event.code !== 'NumpadEnter') {
                 return;
             }
 
             event.preventDefault();
+            if (openCustomerPaidSupplierModal()) {
+                return;
+            }
             if (paymentPrimarySaveButton instanceof HTMLButtonElement) {
                 paymentPrimarySaveButton.focus();
             }
+        });
+    }
+
+    customerPaidSupplierOpenButtons.forEach((button) => {
+        button.addEventListener('click', () => {
+            if (noteSavedPaymentEditAttempt()) {
+                return;
+            }
+            openCustomerPaidSupplierModal();
+        });
+    });
+
+    customerPaidSupplierCloseButtons.forEach((button) => {
+        button.addEventListener('click', () => {
+            closeCustomerPaidSupplierModal();
+            if (paymentMethodSelect instanceof HTMLSelectElement) {
+                paymentMethodSelect.focus();
+            }
+        });
+    });
+
+    if (customerPaidSupplierSearchInput instanceof HTMLInputElement) {
+        customerPaidSupplierSearchInput.addEventListener('input', () => {
+            window.clearTimeout(customerPaidSupplierSearchTimer);
+            customerPaidSupplierSearchTimer = window.setTimeout(() => {
+                void loadCustomerPaidSupplierOptions(customerPaidSupplierSearchInput.value || '');
+            }, 250);
+        });
+    }
+
+    if (customerPaidSupplierApplyButton instanceof HTMLButtonElement) {
+        customerPaidSupplierApplyButton.addEventListener('click', async () => {
+            if (!customerPaidSupplierSelectedResult || customerPaidSupplierSelectedResult.id <= 0) {
+                showCustomerPaidSupplierFeedback('Select a supplier first.', true);
+                return;
+            }
+
+            directSupplierSelectedExternalObligation = customerPaidSupplierSelectedResult;
+            syncDirectSupplierObligationOptions();
+            if (directSupplierObligationSelect instanceof HTMLSelectElement) {
+                setDirectSupplierHiddenFields(customerPaidSupplierSelectedResult, directSupplierSelectedExternalRows);
+            }
+            if (directSupplierSelectedExternalRows.length === 0) {
+                directSupplierSelectedExternalRows = [customerPaidSupplierSelectedResult];
+            }
+            updateDirectSupplierSelectionSummary();
+            if (customerPaidSupplierReferenceInput instanceof HTMLInputElement && paymentReferenceInput) {
+                paymentReferenceInput.value = String(customerPaidSupplierReferenceInput.value || '').trim();
+            }
+            if (customerPaidSupplierBankDetailInput instanceof HTMLInputElement && paymentBankCardDetailInput) {
+                paymentBankCardDetailInput.value = String(customerPaidSupplierBankDetailInput.value || '').trim();
+            }
+            if (customerPaidSupplierChargesInput instanceof HTMLInputElement && paymentChargesAmountInput) {
+                paymentChargesAmountInput.value = formatNumberInputValue(Math.max(toNumber(customerPaidSupplierChargesInput.value || 0), 0));
+            }
+            if (customerPaidSupplierRemarksInput instanceof HTMLInputElement && paymentRemarksInput) {
+                paymentRemarksInput.value = String(customerPaidSupplierRemarksInput.value || '').trim();
+            }
+            updateDirectSupplierSelectionSummary();
+            closeCustomerPaidSupplierModal();
+            showFeedback('Paid Supplier details ready to save.');
+            if (!hasPaymentDetailMetadata()) {
+                customerPaidSupplierPendingSave = true;
+                openPaymentDetailModal();
+                return;
+            }
+            customerPaidSupplierPendingSave = false;
+            await performSameCurrencyPaymentSave({
+                autoOpenReceipt: true,
+                workflowOrigin: 'paid_supplier_modal',
+            });
         });
     }
 
@@ -7906,10 +10028,19 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     if (paymentDetailApplyButton) {
-        paymentDetailApplyButton.addEventListener('click', () => {
+        paymentDetailApplyButton.addEventListener('click', async () => {
             paymentDetailCloseFocusMode = 'after-save';
             applyPaymentDetailModalValues({ close: false });
             triggerPaymentDetailCloseButton();
+            if (!customerPaidSupplierPendingSave) {
+                return;
+            }
+
+            customerPaidSupplierPendingSave = false;
+            await performSameCurrencyPaymentSave({
+                autoOpenReceipt: true,
+                workflowOrigin: 'paid_supplier_modal',
+            });
         });
     }
 
@@ -7963,6 +10094,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     syncPaymentTreasurySelector();
+    loadPaymentAccountHolderBalances().catch(() => populatePaymentAccountBalanceOptions([]));
 
     if (paymentDueDatePicker && paymentDueDateInput) {
         paymentDueDatePicker.addEventListener('change', () => {
@@ -8107,6 +10239,21 @@ document.addEventListener('DOMContentLoaded', () => {
                 });
 
                 const servicePayload = await persistServiceAutosave({ allowCreate: true });
+                const canReuseExistingSavedService = currentBookingId() > 0 && hasValidSavedServiceForPayment();
+                if (!servicePayload && canReuseExistingSavedService) {
+                    logWorkflowTrace('save-payment:commit-draft-fallback-existing-service', {
+                        currentBookingId: currentBookingId(),
+                        currentPersistedServiceId: currentPersistedServiceId(),
+                        activeServiceId: activeServiceId(),
+                    });
+                    window.workspaceDebugEnterFlow('payment-save-commit-draft-fallback-existing-service', {
+                        currentBookingId: currentBookingId(),
+                        currentPersistedServiceId: currentPersistedServiceId(),
+                        activeServiceId: activeServiceId(),
+                    });
+                    return true;
+                }
+
                 if (!servicePayload || currentBookingId() <= 0 || currentPersistedServiceId() <= 0) {
                     logWorkflowTrace('save-payment:commit-draft-failed', {
                         servicePayloadOk: Boolean(servicePayload),
@@ -8539,6 +10686,12 @@ document.addEventListener('DOMContentLoaded', () => {
         customerAdvanceOpenButton.addEventListener('click', () => openCustomerAdvanceModal());
     }
 
+    if (customerAdvanceEditOpenButton) {
+        customerAdvanceEditOpenButton.addEventListener('click', () => {
+            openCustomerAdvancePickerModal();
+        });
+    }
+
     if (customerAdvanceSearchInput) {
         let customerAdvanceSearchTimer = 0;
         customerAdvanceSearchInput.addEventListener('input', () => {
@@ -8609,6 +10762,14 @@ document.addEventListener('DOMContentLoaded', () => {
         button.addEventListener('click', () => closeCustomerAdvanceModal());
     });
 
+    customerAdvanceEditCloseButtons.forEach((button) => {
+        button.addEventListener('click', () => closeCustomerAdvanceEditForm());
+    });
+
+    customerAdvancePickerCloseButtons.forEach((button) => {
+        button.addEventListener('click', () => closeCustomerAdvancePickerModal());
+    });
+
     [customerAdvanceBranch, customerAdvanceCurrency, customerAdvanceMethod].forEach((field) => {
         if (field instanceof HTMLSelectElement) {
             field.addEventListener('change', () => {
@@ -8622,6 +10783,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 syncCustomerAdvanceBankDetailVisibility();
                 syncCustomerAdvanceRefundTreasurySelector();
                 loadCustomerAdvanceRefundOptions();
+                if (customerAdvanceEditForm instanceof HTMLElement && !customerAdvanceEditForm.hidden) {
+                    if (field === customerAdvanceBranch && customerAdvanceEditBranchFilter instanceof HTMLSelectElement) {
+                        customerAdvanceEditBranchFilter.value = customerAdvanceBranch.value;
+                    }
+                    void loadCustomerAdvanceEditOptions({ allowBranchFallback: false });
+                }
             });
         }
     });
@@ -8638,6 +10805,96 @@ document.addEventListener('DOMContentLoaded', () => {
     if (customerAdvanceRefundReceipt instanceof HTMLSelectElement) {
         customerAdvanceRefundReceipt.addEventListener('change', () => syncCustomerAdvanceRefundAmountFromSelection());
     }
+
+    if (customerAdvanceEditBranchFilter instanceof HTMLSelectElement) {
+        customerAdvanceEditBranchFilter.addEventListener('change', () => {
+            if (customerAdvanceEditBranchId instanceof HTMLInputElement) {
+                customerAdvanceEditBranchId.value = customerAdvanceEditBranchFilter.value;
+            }
+            void loadCustomerAdvanceEditOptions({ allowBranchFallback: false });
+            syncCustomerAdvanceEditTreasurySelector();
+        });
+    }
+
+    if (customerAdvancePickerBranch instanceof HTMLSelectElement) {
+        customerAdvancePickerBranch.addEventListener('change', () => {
+            void loadCustomerAdvancePickerRows({
+                query: String(customerAdvancePickerSearch?.value || ''),
+                branchId: Number.parseInt(String(customerAdvancePickerBranch.value || 0), 10) || 0,
+            });
+        });
+    }
+
+    if (customerAdvancePickerSearch instanceof HTMLInputElement) {
+        let customerAdvancePickerSearchTimer = 0;
+        customerAdvancePickerSearch.addEventListener('input', () => {
+            window.clearTimeout(customerAdvancePickerSearchTimer);
+            customerAdvancePickerSearchTimer = window.setTimeout(() => {
+                void loadCustomerAdvancePickerRows({
+                    query: customerAdvancePickerSearch.value,
+                    branchId: Number.parseInt(String(customerAdvancePickerBranch?.value || 0), 10) || 0,
+                });
+            }, 180);
+        });
+    }
+
+    if (customerAdvancePickerResults instanceof HTMLElement) {
+        customerAdvancePickerResults.addEventListener('click', (event) => {
+            const button = event.target instanceof HTMLElement ? event.target.closest('[data-customer-advance-picker-select]') : null;
+            if (!(button instanceof HTMLElement)) {
+                return;
+            }
+
+            const travelerId = Number.parseInt(String(button.dataset.customerAdvancePickerSelect || '0'), 10) || 0;
+            const branchId = Number.parseInt(String(button.dataset.customerAdvancePickerBranchSelect || '0'), 10) || 0;
+            const selectedRow = Array.isArray(customerAdvancePickerState.rows)
+                ? customerAdvancePickerState.rows.find((row) => (Number.parseInt(String(row?.traveler_id || 0), 10) || 0) === travelerId && (Number.parseInt(String(row?.branch_id || 0), 10) || 0) === branchId)
+                : null;
+            if (!selectedRow) {
+                setCustomerAdvancePickerFeedback('The selected customer advance could not be opened. Please search again.', true);
+                return;
+            }
+
+            selectCustomerForAdvance({
+                id: travelerId,
+                full_name: String(selectedRow.customer_name || 'Customer'),
+                mobile: String(selectedRow.mobile || ''),
+                passport_number: String(selectedRow.passport_number || ''),
+                family_id: String(selectedRow.family_id || ''),
+                branch_id: branchId,
+            });
+            if (customerAdvanceBranch instanceof HTMLSelectElement && branchId > 0) {
+                customerAdvanceBranch.value = String(branchId);
+            }
+            if (customerAdvanceEditBranchFilter instanceof HTMLSelectElement && branchId > 0) {
+                customerAdvanceEditBranchFilter.value = String(branchId);
+            }
+            closeCustomerAdvancePickerModal();
+            void openCustomerAdvanceEditForm();
+        });
+    }
+
+    if (customerAdvanceEditPicker instanceof HTMLSelectElement) {
+        customerAdvanceEditPicker.addEventListener('change', () => {
+            const receiptId = String(customerAdvanceEditPicker.value || '').trim();
+            if (receiptId === '') {
+                if (customerAdvanceEditReceiptId instanceof HTMLInputElement) {
+                    customerAdvanceEditReceiptId.value = '';
+                }
+                return;
+            }
+
+            void loadCustomerAdvanceEditDetail(receiptId);
+        });
+    }
+
+    [customerAdvanceEditCurrency, customerAdvanceEditMethod].forEach((field) => {
+        if (field instanceof HTMLSelectElement) {
+            field.addEventListener('change', () => {
+                syncCustomerAdvanceEditTreasurySelector();
+            });
+        }
+    });
 
     if (customerAdvanceForm instanceof HTMLFormElement) {
         customerAdvanceForm.addEventListener('submit', (event) => {
@@ -8730,6 +10987,48 @@ document.addEventListener('DOMContentLoaded', () => {
                 event.preventDefault();
                 setCustomerAdvanceRefundFeedback('Enter the reason for returning the advance.');
                 reasonField.focus();
+            }
+        });
+    }
+
+    if (customerAdvanceEditForm instanceof HTMLFormElement) {
+        customerAdvanceEditForm.addEventListener('submit', (event) => {
+            const travelerId = Number.parseInt(String(customerAdvanceEditTravelerId?.value || '0'), 10) || 0;
+            const receiptId = Number.parseInt(String(customerAdvanceEditReceiptId?.value || '0'), 10) || 0;
+            const amount = toNumber(customerAdvanceEditAmount?.value || 0);
+            const requiresTreasury = paymentMethodRequiresTreasurySelection(customerAdvanceEditMethod?.value || '');
+            if (travelerId <= 0) {
+                event.preventDefault();
+                setCustomerAdvanceEditFeedback('Select a customer first.', true, true);
+                customerAdvanceSearchInput?.focus();
+                return;
+            }
+            if (receiptId <= 0) {
+                event.preventDefault();
+                setCustomerAdvanceEditFeedback('Select the advance you want to edit.', true, true);
+                customerAdvanceEditPicker?.focus();
+                return;
+            }
+            if (customerAdvanceEditBranchId instanceof HTMLInputElement && customerAdvanceEditBranchFilter instanceof HTMLSelectElement) {
+                customerAdvanceEditBranchId.value = customerAdvanceEditBranchFilter.value;
+            }
+            if (amount <= 0) {
+                event.preventDefault();
+                setCustomerAdvanceEditFeedback('Enter a valid advance amount.', true, true);
+                customerAdvanceEditAmount?.focus();
+                return;
+            }
+            if (requiresTreasury && String(customerAdvanceEditAccount?.value || '').trim() === '') {
+                event.preventDefault();
+                setCustomerAdvanceEditFeedback('Select the deposit account for this correction.', true, true);
+                customerAdvanceEditAccount?.focus();
+                return;
+            }
+            if (String(customerAdvanceEditReason?.value || '').trim() === '') {
+                event.preventDefault();
+                setCustomerAdvanceEditFeedback('Please enter a short reason for the edit.', true, true);
+                customerAdvanceEditReason?.focus();
+                return;
             }
         });
     }
@@ -8858,8 +11157,28 @@ document.addEventListener('DOMContentLoaded', () => {
             openSupplierPaymentEdit(button.dataset.supplierPaymentEditOpen || '');
         }
     });
+    globalPaymentManagerResults?.addEventListener('submit', (event) => {
+        const form = event.target instanceof HTMLFormElement
+            ? event.target
+            : null;
+        if (!(form instanceof HTMLFormElement)) {
+            return;
+        }
+
+        if (form.classList.contains('global-payment-manager-correction-form')) {
+            event.preventDefault();
+            void submitGlobalPaymentManagerForm(form, 'change_supplier');
+            return;
+        }
+
+        if (form.classList.contains('global-payment-manager-void-form')) {
+            event.preventDefault();
+            void submitGlobalPaymentManagerForm(form, 'void');
+        }
+    });
     supplierPaymentEditCloseButtons.forEach((button) => button.addEventListener('click', () => closeSupplierPaymentEdit()));
     supplierPaymentEditForm?.addEventListener('submit', (event) => void submitSupplierPaymentEdit(event));
+    supplierPaymentEditVoidButton?.addEventListener('click', submitSupplierPaymentVoid);
     [supplierPaymentEditSupplier, supplierPaymentEditDate, supplierPaymentEditAmount, supplierPaymentEditReference, supplierPaymentEditBankDetail, supplierPaymentEditRemarks].forEach((field) => {
         field?.addEventListener('input', () => updateSupplierPaymentEditPreview());
         field?.addEventListener('change', () => updateSupplierPaymentEditPreview());
@@ -8924,6 +11243,12 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         syncPrepaidPaymentEditAccounts();
     });
+    prepaidPaymentEditCurrency?.addEventListener('change', () => {
+        if (prepaidPaymentEditAccount instanceof HTMLSelectElement) {
+            prepaidPaymentEditAccount.dataset.requestedAccountId = '';
+        }
+        syncPrepaidPaymentEditAccounts();
+    });
     prepaidPaymentEditForm?.addEventListener('submit', submitPrepaidPaymentEdit);
 
     if (documentFileInput instanceof HTMLInputElement) {
@@ -8942,7 +11267,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const fillValue = (field, value) => {
         if (field) {
             if (field instanceof HTMLInputElement && field.type === 'number') {
-                field.value = formatNumberInputValue(value ?? 0);
+                field.value = formatNumberInputValue(value ?? 0, inputDecimalPlaces(field));
                 return;
             }
 
@@ -8960,7 +11285,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        field.value = formatNumberInputValue(rawValue);
+        field.value = formatNumberInputValue(rawValue, inputDecimalPlaces(field));
     };
 
     const bindWholeNumberInputs = (root = station) => {
@@ -9182,6 +11507,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const supplierHistoryFinderUrl = String(supplierHistoryModal?.dataset.supplierHistoryUrl || '').trim();
     const globalPaymentHistoryUrl = String(globalPaymentManagerModal?.dataset.globalPaymentHistoryUrl || '').trim();
     const globalPaymentCorrectionUrl = String(globalPaymentManagerModal?.dataset.globalPaymentCorrectionUrl || '').trim();
+    const globalPaymentSupplierCorrectionUrl = String(globalPaymentManagerModal?.dataset.globalPaymentSupplierCorrectionUrl || '').trim();
     const supplierPaymentEditUrl = String(globalPaymentManagerModal?.dataset.supplierPaymentEditUrl || '').trim();
     const prepaidPaymentHistoryUrl = String(prepaidPaymentManagerModal?.dataset.prepaidPaymentHistoryUrl || '').trim();
     const prepaidPaymentCorrectionUrl = String(prepaidPaymentManagerModal?.dataset.prepaidPaymentCorrectionUrl || '').trim();
@@ -9324,11 +11650,21 @@ document.addEventListener('DOMContentLoaded', () => {
     const serviceRefundId = station.querySelector('[data-service-refund-id]');
     const serviceRefundButton = station.querySelector('[data-service-refund-button]');
     const serviceRefundForm = station.querySelector('form[data-service-event-bar="refund"]');
+    const serviceRefundProgressNote = serviceRefundForm?.querySelector('[data-service-refund-progress-note]') || null;
     const serviceRefundMethodSelect = serviceRefundForm?.elements?.namedItem('refund_payment_method') instanceof HTMLSelectElement
         ? serviceRefundForm.elements.namedItem('refund_payment_method')
         : null;
     const serviceCustomerRefundAmount = serviceRefundForm?.elements?.namedItem('customer_refund_amount') instanceof HTMLInputElement
         ? serviceRefundForm.elements.namedItem('customer_refund_amount')
+        : null;
+    const serviceCustomerRefundCurrencyInput = serviceRefundForm?.elements?.namedItem('customer_refund_currency') instanceof HTMLSelectElement
+        ? serviceRefundForm.elements.namedItem('customer_refund_currency')
+        : null;
+    const serviceCustomerRefundSourceAmountInput = serviceRefundForm?.elements?.namedItem('customer_refund_source_amount') instanceof HTMLInputElement
+        ? serviceRefundForm.elements.namedItem('customer_refund_source_amount')
+        : null;
+    const serviceCustomerRefundExchangeRateInput = serviceRefundForm?.elements?.namedItem('customer_refund_exchange_rate') instanceof HTMLInputElement
+        ? serviceRefundForm.elements.namedItem('customer_refund_exchange_rate')
         : null;
     const serviceCustomerRefundTreatmentInputs = serviceRefundForm
         ? Array.from(serviceRefundForm.querySelectorAll('input[name="customer_refund_treatment"]'))
@@ -9346,10 +11682,24 @@ document.addEventListener('DOMContentLoaded', () => {
     const serviceSupplierRefundAmount = serviceRefundForm?.elements?.namedItem('supplier_refund_amount') instanceof HTMLInputElement
         ? serviceRefundForm.elements.namedItem('supplier_refund_amount')
         : null;
+    const serviceSupplierRefundCurrencyInput = serviceRefundForm?.elements?.namedItem('supplier_refund_currency') instanceof HTMLSelectElement
+        ? serviceRefundForm.elements.namedItem('supplier_refund_currency')
+        : null;
+    const serviceSupplierRefundSourceAmountInput = serviceRefundForm?.elements?.namedItem('supplier_refund_source_amount') instanceof HTMLInputElement
+        ? serviceRefundForm.elements.namedItem('supplier_refund_source_amount')
+        : null;
+    const serviceSupplierRefundExchangeRateInput = serviceRefundForm?.elements?.namedItem('supplier_refund_exchange_rate') instanceof HTMLInputElement
+        ? serviceRefundForm.elements.namedItem('supplier_refund_exchange_rate')
+        : null;
     const serviceSupplierRefundTreasuryRow = station.querySelector('[data-service-supplier-refund-treasury-row]');
     const serviceSupplierRefundTreasurySelect = serviceRefundForm?.elements?.namedItem('supplier_refund_treasury_account_id') instanceof HTMLSelectElement
         ? serviceRefundForm.elements.namedItem('supplier_refund_treasury_account_id')
         : null;
+    const refundFxCurrencyTriggers = serviceRefundForm
+        ? Array.from(serviceRefundForm.querySelectorAll('[data-refund-fx-currency-trigger]'))
+        : [];
+    const customerRefundFxSummary = serviceRefundForm?.querySelector('[data-refund-fx-summary="customer"]') || null;
+    const supplierRefundFxSummary = serviceRefundForm?.querySelector('[data-refund-fx-summary="supplier"]') || null;
     const serviceRefundBranchIdField = station.querySelector('[data-service-refund-branch-id]');
     const serviceRefundCurrencyField = station.querySelector('[data-service-refund-currency]');
     const serviceRefundDestinationRows = Array.from(station.querySelectorAll('[data-service-refund-destination-row]'));
@@ -9370,13 +11720,58 @@ document.addEventListener('DOMContentLoaded', () => {
     const serviceCorrectionSupplierRefundTreasurySelect = serviceCorrectionRefundForm?.elements?.namedItem('supplier_refund_treasury_account_id') instanceof HTMLSelectElement
         ? serviceCorrectionRefundForm.elements.namedItem('supplier_refund_treasury_account_id')
         : null;
+    const serviceCorrectionCustomerRefundAmountInput = serviceCorrectionRefundForm?.elements?.namedItem('customer_refund_amount') instanceof HTMLInputElement
+        ? serviceCorrectionRefundForm.elements.namedItem('customer_refund_amount')
+        : null;
+    const serviceCorrectionCustomerRefundSourceAmountInput = serviceCorrectionRefundForm?.elements?.namedItem('customer_refund_source_amount') instanceof HTMLInputElement
+        ? serviceCorrectionRefundForm.elements.namedItem('customer_refund_source_amount')
+        : null;
+    const serviceCorrectionCustomerRefundRateInput = serviceCorrectionRefundForm?.elements?.namedItem('customer_refund_exchange_rate') instanceof HTMLInputElement
+        ? serviceCorrectionRefundForm.elements.namedItem('customer_refund_exchange_rate')
+        : null;
+    const serviceCorrectionCustomerRefundCurrencySelect = serviceCorrectionRefundForm?.elements?.namedItem('customer_refund_currency') instanceof HTMLSelectElement
+        ? serviceCorrectionRefundForm.elements.namedItem('customer_refund_currency')
+        : null;
+    const serviceCorrectionSupplierRefundAmountInput = serviceCorrectionRefundForm?.elements?.namedItem('supplier_refund_amount') instanceof HTMLInputElement
+        ? serviceCorrectionRefundForm.elements.namedItem('supplier_refund_amount')
+        : null;
+    const serviceCorrectionSupplierRefundSourceAmountInput = serviceCorrectionRefundForm?.elements?.namedItem('supplier_refund_source_amount') instanceof HTMLInputElement
+        ? serviceCorrectionRefundForm.elements.namedItem('supplier_refund_source_amount')
+        : null;
+    const serviceCorrectionSupplierRefundRateInput = serviceCorrectionRefundForm?.elements?.namedItem('supplier_refund_exchange_rate') instanceof HTMLInputElement
+        ? serviceCorrectionRefundForm.elements.namedItem('supplier_refund_exchange_rate')
+        : null;
+    const serviceCorrectionSupplierRefundCurrencySelect = serviceCorrectionRefundForm?.elements?.namedItem('supplier_refund_currency') instanceof HTMLSelectElement
+        ? serviceCorrectionRefundForm.elements.namedItem('supplier_refund_currency')
+        : null;
     const serviceCorrectionRefundBranchIdField = serviceCorrectionRefundForm?.querySelector('[data-service-correction-refund-branch-id]') || null;
     const serviceCorrectionRefundCurrencyField = serviceCorrectionRefundForm?.querySelector('[data-service-correction-refund-currency]') || null;
     const serviceCorrectionRefundDestinationRows = serviceCorrectionRefundForm
         ? Array.from(serviceCorrectionRefundForm.querySelectorAll('[data-service-correction-refund-destination-row]'))
         : [];
+    const refundFxModal = station.querySelector('[data-refund-fx-modal]');
+    const refundFxTitle = refundFxModal?.querySelector('[data-refund-fx-title]') || null;
+    const refundFxSubtitle = refundFxModal?.querySelector('[data-refund-fx-subtitle]') || null;
+    const refundFxBookingCurrency = refundFxModal?.querySelector('[data-refund-fx-booking-currency]') || null;
+    const refundFxBookingAmount = refundFxModal?.querySelector('[data-refund-fx-booking-amount]') || null;
+    const refundFxCurrencySelect = refundFxModal?.querySelector('[data-refund-fx-currency]') || null;
+    const refundFxSourceAmountInput = refundFxModal?.querySelector('[data-refund-fx-source-amount]') || null;
+    const refundFxRateInput = refundFxModal?.querySelector('[data-refund-fx-rate]') || null;
+    const refundFxDateField = refundFxModal?.querySelector('[data-refund-fx-date]') || null;
+    const refundFxPreview = refundFxModal?.querySelector('[data-refund-fx-preview]') || null;
+    const refundFxFeedback = refundFxModal?.querySelector('[data-refund-fx-feedback]') || null;
+    const refundFxSaveButton = refundFxModal?.querySelector('[data-refund-fx-save]') || null;
+    const refundFxCancelButtons = refundFxModal
+        ? Array.from(refundFxModal.querySelectorAll('[data-refund-fx-cancel]'))
+        : [];
     const serviceCorrectionCustomerRefundStatus = serviceCorrectionRefundForm?.querySelector('[data-correction-customer-refund-status]') || null;
     const serviceCorrectionSupplierRefundStatus = serviceCorrectionRefundForm?.querySelector('[data-correction-supplier-refund-status]') || null;
+    const serviceCorrectionCustomerRefundPostedFields = serviceCorrectionRefundForm
+        ? Array.from(serviceCorrectionRefundForm.querySelectorAll('[data-correction-customer-refund-posted-field]'))
+        : [];
+    const serviceCorrectionSupplierRefundPostedFields = serviceCorrectionRefundForm
+        ? Array.from(serviceCorrectionRefundForm.querySelectorAll('[data-correction-supplier-refund-posted-field]'))
+        : [];
     const correctionRefundWorkflowButtons = serviceCorrectionRefundForm
         ? Array.from(serviceCorrectionRefundForm.querySelectorAll('[data-open-refund-workflow]'))
         : [];
@@ -9414,7 +11809,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const reissueServiceCurrency = String(serviceReissueForm?.dataset.reissueServiceCurrency || reissueInvoiceCurrency).trim().toUpperCase();
     const reissueEffectiveDate = () => normalizeLooseDate(serviceReissueForm?.elements?.namedItem('reissue_event_date')?.value || '')
         || new Date().toISOString().slice(0, 10);
-    const formatReissuePosition = (currency, amount) => `${currency} ${Number(amount || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    const formatReissuePosition = (currency, amount) => `${currency} ${Number(roundWholeMoney(amount || 0)).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
     const reissueRate = (fromCurrency, toCurrency) => {
         if (fromCurrency === toCurrency) return 1;
         return resolvePricingExchangeRateFromMap(fromCurrency, toCurrency, reissueEffectiveDate());
@@ -9462,7 +11857,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const option = document.createElement('option');
                 option.value = String(credit.id || '');
                 option.dataset.amount = String(amount);
-                option.textContent = `${credit.booking_reference || 'Booking'} / ${credit.receipt_no || 'Receipt'} / ${currency} ${formatNumberInputValue(amount)}`;
+                option.textContent = `${credit.booking_reference || 'Booking'} / ${credit.receipt_no || 'Receipt'} / ${currency} ${formatWholeNumberInputValue(amount)}`;
                 serviceReissueCreditSelect.appendChild(option);
             });
             if (serviceReissueCreditSelect.options.length > 1) serviceReissueCreditSelect.options[0].textContent = 'Select customer credit';
@@ -9488,12 +11883,12 @@ document.addEventListener('DOMContentLoaded', () => {
         const receivedCurrency = reissueCurrency(serviceReissueReceivedCurrency, customerCurrency);
         const supplierRate = reissueRate(supplierCurrency, customerCurrency);
         const agencyRate = reissueRate(agencyCurrency, customerCurrency);
-        const supplierConverted = supplierCharge <= 0.005 ? 0 : (supplierRate > 0.005 ? supplierCharge * supplierRate : 0);
-        const agencyConverted = agencyFee <= 0.005 ? 0 : (agencyRate > 0.005 ? agencyFee * agencyRate : 0);
+        const supplierConverted = supplierCharge <= 0.005 ? 0 : (supplierRate > 0.005 ? roundWholeMoney(supplierCharge * supplierRate) : 0);
+        const agencyConverted = agencyFee <= 0.005 ? 0 : (agencyRate > 0.005 ? roundWholeMoney(agencyFee * agencyRate) : 0);
         const missingRate = (supplierCharge > 0.005 && supplierCurrency !== customerCurrency && supplierRate <= 0.005)
             || (agencyFee > 0.005 && agencyCurrency !== customerCurrency && agencyRate <= 0.005);
-        const customerDelta = roundToTwo(supplierConverted + agencyConverted);
-        serviceReissueCustomerTotal.value = missingRate ? '' : formatNumberInputValue(customerDelta);
+        const customerDelta = roundWholeMoney(supplierConverted + agencyConverted);
+        serviceReissueCustomerTotal.value = missingRate ? '' : formatWholeNumberInputValue(customerDelta);
         serviceReissueCustomerTotal.placeholder = missingRate ? 'Confirm FX rate' : '';
         if (serviceReissueRateDate instanceof HTMLInputElement) serviceReissueRateDate.value = reissueEffectiveDate();
         const distinctCurrencies = new Set([supplierCurrency, agencyCurrency, customerCurrency, ...(Number(serviceReissueReceived?.value || 0) > 0.005 ? [receivedCurrency] : [])]);
@@ -9506,12 +11901,12 @@ document.addEventListener('DOMContentLoaded', () => {
         const currentOutstanding = Number(serviceReissuePosition?.dataset.currentOutstanding || 0);
         const received = Math.max(0, Number(serviceReissueReceived?.value || 0));
         const receivedRate = reissueRate(receivedCurrency, customerCurrency);
-        const receivedInCustomerCurrency = received <= 0.005 ? 0 : (receivedRate > 0.005 ? received * receivedRate : 0);
+        const receivedInCustomerCurrency = received <= 0.005 ? 0 : (receivedRate > 0.005 ? roundWholeMoney(received * receivedRate) : 0);
         const credit = Math.max(0, Number(serviceReissueCreditAmount?.value || 0));
         const selectedCredit = serviceReissueCreditSelect instanceof HTMLSelectElement ? serviceReissueCreditSelect.selectedOptions[0] : null;
         const creditAvailable = Math.max(0, Number(selectedCredit?.dataset.amount || 0));
         const openingDueInCustomerCurrency = customerCurrency === reissueInvoiceCurrency ? currentOutstanding : 0;
-        const maxCredit = Math.max(0, openingDueInCustomerCurrency + customerDelta - receivedInCustomerCurrency);
+        const maxCredit = Math.max(0, roundWholeMoney(openingDueInCustomerCurrency + customerDelta - receivedInCustomerCurrency));
         const appliedCredit = Math.min(credit, creditAvailable, maxCredit);
         if (serviceReissueCreditAmount instanceof HTMLInputElement && Math.abs(appliedCredit - credit) > 0.005) serviceReissueCreditAmount.value = String(appliedCredit);
         const values = {
@@ -9575,11 +11970,7 @@ document.addEventListener('DOMContentLoaded', () => {
         appendPair('Agency fee for customer', agencyCurrency, customerCurrency, agencyAmount);
         appendPair('Supplier charge booking mirror', supplierCurrency, reissueCostCurrency, supplierAmount);
         appendPair('Agency fee booking mirror', agencyCurrency, reissueServiceCurrency, agencyAmount);
-        const customerAmount = Math.max(
-            0,
-            toNumber(serviceReissueCustomerTotal?.value || 0),
-            supplierAmount + agencyAmount
-        );
+        const customerAmount = Math.max(0, toNumber(serviceReissueCustomerTotal?.value || 0));
         appendPair('Customer charge booking mirror', customerCurrency, reissueInvoiceCurrency, customerAmount);
         appendPair('Payment received now', receivedCurrency, customerCurrency, receivedAmount);
         return Array.from(grouped.values());
@@ -9637,6 +12028,12 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!availability[selected]) {
             selected = availability[current] ? current : (priority.find((key) => availability[key]) || '');
         }
+        window.workspaceDebugServiceWorkflow('sync-tabs', {
+            preferred,
+            current,
+            selected,
+            availability,
+        });
         serviceEditBookingModal.dataset.serviceWorkflowActiveTab = selected;
 
         serviceWorkflowTabButtons.forEach((button) => {
@@ -9765,6 +12162,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const chips = Array.from(station.querySelectorAll('.service-type-chip'));
     const serviceFields = {
         serviceId: station.querySelector('[data-service-field="serviceId"]'),
+        updatedAt: station.querySelector('[data-service-field="updatedAt"]'),
         lineNumber: station.querySelector('[data-service-field="lineNumber"]'),
         supplier: station.querySelector('[data-service-field="supplier"]'),
         currency: station.querySelector('[data-service-field="currency"]'),
@@ -9945,6 +12343,42 @@ document.addEventListener('DOMContentLoaded', () => {
         receivable: station.querySelector('#commercial-bottom-receivable'),
         payable: station.querySelector('#commercial-bottom-payable'),
         profit: station.querySelector('#commercial-bottom-profit'),
+    };
+    const wholeCommercialMoneyInputs = new Set([
+        serviceMetricInputs.sale,
+        serviceMetricInputs.tax,
+        serviceMetricInputs.otherFare,
+        serviceMetricInputs.sotoFare,
+        serviceMetricInputs.spyiAmount,
+        serviceMetricInputs.aqYrPkAmount,
+        serviceMetricInputs.yqAmount,
+        serviceMetricInputs.othAmount,
+        serviceMetricInputs.vatInput,
+        serviceMetricInputs.vat,
+        serviceMetricInputs.commission,
+        serviceMetricInputs.serviceCharge,
+        serviceDiscountInput,
+        finalSalePriceInput,
+    ].filter((input) => input instanceof HTMLInputElement));
+    const isWholeCommercialMoneyInput = (field) => field instanceof HTMLInputElement && wholeCommercialMoneyInputs.has(field);
+    const readCommercialMoneyValue = (field) => {
+        const numericValue = toNumber(field?.value || 0);
+        return isWholeCommercialMoneyInput(field)
+            ? roundToTwo(Math.round(numericValue))
+            : roundToTwo(numericValue);
+    };
+    const normalizeWholeCommercialMoneyField = (field) => {
+        if (!(field instanceof HTMLInputElement) || !isWholeCommercialMoneyInput(field)) {
+            return;
+        }
+
+        const rawValue = String(field.value || '').trim();
+        if (rawValue === '') {
+            return;
+        }
+
+        const normalizedValue = Math.round(toNumber(rawValue));
+        field.value = formatNumberInputValue(normalizedValue, 0);
     };
     let commercialDiagnosticCount = 0;
     let commercialDiagnosticLastPayload = '';
@@ -10443,6 +12877,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const currentServiceDraftSnapshot = () => ({
         serviceId: activeServiceId(),
+        updatedAt: serviceFields.updatedAt?.value || '',
         lineNumber: serviceFields.lineNumber?.value || 'SV-DRAFT',
         type: serviceTypeField?.value || 'air ticket',
         supplier: serviceFields.supplier?.value || '',
@@ -10534,6 +12969,94 @@ document.addEventListener('DOMContentLoaded', () => {
         otherProviderName: subtypeFields.otherProviderName?.value || '',
         otherRemarks: subtypeFields.otherRemarks?.value || '',
     });
+
+    const activePersistedServiceLine = () => {
+        const persistedId = currentPersistedServiceId();
+        if (persistedId <= 0) {
+            return null;
+        }
+
+        return serviceLines.find((serviceLine) =>
+            Number.parseInt(String(serviceLine?.serviceId || 0), 10) === persistedId
+        ) || null;
+    };
+
+    const ensureCurrentServiceVersionToken = () => {
+        if (!(serviceFields.updatedAt instanceof HTMLInputElement)) {
+            return '';
+        }
+
+        const existingToken = String(serviceFields.updatedAt.value || '').trim();
+        if (existingToken !== '') {
+            return existingToken;
+        }
+
+        const persistedLine = activePersistedServiceLine();
+        const fallbackToken = String(persistedLine?.updatedAt || '').trim();
+        if (fallbackToken !== '') {
+            serviceFields.updatedAt.value = fallbackToken;
+        }
+
+        return fallbackToken;
+    };
+
+    const hasSupplierOnlyServiceCorrectionPending = () => {
+        const persistedLine = activePersistedServiceLine();
+        if (!persistedLine) {
+            return false;
+        }
+
+        const draft = currentServiceDraftSnapshot();
+        const currentSupplier = String(draft.supplier || '').trim();
+        const savedSupplier = String(persistedLine.supplier || persistedLine.supplierName || '').trim();
+        if (currentSupplier === '' || currentSupplier === '__add_supplier__' || currentSupplier === savedSupplier) {
+            return false;
+        }
+
+        const normalizeCurrency = (value, fallback = 'PKR') => String(value || fallback).trim().toUpperCase();
+        const sameMoney = (left, right) => Math.abs(toNumber(left || 0) - toNumber(right || 0)) <= 0.005;
+        const sameRate = (left, right) => Math.abs(toNumber(left || 0) - toNumber(right || 0)) <= 0.00000001;
+
+        if (normalizeCurrency(draft.currency) !== normalizeCurrency(persistedLine.currency)) {
+            return false;
+        }
+        if (normalizeCurrency(draft.costCurrency, draft.currency) !== normalizeCurrency(persistedLine.costCurrency, persistedLine.currency || draft.currency)) {
+            return false;
+        }
+        if (normalizeCurrency(draft.serviceChargeCurrency, draft.currency) !== normalizeCurrency(persistedLine.serviceChargeCurrency, persistedLine.currency || draft.currency)) {
+            return false;
+        }
+
+        const moneyFieldPairs = [
+            [draft.salePrice, persistedLine.salePrice],
+            [draft.purchaseCost, persistedLine.purchaseCost],
+            [draft.taxes, persistedLine.taxes],
+            [draft.otherFare, persistedLine.otherFare],
+            [draft.sotoFare, persistedLine.sotoFare],
+            [draft.spyiAmount, persistedLine.spyiAmount],
+            [draft.aqYrPkAmount, persistedLine.aqYrPkAmount],
+            [draft.yqAmount, persistedLine.yqAmount],
+            [draft.othAmount, persistedLine.othAmount],
+            [draft.vatInput, persistedLine.vatInput],
+            [draft.vat, persistedLine.vat],
+            [draft.commission, persistedLine.commission],
+            [draft.serviceCharge, persistedLine.serviceCharge],
+            [draft.discountAmount, persistedLine.discountAmount],
+            [draft.finalSalePrice, persistedLine.finalSalePrice],
+        ];
+        if (moneyFieldPairs.some(([left, right]) => !sameMoney(left, right))) {
+            return false;
+        }
+
+        if (!sameRate(draft.pricingExchangeRate, persistedLine.pricingExchangeRate)
+            || !sameRate(draft.serviceChargeExchangeRate, persistedLine.serviceChargeExchangeRate)
+            || String(draft.pricingRateEffectiveDate || '') !== String(persistedLine.pricingRateEffectiveDate || '')
+            || String(draft.serviceChargeRateEffectiveDate || '') !== String(persistedLine.serviceChargeRateEffectiveDate || '')) {
+            return false;
+        }
+
+        return true;
+    };
 
     const primeScaffoldField = (field) => {
         if (!(field instanceof HTMLInputElement) || field.readOnly || field.disabled) {
@@ -10777,6 +13300,11 @@ document.addEventListener('DOMContentLoaded', () => {
             clearSupplierAdvanceFxFields();
             return true;
         }
+        if (advanceCurrency === payableCurrency) {
+            clearSupplierAdvanceFxFields();
+            supplierAdvanceFxCandidate = null;
+            return true;
+        }
 
         const useAdvance = window.confirm(`A ${advanceCurrency} prepaid supplier balance is available, but this payable is ${payableCurrency}. Use it with an exchange rate now?`);
         if (!useAdvance) {
@@ -10880,12 +13408,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
             showSupplierAdvanceNote(
                 `Available prepaid supplier balance: ${formattedAmount}`,
-                Number(payload.available_amount || 0) > 0
+                Number(payload.same_currency_available_amount || 0) > 0
                     ? 'Same-currency advance will be used automatically against Mkt. Fare.'
                     : 'Different-currency advance requires exchange-rate confirmation before it is used.'
             );
             supplierAdvanceFxCandidate = null;
-            if (Number(payload.available_amount || 0) <= 0) {
+            if (payload.requires_fx_confirmation === true) {
                 const candidates = Array.isArray(payload.advance_candidates) ? payload.advance_candidates : [];
                 supplierAdvanceFxCandidate = candidates.find((row) => String(row.currency || '').toUpperCase() !== currency) || null;
                 if (!supplierAdvanceFxCandidate) {
@@ -10975,8 +13503,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const isAirTicket = isAirTicketServiceType();
 
         return isAirTicket
-            ? roundToTwo(toNumber(serviceMetricInputs.sale?.value) + currentServiceTaxTotal())
-            : roundToTwo(toNumber(serviceMetricInputs.sale?.value));
+            ? roundToTwo(readCommercialMoneyValue(serviceMetricInputs.sale) + currentServiceTaxTotal())
+            : roundToTwo(readCommercialMoneyValue(serviceMetricInputs.sale));
     };
 
     const currentInvoiceCurrencyCode = () => String(serviceFields.currency?.value || 'PKR').trim().toUpperCase() || 'PKR';
@@ -11232,10 +13760,18 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
+    const roundCustomerCashTotal = (amount) => {
+        const normalized = roundToTwo(amount);
+        const wholeAmount = Math.round(normalized);
+        return Math.abs(normalized - wholeAmount) <= 0.005
+            ? roundToTwo(wholeAmount)
+            : roundToTwo(Math.ceil(normalized));
+    };
+
     const currentAgencyAmountInServiceCurrency = () => roundToTwo(
-        toNumber(serviceMetricInputs.serviceCharge?.value)
-        + toNumber(serviceMetricInputs.vat?.value)
-        - toNumber(serviceDiscountInput?.value)
+        readCommercialMoneyValue(serviceMetricInputs.serviceCharge)
+        + readCommercialMoneyValue(serviceMetricInputs.vat)
+        - readCommercialMoneyValue(serviceDiscountInput)
     );
 
     const convertServiceChargeAmountToInvoiceCurrency = (amount) => {
@@ -11279,7 +13815,55 @@ document.addEventListener('DOMContentLoaded', () => {
             ? receivableBaseOverride
             : currentConvertedPayableAmount();
 
-        return roundToTwo(receivableBase + currentConvertedAgencyAmount());
+        return roundCustomerCashTotal(receivableBase + currentConvertedAgencyAmount());
+    };
+
+    const alignServiceChargeToWholeCustomerTotal = (options = {}) => {
+        if (!(serviceMetricInputs.serviceCharge instanceof HTMLInputElement)) {
+            return false;
+        }
+
+        const invoiceCurrency = options.invoiceCurrency || currentInvoiceCurrencyCode();
+        const serviceChargeCurrency = options.serviceChargeCurrency || currentServiceChargeCurrencyCode();
+        const serviceChargeRate = Number.isFinite(options.serviceChargeRate)
+            ? options.serviceChargeRate
+            : currentServiceChargeExchangeRate({ invoiceCurrency, serviceChargeCurrency });
+        const payableAmount = Number.isFinite(options.convertedPayable)
+            ? options.convertedPayable
+            : currentConvertedPayableAmount();
+
+        if (invoiceCurrency !== serviceChargeCurrency && serviceChargeRate <= 0.005) {
+            return false;
+        }
+
+        let adjusted = false;
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+            const exactTotal = roundToTwo(payableAmount + currentConvertedAgencyAmount());
+            const roundedTotal = roundCustomerCashTotal(exactTotal);
+            const deltaInInvoiceCurrency = roundToTwo(roundedTotal - exactTotal);
+            if (deltaInInvoiceCurrency <= 0.005) {
+                break;
+            }
+
+            const deltaInServiceCurrency = invoiceCurrency === serviceChargeCurrency
+                ? deltaInInvoiceCurrency
+                : roundToTwo(deltaInInvoiceCurrency / serviceChargeRate);
+            if (deltaInServiceCurrency <= 0.005) {
+                break;
+            }
+
+            const nextServiceCharge = roundToTwo(
+                readCommercialMoneyValue(serviceMetricInputs.serviceCharge) + deltaInServiceCurrency
+            );
+            serviceMetricInputs.serviceCharge.value = formatNumberInputValue(
+                nextServiceCharge,
+                inputDecimalPlaces(serviceMetricInputs.serviceCharge)
+            );
+            syncCommercialPercentFromAmount('serviceCharge', { markManualAmount: true });
+            adjusted = true;
+        }
+
+        return adjusted;
     };
 
     let commercialPercentSyncing = false;
@@ -11302,12 +13886,12 @@ document.addEventListener('DOMContentLoaded', () => {
             );
             return payableInServiceCurrency === null
                 ? null
-                : payableInServiceCurrency + toNumber(serviceMetricInputs.serviceCharge?.value);
+                : payableInServiceCurrency + readCommercialMoneyValue(serviceMetricInputs.serviceCharge);
         }
 
         if (fieldKey === 'vat') {
             return Math.max(
-                toNumber(serviceMetricInputs.serviceCharge?.value) - toNumber(serviceDiscountInput?.value),
+                readCommercialMoneyValue(serviceMetricInputs.serviceCharge) - readCommercialMoneyValue(serviceDiscountInput),
                 0
             );
         }
@@ -11395,7 +13979,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         const base = percentBaseForCommercialField(fieldKey);
-        const amount = toNumber(amountInput.value);
+        const amount = readCommercialMoneyValue(amountInput);
         if (!Number.isFinite(base)) {
             return;
         }
@@ -11441,12 +14025,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const currentServiceTaxTotal = () => {
         return roundToTwo(
-            toNumber(serviceMetricInputs.spyiAmount?.value)
-            + toNumber(serviceMetricInputs.aqYrPkAmount?.value)
-            + toNumber(serviceMetricInputs.yqAmount?.value)
-            + toNumber(serviceMetricInputs.othAmount?.value)
-            + toNumber(serviceMetricInputs.vatInput?.value)
-            + toNumber(serviceMetricInputs.tax?.value)
+            readCommercialMoneyValue(serviceMetricInputs.spyiAmount)
+            + readCommercialMoneyValue(serviceMetricInputs.aqYrPkAmount)
+            + readCommercialMoneyValue(serviceMetricInputs.yqAmount)
+            + readCommercialMoneyValue(serviceMetricInputs.othAmount)
+            + readCommercialMoneyValue(serviceMetricInputs.vatInput)
+            + readCommercialMoneyValue(serviceMetricInputs.tax)
         );
     };
 
@@ -11478,6 +14062,21 @@ document.addEventListener('DOMContentLoaded', () => {
         const correctionDateField = financialCorrectionForm?.elements?.namedItem('financial_correction_date');
         return normalizeLooseDate(correctionDateField instanceof HTMLInputElement ? correctionDateField.value : '')
             || new Date().toISOString().slice(0, 10);
+    };
+
+    const logFinancialCorrectionTrace = (stage, payload = {}) => {
+        if (!(financialCorrectionForm instanceof HTMLFormElement) || typeof console === 'undefined') {
+            return;
+        }
+        const serviceIdField = financialCorrectionForm.elements.namedItem('service_id');
+        const serviceId = serviceIdField instanceof HTMLInputElement
+            ? Number.parseInt(String(serviceIdField.value || '0'), 10) || 0
+            : 0;
+        console.debug('[financial-correction]', {
+            stage,
+            serviceId,
+            ...payload,
+        });
     };
 
     const syncFinancialCorrectionCurrencyAvailability = () => {
@@ -11536,6 +14135,69 @@ document.addEventListener('DOMContentLoaded', () => {
         } else if (costCurrency === 'PKR' && invoiceCurrency === 'AED') {
             financialCorrectionRateInput.value = String(roundExchangeRate(1 / aedToPkrRate));
         }
+    };
+
+    const liveFinancialCorrectionSourceToInvoiceRate = (sourceCurrency, targetCurrency, rateInput, options = {}) => {
+        const source = String(sourceCurrency || '').trim().toUpperCase();
+        const target = String(targetCurrency || '').trim().toUpperCase();
+        if (source === '' || target === '') {
+            return 0;
+        }
+        if (source === target) {
+            return 1;
+        }
+
+        const aedToPkrRate = toNumber(financialCorrectionAedToPkrRateInput?.value || 0);
+        if (aedToPkrRate > 0.00000001) {
+            if (source === 'AED' && target === 'PKR') {
+                return roundExchangeRate(aedToPkrRate);
+            }
+            if (source === 'PKR' && target === 'AED') {
+                return roundExchangeRate(1 / aedToPkrRate);
+            }
+        }
+
+        const storedRate = toNumber(rateInput instanceof HTMLInputElement ? rateInput.value : 0);
+        if (storedRate > 0.00000001) {
+            return storedRate;
+        }
+
+        return roundExchangeRate(
+            resolvePricingExchangeRateFromMap(source, target, String(options.effectiveDate || financialCorrectionEffectiveDate()).trim())
+            || 0
+        );
+    };
+
+    const applyFinancialCorrectionDerivedRate = (role, selectedCurrency, previousCurrency, previousSourceToInvoiceRate, conversionRate, effectiveDate) => {
+        const control = financialCorrectionCurrencyControls[role];
+        if (!(control?.rateInput instanceof HTMLInputElement)) {
+            return 0;
+        }
+
+        const invoiceCurrency = String(financialCorrectionInvoiceCurrencySelect?.value || 'PKR').trim().toUpperCase() || 'PKR';
+        const normalizedSelectedCurrency = String(selectedCurrency || '').trim().toUpperCase() || invoiceCurrency;
+        const normalizedPreviousCurrency = String(previousCurrency || '').trim().toUpperCase() || invoiceCurrency;
+        let derivedRate = 0;
+
+        if (normalizedSelectedCurrency === invoiceCurrency) {
+            derivedRate = 1;
+        } else if (normalizedPreviousCurrency === invoiceCurrency && conversionRate > 0.00000001) {
+            derivedRate = roundExchangeRate(1 / conversionRate);
+        } else if (previousSourceToInvoiceRate > 0.00000001 && conversionRate > 0.00000001) {
+            derivedRate = roundExchangeRate(previousSourceToInvoiceRate / conversionRate);
+        } else {
+            derivedRate = roundExchangeRate(
+                resolvePricingExchangeRateFromMap(normalizedSelectedCurrency, invoiceCurrency, effectiveDate)
+                || 0
+            );
+        }
+
+        control.rateInput.value = derivedRate > 0.00000001 ? String(derivedRate) : '';
+        if (control.rateDateInput instanceof HTMLInputElement) {
+            control.rateDateInput.value = derivedRate > 0.00000001 ? effectiveDate : '';
+        }
+
+        return derivedRate;
     };
 
     const syncFinancialCorrectionRateFields = () => {
@@ -11614,7 +14276,7 @@ document.addEventListener('DOMContentLoaded', () => {
         return modal;
     };
 
-    const requestFinancialCurrencyDecision = (role, previousCurrency, selectedCurrency, amount) => new Promise((resolve) => {
+    const requestFinancialCurrencyDecision = (role, previousCurrency, selectedCurrency, amount, options = {}) => new Promise((resolve) => {
         const modal = ensureFinancialCurrencyDecisionModal();
         const control = financialCorrectionCurrencyControls[role];
         const title = modal.querySelector('[data-financial-currency-title]');
@@ -11626,12 +14288,13 @@ document.addEventListener('DOMContentLoaded', () => {
         const keepPreview = modal.querySelector('[data-financial-currency-keep-preview]');
         const error = modal.querySelector('[data-financial-currency-error]');
         const promptPair = pricingPromptPair(previousCurrency, selectedCurrency);
-        const effectiveDate = financialCorrectionEffectiveDate();
+        const effectiveDate = String(options.effectiveDate || financialCorrectionEffectiveDate()).trim();
+        const amountLabel = String(options.label || control?.label || 'Amount').trim();
         const storedRate = resolvePricingExchangeRateFromMap(promptPair.from, promptPair.to, effectiveDate);
         let settled = false;
 
         if (title instanceof HTMLElement) {
-            title.textContent = `Change ${control?.label || 'Amount'} Currency`;
+            title.textContent = `Change ${amountLabel} Currency`;
         }
         if (current instanceof HTMLElement) {
             current.textContent = `Change from ${previousCurrency} to ${selectedCurrency} · Current amount ${formatCurrencyAmount(previousCurrency, amount)}`;
@@ -11717,6 +14380,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 finish({
                     action,
                     convertedAmount: roundToTwo(amount * conversionRate),
+                    conversionRate,
+                    enteredRate,
                     effectiveDate,
                 });
             } catch (exchangeError) {
@@ -11751,39 +14416,83 @@ document.addEventListener('DOMContentLoaded', () => {
         const correctionCurrency = String(financialCorrectionInvoiceCurrencySelect?.value || financialCorrectionForm.dataset.financialCorrectionCurrency || serviceFields.currency?.value || 'PKR').trim().toUpperCase() || 'PKR';
         const correctionCostCurrency = String(financialCorrectionCostCurrencySelect?.value || financialCorrectionForm.dataset.financialCorrectionCostCurrency || correctionCurrency).trim().toUpperCase() || correctionCurrency;
         const correctionServiceChargeCurrency = String(financialCorrectionServiceChargeCurrencySelect?.value || financialCorrectionForm.dataset.financialCorrectionServiceChargeCurrency || correctionCurrency).trim().toUpperCase() || correctionCurrency;
-        const correctionRate = correctionCurrency === correctionCostCurrency
-            ? 1
-            : Math.max(toNumber(financialCorrectionRateInput?.value || 0), 0);
-        const correctionServiceChargeRate = correctionCurrency === correctionServiceChargeCurrency
-            ? 1
-            : Math.max(toNumber(financialCorrectionServiceChargeRateInput?.value || 0), 0);
+        const correctionRate = Math.max(
+            liveFinancialCorrectionSourceToInvoiceRate(
+                correctionCostCurrency,
+                correctionCurrency,
+                financialCorrectionRateInput
+            ),
+            0
+        );
+        const correctionServiceChargeRate = Math.max(
+            liveFinancialCorrectionSourceToInvoiceRate(
+                correctionServiceChargeCurrency,
+                correctionCurrency,
+                financialCorrectionServiceChargeRateInput
+            ),
+            0
+        );
         const correctionTaxTotal = toNumber(financialCorrectionForm.dataset.financialCorrectionTaxTotal || 0);
         const correctionVatAmount = toNumber(financialCorrectionForm.dataset.financialCorrectionVat || 0);
-        const correctedCostBasis = toNumber(financialCorrectionCostInput?.value || 0);
-        const correctedServiceAmount = toNumber(financialCorrectionServiceAmountInput?.value || 0);
-        const correctedDiscountAmount = toNumber(financialCorrectionDiscountInput?.value || 0);
+        const correctedCostBasis = roundWholeMoney(financialCorrectionCostInput?.value || 0);
+        const correctedServiceAmount = roundWholeMoney(financialCorrectionServiceAmountInput?.value || 0);
+        const correctedDiscountAmount = roundWholeMoney(financialCorrectionDiscountInput?.value || 0);
         const correctedPayableInCostCurrency = serviceType === 'air ticket'
-            ? roundToTwo(correctedCostBasis + correctionTaxTotal)
-            : roundToTwo(correctedCostBasis);
-        const correctedPayableAmount = roundToTwo(
+            ? roundWholeMoney(correctedCostBasis + correctionTaxTotal)
+            : roundWholeMoney(correctedCostBasis);
+        const correctedPayableAmount = roundWholeMoney(
             correctedPayableInCostCurrency * correctionRate
         );
-        const correctedAgencyAmount = roundToTwo(correctedServiceAmount + correctionVatAmount - correctedDiscountAmount);
-        const correctedAgencyAmountInInvoiceCurrency = roundToTwo(
+        const correctedAgencyAmount = roundWholeMoney(correctedServiceAmount + correctionVatAmount - correctedDiscountAmount);
+        const correctedAgencyAmountInInvoiceCurrency = roundWholeMoney(
             correctedAgencyAmount * correctionServiceChargeRate
         );
-        const correctedCustomerTotal = roundToTwo(correctedPayableAmount + correctedAgencyAmountInInvoiceCurrency);
-        const lossAmount = Math.max(roundToTwo(correctedPayableAmount - correctedCustomerTotal), 0);
+        const calculatedCustomerTotal = roundWholeMoney(correctedPayableAmount + correctedAgencyAmountInInvoiceCurrency);
+        const customerTotalIsManual = financialCorrectionForm.dataset.financialInvoiceManuallyOverridden === '1';
+        const correctedCustomerTotal = customerTotalIsManual
+            ? roundWholeMoney(financialCorrectionCustomerTotalInput.value || 0)
+            : calculatedCustomerTotal;
+        const lossAmount = Math.max(roundWholeMoney(correctedPayableAmount - correctedCustomerTotal), 0);
         const hasLoss = lossAmount > 0.005;
 
-        financialCorrectionCustomerTotalInput.value = formatNumberInputValue(correctedCustomerTotal);
-        financialCorrectionLossInput.value = formatNumberInputValue(lossAmount);
+        logFinancialCorrectionTrace('preview', {
+            invoiceCurrency: correctionCurrency,
+            costCurrency: correctionCostCurrency,
+            serviceChargeCurrency: correctionServiceChargeCurrency,
+            pricingExchangeRate: correctionRate,
+            serviceChargeExchangeRate: correctionServiceChargeRate,
+            correctedCostBasis,
+            correctedServiceAmount,
+            correctedDiscountAmount,
+            correctedPayableAmount,
+            calculatedCustomerTotal,
+            correctedCustomerTotal,
+            lossAmount,
+            customerTotalIsManual,
+        });
+
+        if (!customerTotalIsManual) {
+            financialCorrectionCustomerTotalInput.value = formatWholeNumberInputValue(correctedCustomerTotal);
+        }
+        if (financialCorrectionCostInput instanceof HTMLInputElement) {
+            financialCorrectionCostInput.value = formatWholeNumberInputValue(correctedCostBasis);
+        }
+        if (financialCorrectionServiceAmountInput instanceof HTMLInputElement) {
+            financialCorrectionServiceAmountInput.value = formatWholeNumberInputValue(correctedServiceAmount);
+        }
+        if (financialCorrectionDiscountInput instanceof HTMLInputElement) {
+            financialCorrectionDiscountInput.value = formatWholeNumberInputValue(correctedDiscountAmount);
+        }
+        financialCorrectionLossInput.value = formatWholeNumberInputValue(lossAmount);
         syncFinancialCorrectionCurrencyAvailability();
 
         if (financialCorrectionLossNote instanceof HTMLElement) {
             financialCorrectionLossNote.hidden = !hasLoss;
+            financialCorrectionLossNote.toggleAttribute('hidden', !hasLoss);
             if (hasLoss) {
                 financialCorrectionLossNote.innerHTML = `Loss sale preview: <strong>${formatCurrencyAmount(correctionCurrency, lossAmount)}</strong>. Customer Total is below supplier payable, so this edit will record a loss instead of reducing Mkt. Fare automatically.`;
+            } else {
+                financialCorrectionLossNote.textContent = '';
             }
         }
     };
@@ -11799,29 +14508,28 @@ document.addEventListener('DOMContentLoaded', () => {
         const invoiceCurrency = String(financialCorrectionInvoiceCurrencySelect.value || 'PKR').trim().toUpperCase() || 'PKR';
         const costCurrency = String(financialCorrectionCostCurrencySelect?.value || invoiceCurrency).trim().toUpperCase() || invoiceCurrency;
         const serviceCurrency = String(financialCorrectionServiceChargeCurrencySelect?.value || invoiceCurrency).trim().toUpperCase() || invoiceCurrency;
-        const costRate = costCurrency === invoiceCurrency ? 1 : toNumber(financialCorrectionRateInput?.value);
-        const serviceRate = serviceCurrency === invoiceCurrency ? 1 : toNumber(financialCorrectionServiceChargeRateInput?.value);
+        const costRate = liveFinancialCorrectionSourceToInvoiceRate(costCurrency, invoiceCurrency, financialCorrectionRateInput);
+        const serviceRate = liveFinancialCorrectionSourceToInvoiceRate(serviceCurrency, invoiceCurrency, financialCorrectionServiceChargeRateInput);
         if (costRate <= 0.005 || serviceRate <= 0.005) {
             return false;
         }
 
         const taxTotal = toNumber(financialCorrectionForm.dataset.financialCorrectionTaxTotal || 0);
         const vatAmount = toNumber(financialCorrectionForm.dataset.financialCorrectionVat || 0);
-        const costBasis = toNumber(financialCorrectionCostInput?.value || 0);
-        const discountAmount = toNumber(financialCorrectionDiscountInput?.value || 0);
+        const costBasis = roundWholeMoney(financialCorrectionCostInput?.value || 0);
+        const discountAmount = roundWholeMoney(financialCorrectionDiscountInput?.value || 0);
         const payableInCostCurrency = serviceType === 'air ticket'
-            ? roundToTwo(costBasis + taxTotal)
-            : roundToTwo(costBasis);
-        const payableInInvoiceCurrency = roundToTwo(payableInCostCurrency * costRate);
-        const agencyAmountInInvoiceCurrency = roundToTwo(desiredTotal - payableInInvoiceCurrency);
-        const requiredServiceAmount = roundToTwo(
+            ? roundWholeMoney(costBasis + taxTotal)
+            : roundWholeMoney(costBasis);
+        const payableInInvoiceCurrency = roundWholeMoney(payableInCostCurrency * costRate);
+        const agencyAmountInInvoiceCurrency = roundWholeMoney(desiredTotal - payableInInvoiceCurrency);
+        const requiredServiceAmount = roundWholeMoney(
             (agencyAmountInInvoiceCurrency / serviceRate) - vatAmount + discountAmount
         );
-        if (requiredServiceAmount < -0.005) {
-            return false;
-        }
-
-        financialCorrectionServiceAmountInput.value = formatNumberInputValue(Math.max(requiredServiceAmount, 0));
+        // A customer total below supplier payable is a valid loss sale. Service
+        // charge cannot be negative, so store zero and let Customer Total plus the
+        // mandatory correction reason carry the explicit loss.
+        financialCorrectionServiceAmountInput.value = formatWholeNumberInputValue(Math.max(requiredServiceAmount, 0));
         return true;
     };
 
@@ -11856,13 +14564,13 @@ document.addEventListener('DOMContentLoaded', () => {
             + toNumber(serviceLine.taxes)
         );
         const correctedPayable = serviceType === 'air ticket'
-            ? roundToTwo(correctedCostBasis + correctionTaxTotal)
-            : roundToTwo(correctedCostBasis);
-        const correctedPayableInInvoiceCurrency = roundToTwo(
+            ? roundWholeMoney(correctedCostBasis + correctionTaxTotal)
+            : roundWholeMoney(correctedCostBasis);
+        const correctedPayableInInvoiceCurrency = roundWholeMoney(
             correctedPayable * (currency === costCurrency ? 1 : pricingExchangeRate)
         );
-        const correctedCustomerTotal = toNumber(serviceLine.finalSalePrice);
-        const lossAmount = Math.max(roundToTwo(correctedPayableInInvoiceCurrency - correctedCustomerTotal), 0);
+        const correctedCustomerTotal = roundWholeMoney(serviceLine.finalSalePrice);
+        const lossAmount = Math.max(roundWholeMoney(correctedPayableInInvoiceCurrency - correctedCustomerTotal), 0);
 
         const serviceIdField = financialCorrectionForm.elements.namedItem('service_id');
         if (serviceIdField instanceof HTMLInputElement) {
@@ -11886,11 +14594,11 @@ document.addEventListener('DOMContentLoaded', () => {
             costLabel.textContent = serviceType === 'air ticket' ? 'Mkt. Fare' : 'Cost';
         }
         if (serviceSelectionChanged) {
-            fillValue(financialCorrectionCostInput, formatNumberInputValue(correctedCostBasis));
-            fillValue(financialCorrectionServiceAmountInput, formatNumberInputValue(correctedServiceCharge));
-            fillValue(financialCorrectionDiscountInput, formatNumberInputValue(correctedDiscount));
-            fillValue(financialCorrectionCustomerTotalInput, formatNumberInputValue(correctedCustomerTotal));
-            fillValue(financialCorrectionLossInput, formatNumberInputValue(lossAmount));
+            fillValue(financialCorrectionCostInput, formatWholeNumberInputValue(correctedCostBasis));
+            fillValue(financialCorrectionServiceAmountInput, formatWholeNumberInputValue(correctedServiceCharge));
+            fillValue(financialCorrectionDiscountInput, formatWholeNumberInputValue(correctedDiscount));
+            fillValue(financialCorrectionCustomerTotalInput, formatWholeNumberInputValue(correctedCustomerTotal));
+            fillValue(financialCorrectionLossInput, formatWholeNumberInputValue(lossAmount));
             fillValue(financialCorrectionInvoiceCurrencySelect, currency);
             fillValue(financialCorrectionCostCurrencySelect, costCurrency);
             fillValue(financialCorrectionServiceChargeCurrencySelect, serviceChargeCurrency);
@@ -11918,8 +14626,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (financialCorrectionLossNote instanceof HTMLElement) {
             financialCorrectionLossNote.hidden = lossAmount <= 0.005;
+            financialCorrectionLossNote.toggleAttribute('hidden', lossAmount <= 0.005);
             if (lossAmount > 0.005) {
                 financialCorrectionLossNote.innerHTML = `Loss sale preview: <strong>${formatCurrencyAmount(currency, lossAmount)}</strong>. Customer Total is below supplier payable, so this edit will record a loss instead of reducing ${serviceType === 'air ticket' ? 'Mkt. Fare' : 'Cost'} automatically.`;
+            } else {
+                financialCorrectionLossNote.textContent = '';
             }
         }
         syncFinancialCorrectionCurrencyAvailability();
@@ -11929,16 +14640,35 @@ document.addEventListener('DOMContentLoaded', () => {
         financialCorrectionCostInput,
         financialCorrectionServiceAmountInput,
         financialCorrectionDiscountInput,
-        financialCorrectionAedToPkrRateInput,
-        financialCorrectionServiceChargeRateInput,
     ].forEach((input) => {
         if (!(input instanceof HTMLInputElement || input instanceof HTMLSelectElement)) {
             return;
         }
 
-        input.addEventListener('input', refreshFinancialCorrectionLossPreview);
-        input.addEventListener('change', refreshFinancialCorrectionLossPreview);
+        const refreshFromComponents = () => {
+            if (financialCorrectionForm instanceof HTMLFormElement) {
+                financialCorrectionForm.dataset.financialInvoiceManuallyOverridden = '0';
+            }
+            refreshFinancialCorrectionLossPreview();
+        };
+        input.addEventListener('input', refreshFromComponents);
+        input.addEventListener('change', refreshFromComponents);
     });
+
+    financialCorrectionServiceChargeRateInput?.addEventListener('input', refreshFinancialCorrectionLossPreview);
+    financialCorrectionServiceChargeRateInput?.addEventListener('change', refreshFinancialCorrectionLossPreview);
+
+    if (financialCorrectionCustomerTotalInput instanceof HTMLInputElement) {
+        const refreshFromCustomerTotal = () => {
+            if (financialCorrectionForm instanceof HTMLFormElement) {
+                financialCorrectionForm.dataset.financialInvoiceManuallyOverridden = '1';
+            }
+            setFinancialCorrectionCustomerTotal(toNumber(financialCorrectionCustomerTotalInput.value || 0));
+            refreshFinancialCorrectionLossPreview();
+        };
+        financialCorrectionCustomerTotalInput.addEventListener('input', refreshFromCustomerTotal);
+        financialCorrectionCustomerTotalInput.addEventListener('change', refreshFromCustomerTotal);
+    }
 
     financialCorrectionAedToPkrRateInput?.addEventListener('input', () => {
         syncFinancialCorrectionDirectionalRateFromAedToPkr();
@@ -11965,6 +14695,15 @@ document.addEventListener('DOMContentLoaded', () => {
         ).trim().toUpperCase();
         const selectedCurrency = String(control.select.value || '').trim().toUpperCase();
         const currentAmount = toNumber(control.input.value);
+        const invoiceCurrencyBeforeChange = String(financialCorrectionInvoiceCurrencySelect?.value || 'PKR').trim().toUpperCase() || 'PKR';
+        const previousSourceToInvoiceRate = role === 'invoice'
+            ? 0
+            : liveFinancialCorrectionSourceToInvoiceRate(
+                previousCurrency,
+                invoiceCurrencyBeforeChange,
+                control.rateInput,
+                { effectiveDate: financialCorrectionEffectiveDate() }
+            );
         if (previousCurrency === selectedCurrency) {
             control.select.dataset.financialAcceptedCurrency = selectedCurrency;
             return;
@@ -11986,6 +14725,18 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
+            logFinancialCorrectionTrace('currency-change-confirmed', {
+                role,
+                previousCurrency,
+                selectedCurrency,
+                currentAmount,
+                action: result.action,
+                conversionRate: result.conversionRate,
+                convertedAmount: result.convertedAmount,
+                invoiceCurrencyBeforeChange,
+                previousSourceToInvoiceRate,
+            });
+
             if (role === 'invoice') {
                 const desiredCustomerTotal = result.action === 'convert'
                     ? result.convertedAmount
@@ -12000,27 +14751,33 @@ document.addEventListener('DOMContentLoaded', () => {
                     financialCorrectionForm.dataset.financialInvoiceManuallyOverridden = previousManualOverride;
                     syncFinancialCorrectionRateFields();
                     refreshFinancialCorrectionLossPreview();
-                    showFeedback(
-                        'That customer total is below the converted supplier payable. '
-                        + 'Correct the market fare, service amount, or discount first.'
-                    );
+                    showFeedback('Enter a valid exchange rate before changing the customer total currency.');
                     return;
                 }
             } else {
                 if (result.action === 'convert') {
-                    control.input.value = formatNumberInputValue(result.convertedAmount);
+                    control.input.value = formatWholeNumberInputValue(result.convertedAmount);
                 }
                 control.select.dataset.financialAcceptedCurrency = selectedCurrency;
+                applyFinancialCorrectionDerivedRate(
+                    role,
+                    selectedCurrency,
+                    previousCurrency,
+                    previousSourceToInvoiceRate,
+                    result.conversionRate,
+                    result.effectiveDate
+                );
 
                 if (role === 'service'
                     && financialCorrectionForm.dataset.financialInvoiceManuallyOverridden !== '1'
                     && financialCorrectionInvoiceCurrencySelect instanceof HTMLSelectElement) {
                     financialCorrectionInvoiceCurrencySelect.value = selectedCurrency;
                     financialCorrectionInvoiceCurrencySelect.dataset.financialAcceptedCurrency = selectedCurrency;
+                    syncFinancialCorrectionRateFields();
                 }
-                syncFinancialCorrectionRateFields();
             }
 
+            syncFinancialCorrectionAedToPkrDisplay();
             refreshFinancialCorrectionLossPreview();
         } finally {
             control.select.dataset.financialCurrencyBusy = '0';
@@ -12093,6 +14850,21 @@ document.addEventListener('DOMContentLoaded', () => {
             financialCorrectionServiceChargeRateInput,
             financialCorrectionServiceChargeRateDateInput
         );
+
+        logFinancialCorrectionTrace('submit', {
+            invoiceCurrency,
+            costCurrency,
+            serviceChargeCurrency,
+            correctedCostBasis: toNumber(financialCorrectionCostInput?.value || 0),
+            correctedServiceAmount: toNumber(financialCorrectionServiceAmountInput?.value || 0),
+            correctedDiscountAmount: toNumber(financialCorrectionDiscountInput?.value || 0),
+            correctedCustomerTotal: toNumber(financialCorrectionCustomerTotalInput?.value || 0),
+            pricingExchangeRate: toNumber(financialCorrectionRateInput?.value || 0),
+            aedToPkrExchangeRate: toNumber(financialCorrectionAedToPkrRateInput?.value || 0),
+            serviceChargeExchangeRate: toNumber(financialCorrectionServiceChargeRateInput?.value || 0),
+            effectiveDate,
+            missingRateLabel,
+        });
 
         if (missingRateLabel !== '') {
             event.preventDefault();
@@ -12194,7 +14966,7 @@ document.addEventListener('DOMContentLoaded', () => {
             agencyAmount * (invoiceCurrency === serviceChargeCurrency ? 1 : serviceChargeExchangeRate)
         );
 
-        return roundToTwo(convertedCost + convertedAgencyAmount);
+        return roundCustomerCashTotal(convertedCost + convertedAgencyAmount);
     };
 
     const hasManualFinalSaleOverride = (serviceLine) => {
@@ -12287,11 +15059,12 @@ document.addEventListener('DOMContentLoaded', () => {
         refreshPaymentPreview();
     };
 
-    const refreshProfit = (source = 'refreshProfit') => {
+    const refreshProfit = (source = 'refreshProfit', options = {}) => {
         updateCommercialTrace({
             bootStatus: 'refresh-running',
             lastEventFired: source,
         });
+        const skipAutoWholeTotalAdjustment = options.skipAutoWholeTotalAdjustment === true;
 
         if (!serviceProfit || !serviceMetricInputs.sale || !serviceMetricInputs.cost || !serviceMetricInputs.tax || !serviceMetricInputs.vat || !serviceMetricInputs.commission || !serviceMetricInputs.serviceCharge || !finalSalePriceInput) {
             const missingRequirements = [
@@ -12330,23 +15103,25 @@ document.addEventListener('DOMContentLoaded', () => {
         const isAirTicket = isAirTicketServiceType();
         const taxTotal = currentServiceTaxTotal();
         const supplierPayable = currentServicePayableAmount();
-        const convertedPayable = isAirTicket ? currentConvertedPayableAmount() : supplierPayable;
+        // Profit/loss must always compare invoice-currency receivable against
+        // invoice-currency payable, regardless of service type.
+        const convertedPayable = currentConvertedPayableAmount();
         const invoiceCurrency = currentInvoiceCurrencyCode();
         const costCurrency = currentCostCurrencyCode();
         const pricingRate = currentPricingExchangeRate({ invoiceCurrency, costCurrency });
         const missingPricingRate = invoiceCurrency !== costCurrency && pricingRate <= 0.005;
         const serviceChargeCurrency = currentServiceChargeCurrencyCode();
         const serviceChargeRate = currentServiceChargeExchangeRate({ invoiceCurrency, serviceChargeCurrency });
-        const agencyAmount = currentAgencyAmountInServiceCurrency();
-        const missingServiceChargeRate = invoiceCurrency !== serviceChargeCurrency
+        let agencyAmount = currentAgencyAmountInServiceCurrency();
+        let missingServiceChargeRate = invoiceCurrency !== serviceChargeCurrency
             && Math.abs(agencyAmount) > 0.005
             && serviceChargeRate <= 0.005;
         const airlinePayable = isAirTicket ? supplierPayable : 0;
         const otherPayable = isAirTicket ? 0 : supplierPayable;
         const totalPayable = convertedPayable;
         const currentManualOverride = finalSalePriceInput.dataset.manualOverride === '1';
-        const suggestedFinalSalePrice = defaultFinalSalePrice(totalPayable);
-        const missingRequiredPricingRate = missingPricingRate || missingServiceChargeRate;
+        let suggestedFinalSalePrice = defaultFinalSalePrice(totalPayable);
+        let missingRequiredPricingRate = missingPricingRate || missingServiceChargeRate;
         updateCommercialTrace({
             lastMktFareRead: toNumber(serviceMetricInputs.sale?.value).toFixed(2),
             lastServAmountRead: toNumber(serviceMetricInputs.serviceCharge?.value).toFixed(2),
@@ -12378,6 +15153,20 @@ document.addEventListener('DOMContentLoaded', () => {
             serviceProfit.style.color = '#a23737';
             return;
         }
+        if (!currentManualOverride && !skipAutoWholeTotalAdjustment) {
+            alignServiceChargeToWholeCustomerTotal({
+                convertedPayable,
+                invoiceCurrency,
+                serviceChargeCurrency,
+                serviceChargeRate,
+            });
+            agencyAmount = currentAgencyAmountInServiceCurrency();
+            missingServiceChargeRate = invoiceCurrency !== serviceChargeCurrency
+                && Math.abs(agencyAmount) > 0.005
+                && serviceChargeRate <= 0.005;
+            missingRequiredPricingRate = missingPricingRate || missingServiceChargeRate;
+            suggestedFinalSalePrice = defaultFinalSalePrice(totalPayable);
+        }
         delete finalSalePriceInput.dataset.pricingRateMissing;
         finalSalePriceInput.setCustomValidity('');
         const existingFinalSalePrice = toNumber(finalSalePriceInput.value);
@@ -12394,7 +15183,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         const finalSalePrice = toNumber(finalSalePriceInput.value);
         const receivable = finalSalePrice;
-        const financialPayable = financialSummaryAmount(supplierPayable, costCurrency);
+        const supplierPayableDisplay = formatCurrencyAmount(costCurrency, supplierPayable);
         const financialReceivable = financialSummaryAmount(receivable, invoiceCurrency);
         const manualSaleAdjustment = currentManualOverride
             ? roundToTwo(finalSalePrice - suggestedFinalSalePrice)
@@ -12425,9 +15214,9 @@ document.addEventListener('DOMContentLoaded', () => {
         });
         [airlinePayableSummary].forEach((node) => {
             if (node) {
-                node.textContent = node.tagName === 'STRONG' ? formatMoney(convertedPayable) : node.textContent;
+                node.textContent = node.tagName === 'STRONG' ? supplierPayableDisplay : node.textContent;
                 if ('value' in node) {
-                    node.value = formatMoney(convertedPayable);
+                    node.value = supplierPayableDisplay;
                     updateCommercialTrace({
                         lastFieldWritten: `${node.id || node.dataset.airlinePayableFinancialField || node.dataset.ticketValueField || 'convertedPayableNode'}=${node.value}`,
                         lastOverwriteSource: source,
@@ -12436,7 +15225,9 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         });
         [airlinePayableFinancialField, ticketValueField].forEach((node) => {
-            writeFinancialSummaryAmount(node, financialPayable);
+            if (node && 'value' in node) {
+                node.value = supplierPayableDisplay;
+            }
         });
         [clientReceivableSummary].forEach((node) => {
             if (node) {
@@ -12477,7 +15268,7 @@ document.addEventListener('DOMContentLoaded', () => {
             bottomTotalFields.receivable.value = formatMoney(receivable);
         }
         if (bottomTotalFields.payable) {
-            bottomTotalFields.payable.value = formatMoney(totalPayable);
+            bottomTotalFields.payable.value = supplierPayableDisplay;
         }
         if (bottomTotalFields.profit) {
             bottomTotalFields.profit.value = formatMoney(profit);
@@ -12710,6 +15501,7 @@ document.addEventListener('DOMContentLoaded', () => {
         syncSettlementFormFromServiceLine(serviceLine);
         syncSettlementCorrectionFormFromServiceLine(serviceLine);
         syncRefundCorrectionFormFromServiceLine(serviceLine);
+        syncRefundFormFromServiceLine(serviceLine);
 
         if (serviceReissueId) {
             serviceReissueId.value = canShowServiceEventActions && type === 'air ticket' ? String(serviceLine.serviceId || '') : '';
@@ -12757,21 +15549,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const eligibleRefundTreasuryAccountsFor = (method, branchField, currencyField, allowBankSourceForCash = false) => {
         const normalizedMethod = String(method || '').trim();
-        const currency = currencyField instanceof HTMLInputElement || currencyField instanceof HTMLSelectElement
-            ? String(currencyField.value || '').trim().toUpperCase()
-            : '';
-        const branchId = branchField instanceof HTMLInputElement || branchField instanceof HTMLSelectElement
-            ? Number.parseInt(String(branchField.value || '0'), 10) || 0
-            : 0;
         const compatibleTypes = paymentTreasuryTypesForMethod(normalizedMethod);
         if (allowBankSourceForCash && normalizedMethod === 'cash' && !compatibleTypes.includes('bank')) {
             compatibleTypes.push('bank');
         }
 
         return paymentTreasuryAccounts.filter((account) => {
-            return (branchId <= 0 || Number.parseInt(String(account?.branchId || 0), 10) === branchId)
-                && compatibleTypes.includes(String(account?.accountType || '').trim())
-                && String(account?.currency || '').trim().toUpperCase() === currency;
+            return compatibleTypes.includes(String(account?.accountType || '').trim());
         });
     };
 
@@ -12824,6 +15608,7 @@ document.addEventListener('DOMContentLoaded', () => {
             nextValue = String(preferredAccount.id || '');
         }
         treasurySelect.value = nextValue;
+        treasurySelect.dataset.lastSelectedAccountId = treasurySelect.value;
 
         treasuryRow.hidden = !requiresTreasury;
         treasurySelect.disabled = !requiresTreasury;
@@ -12841,6 +15626,396 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         });
     };
+
+    const alignRefundCurrencyToTreasuryAccount = async ({
+        treasurySelect,
+        currencyField,
+        role,
+        onAligned = null,
+    }) => {
+        if (!(treasurySelect instanceof HTMLSelectElement) || !(currencyField instanceof HTMLSelectElement)) {
+            return;
+        }
+
+        const selectedAccountId = String(treasurySelect.value || '').trim();
+        const previousAccountId = String(treasurySelect.dataset.lastSelectedAccountId || '').trim();
+        if (selectedAccountId === '') {
+            treasurySelect.dataset.lastSelectedAccountId = '';
+            return;
+        }
+
+        const selectedAccount = findPaymentTreasuryAccountById(selectedAccountId);
+        const selectedAccountCurrency = String(selectedAccount?.currency || '').trim().toUpperCase();
+        const currentCurrency = String(currencyField.value || '').trim().toUpperCase();
+        if (selectedAccountCurrency === '' || currentCurrency === '' || selectedAccountCurrency === currentCurrency) {
+            treasurySelect.dataset.lastSelectedAccountId = selectedAccountId;
+            return;
+        }
+
+        const switched = await applyRefundFxCurrencyDecision(role, currentCurrency, selectedAccountCurrency);
+        if (!switched) {
+            treasurySelect.value = previousAccountId;
+            return;
+        }
+
+        treasurySelect.dataset.lastSelectedAccountId = selectedAccountId;
+        if (typeof onAligned === 'function') {
+            onAligned();
+        }
+    };
+
+    const refundFxConfigFor = (role) => role === 'customer'
+        ? {
+            role,
+            title: 'Customer Refund Currency',
+            subtitle: 'Store the real currency and amount paid back to the customer.',
+            amountLabel: 'paid',
+            amountField: serviceCustomerRefundAmount,
+            currencyField: serviceCustomerRefundCurrencyInput,
+            sourceAmountField: serviceCustomerRefundSourceAmountInput,
+            rateField: serviceCustomerRefundExchangeRateInput,
+            summaryNode: customerRefundFxSummary,
+            postSave: () => syncRefundTreasurySelector(),
+        }
+        : {
+            role,
+            title: 'Supplier Refund Currency',
+            subtitle: 'Store the real currency and amount received back from the supplier.',
+            amountLabel: 'received',
+            amountField: serviceSupplierRefundAmount,
+            currencyField: serviceSupplierRefundCurrencyInput,
+            sourceAmountField: serviceSupplierRefundSourceAmountInput,
+            rateField: serviceSupplierRefundExchangeRateInput,
+            summaryNode: supplierRefundFxSummary,
+            postSave: () => syncSupplierRefundTreasurySelector(),
+        };
+
+    const showRefundFxFeedback = (message) => {
+        if (!(refundFxFeedback instanceof HTMLElement)) {
+            return;
+        }
+        refundFxFeedback.textContent = message;
+        refundFxFeedback.hidden = String(message || '').trim() === '';
+    };
+
+    const refundFxBookingCurrencyCode = () => serviceRefundCurrencyField instanceof HTMLInputElement
+        ? (String(serviceRefundCurrencyField.value || '').trim().toUpperCase() || 'PKR')
+        : 'PKR';
+
+    const refundFxEffectiveDate = () => normalizeLooseDate(
+        serviceRefundForm?.elements?.namedItem('refund_event_date')?.value || ''
+    ) || new Date().toISOString().slice(0, 10);
+
+    const syncRefundFxSummary = (role) => {
+        const config = refundFxConfigFor(role);
+        if (!(config.summaryNode instanceof HTMLElement)) {
+            return;
+        }
+
+        const bookingCurrency = refundFxBookingCurrencyCode();
+        const refundAmount = Math.max(toNumber(config.amountField?.value || 0), 0);
+        const actualCurrency = String(config.currencyField?.value || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+        const sourceAmount = Math.max(toNumber(config.sourceAmountField?.value || 0), 0);
+        const fxRate = Math.max(toNumber(config.rateField?.value || 0), 0);
+
+        if (refundAmount <= 0.005) {
+            config.summaryNode.textContent = '';
+            return;
+        }
+
+        if (actualCurrency === bookingCurrency) {
+            config.summaryNode.textContent = '';
+            return;
+        }
+
+        if (sourceAmount > 0.005 && fxRate > 0.00000001) {
+            const bookingEquivalent = roundToTwo(sourceAmount / fxRate);
+            config.summaryNode.textContent = `${formatCurrencyAmount(actualCurrency, sourceAmount)} -> ${formatCurrencyAmount(bookingCurrency, bookingEquivalent)} @ ${roundExchangeRate(fxRate)}.`;
+            return;
+        }
+
+        config.summaryNode.textContent = 'Different currency selected. Confirm actual amount and FX rate.';
+    };
+
+    const syncRefundFxDefaults = (role) => {
+        const config = refundFxConfigFor(role);
+        if (!(config.currencyField instanceof HTMLInputElement || config.currencyField instanceof HTMLSelectElement) || !(config.sourceAmountField instanceof HTMLInputElement) || !(config.rateField instanceof HTMLInputElement)) {
+            return;
+        }
+
+        const bookingCurrency = refundFxBookingCurrencyCode();
+        const refundAmount = Math.max(toNumber(config.amountField?.value || 0), 0);
+        const actualCurrency = String(config.currencyField.value || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+        const currentRate = Math.max(toNumber(config.rateField.value || 0), 0);
+        const currentSourceAmount = Math.max(toNumber(config.sourceAmountField.value || 0), 0);
+        const preferredCurrency = String(config.currencyField.dataset.preferredCurrency || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+
+        if (refundAmount <= 0.005) {
+            config.currencyField.value = preferredCurrency;
+            config.sourceAmountField.value = '0';
+            config.rateField.value = preferredCurrency === bookingCurrency ? '1' : '';
+            syncRefundFxSummary(role);
+            return;
+        }
+
+        if (actualCurrency === bookingCurrency) {
+            config.sourceAmountField.value = formatNumberInputValue(refundAmount);
+            config.rateField.value = '1';
+            syncRefundFxSummary(role);
+            return;
+        }
+
+        if (currentSourceAmount > 0.005 && currentRate > 0.00000001) {
+            syncRefundFxSummary(role);
+            return;
+        }
+
+        if (currentSourceAmount <= 0.005) {
+            config.sourceAmountField.value = formatNumberInputValue(refundAmount);
+        }
+
+        if (currentRate > 0.00000001 && refundAmount > 0.005 && currentSourceAmount <= 0.005) {
+            syncRefundFxSummary(role);
+            return;
+        }
+
+        syncRefundFxSummary(role);
+    };
+
+    let refundFxModalRequest = null;
+    const closeRefundFxModal = () => {
+        if (refundFxModal instanceof HTMLElement) {
+            refundFxModal.hidden = true;
+            refundFxModal.setAttribute('aria-hidden', 'true');
+        }
+        refundFxModalRequest = null;
+        showRefundFxFeedback('');
+    };
+
+    const refreshRefundFxModal = () => {
+        if (!(refundFxModalRequest && refundFxCurrencySelect instanceof HTMLSelectElement && refundFxSourceAmountInput instanceof HTMLInputElement && refundFxRateInput instanceof HTMLInputElement && refundFxPreview instanceof HTMLElement)) {
+            return;
+        }
+
+        const bookingCurrency = refundFxModalRequest.bookingCurrency;
+        const refundAmount = refundFxModalRequest.refundAmount;
+        const selectedCurrency = String(refundFxCurrencySelect.value || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+        if (refundFxDateField instanceof HTMLInputElement) {
+            refundFxDateField.value = refundFxModalRequest.effectiveDate;
+        }
+
+        if (selectedCurrency === bookingCurrency) {
+            refundFxRateInput.value = '1';
+            refundFxSourceAmountInput.value = formatNumberInputValue(refundAmount);
+            refundFxRateInput.readOnly = true;
+            refundFxSourceAmountInput.readOnly = true;
+            refundFxPreview.textContent = 'Same currency. No conversion needed.';
+            return;
+        }
+
+        refundFxRateInput.readOnly = false;
+        refundFxSourceAmountInput.readOnly = false;
+        const enteredSourceAmount = Math.max(toNumber(refundFxSourceAmountInput.value || 0), 0);
+        if (enteredSourceAmount <= 0.005 && refundAmount > 0.005) {
+            refundFxSourceAmountInput.value = formatNumberInputValue(refundAmount);
+        }
+
+        const effectiveRate = Math.max(toNumber(refundFxRateInput.value || 0), 0);
+        if (effectiveRate > 0.00000001) {
+            const actualAmount = Math.max(toNumber(refundFxSourceAmountInput.value || refundAmount), 0);
+            const bookingEquivalent = roundToTwo(actualAmount / effectiveRate);
+            refundFxPreview.textContent = `${formatCurrencyAmount(selectedCurrency, actualAmount)} equals ${formatCurrencyAmount(bookingCurrency, bookingEquivalent)} @ ${roundExchangeRate(effectiveRate)}.`;
+            return;
+        }
+
+        refundFxPreview.textContent = `Enter the refund FX rate for ${selectedCurrency} -> ${bookingCurrency}.`;
+    };
+
+    const openRefundFxModal = (role) => {
+        if (!(refundFxModal instanceof HTMLElement) || !(refundFxCurrencySelect instanceof HTMLSelectElement) || !(refundFxSourceAmountInput instanceof HTMLInputElement) || !(refundFxRateInput instanceof HTMLInputElement)) {
+            return;
+        }
+
+        const config = refundFxConfigFor(role);
+        const bookingCurrency = refundFxBookingCurrencyCode();
+        const refundAmount = Math.max(toNumber(config.amountField?.value || 0), 0);
+        if (refundAmount <= 0.005) {
+            showFeedback(`Enter the ${role === 'customer' ? 'customer' : 'supplier'} refund amount first.`);
+            return;
+        }
+
+        syncRefundFxDefaults(role);
+        refundFxModalRequest = {
+            role,
+            bookingCurrency,
+            refundAmount,
+            effectiveDate: refundFxEffectiveDate(),
+        };
+        if (refundFxTitle instanceof HTMLElement) {
+            refundFxTitle.textContent = config.title;
+        }
+        if (refundFxSubtitle instanceof HTMLElement) {
+            refundFxSubtitle.textContent = config.subtitle;
+        }
+        if (refundFxBookingCurrency instanceof HTMLElement) {
+            refundFxBookingCurrency.textContent = bookingCurrency;
+        }
+        if (refundFxBookingAmount instanceof HTMLElement) {
+            refundFxBookingAmount.textContent = formatCurrencyAmount(bookingCurrency, refundAmount);
+        }
+        refundFxCurrencySelect.value = String(config.currencyField?.value || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+        refundFxSourceAmountInput.value = String(config.sourceAmountField?.value || '');
+        refundFxRateInput.value = String(config.rateField?.value || '');
+        showRefundFxFeedback('');
+        refreshRefundFxModal();
+        refundFxModal.hidden = false;
+        refundFxModal.setAttribute('aria-hidden', 'false');
+        window.setTimeout(() => {
+            if (refundFxCurrencySelect.value === bookingCurrency) {
+                refundFxCurrencySelect.focus();
+            } else {
+                refundFxRateInput.focus();
+                refundFxRateInput.select();
+            }
+        }, 0);
+    };
+
+    const applyRefundFxCurrencyDecision = async (role, previousCurrency, nextCurrency) => {
+        const config = refundFxConfigFor(role);
+        if (!(config.currencyField instanceof HTMLSelectElement) || !(config.sourceAmountField instanceof HTMLInputElement) || !(config.rateField instanceof HTMLInputElement)) {
+            return false;
+        }
+
+        const bookingCurrency = refundFxBookingCurrencyCode();
+        const refundAmount = Math.max(toNumber(config.amountField?.value || 0), 0);
+        if (refundAmount <= 0.005) {
+            showFeedback(`Enter the ${role === 'customer' ? 'customer' : 'supplier'} refund amount first.`);
+            config.currencyField.value = previousCurrency;
+            return false;
+        }
+
+        if (nextCurrency === bookingCurrency) {
+            config.currencyField.value = bookingCurrency;
+            config.currencyField.dataset.lastCurrency = bookingCurrency;
+            config.currencyField.dataset.preferredCurrency = bookingCurrency;
+            syncRefundFxDefaults(role);
+            if (typeof config.postSave === 'function') {
+                config.postSave();
+            }
+            return true;
+        }
+
+        config.currencyField.value = nextCurrency;
+        config.currencyField.dataset.lastCurrency = nextCurrency;
+        config.currencyField.dataset.preferredCurrency = nextCurrency;
+        const currentSourceAmount = Math.max(toNumber(config.sourceAmountField.value || 0), 0);
+        const currentRate = Math.max(toNumber(config.rateField.value || 0), 0);
+        if (currentSourceAmount <= 0.005) {
+            config.sourceAmountField.value = formatNumberInputValue(refundAmount);
+        }
+        if (currentRate <= 0.00000001) {
+            config.rateField.value = '';
+        }
+        syncRefundFxSummary(role);
+        if (typeof config.postSave === 'function') {
+            config.postSave();
+        }
+        openRefundFxModal(role);
+        return true;
+    };
+
+    refundFxCurrencyTriggers.forEach((field) => {
+        if (!(field instanceof HTMLSelectElement)) {
+            return;
+        }
+        field.dataset.lastCurrency = String(field.value || '').trim().toUpperCase();
+        field.addEventListener('change', () => {
+            const role = String(field.dataset.refundFxCurrencyTrigger || '').trim();
+            if (role !== 'customer' && role !== 'supplier') {
+                return;
+            }
+            const bookingCurrency = refundFxBookingCurrencyCode();
+            const nextCurrency = String(field.value || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+            const previousCurrency = String(field.dataset.lastCurrency || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+            void applyRefundFxCurrencyDecision(role, previousCurrency, nextCurrency);
+        });
+    });
+    refundFxCancelButtons.forEach((button) => {
+        button.addEventListener('click', closeRefundFxModal);
+    });
+    refundFxCurrencySelect?.addEventListener('change', refreshRefundFxModal);
+    refundFxRateInput?.addEventListener('input', refreshRefundFxModal);
+    refundFxSourceAmountInput?.addEventListener('input', () => {
+        if (!(refundFxModalRequest && refundFxRateInput instanceof HTMLInputElement && refundFxSourceAmountInput instanceof HTMLInputElement)) {
+            return;
+        }
+        const refundAmount = refundFxModalRequest.refundAmount;
+        const sourceAmount = Math.max(toNumber(refundFxSourceAmountInput.value || 0), 0);
+        if (sourceAmount > 0.005 && refundAmount > 0.005) {
+            refundFxRateInput.value = String(roundExchangeRate(sourceAmount / refundAmount));
+        }
+        refreshRefundFxModal();
+    });
+    refundFxSaveButton?.addEventListener('click', async () => {
+        if (!(refundFxModalRequest && refundFxCurrencySelect instanceof HTMLSelectElement && refundFxSourceAmountInput instanceof HTMLInputElement && refundFxRateInput instanceof HTMLInputElement)) {
+            return;
+        }
+
+        const config = refundFxConfigFor(refundFxModalRequest.role);
+        if (!(config.currencyField instanceof HTMLInputElement || config.currencyField instanceof HTMLSelectElement) || !(config.sourceAmountField instanceof HTMLInputElement) || !(config.rateField instanceof HTMLInputElement)) {
+            return;
+        }
+
+        const bookingCurrency = refundFxModalRequest.bookingCurrency;
+        const actualCurrency = String(refundFxCurrencySelect.value || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+        const refundAmount = refundFxModalRequest.refundAmount;
+        const sourceAmount = Math.max(toNumber(refundFxSourceAmountInput.value || 0), 0);
+        const fxRate = Math.max(toNumber(refundFxRateInput.value || 0), 0);
+
+        if (actualCurrency !== bookingCurrency) {
+            if (sourceAmount <= 0.005) {
+                showRefundFxFeedback('Enter the actual refund amount in the selected currency.');
+                refundFxSourceAmountInput.focus();
+                return;
+            }
+            if (fxRate <= 0.00000001) {
+                showRefundFxFeedback('Enter a valid exchange rate before saving.');
+                refundFxRateInput.focus();
+                return;
+            }
+            const expectedSourceAmount = Math.round(refundAmount * fxRate);
+            if (Math.abs(expectedSourceAmount - sourceAmount) > 1) {
+                showRefundFxFeedback('Actual amount and FX rate do not match the booking refund amount.');
+                refundFxSourceAmountInput.focus();
+                return;
+            }
+
+            try {
+                await saveDailyPricingExchangeRate(
+                    bookingCurrency,
+                    actualCurrency,
+                    fxRate,
+                    refundFxModalRequest.effectiveDate
+                );
+            } catch (error) {
+                showRefundFxFeedback(error instanceof Error ? error.message : 'The refund exchange rate could not be saved.');
+                return;
+            }
+        }
+
+        config.currencyField.value = actualCurrency;
+        config.sourceAmountField.value = actualCurrency === bookingCurrency
+            ? formatNumberInputValue(refundAmount)
+            : formatNumberInputValue(sourceAmount);
+        config.rateField.value = actualCurrency === bookingCurrency
+            ? '1'
+            : String(roundExchangeRate(fxRate));
+        syncRefundFxSummary(refundFxModalRequest.role);
+        if (typeof config.postSave === 'function') {
+            config.postSave();
+        }
+        closeRefundFxModal();
+    });
 
     const customerRefundWillBePaidNow = () => serviceCustomerRefundTreatmentInputs.some((input) => (
         input instanceof HTMLInputElement && input.checked && input.value === 'pay_now'
@@ -12872,13 +16047,30 @@ document.addEventListener('DOMContentLoaded', () => {
             treasuryRow: serviceRefundTreasuryRow,
             treasurySelect: serviceRefundTreasurySelect,
             branchField: serviceRefundBranchIdField,
-            currencyField: serviceRefundCurrencyField,
+            currencyField: serviceCustomerRefundCurrencyInput || serviceRefundCurrencyField,
             destinationRows: serviceRefundDestinationRows,
             allowBankSourceForCash: true,
         });
     };
     if (serviceRefundMethodSelect) {
         serviceRefundMethodSelect.addEventListener('change', syncRefundTreasurySelector);
+    }
+    if (serviceRefundTreasurySelect instanceof HTMLSelectElement) {
+        const rememberCustomerRefundAccount = () => {
+            serviceRefundTreasurySelect.dataset.lastSelectedAccountId = String(serviceRefundTreasurySelect.value || '').trim();
+        };
+        serviceRefundTreasurySelect.addEventListener('focus', rememberCustomerRefundAccount);
+        serviceRefundTreasurySelect.addEventListener('pointerdown', rememberCustomerRefundAccount);
+        serviceRefundTreasurySelect.addEventListener('change', async () => {
+            await alignRefundCurrencyToTreasuryAccount({
+                treasurySelect: serviceRefundTreasurySelect,
+                currencyField: serviceCustomerRefundCurrencyInput,
+                role: 'customer',
+                onAligned: () => {
+                    syncRefundTreasurySelector();
+                },
+            });
+        });
     }
 
     const syncCustomerRefundTreatment = () => {
@@ -12905,16 +16097,80 @@ document.addEventListener('DOMContentLoaded', () => {
                 ? 'Save'
                 : 'Save Refund';
         }
+        if (payNow) {
+            syncRefundFxDefaults('customer');
+        } else {
+            syncRefundFxSummary('customer');
+        }
+        syncRefundFxDefaults('supplier');
         syncRefundTreasurySelector();
     };
     serviceCustomerRefundTreatmentInputs.forEach((input) => {
         input.addEventListener('change', syncCustomerRefundTreatment);
     });
-    serviceSupplierRefundAmount?.addEventListener('input', syncCustomerRefundTreatment);
+    serviceCustomerRefundAmount?.addEventListener('input', () => {
+        syncRefundFxDefaults('customer');
+        syncCustomerRefundTreatment();
+    });
+    serviceSupplierRefundAmount?.addEventListener('input', () => {
+        syncRefundFxDefaults('supplier');
+        syncCustomerRefundTreatment();
+    });
     if (serviceRefundForm) {
         serviceRefundForm.addEventListener('submit', (event) => {
             const customerRefundAmount = Math.max(toNumber(serviceCustomerRefundAmount?.value || 0), 0);
             const supplierRefundAmount = Math.max(toNumber(serviceSupplierRefundAmount?.value || 0), 0);
+            syncRefundFxDefaults('customer');
+            syncRefundFxDefaults('supplier');
+            const bookingCurrency = refundFxBookingCurrencyCode();
+            const customerRefundCurrency = String(serviceCustomerRefundCurrencyInput?.value || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+            const supplierRefundCurrency = String(serviceSupplierRefundCurrencyInput?.value || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+            if (serviceCustomerRefundSourceAmountInput instanceof HTMLInputElement) {
+                serviceCustomerRefundSourceAmountInput.value = customerRefundCurrency === bookingCurrency
+                    ? formatNumberInputValue(customerRefundAmount)
+                    : formatNumberInputValue(
+                        Math.max(toNumber(serviceCustomerRefundSourceAmountInput.value || 0), 0) > 0.005
+                            ? toNumber(serviceCustomerRefundSourceAmountInput.value || 0)
+                            : customerRefundAmount
+                    );
+            }
+            if (serviceCustomerRefundExchangeRateInput instanceof HTMLInputElement) {
+                serviceCustomerRefundExchangeRateInput.value = customerRefundCurrency === bookingCurrency
+                    ? '1'
+                    : String(serviceCustomerRefundExchangeRateInput.value || '');
+            }
+            if (serviceSupplierRefundSourceAmountInput instanceof HTMLInputElement) {
+                serviceSupplierRefundSourceAmountInput.value = supplierRefundCurrency === bookingCurrency
+                    ? formatNumberInputValue(supplierRefundAmount)
+                    : formatNumberInputValue(
+                        Math.max(toNumber(serviceSupplierRefundSourceAmountInput.value || 0), 0) > 0.005
+                            ? toNumber(serviceSupplierRefundSourceAmountInput.value || 0)
+                            : supplierRefundAmount
+                    );
+            }
+            if (serviceSupplierRefundExchangeRateInput instanceof HTMLInputElement) {
+                serviceSupplierRefundExchangeRateInput.value = supplierRefundCurrency === bookingCurrency
+                    ? '1'
+                    : String(serviceSupplierRefundExchangeRateInput.value || '');
+            }
+            if (customerRefundAmount > 0.005 && customerRefundCurrency !== bookingCurrency) {
+                const customerRate = Math.max(toNumber(serviceCustomerRefundExchangeRateInput?.value || 0), 0);
+                if (customerRate <= 0.00000001) {
+                    event.preventDefault();
+                    showFeedback('Enter and confirm the customer refund FX rate before saving.');
+                    openRefundFxModal('customer');
+                    return;
+                }
+            }
+            if (supplierRefundAmount > 0.005 && supplierRefundCurrency !== bookingCurrency) {
+                const supplierRate = Math.max(toNumber(serviceSupplierRefundExchangeRateInput?.value || 0), 0);
+                if (supplierRate <= 0.00000001) {
+                    event.preventDefault();
+                    showFeedback('Enter and confirm the supplier refund FX rate before saving.');
+                    openRefundFxModal('supplier');
+                    return;
+                }
+            }
             if (!customerRefundWillBePaidNow() && supplierRefundAmount <= 0.005) {
                 event.preventDefault();
                 closeServiceEditBookingModal();
@@ -12936,7 +16192,7 @@ document.addEventListener('DOMContentLoaded', () => {
             treasuryRow: serviceSupplierRefundTreasuryRow,
             treasurySelect: serviceSupplierRefundTreasurySelect,
             branchField: serviceRefundBranchIdField,
-            currencyField: serviceRefundCurrencyField,
+            currencyField: serviceSupplierRefundCurrencyInput || serviceRefundCurrencyField,
             destinationRows: [],
             toggleFormClass: false,
         });
@@ -12944,6 +16200,25 @@ document.addEventListener('DOMContentLoaded', () => {
     if (serviceSupplierRefundMethodSelect) {
         serviceSupplierRefundMethodSelect.addEventListener('change', syncSupplierRefundTreasurySelector);
     }
+    if (serviceSupplierRefundTreasurySelect instanceof HTMLSelectElement) {
+        const rememberSupplierRefundAccount = () => {
+            serviceSupplierRefundTreasurySelect.dataset.lastSelectedAccountId = String(serviceSupplierRefundTreasurySelect.value || '').trim();
+        };
+        serviceSupplierRefundTreasurySelect.addEventListener('focus', rememberSupplierRefundAccount);
+        serviceSupplierRefundTreasurySelect.addEventListener('pointerdown', rememberSupplierRefundAccount);
+        serviceSupplierRefundTreasurySelect.addEventListener('change', async () => {
+            await alignRefundCurrencyToTreasuryAccount({
+                treasurySelect: serviceSupplierRefundTreasurySelect,
+                currencyField: serviceSupplierRefundCurrencyInput,
+                role: 'supplier',
+                onAligned: () => {
+                    syncSupplierRefundTreasurySelector();
+                },
+            });
+        });
+    }
+    syncRefundFxSummary('customer');
+    syncRefundFxSummary('supplier');
 
     const syncCorrectionRefundTreasurySelector = () => {
         if (!serviceCorrectionRefundMethodSelect || !serviceCorrectionRefundTreasurySelect || !serviceCorrectionRefundTreasuryRow) {
@@ -12968,13 +16243,40 @@ document.addEventListener('DOMContentLoaded', () => {
             treasuryRow: serviceCorrectionRefundTreasuryRow,
             treasurySelect: serviceCorrectionRefundTreasurySelect,
             branchField: serviceCorrectionRefundBranchIdField,
-            currencyField: serviceCorrectionRefundCurrencyField,
+            currencyField: serviceCorrectionCustomerRefundCurrencySelect || serviceCorrectionRefundCurrencyField,
             destinationRows: serviceCorrectionRefundDestinationRows,
             allowBankSourceForCash: true,
         });
     };
     if (serviceCorrectionRefundMethodSelect) {
         serviceCorrectionRefundMethodSelect.addEventListener('change', syncCorrectionRefundTreasurySelector);
+    }
+    serviceCorrectionCustomerRefundCurrencySelect?.addEventListener('change', () => {
+        syncCorrectionRefundBookedAmount('customer');
+        syncCorrectionRefundTreasurySelector();
+    });
+    serviceCorrectionCustomerRefundSourceAmountInput?.addEventListener('input', () => {
+        syncCorrectionRefundBookedAmount('customer');
+    });
+    serviceCorrectionCustomerRefundRateInput?.addEventListener('input', () => {
+        syncCorrectionRefundBookedAmount('customer');
+    });
+    if (serviceCorrectionRefundTreasurySelect instanceof HTMLSelectElement) {
+        const rememberCorrectionCustomerRefundAccount = () => {
+            serviceCorrectionRefundTreasurySelect.dataset.lastSelectedAccountId = String(serviceCorrectionRefundTreasurySelect.value || '').trim();
+        };
+        serviceCorrectionRefundTreasurySelect.addEventListener('focus', rememberCorrectionCustomerRefundAccount);
+        serviceCorrectionRefundTreasurySelect.addEventListener('pointerdown', rememberCorrectionCustomerRefundAccount);
+        serviceCorrectionRefundTreasurySelect.addEventListener('change', async () => {
+            await alignRefundCurrencyToTreasuryAccount({
+                treasurySelect: serviceCorrectionRefundTreasurySelect,
+                currencyField: serviceCorrectionCustomerRefundCurrencySelect,
+                role: 'customer',
+                onAligned: () => {
+                    syncCorrectionRefundTreasurySelector();
+                },
+            });
+        });
     }
 
     const syncCorrectionSupplierRefundTreasurySelector = () => {
@@ -12996,7 +16298,7 @@ document.addEventListener('DOMContentLoaded', () => {
             treasuryRow: serviceCorrectionSupplierRefundTreasuryRow,
             treasurySelect: serviceCorrectionSupplierRefundTreasurySelect,
             branchField: serviceCorrectionRefundBranchIdField,
-            currencyField: serviceCorrectionRefundCurrencyField,
+            currencyField: serviceCorrectionSupplierRefundCurrencySelect || serviceCorrectionRefundCurrencyField,
             destinationRows: [],
             toggleFormClass: false,
         });
@@ -13004,7 +16306,33 @@ document.addEventListener('DOMContentLoaded', () => {
     if (serviceCorrectionSupplierRefundMethodSelect) {
         serviceCorrectionSupplierRefundMethodSelect.addEventListener('change', syncCorrectionSupplierRefundTreasurySelector);
     }
-
+    serviceCorrectionSupplierRefundCurrencySelect?.addEventListener('change', () => {
+        syncCorrectionRefundBookedAmount('supplier');
+        syncCorrectionSupplierRefundTreasurySelector();
+    });
+    serviceCorrectionSupplierRefundSourceAmountInput?.addEventListener('input', () => {
+        syncCorrectionRefundBookedAmount('supplier');
+    });
+    serviceCorrectionSupplierRefundRateInput?.addEventListener('input', () => {
+        syncCorrectionRefundBookedAmount('supplier');
+    });
+    if (serviceCorrectionSupplierRefundTreasurySelect instanceof HTMLSelectElement) {
+        const rememberCorrectionSupplierRefundAccount = () => {
+            serviceCorrectionSupplierRefundTreasurySelect.dataset.lastSelectedAccountId = String(serviceCorrectionSupplierRefundTreasurySelect.value || '').trim();
+        };
+        serviceCorrectionSupplierRefundTreasurySelect.addEventListener('focus', rememberCorrectionSupplierRefundAccount);
+        serviceCorrectionSupplierRefundTreasurySelect.addEventListener('pointerdown', rememberCorrectionSupplierRefundAccount);
+        serviceCorrectionSupplierRefundTreasurySelect.addEventListener('change', async () => {
+            await alignRefundCurrencyToTreasuryAccount({
+                treasurySelect: serviceCorrectionSupplierRefundTreasurySelect,
+                currencyField: serviceCorrectionSupplierRefundCurrencySelect,
+                role: 'supplier',
+                onAligned: () => {
+                    syncCorrectionSupplierRefundTreasurySelector();
+                },
+            });
+        });
+    }
     const loadServiceLine = (index) => {
         const serviceLine = serviceLines[index];
         if (!serviceLine) {
@@ -13021,6 +16349,7 @@ document.addEventListener('DOMContentLoaded', () => {
             );
 
         fillValue(serviceFields.serviceId, serviceLine.serviceId ?? 0);
+        fillValue(serviceFields.updatedAt, serviceLine.updatedAt || '');
         fillValue(serviceFields.lineNumber, serviceLine.lineNumber || 'SV-DRAFT');
         fillValue(serviceTypeField, serviceLine.type || 'air ticket');
         fillValue(serviceFields.supplier, serviceLine.supplier || '');
@@ -13102,6 +16431,7 @@ document.addEventListener('DOMContentLoaded', () => {
         autosavedHasSavedService = hasPersistedServices();
         autosavedReceivableAmount = 0;
         fillValue(serviceFields.serviceId, 0);
+        fillValue(serviceFields.updatedAt, '');
         fillValue(serviceFields.lineNumber, 'SV-DRAFT');
         fillValue(serviceTypeField, 'air ticket');
         fillValue(serviceFields.supplier, '');
@@ -13355,6 +16685,7 @@ document.addEventListener('DOMContentLoaded', () => {
         };
 
         mergedLine.serviceId = payloadServiceId > 0 ? payloadServiceId : Number.parseInt(String(mergedLine.serviceId || 0), 10) || 0;
+        mergedLine.updatedAt = mergedLine.updatedAt || draftSnapshot.updatedAt || '';
         mergedLine.lineNumber = mergedLine.lineNumber || draftSnapshot.lineNumber || 'SV-DRAFT';
         mergedLine.type = mergedLine.type || draftSnapshot.type || 'air ticket';
         mergedLine.currency = mergedLine.currency || draftSnapshot.currency || 'PKR';
@@ -13413,6 +16744,7 @@ document.addEventListener('DOMContentLoaded', () => {
         syncBookingIdFields(bookingId);
         applyAutosavedCustomer(payload.customer || null);
         fillValue(serviceFields.serviceId, serviceId || 0);
+        fillValue(serviceFields.updatedAt, payload.service_updated_at || normalizedServiceLine?.updatedAt || '');
         autosavedPersistedServiceId = serviceId;
         autosavedPaymentEligible = payload.payment_eligible === true
             || normalizedServiceLine?.paymentEligible === true;
@@ -13469,7 +16801,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     targetName: input.name || '',
                     targetValue: input.value,
                 });
-                refreshProfit(`input:${input.name || input.id || 'metric'}`);
+                refreshProfit(`input:${input.name || input.id || 'metric'}`, {
+                    skipAutoWholeTotalAdjustment: input === serviceMetricInputs.sale
+                        || input === serviceMetricInputs.serviceCharge,
+                });
                 syncTicketCommercialMirrors();
                 if (input === serviceMetricInputs.sale
                     || input === serviceMetricInputs.tax
@@ -13483,6 +16818,28 @@ document.addEventListener('DOMContentLoaded', () => {
                     reapplyActiveCommercialPercents();
                 }
             });
+            if (isWholeCommercialMoneyInput(input)) {
+                input.addEventListener('blur', () => {
+                    normalizeWholeCommercialMoneyField(input);
+                    refreshProfit(`blur:${input.name || input.id || 'metric'}`);
+                    syncTicketCommercialMirrors();
+                });
+            } else if (input === serviceMetricInputs.sale || input === serviceMetricInputs.serviceCharge) {
+                input.addEventListener('blur', () => {
+                    refreshProfit(`blur:${input.name || input.id || 'metric'}`);
+                    syncTicketCommercialMirrors();
+                });
+            }
+            if (input === serviceMetricInputs.sale || input === serviceMetricInputs.serviceCharge) {
+                input.addEventListener('keydown', (event) => {
+                    if (event.key === '/') {
+                        window.setTimeout(() => {
+                            refreshProfit(`slash:${input.name || input.id || 'metric'}`);
+                            syncTicketCommercialMirrors();
+                        }, 0);
+                    }
+                });
+            }
         }
     });
     updateCommercialTrace({
@@ -13501,6 +16858,8 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!(target instanceof HTMLInputElement)) {
                 return;
             }
+            const isTypingSensitiveMetric = target === serviceMetricInputs.sale
+                || target === serviceMetricInputs.serviceCharge;
 
             if (
                 target.matches('[data-service-metric], [data-service-discount], [data-service-percent], [data-service-final-sale]')
@@ -13513,8 +16872,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     matchesDiscount: target.matches('[data-service-discount]'),
                     matchesPercent: target.matches('[data-service-percent]'),
                     matchesFinalSale: target.matches('[data-service-final-sale]'),
+                    skipAutoWholeTotalAdjustment: isTypingSensitiveMetric,
                 });
-                refreshProfit(`commercial-delegate:${target.name || target.id || 'field'}`);
+                refreshProfit(`commercial-delegate:${target.name || target.id || 'field'}`, {
+                    skipAutoWholeTotalAdjustment: isTypingSensitiveMetric,
+                });
                 syncTicketCommercialMirrors();
             }
         });
@@ -13550,9 +16912,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (invoiceCurrencyChanged || costCurrencyChanged || serviceChargeCurrencyChanged) {
                     markBranchCurrencyManual(target);
                 }
-                if (serviceChargeCurrencyChanged) {
-                    syncInvoiceAndPaymentCurrenciesFromServiceAmount(target.value);
-                } else if (invoiceCurrencyChanged) {
+                if (invoiceCurrencyChanged) {
                     const selectedPaymentCurrency = String(
                         paymentCurrencySelect?.value || target.value || 'PKR'
                     ).trim().toUpperCase() || 'PKR';
@@ -13569,14 +16929,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 refreshProfit(`commercial-delegate-change:${target.name || target.id || 'field'}`);
                 syncTicketCommercialMirrors();
                 if (
-                    serviceChargeCurrencyChanged
+                    (costCurrencyChanged || serviceChargeCurrencyChanged)
                     && previousPricingCurrency !== selectedPricingCurrency
+                    && currentPersistedServiceId() <= 0
                 ) {
                     const amountsConverted = await convertEnteredAmountsForCurrencyChange({
                         currencyField: target,
                         previousCurrency: previousPricingCurrency,
                         selectedCurrency: selectedPricingCurrency,
-                        role: 'service',
+                        role: costCurrencyChanged ? 'cost' : 'service',
                     });
                     if (!amountsConverted) {
                         refreshProfit('pricing-currency-amount-conversion-cancelled');
@@ -13584,11 +16945,10 @@ document.addEventListener('DOMContentLoaded', () => {
                         refreshPaymentPreview();
                         return;
                     }
-                } else if (invoiceCurrencyChanged || costCurrencyChanged) {
-                    // Mkt.Fare is the supplier's nominal amount. Changing Cost
-                    // Currency changes its denomination, not its number. The
-                    // Financial Summary equivalent is recalculated separately in
-                    // the Service Amount currency using the confirmed booking rate.
+                    if (serviceChargeCurrencyChanged) {
+                        syncInvoiceAndPaymentCurrenciesFromServiceAmount(target.value);
+                    }
+                } else if (invoiceCurrencyChanged || costCurrencyChanged || serviceChargeCurrencyChanged) {
                     target.dataset.pricingCurrencyValue = selectedPricingCurrency;
                 }
                 if (
@@ -13685,15 +17045,6 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    [financialCorrectionCostInput, financialCorrectionCustomerTotalInput].forEach((field) => {
-        if (!(field instanceof HTMLInputElement)) {
-            return;
-        }
-
-        field.addEventListener('input', refreshFinancialCorrectionLossPreview);
-        field.addEventListener('change', refreshFinancialCorrectionLossPreview);
-    });
-
     [airlineCommissionExtra, airlineCommissionAdjustment].forEach((input) => {
         if (input) {
             input.addEventListener('input', refreshAirlineCommissionTotal);
@@ -13712,6 +17063,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (serviceFields.currency) {
         serviceFields.currency.addEventListener('change', () => {
+            markBranchCurrencyManual(serviceFields.currency);
             pricingExchangeConfirmedSignature = '';
             if (serviceFields.pricingExchangeRate instanceof HTMLInputElement) {
                 serviceFields.pricingExchangeRate.value = '';
@@ -13728,6 +17080,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (serviceFields.costCurrency) {
         serviceFields.costCurrency.addEventListener('change', () => {
+            markBranchCurrencyManual(serviceFields.costCurrency);
             pricingExchangeConfirmedSignature = '';
             if (serviceFields.pricingExchangeRate instanceof HTMLInputElement) {
                 serviceFields.pricingExchangeRate.value = '';
@@ -13739,6 +17092,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (serviceFields.serviceChargeCurrency) {
         serviceFields.serviceChargeCurrency.addEventListener('change', () => {
+            markBranchCurrencyManual(serviceFields.serviceChargeCurrency);
             pricingExchangeConfirmedSignature = '';
             if (serviceFields.serviceChargeExchangeRate instanceof HTMLInputElement) {
                 serviceFields.serviceChargeExchangeRate.value = '';
@@ -13953,6 +17307,30 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     };
 
+    const syncWorkspacePricingCurrencyAvailability = () => {
+        if (currentPersistedServiceId() > 0) {
+            return;
+        }
+
+        const syncField = (currencyField, amountField, amountLabel) => {
+            if (!(currencyField instanceof HTMLSelectElement)) {
+                return;
+            }
+
+            const hasAmount = Math.abs(toNumber(amountField?.value || 0)) > 0.005;
+            currencyField.disabled = !hasAmount;
+            currencyField.setAttribute('aria-disabled', hasAmount ? 'false' : 'true');
+            currencyField.title = hasAmount ? '' : `Enter ${amountLabel} first.`;
+        };
+
+        syncField(serviceFields.costCurrency, serviceMetricInputs.sale, 'Market Fare');
+        syncField(
+            serviceFields.serviceChargeCurrency,
+            serviceMetricInputs.serviceCharge,
+            'Service Amount'
+        );
+    };
+
     const convertEnteredAmountsForCurrencyChange = async (options = {}) => {
         const currencyField = options.currencyField;
         const previousCurrency = normalizeWorkspaceCurrency(options.previousCurrency || '');
@@ -13990,65 +17368,47 @@ document.addEventListener('DOMContentLoaded', () => {
         const effectiveDate = currentPricingRateEffectiveDate()
             || normalizeLooseDate(paymentReceiptDateInput?.value || '')
             || new Date().toISOString().slice(0, 10);
-        const promptPair = pricingPromptPair(previousCurrency, selectedCurrency);
-        const requirement = {
-            key: `amount-currency:${role}:${previousCurrency}->${selectedCurrency}`,
-            sourceCurrency: previousCurrency,
-            invoiceCurrency: selectedCurrency,
-            promptFromCurrency: promptPair.from,
-            promptToCurrency: promptPair.to,
-            effectiveDate,
-            previewLabel: `Converted ${role === 'cost' ? 'supplier cost' : 'service amount'}`,
-            components: moneyFields.map((entry) => {
-                const originalAmount = toNumber(entry.field.value || 0);
-                return {
-                    label: entry.label,
-                    sourceCurrency: previousCurrency,
-                    amount: originalAmount,
-                    rateField: null,
-                    dateField: null,
-                    applyConvertedAmount: (sourceToSelectedRate) => {
-                        entry.field.value = formatNumberInputValue(
-                            roundToTwo(originalAmount * sourceToSelectedRate)
-                        );
-                    },
-                };
-            }),
-        };
-        const signature = JSON.stringify({
-            mode: 'pricing-amount-currency-transition',
+        const decisionAmount = moneyFields.reduce(
+            (sum, entry) => roundToTwo(sum + toNumber(entry.field.value || 0)),
+            0
+        );
+        const decision = await requestFinancialCurrencyDecision(
             role,
-            from: previousCurrency,
-            to: selectedCurrency,
-            amounts: moneyFields.map((entry) => [entry.label, toNumber(entry.field.value || 0)]),
-        });
+            previousCurrency,
+            selectedCurrency,
+            decisionAmount,
+            {
+                label: role === 'cost' ? 'Market Fare' : 'Service Amount',
+                effectiveDate,
+            }
+        );
+        const confirmed = decision !== null;
 
-        const finishConversion = () => {
+        if (confirmed) {
+            if (decision.action === 'convert') {
+                moneyFields.forEach((entry) => {
+                    entry.field.value = formatNumberInputValue(
+                        roundToTwo(toNumber(entry.field.value || 0) * decision.conversionRate)
+                    );
+                });
+            }
             currencyField.dataset.pricingCurrencyValue = selectedCurrency;
             pricingExchangeConfirmedSignature = '';
+            const pair = {
+                sourceCurrency: previousCurrency,
+                invoiceCurrency: selectedCurrency,
+                effectiveDate,
+            };
+            pricingExchangeConfirmedPairs.add(pricingExchangePairKey(pair));
+            pricingExchangeConfirmedPairs.add(pricingExchangePairKey({
+                sourceCurrency: selectedCurrency,
+                invoiceCurrency: previousCurrency,
+                effectiveDate,
+            }));
             syncPricingSnapshotFields();
-            refreshProfit(`pricing-${role}-amount-currency-converted`);
+            refreshProfit(`pricing-${role}-amount-currency-${decision.action}`);
             syncTicketCommercialMirrors();
             refreshPaymentPreview();
-        };
-        // A dated quote may prefill the dialog, but it must not silently convert
-        // this booking. Reuse only a booking rate or a pair confirmed on this page.
-        const reusableRate = sourceToInvoiceConfirmedRate(requirement);
-        let confirmed = false;
-        if (reusableRate > 0.005) {
-            requirement.components.forEach((component) => {
-                component.applyConvertedAmount(reusableRate);
-            });
-            finishConversion();
-            confirmed = true;
-        } else {
-            confirmed = await openPricingExchangeModal([requirement], signature, {
-                mode: 'pricing-amount-currency-transition',
-                title: role === 'cost' ? 'Convert Supplier Cost' : 'Convert Service Amount',
-                subtitle: `Amounts entered in ${previousCurrency} will be converted to ${selectedCurrency}; they will never be multiplied in the wrong direction or merely relabelled.`,
-                currencyLabel: 'New Currency',
-                onConfirmed: finishConversion,
-            });
         }
 
         if (!confirmed) {
@@ -14352,6 +17712,15 @@ document.addEventListener('DOMContentLoaded', () => {
     let lastWorkspaceBranchId = String(bookingBranchField?.value || '').trim();
     initializeBranchCurrencyModes();
     initializePricingCurrencyTracking();
+    syncWorkspacePricingCurrencyAvailability();
+
+    [serviceMetricInputs.sale, serviceMetricInputs.serviceCharge].forEach((amountField) => {
+        if (!(amountField instanceof HTMLInputElement)) {
+            return;
+        }
+        amountField.addEventListener('input', syncWorkspacePricingCurrencyAvailability);
+        amountField.addEventListener('change', syncWorkspacePricingCurrencyAvailability);
+    });
 
     bookingBranchField?.addEventListener('change', async () => {
         const previousBranchId = lastWorkspaceBranchId;
@@ -14433,7 +17802,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (serviceForm) {
-        serviceForm.addEventListener('submit', (event) => {
+        serviceForm.addEventListener('submit', async (event) => {
+            if (allowNativeServiceSubmit) {
+                allowNativeServiceSubmit = false;
+                return;
+            }
+
             window.workspaceDebugEnterFlow('service-form-submit', {
                 activeElement: document.activeElement instanceof HTMLElement
                     ? `${document.activeElement.tagName.toLowerCase()}${document.activeElement.id ? `#${document.activeElement.id}` : ''}${document.activeElement.getAttribute('name') ? `[name="${document.activeElement.getAttribute('name')}"]` : ''}`
@@ -14447,6 +17821,7 @@ document.addEventListener('DOMContentLoaded', () => {
             });
             syncAutoBookingFields();
             syncServiceTravelerIdFromName();
+            ensureCurrentServiceVersionToken();
 
             if (!hasRequiredLossReason({ focus: true, announce: true })) {
                 event.preventDefault();
@@ -14454,6 +17829,19 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             if (!prepareSupplierAdvanceFxUse()) {
                 event.preventDefault();
+                return;
+            }
+
+            if (serviceAutosaveInFlight) {
+                event.preventDefault();
+                const autosavePayload = await serviceAutosavePromise;
+                if (!autosavePayload) {
+                    showFeedback('Finish saving the supplier change first, then save again.');
+                    return;
+                }
+
+                allowNativeServiceSubmit = true;
+                serviceForm.requestSubmit();
                 return;
             }
 
@@ -14556,7 +17944,6 @@ document.addEventListener('DOMContentLoaded', () => {
         'other_remarks',
     ]);
     const protectedSavedServiceFinancialFields = new Set([
-        'cost_currency',
         'sale_price',
         'purchase_cost',
         'taxes',
@@ -14899,11 +18286,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (syncCommercialEditor) {
             const financialCurrency = currentFinancialSummaryCurrencyCode();
-            const financialPayable = convertAmountBetweenPricingCurrencies(
-                airlinePayable,
-                currentInvoiceCurrency,
-                financialCurrency
-            );
+            const supplierPayable = currentServicePayableAmount();
+            const supplierCurrency = currentCostCurrencyCode();
+            const supplierPayableDisplay = formatCurrencyAmount(supplierCurrency, supplierPayable);
             const financialReceivable = convertAmountBetweenPricingCurrencies(
                 receivable,
                 currentInvoiceCurrency,
@@ -14915,13 +18300,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
 
                 if ('value' in node) {
-                    node.value = formatMoney(airlinePayable);
+                    node.value = supplierPayableDisplay;
                 } else {
-                    node.textContent = formatMoney(airlinePayable);
+                    node.textContent = supplierPayableDisplay;
                 }
             });
             [airlinePayableFinancialField, ticketValueField].forEach((node) => {
-                writeFinancialSummaryAmount(node, financialPayable);
+                if (node && 'value' in node) {
+                    node.value = supplierPayableDisplay;
+                }
             });
             [clientReceivableSummary].forEach((node) => {
                 if (!node) {
@@ -14961,7 +18348,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 bottomTotalFields.receivable.value = formatMoney(receivable);
             }
             if (bottomTotalFields.payable) {
-                bottomTotalFields.payable.value = formatMoney(payable);
+                bottomTotalFields.payable.value = supplierPayableDisplay;
             }
             if (bottomTotalFields.profit) {
                 bottomTotalFields.profit.value = formatMoney(profit);
@@ -15128,7 +18515,12 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!(serviceForm instanceof HTMLFormElement) || autosaveServiceUrl === '') {
             return Promise.resolve(null);
         }
-        const { allowCreate = false } = options;
+        const {
+            allowCreate = false,
+            allowSupplierOnlyWithoutPricingRate = false,
+            bypassPricingRateValidation = false,
+            supplierCorrectionIntent = false,
+        } = options;
 
         window.workspaceDebugEnterFlow('persist-service-start', {
             suppressAutosave,
@@ -15172,13 +18564,16 @@ document.addEventListener('DOMContentLoaded', () => {
         serviceAutosavePromise = (async () => {
             syncAutoBookingFields();
             syncServiceTravelerIdFromName();
-            const pricingReady = await ensurePricingExchangeRateReady({
-                reason: 'service-save',
-                allowPrompt: false,
-            });
-            if (!pricingReady) {
-                setAutosaveStatus('dirty', 'Exchange rate required');
-                return null;
+            ensureCurrentServiceVersionToken();
+            if (!bypassPricingRateValidation && !(allowSupplierOnlyWithoutPricingRate && hasSupplierOnlyServiceCorrectionPending())) {
+                const pricingReady = await ensurePricingExchangeRateReady({
+                    reason: 'service-save',
+                    allowPrompt: false,
+                });
+                if (!pricingReady) {
+                    setAutosaveStatus('dirty', 'Exchange rate required');
+                    return null;
+                }
             }
             prepareSupplierAdvanceFxUse();
 
@@ -15203,14 +18598,18 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             setAutosaveStatus('saving', 'Saving...');
-            const payload = await postAutosave(autosaveServiceUrl, serviceForm, { commit_intent: 'payment_save' });
+            const autosaveExtraFields = { commit_intent: 'payment_save' };
+            if (supplierCorrectionIntent) {
+                autosaveExtraFields.supplier_correction_intent = '1';
+            }
+            const payload = await postAutosave(autosaveServiceUrl, serviceForm, autosaveExtraFields);
             const currentPayloadKey = serializeForm(serviceForm);
             const responseIsStale = currentPayloadKey !== payloadKey;
             lastInvoiceAutosaveKey = serializeForm(invoiceForm);
-            lastServiceAutosaveKey = serializeForm(serviceForm);
             applySavedServiceUiState(payload, {
                 preserveLiveEditorState: true,
             });
+            lastServiceAutosaveKey = serializeForm(serviceForm);
             if (responseIsStale) {
                 refreshProfit('autosave-stale-response');
             }
@@ -15239,18 +18638,9 @@ document.addEventListener('DOMContentLoaded', () => {
         return serviceAutosavePromise;
     };
 
-    const savedSupplierForActiveService = () => {
-        const persistedId = currentPersistedServiceId();
-        if (persistedId <= 0) {
-            return '';
-        }
-
-        const activeLine = serviceLines.find((serviceLine) =>
-            Number.parseInt(String(serviceLine?.serviceId || 0), 10) === persistedId
-        );
-
-        return String(activeLine?.supplier || activeLine?.supplierName || '').trim();
-    };
+    const savedSupplierForActiveService = () => String(
+        activePersistedServiceLine()?.supplier || activePersistedServiceLine()?.supplierName || ''
+    ).trim();
 
     if (serviceFields.supplier instanceof HTMLSelectElement) {
         serviceFields.supplier.addEventListener('change', async () => {
@@ -15283,7 +18673,11 @@ document.addEventListener('DOMContentLoaded', () => {
             if (serviceAutosaveInFlight) {
                 await serviceAutosavePromise;
             }
-            const payload = await persistServiceAutosave();
+            const payload = await persistServiceAutosave({
+                allowSupplierOnlyWithoutPricingRate: true,
+                bypassPricingRateValidation: true,
+                supplierCorrectionIntent: true,
+            });
             if (payload) {
                 showFeedback(`Supplier updated to ${newSupplier}. Payables and financial reports were synchronized.`);
             } else {
@@ -15384,6 +18778,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         setElementsEnabled(paymentHistoryButtons, true);
         setElementsEnabled(paymentSubmitButtons, true);
+        syncWorkspacePricingCurrencyAvailability();
     };
 
     if (serviceForm instanceof HTMLFormElement) {
@@ -15417,7 +18812,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let customerPickerSelectionIndex = 0;
     let filteredCustomers = customerDirectory.slice();
     let customerAutocompleteSelectionIndex = 0;
-    let filteredAutocompleteCustomers = customerDirectory.slice(0, 12);
+    let filteredAutocompleteCustomers = customerDirectory.slice();
     let suppressCustomerAutocompleteInput = false;
     let customerAdvanceNewCustomerMode = false;
     const resolveBookingLeadField = (preferredField = null) => {
@@ -15811,8 +19206,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const query = (customerAutocompleteInput?.value || '').trim().toLowerCase();
         const availableCustomers = searchableCustomerDirectory();
         filteredAutocompleteCustomers = query === ''
-            ? availableCustomers.slice(0, 12)
-            : availableCustomers.filter((customer) => customerLabel(customer).includes(query)).slice(0, 12);
+            ? availableCustomers.slice()
+            : availableCustomers.filter((customer) => customerLabel(customer).includes(query));
         customerAutocompleteSelectionIndex = 0;
         renderCustomerAutocomplete();
     };
@@ -16063,7 +19458,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     customerDirectory.push(customer);
                 }
                 filteredCustomers = searchableCustomerDirectory();
-                filteredAutocompleteCustomers = searchableCustomerDirectory().slice(0, 12);
+                filteredAutocompleteCustomers = searchableCustomerDirectory().slice();
                 if (newCustomerModal?.dataset.returnTo === 'customer-advance' || customerAdvanceNewCustomerMode) {
                     closeNewCustomerModal();
                     selectCustomerForAdvance(customer);
@@ -16305,9 +19700,20 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!(serviceEditBookingModal instanceof HTMLElement)) {
             return;
         }
+        window.workspaceDebugServiceWorkflow('modal-open-request', {
+            preferredTab: String(options.preferredTab || ''),
+            silent: options.silent === true,
+            activeTabBefore: String(serviceEditBookingModal.dataset.serviceWorkflowActiveTab || ''),
+        });
 
         try {
             window.sessionStorage.setItem(pendingServiceEditBookingModalKey, '1');
+            if (String(options.preferredTab || '').trim() !== '') {
+                window.sessionStorage.setItem(
+                    pendingServiceEditBookingTabKey,
+                    String(options.preferredTab || '').trim()
+                );
+            }
             window.sessionStorage.removeItem(pendingPenaltyRefundModalKey);
         } catch (error) {
             // ignore storage failures
@@ -16316,6 +19722,11 @@ document.addEventListener('DOMContentLoaded', () => {
         serviceEditBookingModal.hidden = false;
         serviceEditBookingModal.setAttribute('aria-hidden', 'false');
         syncServiceWorkflowTabs({ preferred: String(options.preferredTab || '') });
+        window.workspaceDebugServiceWorkflow('modal-opened', {
+            preferredTab: String(options.preferredTab || ''),
+            activeTabAfter: String(serviceEditBookingModal.dataset.serviceWorkflowActiveTab || ''),
+            modalHidden: serviceEditBookingModal.hidden,
+        });
 
         window.setTimeout(() => {
             const preferredField = serviceEditBookingModal.querySelector(
@@ -16340,9 +19751,13 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!(serviceEditBookingModal instanceof HTMLElement)) {
             return;
         }
+        window.workspaceDebugServiceWorkflow('modal-close', {
+            activeTabBefore: String(serviceEditBookingModal.dataset.serviceWorkflowActiveTab || ''),
+        });
 
         try {
             window.sessionStorage.removeItem(pendingServiceEditBookingModalKey);
+            window.sessionStorage.removeItem(pendingServiceEditBookingTabKey);
         } catch (error) {
             // ignore storage failures
         }
@@ -16427,8 +19842,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const restoreServiceEditBookingModalState = () => {
         let shouldRestore = '';
+        let preferredTab = '';
         try {
             shouldRestore = window.sessionStorage.getItem(pendingServiceEditBookingModalKey) || '';
+            preferredTab = window.sessionStorage.getItem(pendingServiceEditBookingTabKey) || '';
         } catch (error) {
             return;
         }
@@ -16440,9 +19857,16 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!(serviceEditBookingModal instanceof HTMLElement)) {
             return;
         }
+        window.workspaceDebugServiceWorkflow('modal-restore-scheduled', {
+            shouldRestore,
+            preferredTab,
+        });
 
         window.setTimeout(() => {
-            openServiceEditBookingModal({ silent: true });
+            window.workspaceDebugServiceWorkflow('modal-restore-run', {
+                preferredTab,
+            });
+            openServiceEditBookingModal({ silent: true, preferredTab });
         }, 80);
     };
 
@@ -16510,19 +19934,46 @@ document.addEventListener('DOMContentLoaded', () => {
             const isVoid = String(row?.status || '').toLowerCase() === 'void';
             const paymentId = Number.parseInt(String(row?.id || 0), 10) || 0;
             const supplierId = Number.parseInt(String(row?.supplier_id || 0), 10) || 0;
+            const correctionFormId = `supplier-payment-correction-${paymentId}`;
             const action = canCorrect
                 ? (isVoid
                     ? `<span class="global-payment-manager-void-note">${escapeHtml(String(row?.void_reason || 'Voided'))}</span>`
-                    : `<form method="post" action="${escapeHtml(globalPaymentCorrectionUrl)}" class="global-payment-manager-correction-form">
-                            <input type="hidden" name="_token" value="${escapeHtml(csrfToken)}">
-                            <input type="hidden" name="supplier_payment_id" value="${paymentId}">
-                            <input type="hidden" name="branch_id" value="${Number.parseInt(String(row?.branch_id || 0), 10) || 0}">
-                            <input type="hidden" name="supplier_id" value="${supplierId}">
-                            <input type="hidden" name="currency" value="${escapeHtml(String(row?.currency || 'PKR'))}">
-                            <input type="hidden" name="void_reason" value="">
-                            <button class="btn btn-primary btn-sm" type="button" data-supplier-payment-edit-open="${paymentId}">Edit</button>
-                            <button class="btn btn-danger btn-sm" type="submit" name="correction_action" value="void" onclick="const reason = window.prompt('Enter the reason for voiding this supplier payment:'); if (reason === null) return false; if (reason.trim().length < 5) { window.alert('Enter a reason of at least 5 characters.'); return false; } this.form.elements.void_reason.value = reason.trim();">Void</button>
-                        </form>`)
+                    : `<div class="global-payment-manager-row-actions">
+                            <form method="post" action="${escapeHtml(globalPaymentSupplierCorrectionUrl || globalPaymentCorrectionUrl)}" class="global-payment-manager-correction-form" id="${correctionFormId}">
+                                <input type="hidden" name="_token" value="${escapeHtml(csrfToken)}">
+                                <input type="hidden" name="supplier_payment_id" value="${paymentId}">
+                                <input type="hidden" name="branch_id" value="${Number.parseInt(String(row?.branch_id || 0), 10) || 0}">
+                                <input type="hidden" name="supplier_id" value="${supplierId}">
+                                <input type="hidden" name="currency" value="${escapeHtml(String(row?.currency || 'PKR'))}">
+                            </form>
+                            <div class="global-payment-manager-top-row">
+                                <select name="replacement_supplier_id" required form="${correctionFormId}" aria-label="Correct supplier for ${escapeHtml(String(row?.payment_no || 'payment'))}">
+                                    <option value="">Correct supplier...</option>
+                                    ${Array.isArray(correctionSuppliers) ? correctionSuppliers.map((supplier) => {
+                                        const correctionSupplierId = Number.parseInt(String(supplier?.id || 0), 10) || 0;
+                                        if (correctionSupplierId <= 0) {
+                                            return '';
+                                        }
+
+                                        return `<option value="${correctionSupplierId}"${correctionSupplierId === supplierId ? ' disabled' : ''}>${escapeHtml(String(supplier?.name || 'Supplier'))}</option>`;
+                                    }).join('') : ''}
+                                </select>
+                                <button class="btn btn-primary btn-sm" type="submit" form="${correctionFormId}" name="correction_action" value="change_supplier">Change Supplier</button>
+                            </div>
+                            <div class="global-payment-manager-bottom-row">
+                                <input type="text" name="correction_reason" value="" form="${correctionFormId}" placeholder="Remarks" maxlength="500" aria-label="Reason for supplier change">
+                                <button class="btn btn-primary btn-sm" type="button" data-supplier-payment-edit-open="${paymentId}">Edit</button>
+                                <form method="post" action="${escapeHtml(globalPaymentCorrectionUrl)}" class="global-payment-manager-void-form">
+                                    <input type="hidden" name="_token" value="${escapeHtml(csrfToken)}">
+                                    <input type="hidden" name="supplier_payment_id" value="${paymentId}">
+                                    <input type="hidden" name="branch_id" value="${Number.parseInt(String(row?.branch_id || 0), 10) || 0}">
+                                    <input type="hidden" name="supplier_id" value="${supplierId}">
+                                    <input type="hidden" name="currency" value="${escapeHtml(String(row?.currency || 'PKR'))}">
+                                    <input type="hidden" name="void_reason" value="">
+                                    <button class="btn btn-danger btn-sm" type="submit" name="correction_action" value="void" formnovalidate>Void Payment</button>
+                                </form>
+                            </div>
+                        </div>`)
                 : '<span class="muted">—</span>';
 
             return `<tr class="global-payment-manager-summary-row">
@@ -16625,7 +20076,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         const method = String(supplierPaymentEditMethod?.value || '').trim().toLowerCase().replaceAll(' ', '_');
         const currency = String(supplierPaymentEditCurrency?.value || '').trim().toUpperCase();
-        const branchId = Number.parseInt(String(supplierPaymentEditOriginal?.branch_id || 0), 10) || 0;
         const requestedAccountId = Number.parseInt(
             String(supplierPaymentEditAccount.dataset.requestedAccountId || supplierPaymentEditOriginal?.treasury_account_id || 0),
             10
@@ -16643,13 +20093,18 @@ document.addEventListener('DOMContentLoaded', () => {
             ? ['cash']
             : ['bank', 'wallet', 'bank_clearing'];
         const accounts = globalPaymentManagerTreasuryAccounts.filter((account) => (
-            Number.parseInt(String(account?.branch_id || 0), 10) === branchId
-            && String(account?.currency || '').trim().toUpperCase() === currency
+            String(account?.currency || '').trim().toUpperCase() === currency
             && account?.is_active === true
             && allowedTypes.includes(String(account?.account_type || '').trim().toLowerCase())
         ));
+        if (accounts.length === 0) {
+            const paymentMethodLabel = method === 'cash' ? 'cash' : 'bank';
+            supplierPaymentEditAccount.innerHTML = `<option value="">No active ${escapeHtml(currency)} ${paymentMethodLabel} account found in accessible branches</option>`;
+            supplierPaymentEditAccount.value = '';
+            return;
+        }
         supplierPaymentEditAccount.innerHTML = '<option value="">Select source account</option>' + accounts.map((account) => (
-            `<option value="${Number.parseInt(String(account?.id || 0), 10) || 0}">${escapeHtml(String(account?.account_name || 'Account'))} / ${escapeHtml(currency)} / Bal ${escapeHtml(formatMoney(toNumber(account?.current_balance || 0)))}</option>`
+            `<option value="${Number.parseInt(String(account?.id || 0), 10) || 0}">${escapeHtml(String(account?.branch_name || 'Branch'))} / ${escapeHtml(String(account?.account_name || 'Account'))} / ${escapeHtml(currency)} / Bal ${escapeHtml(formatMoney(toNumber(account?.current_balance || 0)))}</option>`
         )).join('');
         supplierPaymentEditAccount.value = accounts.some((account) => Number.parseInt(String(account?.id || 0), 10) === requestedAccountId)
             ? String(requestedAccountId)
@@ -16688,6 +20143,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
         supplierPaymentEditOriginal = row;
         if (supplierPaymentEditId instanceof HTMLInputElement) supplierPaymentEditId.value = String(normalizedId);
+        if (supplierPaymentEditOriginalBranchId instanceof HTMLInputElement) supplierPaymentEditOriginalBranchId.value = String(Number.parseInt(String(row?.branch_id || 0), 10) || 0);
+        if (supplierPaymentEditOriginalSupplierId instanceof HTMLInputElement) supplierPaymentEditOriginalSupplierId.value = String(Number.parseInt(String(row?.supplier_id || 0), 10) || 0);
+        if (supplierPaymentEditOriginalCurrency instanceof HTMLInputElement) supplierPaymentEditOriginalCurrency.value = String(row?.currency || 'PKR');
         if (supplierPaymentEditNumber instanceof HTMLElement) supplierPaymentEditNumber.textContent = String(row?.payment_no || '');
         if (supplierPaymentEditAllocation instanceof HTMLElement) {
             const count = Number.parseInt(String(row?.allocation_count || 0), 10) || 0;
@@ -16706,10 +20164,10 @@ document.addEventListener('DOMContentLoaded', () => {
         if (supplierPaymentEditCurrency instanceof HTMLSelectElement) {
             supplierPaymentEditCurrency.value = String(row?.currency || 'PKR');
             const allocationCount = Number.parseInt(String(row?.allocation_count || 0), 10) || 0;
-            supplierPaymentEditCurrency.disabled = allocationCount > 0;
+            supplierPaymentEditCurrency.disabled = false;
             supplierPaymentEditCurrency.title = allocationCount > 0
-                ? `Currency is fixed because this payment is already allocated to ${String(row?.currency || '')} supplier invoices.`
-                : 'Select the currency of this unallocated supplier payment.';
+                ? `This payment is already allocated to ${allocationCount} invoice${allocationCount === 1 ? '' : 's'}. If you change currency, the system will rebuild the payment and allocations safely.`
+                : 'Select the currency of this supplier payment.';
         }
         if (supplierPaymentEditAmount instanceof HTMLInputElement) supplierPaymentEditAmount.value = formatNumberInputValue(row?.paid_amount || 0);
         if (supplierPaymentEditMethod instanceof HTMLSelectElement) supplierPaymentEditMethod.value = String(row?.payment_method || 'cash');
@@ -16734,8 +20192,160 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         supplierPaymentEditModal.hidden = true;
         supplierPaymentEditModal.setAttribute('aria-hidden', 'true');
+        supplierPaymentEditModal.style.display = 'none';
+        supplierPaymentEditForm?.reset();
         supplierPaymentEditOriginal = null;
     };
+
+    function submitSupplierPaymentVoid() {
+        const paymentId = Number.parseInt(String(supplierPaymentEditId?.value || 0), 10) || 0;
+        if (paymentId <= 0 || globalPaymentCorrectionUrl === '') {
+            setSupplierPaymentEditFeedback('Void payment is unavailable for this entry.');
+            return;
+        }
+
+        const reason = window.prompt('Enter the reason for voiding this supplier payment:');
+        if (reason === null) {
+            return;
+        }
+        if (reason.trim().length < 5) {
+            window.alert('Enter a reason of at least 5 characters.');
+            return;
+        }
+        const form = document.createElement('form');
+        const branchId = Number.parseInt(String(supplierPaymentEditOriginalBranchId?.value || 0), 10) || 0;
+        const supplierId = Number.parseInt(String(supplierPaymentEditOriginalSupplierId?.value || 0), 10) || 0;
+        const currency = String(supplierPaymentEditOriginalCurrency?.value || supplierPaymentEditOriginal?.currency || 'PKR').trim().toUpperCase();
+        const fields = {
+            _token: csrfToken,
+            supplier_payment_id: String(paymentId),
+            branch_id: String(branchId),
+            supplier_id: String(supplierId),
+            currency,
+            correction_action: 'void',
+            void_reason: reason.trim(),
+        };
+        Object.entries(fields).forEach(([name, value]) => {
+            const input = document.createElement('input');
+            input.name = name;
+            input.value = String(value);
+            form.appendChild(input);
+        });
+        void submitGlobalPaymentManagerForm(form, 'void', {
+            successMessage: 'Supplier payment voided successfully.',
+            source: 'edit-modal',
+        });
+    }
+
+    async function submitGlobalPaymentManagerForm(form, action, options = {}) {
+        if (!(form instanceof HTMLFormElement)) {
+            return;
+        }
+
+        const requestAction = String(action || form.querySelector('[name="correction_action"]')?.value || '').trim().toLowerCase();
+        const targetUrl = requestAction === 'change_supplier'
+            ? globalPaymentSupplierCorrectionUrl
+            : globalPaymentCorrectionUrl;
+        if (targetUrl === '' || requestAction === '') {
+            setGlobalPaymentManagerFeedback('Supplier payment action is unavailable.');
+            return;
+        }
+
+        if (requestAction === 'change_supplier') {
+            const reasonField = form.elements.namedItem('correction_reason');
+            const reasonValue = reasonField instanceof HTMLInputElement ? String(reasonField.value || '').trim() : '';
+            if (reasonValue === '') {
+                setGlobalPaymentManagerFeedback('Enter remarks explaining why you are changing the supplier.');
+                if (reasonField instanceof HTMLInputElement) {
+                    reasonField.focus();
+                    reasonField.select();
+                }
+                window.alert('Please enter remarks before changing the supplier.');
+                return;
+            }
+        }
+
+        if (requestAction === 'void') {
+            const supplierPaymentId = String(form.elements.namedItem('supplier_payment_id')?.value || '').trim();
+            const correctionForm = supplierPaymentId !== ''
+                ? document.getElementById(`supplier-payment-correction-${supplierPaymentId}`)
+                : null;
+            const sharedReasonField = correctionForm instanceof HTMLFormElement
+                ? correctionForm.elements.namedItem('correction_reason')
+                : null;
+            const sharedReasonValue = sharedReasonField instanceof HTMLInputElement
+                ? String(sharedReasonField.value || '').trim()
+                : '';
+            const voidReasonField = form.elements.namedItem('void_reason');
+
+            if (sharedReasonValue.length < 5) {
+                setGlobalPaymentManagerFeedback('Enter remarks of at least 5 characters before voiding the payment.');
+                if (sharedReasonField instanceof HTMLInputElement) {
+                    sharedReasonField.focus();
+                    sharedReasonField.select();
+                }
+                window.alert('Please enter at least 5 characters in Remarks before voiding the payment.');
+                return;
+            }
+
+            if (voidReasonField instanceof HTMLInputElement) {
+                voidReasonField.value = sharedReasonValue;
+            }
+        }
+
+        const formData = new FormData(form);
+        formData.set('correction_action', requestAction);
+        const submitButtons = Array.from(form.querySelectorAll('button'));
+        submitButtons.forEach((button) => {
+            if (button instanceof HTMLButtonElement) {
+                button.disabled = true;
+            }
+        });
+
+        const feedbackMessage = requestAction === 'void'
+            ? 'Voiding supplier payment safely...'
+            : 'Updating supplier payment safely...';
+        setGlobalPaymentManagerFeedback(feedbackMessage);
+
+        try {
+            const response = await fetch(targetUrl, {
+                method: 'POST',
+                body: formData,
+                credentials: 'same-origin',
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest',
+                    Accept: 'application/json',
+                },
+            });
+            const payload = await response.json().catch(() => ({
+                ok: false,
+                message: 'The server returned an invalid supplier payment response.',
+            }));
+            if (!response.ok || payload.ok === false) {
+                throw new Error(String(payload.message || 'The supplier payment could not be updated.'));
+            }
+
+            const message = String(payload.message || options.successMessage || 'Supplier payment updated.');
+            if (options.source === 'edit-modal') {
+                closeSupplierPaymentEdit();
+            }
+            setGlobalPaymentManagerFeedback(message);
+            await loadGlobalPaymentManager();
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'The supplier payment could not be updated.';
+            if (options.source === 'edit-modal') {
+                setSupplierPaymentEditFeedback(message);
+            }
+            setGlobalPaymentManagerFeedback(message);
+            showFeedback(message);
+        } finally {
+            submitButtons.forEach((button) => {
+                if (button instanceof HTMLButtonElement) {
+                    button.disabled = false;
+                }
+            });
+        }
+    }
 
     const submitSupplierPaymentEdit = async (event) => {
         event.preventDefault();
@@ -16789,8 +20399,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 setGlobalPaymentManagerFeedback(String(payload.message || 'Supplier payment updated.'));
                 await loadGlobalPaymentManager();
             }
+            closeSupplierPaymentEdit();
+            supplierPaymentEditModal?.removeAttribute('style');
         } catch (error) {
-            setSupplierPaymentEditFeedback(error instanceof Error ? error.message : 'The supplier payment could not be corrected.');
+            const message = error instanceof Error ? error.message : 'The supplier payment could not be corrected.';
+            setSupplierPaymentEditFeedback(message);
+            showFeedback(message);
         } finally {
             if (supplierPaymentEditSubmit instanceof HTMLButtonElement) {
                 supplierPaymentEditSubmit.disabled = false;
@@ -17042,7 +20656,7 @@ document.addEventListener('DOMContentLoaded', () => {
             prepaidPaymentEditSupplier.disabled = row.supplier_editable !== true;
         }
         if (prepaidPaymentEditBranch instanceof HTMLInputElement) prepaidPaymentEditBranch.value = String(row.branch_name || '');
-        if (prepaidPaymentEditCurrency instanceof HTMLInputElement) prepaidPaymentEditCurrency.value = String(row.currency || '');
+        if (prepaidPaymentEditCurrency instanceof HTMLInputElement || prepaidPaymentEditCurrency instanceof HTMLSelectElement) prepaidPaymentEditCurrency.value = String(row.currency || '');
         if (prepaidPaymentEditDate instanceof HTMLInputElement) prepaidPaymentEditDate.value = String(row.payment_date || '');
         if (prepaidPaymentEditAmount instanceof HTMLInputElement) prepaidPaymentEditAmount.value = String(toNumber(row.deposit_amount || 0));
         if (prepaidPaymentEditMethod instanceof HTMLSelectElement) prepaidPaymentEditMethod.value = String(row.payment_method || 'cash');
@@ -17427,6 +21041,142 @@ document.addEventListener('DOMContentLoaded', () => {
         customerAdvanceRefundFeedback.hidden = !visible || String(message || '').trim() === '';
     };
 
+    const setCustomerAdvanceEditFeedback = (message, visible = true, isError = false) => {
+        if (!(customerAdvanceEditFeedback instanceof HTMLElement)) {
+            return;
+        }
+
+        customerAdvanceEditFeedback.textContent = message || '';
+        customerAdvanceEditFeedback.hidden = !visible || String(message || '').trim() === '';
+        customerAdvanceEditFeedback.classList.toggle('workspace-feedback--error', Boolean(isError && visible && String(message || '').trim() !== ''));
+    };
+
+    const setCustomerAdvancePickerFeedback = (message, visible = true) => {
+        if (!(customerAdvancePickerFeedback instanceof HTMLElement)) {
+            return;
+        }
+
+        customerAdvancePickerFeedback.textContent = message || '';
+        customerAdvancePickerFeedback.hidden = !visible || String(message || '').trim() === '';
+    };
+
+    const customerAdvanceBranchLabel = (branchId) => {
+        const normalizedId = String(branchId || '').trim();
+        if (normalizedId === '') {
+            return 'Branch';
+        }
+
+        const option = customerAdvancePickerBranch instanceof HTMLSelectElement
+            ? Array.from(customerAdvancePickerBranch.options).find((entry) => String(entry.value || '') === normalizedId)
+            : null;
+
+        return option ? String(option.textContent || 'Branch').trim() : 'Branch';
+    };
+
+    const customerAdvanceCurrencySummary = (row) => {
+        const chips = [];
+        [['PKR', row?.total_pkr], ['AED', row?.total_aed], ['USD', row?.total_usd]].forEach(([currency, amount]) => {
+            const numericAmount = toNumber(amount || 0);
+            if (numericAmount > 0.005) {
+                chips.push(`${currency} ${formatMoney(numericAmount)}`);
+            }
+        });
+
+        return chips.length > 0 ? chips.join('  |  ') : 'No balance';
+    };
+
+    const renderCustomerAdvancePickerRows = () => {
+        if (!(customerAdvancePickerResults instanceof HTMLElement)) {
+            return;
+        }
+
+        if (!Array.isArray(customerAdvancePickerState.rows) || customerAdvancePickerState.rows.length === 0) {
+            customerAdvancePickerResults.innerHTML = '<tr><td colspan="6" class="empty-cell">No customers with available advances matched your search.</td></tr>';
+            return;
+        }
+
+        customerAdvancePickerResults.innerHTML = customerAdvancePickerState.rows.map((row) => {
+            const customerName = escapeHtml(String(row?.customer_name || 'Customer'));
+            const mobile = escapeHtml(String(row?.mobile || '-'));
+            const passport = escapeHtml(String(row?.passport_number || '-'));
+            const branchLabel = escapeHtml(customerAdvanceBranchLabel(row?.branch_id || 0));
+            const advanceSummary = escapeHtml(customerAdvanceCurrencySummary(row));
+            const latestDate = escapeHtml(String(row?.latest_receipt_date || '-'));
+            const advanceCount = Number.parseInt(String(row?.advance_count || 0), 10) || 0;
+            return `<tr>
+                <td>
+                    <strong class="customer-advance-picker-name">${customerName}</strong>
+                    <span class="customer-advance-picker-subline">Family ID: ${escapeHtml(String(row?.family_id || '-'))}</span>
+                </td>
+                <td>
+                    <span class="customer-advance-picker-subline">${mobile}</span>
+                    <span class="customer-advance-picker-subline">${passport}</span>
+                </td>
+                <td>${branchLabel}</td>
+                <td>
+                    <strong class="customer-advance-picker-name">${advanceSummary}</strong>
+                    <span class="customer-advance-picker-subline">${advanceCount} advance entr${advanceCount === 1 ? 'y' : 'ies'}</span>
+                </td>
+                <td>${latestDate}</td>
+                <td><button type="button" class="btn btn-primary btn-sm" data-customer-advance-picker-select="${Number.parseInt(String(row?.traveler_id || 0), 10) || 0}" data-customer-advance-picker-branch-select="${Number.parseInt(String(row?.branch_id || 0), 10) || 0}">Select</button></td>
+            </tr>`;
+        }).join('');
+    };
+
+    async function loadCustomerAdvancePickerRows(options = {}) {
+        if (customerAdvanceCustomersUrl === '') {
+            return;
+        }
+
+        const nextQuery = typeof options.query === 'string'
+            ? options.query
+            : String(customerAdvancePickerSearch?.value || customerAdvancePickerState.query || '');
+        const nextBranchId = typeof options.branchId === 'number'
+            ? options.branchId
+            : (Number.parseInt(String(customerAdvancePickerBranch?.value || customerAdvancePickerState.branchId || 0), 10) || 0);
+        const requestToken = customerAdvancePickerState.requestToken + 1;
+        customerAdvancePickerState.requestToken = requestToken;
+        customerAdvancePickerState.query = nextQuery;
+        customerAdvancePickerState.branchId = nextBranchId;
+
+        if (customerAdvancePickerResults instanceof HTMLElement) {
+            customerAdvancePickerResults.innerHTML = '<tr><td colspan="6" class="empty-cell">Loading customers with advance balances...</td></tr>';
+        }
+        setCustomerAdvancePickerFeedback('', false);
+
+        const params = new URLSearchParams();
+        if (String(nextQuery || '').trim() !== '') {
+            params.set('q', String(nextQuery).trim());
+        }
+        if (nextBranchId > 0) {
+            params.set('branch_id', String(nextBranchId));
+        }
+
+        try {
+            const response = await fetch(`${customerAdvanceCustomersUrl}?${params.toString()}`, {
+                credentials: 'same-origin',
+                headers: { Accept: 'application/json' },
+            });
+            const payload = await response.json();
+            if (customerAdvancePickerState.requestToken !== requestToken) {
+                return;
+            }
+
+            customerAdvancePickerState.rows = Array.isArray(payload?.customers) ? payload.customers : [];
+            renderCustomerAdvancePickerRows();
+            if (customerAdvancePickerState.rows.length === 0) {
+                setCustomerAdvancePickerFeedback('No customer advance found for the selected search or branch.', true);
+            }
+        } catch (error) {
+            if (customerAdvancePickerState.requestToken !== requestToken) {
+                return;
+            }
+            customerAdvancePickerState.rows = [];
+            renderCustomerAdvancePickerRows();
+            setCustomerAdvancePickerFeedback('Customer advances could not be loaded right now.', true);
+        }
+    }
+
     const selectedCustomerForAdvance = () => {
         if (customerDuesFinderState.selectedCustomer && typeof customerDuesFinderState.selectedCustomer === 'object') {
             return customerDuesFinderState.selectedCustomer;
@@ -17545,9 +21295,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
         setCustomerAdvanceFeedback('', false);
         setCustomerAdvanceRefundFeedback('', false);
+        setCustomerAdvanceEditFeedback('', false);
         syncCustomerAdvanceTreasurySelector();
         syncCustomerAdvanceRefundTreasurySelector();
         loadCustomerAdvanceRefundOptions();
+        void loadCustomerAdvanceEditOptions();
     }
 
     const preferredCustomerAdvanceCurrency = (customer) => {
@@ -17566,14 +21318,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const eligibleCustomerAdvanceTreasuryAccounts = () => {
         const method = String(customerAdvanceMethod?.value || '').trim();
-        const currency = String(customerAdvanceCurrency?.value || '').trim().toUpperCase();
-        const branchId = Number.parseInt(String(customerAdvanceBranch?.value || '0'), 10) || 0;
         const compatibleTypes = paymentTreasuryTypesForMethod(method);
+        const branchId = Number.parseInt(String(customerAdvanceBranch?.value || '0'), 10) || 0;
+        const currency = String(customerAdvanceCurrency?.value || 'PKR').trim().toUpperCase();
 
         return paymentTreasuryAccounts.filter((account) => {
-            return (branchId <= 0 || Number.parseInt(String(account?.branchId || 0), 10) === branchId)
-                && compatibleTypes.includes(String(account?.accountType || '').trim())
-                && String(account?.currency || '').trim().toUpperCase() === currency;
+            const accountBranchId = Number.parseInt(String(account?.branchId || 0), 10) || 0;
+            const accountCurrency = String(account?.currency || '').trim().toUpperCase();
+
+            return compatibleTypes.includes(String(account?.accountType || '').trim())
+                && (branchId <= 0 || accountBranchId === branchId)
+                && accountCurrency === currency;
         });
     };
 
@@ -17626,14 +21381,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const eligibleCustomerAdvanceRefundTreasuryAccounts = () => {
         const method = String(customerAdvanceRefundMethod?.value || '').trim();
-        const currency = String(customerAdvanceRefundCurrency?.value || '').trim().toUpperCase();
-        const branchId = Number.parseInt(String(customerAdvanceRefundBranch?.value || '0'), 10) || 0;
         const compatibleTypes = paymentTreasuryTypesForMethod(method);
+        const branchId = Number.parseInt(String(customerAdvanceRefundBranch?.value || customerAdvanceBranch?.value || '0'), 10) || 0;
+        const currency = String(customerAdvanceRefundCurrency?.value || customerAdvanceCurrency?.value || 'PKR').trim().toUpperCase();
 
         return paymentTreasuryAccounts.filter((account) => {
-            return (branchId <= 0 || Number.parseInt(String(account?.branchId || 0), 10) === branchId)
-                && compatibleTypes.includes(String(account?.accountType || '').trim())
-                && String(account?.currency || '').trim().toUpperCase() === currency;
+            const accountBranchId = Number.parseInt(String(account?.branchId || 0), 10) || 0;
+            const accountCurrency = String(account?.currency || '').trim().toUpperCase();
+
+            return compatibleTypes.includes(String(account?.accountType || '').trim())
+                && (branchId <= 0 || accountBranchId === branchId)
+                && accountCurrency === currency;
         });
     };
 
@@ -17673,6 +21431,88 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         customerAdvanceRefundTreasuryAccount.disabled = !requiresTreasury;
+    };
+
+    const eligibleCustomerAdvanceEditTreasuryAccounts = () => {
+        const method = String(customerAdvanceEditMethod?.value || '').trim();
+        const compatibleTypes = paymentTreasuryTypesForMethod(method);
+        const branchId = Number.parseInt(String(customerAdvanceEditBranchFilter?.value || customerAdvanceBranch?.value || '0'), 10) || 0;
+        const currency = String(customerAdvanceEditCurrency?.value || 'PKR').trim().toUpperCase();
+
+        return paymentTreasuryAccounts.filter((account) => {
+            const accountBranchId = Number.parseInt(String(account?.branchId || 0), 10) || 0;
+            const accountCurrency = String(account?.currency || '').trim().toUpperCase();
+
+            return compatibleTypes.includes(String(account?.accountType || '').trim())
+                && (branchId <= 0 || accountBranchId === branchId)
+                && accountCurrency === currency;
+        });
+    };
+
+    const syncCustomerAdvanceEditTreasurySelector = () => {
+        if (!(customerAdvanceEditAccount instanceof HTMLSelectElement)) {
+            return;
+        }
+
+        const method = String(customerAdvanceEditMethod?.value || '').trim();
+        const requiresTreasury = paymentMethodRequiresTreasurySelection(method);
+        const eligibleAccounts = requiresTreasury ? eligibleCustomerAdvanceEditTreasuryAccounts() : [];
+        const selectedBefore = String(customerAdvanceEditAccount.value || '').trim();
+        const preferredAccount = defaultPaymentTreasuryAccount(eligibleAccounts);
+
+        customerAdvanceEditAccount.innerHTML = '';
+
+        const promptOption = document.createElement('option');
+        promptOption.value = '';
+        promptOption.textContent = eligibleAccounts.length > 0
+            ? (method === 'cash' ? 'Select cash account' : 'Select bank account')
+            : 'No eligible account configured';
+        customerAdvanceEditAccount.appendChild(promptOption);
+
+        eligibleAccounts.forEach((account) => {
+            const option = document.createElement('option');
+            option.value = String(account.id || '');
+            option.textContent = String(account.accountName || account.label || '').trim();
+            customerAdvanceEditAccount.appendChild(option);
+        });
+
+        if (selectedBefore !== '' && eligibleAccounts.some((account) => String(account.id || '') === selectedBefore)) {
+            customerAdvanceEditAccount.value = selectedBefore;
+        } else if (preferredAccount) {
+            customerAdvanceEditAccount.value = String(preferredAccount.id || '');
+        } else {
+            customerAdvanceEditAccount.value = '';
+        }
+
+        customerAdvanceEditAccount.disabled = !requiresTreasury;
+    };
+
+    const resetCustomerAdvanceEditForm = () => {
+        if (!(customerAdvanceEditForm instanceof HTMLFormElement)) {
+            return;
+        }
+
+        customerAdvanceEditForm.reset();
+        if (customerAdvanceEditReceiptId instanceof HTMLInputElement) {
+            customerAdvanceEditReceiptId.value = '';
+        }
+        if (customerAdvanceEditTravelerId instanceof HTMLInputElement) {
+            customerAdvanceEditTravelerId.value = String(customerAdvanceTravelerId?.value || '');
+        }
+        if (customerAdvanceEditBranchId instanceof HTMLInputElement) {
+            customerAdvanceEditBranchId.value = String(customerAdvanceEditBranchFilter?.value || customerAdvanceBranch?.value || '');
+        }
+        if (customerAdvanceEditPicker instanceof HTMLSelectElement) {
+            customerAdvanceEditPicker.value = '';
+        }
+        if (customerAdvanceEditCurrency instanceof HTMLSelectElement) {
+            customerAdvanceEditCurrency.value = 'PKR';
+        }
+        if (customerAdvanceEditMethod instanceof HTMLSelectElement) {
+            customerAdvanceEditMethod.value = 'cash';
+        }
+        syncCustomerAdvanceEditTreasurySelector();
+        setCustomerAdvanceEditFeedback('', false);
     };
 
     const syncCustomerAdvanceRefundAmountFromSelection = () => {
@@ -17727,6 +21567,253 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    async function fetchCustomerAdvanceEditRows(branchId, travelerId) {
+        if (travelerId <= 0 || customerAdvanceAvailableUrl === '') {
+            return [];
+        }
+
+        const seenAdvanceIds = new Set();
+        const collected = [];
+        for (const currency of ['PKR', 'AED', 'USD']) {
+            const params = new URLSearchParams({
+                traveler_id: String(travelerId),
+                currency,
+            });
+            if (branchId > 0) {
+                params.set('branch_id', String(branchId));
+            }
+            const response = await fetch(`${customerAdvanceAvailableUrl}?${params.toString()}`, {
+                credentials: 'same-origin',
+                headers: { Accept: 'application/json' },
+            });
+            const payload = await response.json();
+            const advances = uniqueCustomerAdvanceRows(payload.advances);
+            advances.forEach((advance) => {
+                const advanceId = String(advance.id || '');
+                if (advanceId === '' || seenAdvanceIds.has(advanceId)) {
+                    return;
+                }
+
+                seenAdvanceIds.add(advanceId);
+                collected.push({
+                    id: advanceId,
+                    receiptNo: String(advance.receipt_no || 'Advance'),
+                    branchId: Number.parseInt(String(advance.branch_id || 0), 10) || 0,
+                    branchLabel: customerAdvanceBranchLabel(advance.branch_id || 0),
+                    currency,
+                    availableAmount: toNumber(advance.unallocated_amount || 0),
+                    businessSourceName: String(advance.business_source_name || 'Unassigned Account'),
+                });
+            });
+        }
+
+        return collected;
+    }
+
+    async function loadCustomerAdvanceEditOptions(options = {}) {
+        if (!(customerAdvanceEditPicker instanceof HTMLSelectElement)) {
+            return;
+        }
+
+        const travelerId = Number.parseInt(String(customerAdvanceTravelerId?.value || '0'), 10) || 0;
+        let branchId = Number.parseInt(String(customerAdvanceEditBranchFilter?.value || customerAdvanceBranch?.value || '0'), 10) || 0;
+        const allowBranchFallback = options.allowBranchFallback !== false;
+        const previouslySelectedId = String(customerAdvanceEditReceiptId?.value || customerAdvanceEditPicker.value || '').trim();
+        customerAdvanceEditPicker.innerHTML = '<option value="">Select customer advance</option>';
+
+        if (customerAdvanceEditBranchId instanceof HTMLInputElement) {
+            customerAdvanceEditBranchId.value = branchId > 0 ? String(branchId) : '';
+        }
+        if (customerAdvanceEditTravelerId instanceof HTMLInputElement) {
+            customerAdvanceEditTravelerId.value = travelerId > 0 ? String(travelerId) : '';
+        }
+
+        if (travelerId <= 0 || branchId <= 0 || customerAdvanceAvailableUrl === '') {
+            return;
+        }
+
+        try {
+            let branchRows = await fetchCustomerAdvanceEditRows(branchId, travelerId);
+            if (branchRows.length === 0 && allowBranchFallback) {
+                branchRows = await fetchCustomerAdvanceEditRows(0, travelerId);
+            }
+
+            const seenAdvanceIds = new Set();
+            customerAdvanceEditPicker.innerHTML = '<option value="">Select customer advance</option>';
+            branchRows.forEach((advance) => {
+                seenAdvanceIds.add(String(advance.id || ''));
+                const option = document.createElement('option');
+                option.value = String(advance.id || '');
+                option.textContent = `${advance.receiptNo} / ${advance.branchLabel} / ${advance.currency} ${formatMoney(advance.availableAmount)} / ${advance.businessSourceName}`;
+                customerAdvanceEditPicker.appendChild(option);
+            });
+
+            if (previouslySelectedId !== '' && !seenAdvanceIds.has(previouslySelectedId) && customerAdvanceDetailUrl !== '') {
+                try {
+                    const params = new URLSearchParams({ receipt_id: previouslySelectedId });
+                    const response = await fetch(`${customerAdvanceDetailUrl}?${params.toString()}`, {
+                        credentials: 'same-origin',
+                        headers: { Accept: 'application/json' },
+                    });
+                    const payload = await response.json();
+                    const advance = payload?.advance && typeof payload.advance === 'object' ? payload.advance : null;
+                    if (advance && String(advance.id || '') === previouslySelectedId) {
+                        seenAdvanceIds.add(previouslySelectedId);
+                        const option = document.createElement('option');
+                        option.value = previouslySelectedId;
+                        option.textContent = `${advance.receipt_no || 'Advance'} / ${String(advance.currency || 'PKR').toUpperCase()} ${formatMoney(toNumber(advance.received_amount || 0))} / ${advance.business_source_name || 'Unassigned Account'} / current selection`;
+                        customerAdvanceEditPicker.appendChild(option);
+                    }
+                } catch (error) {
+                    // Keep the picker usable even if the detail refresh fails.
+                }
+            }
+
+            if (previouslySelectedId !== '' && seenAdvanceIds.has(previouslySelectedId)) {
+                customerAdvanceEditPicker.value = previouslySelectedId;
+                await loadCustomerAdvanceEditDetail(previouslySelectedId, { preserveBranchSelection: true });
+            } else if (customerAdvanceEditPicker.options.length > 1) {
+                const firstAdvanceId = String(customerAdvanceEditPicker.options[1]?.value || '').trim();
+                if (firstAdvanceId !== '') {
+                    customerAdvanceEditPicker.value = firstAdvanceId;
+                    await loadCustomerAdvanceEditDetail(firstAdvanceId);
+                }
+            }
+
+            if (customerAdvanceEditPicker.options.length <= 1) {
+                setCustomerAdvanceEditFeedback('No editable unallocated advance was found for this customer.', true);
+            } else {
+                setCustomerAdvanceEditFeedback('', false);
+            }
+        } catch (error) {
+            setCustomerAdvanceEditFeedback('Customer advances could not be loaded for editing.', true, true);
+        }
+    }
+
+    async function loadCustomerAdvanceEditDetail(receiptId, options = {}) {
+        const normalizedReceiptId = Number.parseInt(String(receiptId || '0'), 10) || 0;
+        if (normalizedReceiptId <= 0 || customerAdvanceDetailUrl === '') {
+            return;
+        }
+
+        try {
+            const params = new URLSearchParams({ receipt_id: String(normalizedReceiptId) });
+            const response = await fetch(`${customerAdvanceDetailUrl}?${params.toString()}`, {
+                credentials: 'same-origin',
+                headers: { Accept: 'application/json' },
+            });
+            const payload = await response.json();
+            if (!payload || payload.ok !== true || !payload.advance) {
+                throw new Error(payload?.message || 'Advance detail unavailable.');
+            }
+
+            const advance = payload.advance;
+            if (customerAdvanceEditReceiptId instanceof HTMLInputElement) {
+                customerAdvanceEditReceiptId.value = String(advance.id || '');
+            }
+            if (customerAdvanceEditTravelerId instanceof HTMLInputElement) {
+                customerAdvanceEditTravelerId.value = String(advance.traveler_id || customerAdvanceTravelerId?.value || '');
+            }
+            const preserveBranchSelection = Boolean(options && options.preserveBranchSelection);
+            if (!preserveBranchSelection) {
+                if (customerAdvanceEditBranchId instanceof HTMLInputElement) {
+                    customerAdvanceEditBranchId.value = String(advance.branch_id || '');
+                }
+                if (customerAdvanceEditBranchFilter instanceof HTMLSelectElement) {
+                    customerAdvanceEditBranchFilter.value = String(advance.branch_id || customerAdvanceEditBranchFilter.value || '');
+                }
+            } else if (customerAdvanceEditBranchId instanceof HTMLInputElement && customerAdvanceEditBranchFilter instanceof HTMLSelectElement) {
+                customerAdvanceEditBranchId.value = String(customerAdvanceEditBranchFilter.value || '');
+            }
+            if (customerAdvanceEditDate instanceof HTMLInputElement) {
+                customerAdvanceEditDate.value = String(advance.receipt_date || '');
+            }
+            if (customerAdvanceEditCurrency instanceof HTMLSelectElement) {
+                customerAdvanceEditCurrency.value = String(advance.currency || 'PKR').toUpperCase();
+            }
+            if (customerAdvanceEditAmount instanceof HTMLInputElement) {
+                customerAdvanceEditAmount.value = String(toNumber(advance.received_amount || 0));
+            }
+            if (customerAdvanceEditMethod instanceof HTMLSelectElement) {
+                customerAdvanceEditMethod.value = String(advance.payment_method || 'cash');
+            }
+            if (customerAdvanceEditReference instanceof HTMLInputElement) {
+                customerAdvanceEditReference.value = String(advance.reference_number || '');
+            }
+            if (customerAdvanceEditRemarks instanceof HTMLInputElement) {
+                customerAdvanceEditRemarks.value = String(advance.remarks || '');
+            }
+            syncCustomerAdvanceEditTreasurySelector();
+            if (customerAdvanceEditAccount instanceof HTMLSelectElement) {
+                customerAdvanceEditAccount.value = String(advance.treasury_account_id || '');
+            }
+            setCustomerAdvanceEditFeedback(`Loaded ${String(advance.receipt_no || 'customer advance')} for quick edit.`, true);
+        } catch (error) {
+            setCustomerAdvanceEditFeedback(error instanceof Error ? error.message : 'Advance detail could not be loaded.', true, true);
+        }
+    }
+
+    const openCustomerAdvanceEditForm = async () => {
+        if (!(customerAdvanceEditForm instanceof HTMLElement)) {
+            return;
+        }
+
+        const travelerId = Number.parseInt(String(customerAdvanceTravelerId?.value || '0'), 10) || 0;
+        if (travelerId <= 0) {
+            setCustomerAdvanceFeedback('Select a customer first, then use Edit Existing.', true);
+            return;
+        }
+
+        customerAdvanceEditForm.hidden = false;
+        if (customerAdvanceEditTravelerId instanceof HTMLInputElement) {
+            customerAdvanceEditTravelerId.value = String(travelerId);
+        }
+        if (customerAdvanceEditBranchFilter instanceof HTMLSelectElement) {
+            customerAdvanceEditBranchFilter.value = String(customerAdvanceBranch?.value || customerAdvanceEditBranchFilter.value || '');
+        }
+        if (customerAdvanceEditBranchId instanceof HTMLInputElement) {
+            customerAdvanceEditBranchId.value = String(customerAdvanceEditBranchFilter?.value || '');
+        }
+        setCustomerAdvanceEditFeedback('', false);
+        await loadCustomerAdvanceEditOptions({ allowBranchFallback: true });
+        window.setTimeout(() => customerAdvanceEditPicker?.focus(), 40);
+    };
+
+    const closeCustomerAdvanceEditForm = () => {
+        if (!(customerAdvanceEditForm instanceof HTMLElement)) {
+            return;
+        }
+
+        customerAdvanceEditForm.hidden = true;
+        resetCustomerAdvanceEditForm();
+    };
+
+    const openCustomerAdvancePickerModal = () => {
+        if (!(customerAdvancePickerModal instanceof HTMLElement)) {
+            return;
+        }
+
+        customerAdvancePickerModal.hidden = false;
+        customerAdvancePickerModal.setAttribute('aria-hidden', 'false');
+        if (customerAdvancePickerBranch instanceof HTMLSelectElement && String(customerAdvanceBranch?.value || '').trim() !== '') {
+            customerAdvancePickerBranch.value = String(customerAdvanceBranch?.value || '');
+        }
+        void loadCustomerAdvancePickerRows({
+            query: String(customerAdvancePickerSearch?.value || ''),
+            branchId: Number.parseInt(String(customerAdvancePickerBranch?.value || 0), 10) || 0,
+        });
+        window.setTimeout(() => customerAdvancePickerSearch?.focus(), 40);
+    };
+
+    const closeCustomerAdvancePickerModal = () => {
+        if (!(customerAdvancePickerModal instanceof HTMLElement)) {
+            return;
+        }
+
+        customerAdvancePickerModal.hidden = true;
+        customerAdvancePickerModal.setAttribute('aria-hidden', 'true');
+    };
+
     function openCustomerAdvanceModal() {
         if (!customerAdvanceModal) {
             return;
@@ -17762,6 +21849,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         setCustomerAdvanceFeedback('', false);
         setCustomerAdvanceRefundFeedback('', false);
+        closeCustomerAdvanceEditForm();
         syncCustomerAdvanceTreasurySelector();
         syncCustomerAdvanceBankDetailVisibility();
         syncCustomerAdvanceRefundTreasurySelector();
@@ -17785,6 +21873,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         customerAdvanceNewCustomerMode = false;
+        closeCustomerAdvancePickerModal();
+        closeCustomerAdvanceEditForm();
         customerAdvanceModal.hidden = true;
         customerAdvanceModal.setAttribute('aria-hidden', 'true');
         refreshPaymentAdvanceControls();
@@ -17795,6 +21885,9 @@ document.addEventListener('DOMContentLoaded', () => {
         refreshPaymentAdvanceControls();
         if (customerAdvanceModal instanceof HTMLElement && !customerAdvanceModal.hidden) {
             loadCustomerAdvanceRefundOptions();
+            if (customerAdvanceEditForm instanceof HTMLElement && !customerAdvanceEditForm.hidden) {
+                void loadCustomerAdvanceEditOptions();
+            }
         }
     });
 
@@ -17807,6 +21900,12 @@ document.addEventListener('DOMContentLoaded', () => {
         refreshPaymentAdvanceControls();
         if (!customerDuesModal?.hidden) {
             renderCustomerDuesFinder();
+        }
+        if (customerAdvanceModal instanceof HTMLElement && !customerAdvanceModal.hidden) {
+            void loadCustomerAdvanceRefundOptions();
+            if (customerAdvanceEditForm instanceof HTMLElement && !customerAdvanceEditForm.hidden) {
+                void loadCustomerAdvanceEditOptions();
+            }
         }
     });
 
@@ -18153,8 +22252,21 @@ document.addEventListener('DOMContentLoaded', () => {
     if (serviceEditBookingModal instanceof HTMLElement) {
         serviceEditBookingModal.querySelectorAll('form').forEach((form) => {
             form.addEventListener('submit', () => {
+                window.workspaceDebugServiceWorkflow('modal-form-submit', {
+                    action: String(form.getAttribute('action') || ''),
+                    workflowPanel: String(form.dataset.serviceWorkflowPanel || ''),
+                    serviceId: String(form.elements.namedItem('service_id')?.value || ''),
+                });
                 try {
                     window.sessionStorage.setItem(pendingServiceEditBookingModalKey, '1');
+                    const workflowPanel = String(form.dataset.serviceWorkflowPanel || '').trim();
+                    if (workflowPanel === 'cancel') {
+                        window.sessionStorage.setItem(pendingServiceEditBookingTabKey, 'settlement');
+                    } else if (workflowPanel === 'settlement' || workflowPanel === 'cancel-reopen') {
+                        window.sessionStorage.setItem(pendingServiceEditBookingTabKey, 'refund');
+                    } else if (workflowPanel === 'refund') {
+                        window.sessionStorage.setItem(pendingServiceEditBookingTabKey, 'refund');
+                    }
                     window.sessionStorage.removeItem(pendingPenaltyRefundModalKey);
                 } catch (error) {
                     // ignore storage failures
@@ -18172,13 +22284,28 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     correctionRefundWorkflowButtons.forEach((button) => {
-        button.addEventListener('click', () => {
+        button.addEventListener('click', async () => {
             const scope = String(button.dataset.openRefundWorkflow || '').trim();
-            closeServicePenaltyRefundModal();
-            openServiceEditBookingModal({ silent: true, preferredTab: 'refund' });
-            showFeedback(scope === 'supplier'
-                ? 'Record the supplier refund in Pay Refund.'
-                : 'Pay the customer refund in Pay Refund.');
+            const originalText = button.textContent || '';
+            const originalDisabled = button.disabled;
+
+            button.disabled = true;
+            button.textContent = 'Saving...';
+
+            try {
+                await saveCorrectionRefundFormIfDirty();
+                closeServicePenaltyRefundModal();
+                openServiceEditBookingModal({ silent: true, preferredTab: 'refund' });
+                syncRefundWorkflowFromCorrectionForm(scope);
+                showFeedback(scope === 'supplier'
+                    ? 'Record the supplier refund in Pay Refund.'
+                    : 'Pay the customer refund in Pay Refund.');
+            } catch (error) {
+                showFeedback(error instanceof Error ? error.message : 'Refund correction could not be saved yet.');
+            } finally {
+                button.disabled = originalDisabled;
+                button.textContent = originalText;
+            }
         });
     });
 
@@ -18261,6 +22388,7 @@ document.addEventListener('DOMContentLoaded', () => {
             currencyField.addEventListener('change', syncSupplierTreasurySelectors);
             currencyField.addEventListener('input', syncSupplierTreasurySelectors);
         }
+        select.addEventListener('change', () => syncSupplierExchangeField(form));
         form?.addEventListener('submit', (event) => {
             if (!ensureSupplierTreasuryReady(form)) {
                 event.preventDefault();
@@ -18825,10 +22953,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const serviceWorkflowState = (() => {
         try {
             const params = new URLSearchParams(window.location.search);
-            return {
+            const state = {
                 step: String(params.get('service_workflow') || '').trim().toLowerCase(),
                 autoPrintRefund: params.get('auto_print_refund') === '1',
             };
+            window.workspaceDebugServiceWorkflow('workflow-state-parse', state);
+            return state;
         } catch (error) {
             return {
                 step: '',
@@ -18850,17 +22980,32 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const ensureServiceWorkflowModalForSelector = (selector) => {
         const normalizedSelector = String(selector || '');
+        window.workspaceDebugServiceWorkflow('ensure-modal-for-selector', {
+            selector: normalizedSelector,
+        });
         if (normalizedSelector.includes('[data-service-event-bar="financial-correction"]')
             || normalizedSelector.includes('[data-service-event-bar="reissue"]')) {
             openServiceEditBookingModal({ silent: true });
             return;
         }
 
+        if (normalizedSelector.includes('[data-service-event-bar="settlement"]')) {
+            openServiceEditBookingModal({ silent: true, preferredTab: 'settlement' });
+            return;
+        }
+
+        if (normalizedSelector.includes('[data-service-event-bar="refund"]')) {
+            openServiceEditBookingModal({ silent: true, preferredTab: 'refund' });
+            return;
+        }
+
+        if (normalizedSelector.includes('[data-service-event-bar="cancel"]')) {
+            openServiceEditBookingModal({ silent: true, preferredTab: 'cancel' });
+            return;
+        }
+
         if (
-            normalizedSelector.includes('[data-service-event-bar="cancel"]')
-            || normalizedSelector.includes('[data-service-event-bar="settlement"]')
-            || normalizedSelector.includes('[data-service-event-bar="refund"]')
-            || normalizedSelector.includes('[data-service-event-bar="cancel-reopen"]')
+            normalizedSelector.includes('[data-service-event-bar="cancel-reopen"]')
         ) {
             openServiceEditBookingModal({ silent: true });
         }
@@ -18870,13 +23015,34 @@ document.addEventListener('DOMContentLoaded', () => {
         const tryFocus = () => {
             const field = station.querySelector(selector);
             if (!(field instanceof HTMLElement)) {
+                window.workspaceDebugServiceWorkflow('focus-field-miss', { selector, reason: 'field-not-found' });
                 return false;
             }
 
             const form = field.closest('form');
             if (form instanceof HTMLElement && form.hidden) {
+                window.workspaceDebugServiceWorkflow('focus-field-miss', { selector, reason: 'form-hidden' });
                 return false;
             }
+
+            const modal = field.closest('[data-service-edit-booking-modal], [data-service-penalty-refund-modal]');
+            if (modal instanceof HTMLElement && modal.hidden) {
+                window.workspaceDebugServiceWorkflow('focus-field-miss', { selector, reason: 'modal-hidden' });
+                return false;
+            }
+
+            const workflowPanel = field.closest('[data-service-workflow-panel], [data-service-correction-panel]');
+            if (workflowPanel instanceof HTMLElement) {
+                if (workflowPanel.hidden || workflowPanel.classList.contains('service-workflow-panel--tab-hidden')) {
+                    window.workspaceDebugServiceWorkflow('focus-field-miss', {
+                        selector,
+                        reason: 'panel-hidden',
+                        panel: String(workflowPanel.dataset.serviceWorkflowPanel || workflowPanel.dataset.serviceCorrectionPanel || ''),
+                    });
+                    return false;
+                }
+            }
+            window.workspaceDebugServiceWorkflow('focus-field-hit', { selector });
 
             field.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
             window.setTimeout(() => focusTarget(selector), 80);
@@ -18913,6 +23079,12 @@ document.addEventListener('DOMContentLoaded', () => {
             ? serviceLines.findIndex((serviceLine) => Number.parseInt(String(serviceLine.serviceId || 0), 10) === requestedServiceId)
             : -1;
         const initialServiceIndex = requestedServiceIndex >= 0 ? requestedServiceIndex : 0;
+        window.workspaceDebugServiceWorkflow('boot-select-service', {
+            requestedServiceId,
+            requestedServiceIndex,
+            initialServiceIndex,
+            serviceLineCount: serviceLines.length,
+        });
         serviceRows.forEach((item, rowIndex) => {
             item.classList.toggle('is-active', rowIndex === initialServiceIndex);
         });
@@ -18930,6 +23102,12 @@ document.addEventListener('DOMContentLoaded', () => {
     window.setTimeout(() => {
         refreshProfit('boot-deferred-commercial-refresh');
         syncTicketCommercialMirrors();
+        if (currentBookingId() > 0 && invoiceForm instanceof HTMLFormElement) {
+            lastInvoiceAutosaveKey = serializeForm(invoiceForm);
+        }
+        if (currentPersistedServiceId() > 0 && serviceForm instanceof HTMLFormElement) {
+            lastServiceAutosaveKey = serializeForm(serviceForm);
+        }
     }, 0);
 
     if (travelers.length > 0) {
@@ -18998,11 +23176,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (serviceWorkflowState.step !== '') {
         const workflowStep = serviceWorkflowState.step;
+        window.workspaceDebugServiceWorkflow('workflow-state-detected', serviceWorkflowState);
         window.setTimeout(() => {
             reapplyActiveServiceActionState();
             unlockVisibleSettlementBar();
 
             if (workflowStep === 'cancelled') {
+                window.workspaceDebugServiceWorkflow('workflow-cancelled-branch', {
+                    activeServiceId: activeServiceId(),
+                });
+                openServiceEditBookingModal({ silent: true, preferredTab: 'settlement' });
                 focusServiceWorkflowField(
                     '[data-service-event-bar="settlement"] input[name="customer_penalty_amount"]',
                     'Cancellation recorded. Continue with settlement if needed.'

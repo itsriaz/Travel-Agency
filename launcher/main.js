@@ -22,15 +22,78 @@ const defaultConfig = {
   launcherKeyIdHeader: 'X-Travel-Launcher-Key-Id'
 };
 
+const launcherLogFileName = 'launcher-runtime.log';
+let cachedLauncherLogPath = '';
+
+function safeJson(value) {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return '"[unserializable]"';
+  }
+}
+
+function resolveLauncherLogPath() {
+  if (cachedLauncherLogPath !== '') {
+    return cachedLauncherLogPath;
+  }
+
+  try {
+    cachedLauncherLogPath = path.join(app.getPath('userData'), 'logs', launcherLogFileName);
+    return cachedLauncherLogPath;
+  } catch {
+    cachedLauncherLogPath = path.join(__dirname, 'logs', launcherLogFileName);
+    return cachedLauncherLogPath;
+  }
+}
+
+function writeLauncherLog(level, message, context = {}) {
+  try {
+    const logPath = resolveLauncherLogPath();
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    const line = `[${new Date().toISOString()}] ${String(level || 'info').toUpperCase()} ${String(message || '')} | ${safeJson(context)}\n`;
+    fs.appendFileSync(logPath, line, 'utf8');
+  } catch {
+    // Logging must never block the launcher.
+  }
+}
+
+function launcherErrorContext(error) {
+  if (!(error instanceof Error)) {
+    return {
+      error: String(error || 'Unknown error')
+    };
+  }
+
+  return {
+    name: error.name,
+    message: error.message,
+    stack: error.stack || null
+  };
+}
+
 function readConfig() {
   const configPath = path.join(__dirname, 'launcher-config.json');
   if (!fs.existsSync(configPath)) {
+    writeLauncherLog('warn', 'Launcher config file was not found. Falling back to defaults.', {
+      configPath
+    });
     return defaultConfig;
   }
 
   try {
-    return { ...defaultConfig, ...JSON.parse(fs.readFileSync(configPath, 'utf8')) };
-  } catch {
+    const parsed = { ...defaultConfig, ...JSON.parse(fs.readFileSync(configPath, 'utf8')) };
+    writeLauncherLog('info', 'Launcher config loaded successfully.', {
+      configPath,
+      serverUrl: parsed.serverUrl,
+      sourceDevice: parsed.sourceDevice
+    });
+    return parsed;
+  } catch (error) {
+    writeLauncherLog('error', 'Launcher config could not be parsed. Falling back to defaults.', {
+      configPath,
+      ...launcherErrorContext(error)
+    });
     return defaultConfig;
   }
 }
@@ -41,7 +104,8 @@ let lastConnectionFailure = null;
 async function prepareOnlineRetry() {
   try {
     await session.defaultSession.clearCache();
-  } catch {
+  } catch (error) {
+    writeLauncherLog('warn', 'Failed to clear Chromium cache before retry.', launcherErrorContext(error));
     // A cache cleanup failure must not block the connection attempt.
   }
 
@@ -49,7 +113,8 @@ async function prepareOnlineRetry() {
     if (typeof session.defaultSession.clearHostResolverCache === 'function') {
       await session.defaultSession.clearHostResolverCache();
     }
-  } catch {
+  } catch (error) {
+    writeLauncherLog('warn', 'Failed to clear host resolver cache before retry.', launcherErrorContext(error));
     // DNS cache cleanup is best-effort.
   }
 }
@@ -61,11 +126,22 @@ async function loadOnlineWindow(win) {
 
   lastConnectionFailure = null;
   await prepareOnlineRetry();
+  writeLauncherLog('info', 'Loading online window.', {
+    serverUrl: config.serverUrl
+  });
   try {
     await win.loadURL(config.serverUrl);
+    writeLauncherLog('info', 'Online window loaded successfully.', {
+      serverUrl: config.serverUrl
+    });
     return { ok: true };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error || 'Connection failed.');
+    writeLauncherLog('error', 'Online window load failed.', {
+      serverUrl: config.serverUrl,
+      failure: lastConnectionFailure,
+      ...launcherErrorContext(error)
+    });
     return { ok: false, error: message, failure: lastConnectionFailure };
   }
 }
@@ -108,6 +184,10 @@ function resolvePrivateKey() {
     : path.join(__dirname, configuredPath);
 
   if (!fs.existsSync(absolutePath)) {
+    writeLauncherLog('warn', 'Configured launcher private key file was not found.', {
+      configuredPath,
+      absolutePath
+    });
     return '';
   }
 
@@ -167,10 +247,16 @@ function launcherSecurityHeaders(targetUrl, method = 'GET') {
 
 function installLauncherGateHeaders() {
   if (!config.launcherToken && !launcherPrivateKey) {
+    writeLauncherLog('info', 'Launcher gate headers are disabled because no token or private key is configured.');
     return;
   }
 
   const origin = new URL(config.serverUrl).origin;
+  writeLauncherLog('info', 'Installing launcher gate request headers.', {
+    origin,
+    hasLauncherToken: Boolean(config.launcherToken),
+    hasLauncherPrivateKey: Boolean(launcherPrivateKey)
+  });
   session.defaultSession.webRequest.onBeforeSendHeaders((details, callback) => {
     let requestOrigin = '';
     try {
@@ -203,6 +289,7 @@ function isInternalUrl(url) {
 }
 
 function createLoadingWindow() {
+  writeLauncherLog('info', 'Creating splash/loading window.');
   const win = new BrowserWindow({
     width: 420,
     height: 240,
@@ -233,6 +320,10 @@ function createLoadingWindow() {
 }
 
 function createAppWindow(initialUrl, parentWindow = null) {
+  writeLauncherLog('info', 'Creating application window.', {
+    initialUrl,
+    isChildWindow: Boolean(parentWindow)
+  });
   const win = new BrowserWindow({
     width: parentWindow ? 1180 : 1280,
     height: parentWindow ? 780 : 820,
@@ -250,6 +341,10 @@ function createAppWindow(initialUrl, parentWindow = null) {
   });
 
   win.webContents.setWindowOpenHandler(({ url }) => {
+    writeLauncherLog('info', 'Launcher intercepted window open request.', {
+      url,
+      internal: isInternalUrl(url)
+    });
     if (isInternalUrl(url)) {
       createAppWindow(url, win);
       return { action: 'deny' };
@@ -267,8 +362,29 @@ function createAppWindow(initialUrl, parentWindow = null) {
         url: String(validatedURL || initialUrl || config.serverUrl),
         occurredAt: new Date().toISOString()
       };
+      writeLauncherLog('error', 'Main window failed to load and is switching to offline screen.', lastConnectionFailure);
       win.loadFile(path.join(__dirname, 'offline.html'));
     }
+  });
+
+  win.webContents.on('did-finish-load', () => {
+    writeLauncherLog('info', 'Window finished loading.', {
+      url: win.webContents.getURL()
+    });
+  });
+
+  win.webContents.on('render-process-gone', (_event, details) => {
+    writeLauncherLog('error', 'Renderer process exited unexpectedly.', {
+      reason: details?.reason || null,
+      exitCode: details?.exitCode ?? null,
+      url: win.webContents.getURL()
+    });
+  });
+
+  win.webContents.on('unresponsive', () => {
+    writeLauncherLog('warn', 'Renderer became unresponsive.', {
+      url: win.webContents.getURL()
+    });
   });
 
   win.webContents.on('before-input-event', (event, input) => {
@@ -286,12 +402,20 @@ function createAppWindow(initialUrl, parentWindow = null) {
 
   if (parentWindow) {
     win.once('ready-to-show', () => {
+      writeLauncherLog('info', 'Child window ready to show.', {
+        url: win.webContents.getURL()
+      });
       win.show();
       win.focus();
     });
   }
 
   win.loadURL(initialUrl);
+  win.on('closed', () => {
+    writeLauncherLog('info', 'Window closed.', {
+      lastUrl: win.webContents.isDestroyed() ? initialUrl : win.webContents.getURL()
+    });
+  });
 
   return win;
 }
@@ -349,6 +473,7 @@ function createWindow() {
     }
 
     windowShown = true;
+    writeLauncherLog('info', 'Revealing main launcher window.');
     if (!splash.isDestroyed()) {
       splash.close();
     }
@@ -465,7 +590,8 @@ ipcMain.handle('launcher:config', async () => ({
   serverUrl: config.serverUrl,
   windowTitle: config.windowTitle,
   sourceDevice: config.sourceDevice,
-  lastConnectionFailure
+  lastConnectionFailure,
+  logFilePath: resolveLauncherLogPath()
 }));
 
 ipcMain.handle('launcher:openOnline', async () => {
@@ -497,18 +623,85 @@ ipcMain.handle('launcher:syncDrafts', async (_event, payload) => serverRequest('
 ipcMain.handle('launcher:saveLedgerPdfAndOpenWhatsApp', async (_event, payload) => exportLedgerPdfToDocuments(payload));
 
 app.whenReady().then(() => {
+  writeLauncherLog('info', 'Launcher app is ready.', {
+    platform: process.platform,
+    arch: process.arch,
+    electron: process.versions.electron,
+    chrome: process.versions.chrome,
+    node: process.versions.node,
+    serverUrl: config.serverUrl,
+    sourceDevice: config.sourceDevice,
+    logFilePath: resolveLauncherLogPath()
+  });
   installLauncherGateHeaders();
   createWindow();
 });
 
 app.on('window-all-closed', () => {
+  writeLauncherLog('info', 'All launcher windows were closed.', {
+    platform: process.platform
+  });
   if (process.platform !== 'darwin') {
     app.quit();
   }
 });
 
 app.on('activate', () => {
+  writeLauncherLog('info', 'Launcher activate event received.', {
+    openWindowCount: BrowserWindow.getAllWindows().length
+  });
   if (BrowserWindow.getAllWindows().length === 0) {
     createWindow();
   }
+});
+
+app.on('browser-window-created', (_event, window) => {
+  writeLauncherLog('info', 'Browser window created.', {
+    id: window.id
+  });
+});
+
+app.on('web-contents-created', (_event, contents) => {
+  writeLauncherLog('info', 'Web contents created.', {
+    id: contents.id,
+    type: contents.getType()
+  });
+});
+
+app.on('child-process-gone', (_event, details) => {
+  writeLauncherLog('error', 'Child process exited unexpectedly.', {
+    type: details?.type || null,
+    reason: details?.reason || null,
+    exitCode: details?.exitCode ?? null,
+    serviceName: details?.serviceName || null,
+    name: details?.name || null
+  });
+});
+
+app.on('render-process-gone', (_event, _webContents, details) => {
+  writeLauncherLog('error', 'Application-level renderer process gone event received.', {
+    reason: details?.reason || null,
+    exitCode: details?.exitCode ?? null
+  });
+});
+
+app.on('certificate-error', (event, webContents, url, error, certificate, callback) => {
+  writeLauncherLog('error', 'TLS certificate error blocked a request.', {
+    url,
+    error,
+    subjectName: certificate?.subjectName || null,
+    issuerName: certificate?.issuerName || null
+  });
+  event.preventDefault();
+  callback(false);
+});
+
+process.on('uncaughtException', (error) => {
+  writeLauncherLog('error', 'Uncaught exception in launcher main process.', launcherErrorContext(error));
+});
+
+process.on('unhandledRejection', (reason) => {
+  writeLauncherLog('error', 'Unhandled promise rejection in launcher main process.', {
+    reason: reason instanceof Error ? launcherErrorContext(reason) : String(reason || 'Unknown rejection')
+  });
 });

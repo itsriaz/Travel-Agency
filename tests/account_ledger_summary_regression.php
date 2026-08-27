@@ -173,8 +173,8 @@ if ($money($settledSummary['supplier_paid'] ?? 0) !== 1188.0) {
 if ($money($settledSummary['total_debit'] ?? 0) !== 1180.0) {
     $fail('Summary Debit must contain customer payment only.');
 }
-if ($money($settledSummary['total_credit'] ?? 0) !== 1188.0) {
-    $fail('Summary Credit must contain supplier payment only.');
+if ($money($settledSummary['total_credit'] ?? 0) !== 535.0) {
+    $fail('Summary Credit must show the latest net supplier burden after cancellation settlement.');
 }
 if ($money($settledSummary['supplier_refund_received'] ?? 0) !== 653.0) {
     $fail('Summary must show supplier refund separately as PKR 653.');
@@ -204,7 +204,7 @@ foreach ((array) ($settled['summaryCards'] ?? []) as $card) {
     $settledCardsByLabel[(string) ($card['label'] ?? '')] = $card;
 }
 if (
-    $money($settledCardsByLabel['Total Sale / PKR']['value'] ?? 0) !== 1188.0
+    $money($settledCardsByLabel['Total Sale / PKR']['value'] ?? 0) !== 580.0
     || $money($settledCardsByLabel['Total Received / PKR']['value'] ?? 0) !== 1180.0
     || $money($settledCardsByLabel['Total Outstanding / PKR']['value'] ?? 0) !== 0.0
 ) {
@@ -265,7 +265,7 @@ if (
     $fail('Account Ledger profit summary must preserve separate native-currency totals.');
 }
 if (
-    $money($profitCardsByLabel['Total Sale / PKR'] ?? 0) !== 1188.0
+    $money($profitCardsByLabel['Total Sale / PKR'] ?? 0) !== 580.0
     || $money($profitCardsByLabel['Total Received / PKR'] ?? 0) !== 1180.0
     || $money($profitCardsByLabel['Total Outstanding / PKR'] ?? 0) !== 0.0
     || $money($profitCardsByLabel['Total Sale / AED'] ?? 0) !== 120.0
@@ -292,13 +292,20 @@ $unpaid = $service->buildReport([
     'refundMovements' => [],
 ]);
 $unpaidSummary = $unpaid['summaryRows'][0] ?? [];
-if ($unpaid['rows'] !== []) {
-    $fail('Unpaid booking must not fabricate customer receipts, supplier payments, or refunds.');
+foreach ((array) ($unpaid['rows'] ?? []) as $row) {
+    if (in_array((string) ($row['ledger_entry'] ?? ''), [
+        'Customer payment received',
+        'Supplier payment made',
+        'Supplier refund received',
+        'Customer refund paid',
+    ], true)) {
+        $fail('Unpaid booking must not fabricate customer receipts, supplier payments, or refunds.');
+    }
 }
-if (! str_contains((string) ($unpaidSummary['pending_status'] ?? ''), 'Cust. receivable 580.00')) {
+if (! str_contains((string) ($unpaidSummary['pending_status'] ?? ''), 'Cust. receivable 580')) {
     $fail('Unpaid customer charge must remain customer receivable.');
 }
-if (! str_contains((string) ($unpaidSummary['pending_status'] ?? ''), 'Supp. payable 535.00')) {
+if (! str_contains((string) ($unpaidSummary['pending_status'] ?? ''), 'Supp. payable 535')) {
     $fail('Unpaid supplier penalty must remain supplier payable.');
 }
 $pass('Unpaid customer and supplier amounts remain pending without fabricated cash rows.');
@@ -317,10 +324,10 @@ $pendingSummary = $pending['summaryRows'][0] ?? [];
 if ($money($pendingSummary['cash_balance'] ?? 0) !== -8.0) {
     $fail('Before refunds are exchanged, cash balance must show the original PKR 8 loss.');
 }
-if (! str_contains((string) ($pendingSummary['pending_status'] ?? ''), 'Supp. refund due 653.00')) {
+if (! str_contains((string) ($pendingSummary['pending_status'] ?? ''), 'Supp. refund due 653')) {
     $fail('Unreceived supplier refund must remain supplier refund receivable.');
 }
-if (! str_contains((string) ($pendingSummary['pending_status'] ?? ''), 'Cust. refund due 600.00')) {
+if (! str_contains((string) ($pendingSummary['pending_status'] ?? ''), 'Cust. refund due 600')) {
     $fail('Unpaid customer refund must remain customer refund payable.');
 }
 $pass('Expected but unpaid refunds remain pending while cash balance stays at 8 Cr.');
@@ -340,10 +347,10 @@ $partialSummary = $partial['summaryRows'][0] ?? [];
 if ($money($partialSummary['cash_balance'] ?? 0) !== -108.0) {
     $fail('Partial settlement cash balance must be 108 Cr.');
 }
-if (! str_contains((string) ($partialSummary['pending_status'] ?? ''), 'Supp. refund due 453.00')) {
+if (! str_contains((string) ($partialSummary['pending_status'] ?? ''), 'Supp. refund due 453')) {
     $fail('Partial supplier refund must leave PKR 453 receivable.');
 }
-if (! str_contains((string) ($partialSummary['pending_status'] ?? ''), 'Cust. refund due 300.00')) {
+if (! str_contains((string) ($partialSummary['pending_status'] ?? ''), 'Cust. refund due 300')) {
     $fail('Partial customer refund must leave PKR 300 payable.');
 }
 $pass('Partial refunds update cash and leave exact supplier/customer pending balances.');
@@ -403,9 +410,117 @@ if ($money($crossBookingSummary['total_debit'] ?? 0) !== 844.0) {
 if ($money($crossBookingSummary['total_credit'] ?? 0) !== 1450.0) {
     $fail('Recorded supplier payment must be Credit AED 1,450 on BK-000277.');
 }
-if (! str_contains((string) ($crossBookingSummary['pending_status'] ?? ''), 'Cust. receivable 606.00')) {
+if (! str_contains((string) ($crossBookingSummary['pending_status'] ?? ''), 'Cust. receivable 606')) {
     $fail('BK-000277 must retain AED 606 as pending customer receivable.');
 }
 $pass('Cross-booking credit shows 844 Debit, supplier payment shows 1,450 Credit, and 606 remains receivable.');
+
+$linkedSettlementPosition = [
+    'booking_id' => 3,
+    'branch_id' => 1,
+    'branch_name' => 'Imdad International Travel Agency',
+    'booking_reference' => 'BK-000274',
+    'booking_date' => '2026-07-10',
+    'lead_traveler_id' => 3,
+    'business_source_name' => 'AJWA SWAT SHJ',
+    'customer_name' => 'OMER',
+    'contact_mobile' => 'N/A',
+    'booking_service_id' => 3,
+    'service_line_reference' => 'SV-001',
+    'service_type' => 'air ticket',
+    'service_status' => 'Cancelled',
+    'currency' => 'AED',
+    'cost_currency' => 'AED',
+    'pricing_exchange_rate' => 1,
+    'original_invoice_amount' => 835,
+    'original_supplier_cost' => 820,
+    'original_profit_loss' => 15,
+    'passenger_name' => 'INAYAT ULLAH',
+    'supplier_name' => 'princess tourism',
+    'pnr' => 'KXTNIV',
+    'route' => 'N/A',
+    'current_customer_due' => 585,
+    'current_customer_outstanding' => 0,
+    'current_supplier_gross' => 545,
+    'current_supplier_payable' => 0,
+    'current_supplier_paid' => 545,
+    'supplier_payment_references' => 'SPAY-000066',
+    'supplier_payment_date' => '2026-08-12',
+    'cross_booking_supplier_credit_applied' => 0,
+    'cross_booking_supplier_credit_references' => '',
+    'cross_booking_supplier_credit_date' => '',
+    'cancellation_event_id' => 2,
+    'cancellation_date' => '2026-08-14',
+    'customer_penalty_amount' => 25,
+    'supplier_penalty_amount' => 545,
+    'customer_final_charge_amount' => 585,
+    'expected_supplier_refund_amount' => 275,
+    'available_customer_refund_credit' => 0,
+    'released_supplier_payment_credit' => 275,
+    'expected_supplier_refund_credit' => 275,
+    'customer_refund_paid' => 0,
+    'supplier_refund_received' => 0,
+];
+$linkedSettlementRow = [
+    'booking_id' => 3,
+    'branch_id' => 1,
+    'branch_name' => 'Imdad International Travel Agency',
+    'business_source_name' => 'AJWA SWAT SHJ',
+    'lead_traveler_id' => 3,
+    'booking_reference' => 'BK-000274',
+    'customer_name' => 'OMER',
+    'contact_mobile' => 'N/A',
+    'service_line_reference' => 'SV-001',
+    'movement_id' => 10,
+    'movement_reference' => 'AUTO-OFFSET-TEST',
+    'movement_date' => '2026-08-14',
+    'currency' => 'AED',
+    'allocated_amount' => 585,
+    'supplier_name' => 'AJWA SWAT TOURISM',
+    'passenger_name' => 'INAYAT ULLAH',
+    'pnr' => 'KXTNIV',
+    'route' => 'N/A',
+    'external_reference' => 'AUTO-OFFSET-TEST',
+];
+$linkedSettlementReport = $service->buildReport([
+    'positions' => [$linkedSettlementPosition],
+    'customerReceipts' => [],
+    'refundMovements' => [],
+    'accountSupplierSettlements' => [$linkedSettlementRow],
+]);
+$linkedSettlementSummary = $linkedSettlementReport['summaryRows'][0] ?? [];
+if ($money($linkedSettlementSummary['total_credit'] ?? 0) !== 545.0) {
+    $fail('Linked supplier settlement summary credit must show the latest net supplier burden AED 545.');
+}
+$linkedSettlementRows = array_values(array_filter(
+    (array) ($linkedSettlementReport['rows'] ?? []),
+    static fn (array $row): bool => (string) ($row['booking_reference'] ?? '') === 'BK-000274'
+));
+$linkedRowsByEntry = [];
+foreach ($linkedSettlementRows as $row) {
+    $linkedRowsByEntry[(string) ($row['ledger_entry'] ?? '')] = $row;
+}
+if ($money($linkedSettlementSummary['invoice_amount'] ?? 0) !== 585.0) {
+    $fail('Linked-settlement cancellation summary must show the latest effective invoice amount AED 585.');
+}
+if (! isset($linkedRowsByEntry['Air Ticket invoice']) || $money($linkedRowsByEntry['Air Ticket invoice']['debit_amount'] ?? 0) !== 835.0) {
+    $fail('Linked-settlement cancellation detail must show the original Air Ticket invoice of AED 835.');
+}
+if (! isset($linkedRowsByEntry['Cancellation invoice reduction']) || $money($linkedRowsByEntry['Cancellation invoice reduction']['credit_amount'] ?? 0) !== 250.0) {
+    $fail('Linked-settlement cancellation detail must show the AED 250 cancellation invoice reduction.');
+}
+if (! isset($linkedRowsByEntry['Supplier penalty retained through linked settlement']) || $money($linkedRowsByEntry['Supplier penalty retained through linked settlement']['credit_amount'] ?? 0) !== 545.0) {
+    $fail('Linked-settlement cancellation detail must show the AED 545 supplier penalty separately.');
+}
+if (! isset($linkedRowsByEntry['Earlier service profit settled through linked supplier']) || $money($linkedRowsByEntry['Earlier service profit settled through linked supplier']['credit_amount'] ?? 0) !== 15.0) {
+    $fail('Linked-settlement cancellation detail must show the AED 15 earlier service profit separately.');
+}
+if (! isset($linkedRowsByEntry['Customer penalty / profit settled through linked supplier']) || $money($linkedRowsByEntry['Customer penalty / profit settled through linked supplier']['credit_amount'] ?? 0) !== 25.0) {
+    $fail('Linked-settlement cancellation detail must show the AED 25 customer penalty separately.');
+}
+if ($money($linkedRowsByEntry['Customer penalty / profit settled through linked supplier']['raw_balance_amount'] ?? 999) !== 0.0) {
+    $fail('Linked-settlement cancellation running balance must close to zero after the final settlement component.');
+}
+$pass('Linked supplier settlement now shows latest summary invoice 585 while keeping invoice 835, cancellation reduction 250, and separate 545 + 15 + 25 settlement parts in detail.');
 
 echo 'Account Ledger summary regression passed.' . PHP_EOL;

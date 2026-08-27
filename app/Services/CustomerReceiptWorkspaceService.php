@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services;
 
 use App\Helpers\AuditLog;
+use App\Repositories\AccountHolderBalanceRepository;
 use App\Repositories\AccountingRepository;
 use App\Repositories\BookingRepository;
 use App\Repositories\CustomerPaymentRepository;
@@ -109,23 +110,36 @@ final class CustomerReceiptWorkspaceService extends Service
         if ($this->isDirectSupplierPaymentMethod((string) $payload['payment_method'])) {
             return $this->saveDirectSupplierReceipt($input, $booking, $payload, $actorUserId, $accessibleBranchIds);
         }
+        $accountHolderFunding = $this->resolveAccountHolderBalanceFunding(
+            $input,
+            (int) ($booking['branch_id'] ?? 0),
+            (string) ($payload['currency'] ?? 'PKR'),
+            round((float) ($payload['received_amount'] ?? 0), 2),
+            (int) ($booking['business_source_id'] ?? 0)
+        );
         if (round((float) ($payload['received_amount'] ?? 0), 2) <= 0.005) {
             $skipReceiptCreation = true;
             $receiptAction = 'no_receipt';
         }
-        $payload['treasury_account_id'] = $skipReceiptCreation
-            ? null
-            : $this->resolveReceiptTreasuryAccountId(
-                $input,
-                $payload,
-                (int) $booking['branch_id']
-            );
+        if ($accountHolderFunding['enabled']) {
+            $payload['payment_method'] = 'account_holder_balance';
+            $payload['treasury_account_id'] = null;
+        } else {
+            $payload['treasury_account_id'] = $skipReceiptCreation
+                ? null
+                : $this->resolveReceiptTreasuryAccountId(
+                    $input,
+                    $payload,
+                    (int) $booking['branch_id']
+                );
+        }
         if ($payload['status'] === 'void') {
             $this->assertFinancialAdminActor($actorUserId, 'Only super admin or branch admin can create a void customer receipt.');
         }
 
         $repository = new CustomerPaymentRepository($this->app);
         $accountingRepository = new AccountingRepository($this->app);
+        $accountHolderBalanceRepository = new AccountHolderBalanceRepository($this->app);
         /** @var PDO $db */
         $db = $this->app->get('db');
         $startedTransaction = false;
@@ -173,6 +187,9 @@ final class CustomerReceiptWorkspaceService extends Service
                 $receiptId = $repository->createReceipt(array_merge($payload, [
                     'branch_id' => (int) $booking['branch_id'],
                     'traveler_id' => (int) ($booking['lead_traveler_id'] ?? 0) ?: null,
+                    'business_source_id' => $accountHolderFunding['enabled']
+                        ? (int) ($accountHolderFunding['business_source_id'] ?? 0)
+                        : null,
                     'receipt_purpose' => 'booking_payment',
                     'booking_reference' => (string) $booking['booking_reference'],
                     'receipt_no' => $receiptNo,
@@ -222,6 +239,23 @@ final class CustomerReceiptWorkspaceService extends Service
                             : 'Automatically applied to current invoice.'
                     );
                 }
+            }
+
+            if ($accountHolderFunding['enabled'] && $receiptId > 0 && $payload['status'] !== 'void') {
+                $accountHolderBalanceRepository->recordApplication([
+                    'branch_id' => (int) ($booking['branch_id'] ?? 0),
+                    'business_source_id' => (int) ($accountHolderFunding['business_source_id'] ?? 0),
+                    'customer_receipt_id' => $receiptId,
+                    'booking_reference' => (string) ($booking['booking_reference'] ?? ''),
+                    'source_currency' => (string) ($accountHolderFunding['source_currency'] ?? $payload['currency']),
+                    'target_currency' => (string) ($payload['currency'] ?? 'PKR'),
+                    'source_amount' => (float) ($accountHolderFunding['source_amount'] ?? 0),
+                    'target_amount' => (float) ($payload['received_amount'] ?? 0),
+                    'exchange_rate' => (float) ($accountHolderFunding['exchange_rate'] ?? 1),
+                    'applied_date' => (string) ($payload['receipt_date'] ?? date('Y-m-d')),
+                    'remarks' => 'Account-holder balance applied to booking receipt.',
+                    'actor_user_id' => $actorUserId,
+                ]);
             }
 
             $advanceApplyResult = $this->applyCustomerAdvanceToCurrentInvoice(
@@ -347,26 +381,17 @@ final class CustomerReceiptWorkspaceService extends Service
         }
 
         try {
-            $supplierObligationId = $this->resolveDirectSupplierObligationId(
+            $supplierSettlement = $this->resolveDirectSupplierSettlementPlan(
                 $input,
                 $supplierRepository,
                 $bookingReference,
+                $branchId,
                 $currency
             );
-            $obligations = $supplierRepository->openObligationsForSettlement([$supplierObligationId], $bookingReference);
-            $obligation = $obligations[0] ?? null;
-            if ($obligation === null) {
-                throw new RuntimeException('The selected supplier payable is no longer open for this booking.');
-            }
-
-            if ((string) ($obligation['currency'] ?? '') !== $currency) {
-                throw new RuntimeException('The customer payment currency must match the selected supplier payable currency.');
-            }
-
-            $supplierOutstanding = round((float) ($obligation['net_payable_amount'] ?? 0), 2);
-            if ($directAmount > $supplierOutstanding + 0.005) {
-                throw new RuntimeException('Direct supplier payment exceeds the selected supplier payable balance.');
-            }
+            $obligation = $supplierSettlement['primary_obligation'];
+            $supplierObligationId = (int) ($obligation['id'] ?? 0);
+            $supplierObligations = $supplierSettlement['obligations'];
+            $supplierOutstanding = round((float) ($supplierSettlement['total_outstanding'] ?? 0), 2);
 
             $targetReceivableId = $this->resolveReceiptAllocationTargetId(
                 $input,
@@ -410,8 +435,9 @@ final class CustomerReceiptWorkspaceService extends Service
             $paymentNo = $supplierRepository->nextSupplierPaymentNumber();
             $supplierPaymentId = $supplierRepository->createSupplierPayment([
                 'supplier_id' => (int) ($obligation['supplier_id'] ?? 0),
-                'branch_id' => $branchId,
-                'booking_reference' => $bookingReference,
+                'branch_id' => (int) ($obligation['branch_id'] ?? $branchId),
+                'booking_reference' => (string) ($obligation['booking_reference'] ?? $bookingReference),
+                'payment_scope' => count($supplierObligations) > 1 ? 'global' : 'booking',
                 'payment_no' => $paymentNo,
                 'payment_date' => $payload['receipt_date'],
                 'currency' => $currency,
@@ -427,16 +453,47 @@ final class CustomerReceiptWorkspaceService extends Service
                 'actor_user_id' => $actorUserId,
             ]);
 
-            $supplierAllocationId = $supplierRepository->allocateSupplierPayment(
-                $supplierPaymentId,
-                $supplierObligationId,
-                $directAmount,
-                1.0,
-                'Customer paid supplier directly',
-                $actorUserId
-            );
+            $supplierAppliedAmount = round(min($directAmount, $supplierOutstanding), 2);
+            $supplierAdvanceAmount = round(max($directAmount - $supplierAppliedAmount, 0), 2);
+            $supplierAllocationIds = [];
+            $supplierAllocationLines = [];
+            $remainingSupplierAmount = $supplierAppliedAmount;
+            foreach ($supplierObligations as $supplierObligation) {
+                if ($remainingSupplierAmount <= 0.005) {
+                    break;
+                }
+
+                $obligationBalance = round((float) ($supplierObligation['net_payable_amount'] ?? 0), 2);
+                if ($obligationBalance <= 0.005) {
+                    continue;
+                }
+
+                $allocationAmount = round(min($remainingSupplierAmount, $obligationBalance), 2);
+                if ($allocationAmount <= 0.005) {
+                    continue;
+                }
+
+                $allocationId = $supplierRepository->allocateSupplierPayment(
+                    $supplierPaymentId,
+                    (int) ($supplierObligation['id'] ?? 0),
+                    $allocationAmount,
+                    1.0,
+                    'Customer paid supplier directly',
+                    $actorUserId
+                );
+                $supplierAllocationIds[] = $allocationId;
+                $supplierAllocationLines[] = [
+                    'supplier_obligation_id' => (int) ($supplierObligation['id'] ?? 0),
+                    'service_line_reference' => (string) ($supplierObligation['service_line_reference'] ?? '') !== ''
+                        ? (string) $supplierObligation['service_line_reference']
+                        : null,
+                    'allocated_amount' => $allocationAmount,
+                ];
+                $remainingSupplierAmount = round($remainingSupplierAmount - $allocationAmount, 2);
+            }
 
             $remainingAmount = $directAmount;
+            $customerAllocationLines = [];
             foreach ($receivables as $receivable) {
                 if ($remainingAmount <= 0.005) {
                     break;
@@ -469,29 +526,62 @@ final class CustomerReceiptWorkspaceService extends Service
                 if ($allocatedAmount <= 0.005) {
                     continue;
                 }
-
-                $accountingRepository->postCustomerDirectSupplierPayment([
-                    'branch_id' => $branchId,
-                    'booking_reference' => $bookingReference,
-                    'source_reference' => $receiptNo . '/' . $paymentNo . '-DIRECT-' . (int) ($allocationResult['allocation_id'] ?? 0),
+                $customerAllocationLines[] = [
+                    'customer_receivable_item_id' => (int) $receivable['id'],
                     'service_line_reference' => (string) ($receivable['service_line_reference'] ?? '') !== ''
                         ? (string) $receivable['service_line_reference']
-                        : ((string) ($obligation['service_line_reference'] ?? '') !== '' ? (string) $obligation['service_line_reference'] : null),
-                    'supplier_obligation_id' => $supplierObligationId,
-                    'supplier_payment_id' => $supplierPaymentId,
-                    'customer_receivable_item_id' => (int) $receivable['id'],
-                    'customer_receipt_id' => $receiptId,
-                    'amount' => $allocatedAmount,
-                    'entry_date' => $payload['receipt_date'],
-                    'currency' => $currency,
-                    'actor_user_id' => $actorUserId,
-                ]);
+                        : null,
+                    'allocated_amount' => $allocatedAmount,
+                ];
 
                 $remainingAmount = round($remainingAmount - $allocatedAmount, 2);
             }
 
             if ($remainingAmount > 0.005) {
                 throw new RuntimeException('Direct supplier payment could not be fully allocated to customer receivables.');
+            }
+
+            $journalEntryId = $accountingRepository->postCustomerDirectSupplierPayment([
+                'branch_id' => $branchId,
+                'booking_reference' => $bookingReference,
+                'source_reference' => $receiptNo . '/' . $paymentNo . '-DIRECT',
+                'supplier_obligation_id' => $supplierObligationId,
+                'supplier_payment_id' => $supplierPaymentId,
+                'customer_receipt_id' => $receiptId,
+                'customer_allocations' => $customerAllocationLines,
+                'supplier_allocations' => $supplierAllocationLines,
+                'supplier_allocated_amount' => $supplierAppliedAmount,
+                'supplier_advance_amount' => $supplierAdvanceAmount,
+                'entry_date' => $payload['receipt_date'],
+                'currency' => $currency,
+                'actor_user_id' => $actorUserId,
+            ]);
+
+            $supplierAdvanceId = null;
+            if ($supplierAdvanceAmount > 0.005) {
+                $supplierAdvanceId = $supplierRepository->registerAdvance([
+                    'supplier_id' => (int) ($obligation['supplier_id'] ?? 0),
+                    'branch_id' => (int) ($obligation['branch_id'] ?? $branchId),
+                    'currency' => $currency,
+                    'deposit_amount' => $supplierAdvanceAmount,
+                    'available_amount' => $supplierAdvanceAmount,
+                    'reference_no' => trim((string) ($payload['reference_number'] ?? '')) !== ''
+                        ? (string) $payload['reference_number']
+                        : $paymentNo,
+                    'remarks' => 'Customer paid supplier directly; excess converted to supplier advance. Customer receipt: ' . $receiptNo,
+                    'received_at' => $payload['receipt_date'],
+                    'payment_method' => self::DIRECT_SUPPLIER_PAYMENT_METHOD,
+                    'treasury_account_id' => null,
+                    'journal_entry_id' => $journalEntryId,
+                    'actor_user_id' => $actorUserId,
+                    'source_supplier_payment_id' => $supplierPaymentId,
+                ]);
+                $supplierRepository->convertSupplierPaymentExcessToAdvance(
+                    $supplierPaymentId,
+                    $supplierAdvanceId,
+                    $supplierAdvanceAmount,
+                    $actorUserId
+                );
             }
 
             AuditLog::record($this->app, 'workspace.customer_direct_supplier_payment.posted', [
@@ -502,10 +592,14 @@ final class CustomerReceiptWorkspaceService extends Service
                 'customer_receipt_no' => $receiptNo,
                 'supplier_payment_id' => $supplierPaymentId,
                 'supplier_payment_no' => $paymentNo,
-                'supplier_payment_allocation_id' => $supplierAllocationId,
+                'supplier_payment_allocation_id' => $supplierAllocationIds[0] ?? 0,
+                'supplier_payment_allocation_ids' => $supplierAllocationIds,
                 'supplier_obligation_id' => $supplierObligationId,
                 'currency' => $currency,
                 'amount' => $directAmount,
+                'supplier_allocated_amount' => $supplierAppliedAmount,
+                'supplier_advance_amount' => $supplierAdvanceAmount,
+                'supplier_advance_id' => $supplierAdvanceId,
             ]);
 
             app_write_log('workspace.receipt.direct_supplier_payment_posted', 'Customer direct-to-supplier payment posted.', array_merge(app_request_log_context(), [
@@ -516,8 +610,12 @@ final class CustomerReceiptWorkspaceService extends Service
                 'supplier_payment_id' => $supplierPaymentId,
                 'supplier_payment_no' => $paymentNo,
                 'supplier_obligation_id' => $supplierObligationId,
+                'supplier_obligation_count' => count($supplierObligations),
                 'currency' => $currency,
                 'amount' => $directAmount,
+                'supplier_allocated_amount' => $supplierAppliedAmount,
+                'supplier_advance_amount' => $supplierAdvanceAmount,
+                'supplier_advance_id' => $supplierAdvanceId,
             ]));
 
             if ($startedTransaction && $db->inTransaction()) {
@@ -555,13 +653,35 @@ final class CustomerReceiptWorkspaceService extends Service
         }
 
         $payload = $this->validatedReceiptPayload($input);
+        if ($this->isDirectSupplierPaymentMethod((string) ($payload['payment_method'] ?? ''))) {
+            return $this->recordGlobalDirectSupplierPayment(
+                $input,
+                $actorUserId,
+                $branchId,
+                $travelerId,
+                $selectedReceivableIds,
+                $payload
+            );
+        }
         $currency = (string) ($payload['currency'] ?? 'PKR');
-        $payload['treasury_account_id'] = $this->resolveReceiptTreasuryAccountId($input, $payload, $branchId);
+        $accountHolderFunding = $this->resolveAccountHolderBalanceFunding(
+            $input,
+            $branchId,
+            $currency,
+            round((float) ($payload['received_amount'] ?? 0), 2)
+        );
+        if ($accountHolderFunding['enabled']) {
+            $payload['payment_method'] = 'account_holder_balance';
+            $payload['treasury_account_id'] = null;
+        } else {
+            $payload['treasury_account_id'] = $this->resolveReceiptTreasuryAccountId($input, $payload, $branchId);
+        }
 
         /** @var PDO $db */
         $db = $this->app->get('db');
         $repository = new CustomerPaymentRepository($this->app);
         $accountingRepository = new AccountingRepository($this->app);
+        $accountHolderBalanceRepository = new AccountHolderBalanceRepository($this->app);
         $startedTransaction = ! $db->inTransaction();
         if ($startedTransaction) {
             $db->beginTransaction();
@@ -587,6 +707,9 @@ final class CustomerReceiptWorkspaceService extends Service
             $receiptId = $repository->createReceipt(array_merge($payload, [
                 'branch_id' => $branchId,
                 'traveler_id' => $travelerId,
+                'business_source_id' => $accountHolderFunding['enabled']
+                    ? (int) ($accountHolderFunding['business_source_id'] ?? 0)
+                    : null,
                 'receipt_purpose' => 'global_payment',
                 'booking_reference' => 'GLOBAL',
                 'receipt_no' => $receiptNo,
@@ -671,6 +794,23 @@ final class CustomerReceiptWorkspaceService extends Service
                 $allocationCount++;
             }
 
+            if ($accountHolderFunding['enabled']) {
+                $accountHolderBalanceRepository->recordApplication([
+                    'branch_id' => $branchId,
+                    'business_source_id' => (int) ($accountHolderFunding['business_source_id'] ?? 0),
+                    'customer_receipt_id' => $receiptId,
+                    'booking_reference' => 'GLOBAL',
+                    'source_currency' => (string) ($accountHolderFunding['source_currency'] ?? $currency),
+                    'target_currency' => $currency,
+                    'source_amount' => (float) ($accountHolderFunding['source_amount'] ?? 0),
+                    'target_amount' => (float) ($payload['received_amount'] ?? 0),
+                    'exchange_rate' => (float) ($accountHolderFunding['exchange_rate'] ?? 1),
+                    'applied_date' => (string) ($payload['receipt_date'] ?? date('Y-m-d')),
+                    'remarks' => 'Account-holder balance applied to global customer payment.',
+                    'actor_user_id' => $actorUserId,
+                ]);
+            }
+
             if ($startedTransaction && $db->inTransaction()) {
                 $db->commit();
             }
@@ -698,6 +838,277 @@ final class CustomerReceiptWorkspaceService extends Service
             }
 
             throw new RuntimeException('Global customer payment could not be saved.', 0, $exception);
+        }
+    }
+
+    private function recordGlobalDirectSupplierPayment(
+        array $input,
+        int $actorUserId,
+        int $branchId,
+        int $travelerId,
+        array $selectedReceivableIds,
+        array $payload
+    ): array {
+        $directAmount = round((float) ($payload['received_amount'] ?? 0), 2);
+        if ($directAmount <= 0.005) {
+            throw new RuntimeException('Please enter the amount the customer paid directly to the supplier.');
+        }
+
+        $currency = (string) ($payload['currency'] ?? 'PKR');
+        $supplierId = max(0, (int) ($input['direct_supplier_id'] ?? 0));
+        if ($supplierId <= 0) {
+            throw new RuntimeException('Please select the supplier the customer paid directly.');
+        }
+
+        /** @var PDO $db */
+        $db = $this->app->get('db');
+        $paymentRepository = new CustomerPaymentRepository($this->app);
+        $supplierRepository = new SupplierRepository($this->app);
+        $accountingRepository = new AccountingRepository($this->app);
+        $startedTransaction = ! $db->inTransaction();
+
+        if ($startedTransaction) {
+            $db->beginTransaction();
+        }
+
+        try {
+            $receivables = $paymentRepository->openGlobalReceivablesForSettlement(
+                $selectedReceivableIds,
+                $branchId,
+                $travelerId,
+                $currency
+            );
+            if (count($receivables) !== count($selectedReceivableIds)) {
+                throw new RuntimeException('One or more selected customer receivable rows are no longer available.');
+            }
+
+            $customerOutstanding = round(array_sum(array_map(
+                static fn (array $receivable): float => max(0.0, (float) ($receivable['outstanding_amount'] ?? 0)),
+                $receivables
+            )), 2);
+            if ($customerOutstanding <= 0.005) {
+                throw new RuntimeException('No open customer receivable is available for this direct supplier payment.');
+            }
+            if ($directAmount > $customerOutstanding + 0.005) {
+                throw new RuntimeException('Direct supplier payment exceeds the selected customer outstanding balance.');
+            }
+
+            $supplierSettlement = $this->resolveDirectSupplierSettlementPlan(
+                ['direct_supplier_id' => $supplierId],
+                $supplierRepository,
+                'GLOBAL',
+                $branchId,
+                $currency
+            );
+            $obligation = $supplierSettlement['primary_obligation'];
+            $supplierObligations = $supplierSettlement['obligations'];
+            $supplierOutstanding = round((float) ($supplierSettlement['total_outstanding'] ?? 0), 2);
+
+            $customerName = (string) ($receivables[0]['customer_name'] ?? 'Customer');
+            $receiptNo = $paymentRepository->nextReceiptNumber();
+            $receiptId = $paymentRepository->createReceipt(array_merge($payload, [
+                'branch_id' => $branchId,
+                'traveler_id' => $travelerId,
+                'receipt_purpose' => 'global_payment',
+                'booking_reference' => 'GLOBAL',
+                'receipt_no' => $receiptNo,
+                'treasury_account_id' => null,
+                'actor_user_id' => $actorUserId,
+                'remarks' => trim((string) ($payload['remarks'] ?? '')) !== ''
+                    ? $payload['remarks']
+                    : 'Customer paid supplier; supplier payable settled first and only any excess moved to supplier advance.',
+            ]));
+
+            $paymentNo = $supplierRepository->nextSupplierPaymentNumber();
+            $supplierPaymentId = $supplierRepository->createSupplierPayment([
+                'supplier_id' => (int) ($obligation['supplier_id'] ?? $supplierId),
+                'branch_id' => $branchId,
+                'booking_reference' => 'GLOBAL',
+                'payment_scope' => 'global',
+                'payment_no' => $paymentNo,
+                'payment_date' => $payload['receipt_date'],
+                'currency' => $currency,
+                'payment_method' => self::DIRECT_SUPPLIER_PAYMENT_METHOD,
+                'treasury_account_id' => null,
+                'reference_number' => $payload['reference_number'] ?? null,
+                'bank_card_detail' => $payload['bank_card_detail'] ?? null,
+                'charges_amount' => 0.0,
+                'status' => 'paid',
+                'exchange_rate_to_booking' => null,
+                'remarks' => 'Customer paid supplier on agency instruction. Supplier payable settled first. Customer receipt: ' . $receiptNo,
+                'paid_amount' => $directAmount,
+                'actor_user_id' => $actorUserId,
+            ]);
+
+            $supplierAppliedAmount = round(min($directAmount, $supplierOutstanding), 2);
+            $supplierAdvanceAmount = round(max($directAmount - $supplierAppliedAmount, 0), 2);
+            $supplierAllocationIds = [];
+            $supplierAllocationLines = [];
+            $remainingSupplierAmount = $supplierAppliedAmount;
+            foreach ($supplierObligations as $supplierObligation) {
+                if ($remainingSupplierAmount <= 0.005) {
+                    break;
+                }
+
+                $obligationBalance = round((float) ($supplierObligation['net_payable_amount'] ?? 0), 2);
+                if ($obligationBalance <= 0.005) {
+                    continue;
+                }
+
+                $allocationAmount = round(min($remainingSupplierAmount, $obligationBalance), 2);
+                if ($allocationAmount <= 0.005) {
+                    continue;
+                }
+
+                $allocationId = $supplierRepository->allocateSupplierPayment(
+                    $supplierPaymentId,
+                    (int) ($supplierObligation['id'] ?? 0),
+                    $allocationAmount,
+                    1.0,
+                    'Customer paid supplier; payable settled first',
+                    $actorUserId
+                );
+                $supplierAllocationIds[] = $allocationId;
+                $supplierAllocationLines[] = [
+                    'supplier_obligation_id' => (int) ($supplierObligation['id'] ?? 0),
+                    'service_line_reference' => (string) ($supplierObligation['service_line_reference'] ?? '') !== ''
+                        ? (string) $supplierObligation['service_line_reference']
+                        : null,
+                    'allocated_amount' => $allocationAmount,
+                ];
+                $remainingSupplierAmount = round($remainingSupplierAmount - $allocationAmount, 2);
+            }
+
+            $remainingAmount = $directAmount;
+            $allocationCount = 0;
+            $allocatedAmount = 0.0;
+            $affectedBookingReferences = [];
+            $customerAllocationLines = [];
+            foreach ($receivables as $receivable) {
+                if ($remainingAmount <= 0.005) {
+                    break;
+                }
+
+                $receivableBalance = round((float) ($receivable['outstanding_amount'] ?? 0), 2);
+                if ($receivableBalance <= 0.005) {
+                    continue;
+                }
+
+                $allocationAmount = round(min($remainingAmount, $receivableBalance), 2);
+                if ($allocationAmount <= 0.005) {
+                    continue;
+                }
+
+                $allocationResult = $paymentRepository->allocateReceiptExplicit([
+                    'receipt_id' => $receiptId,
+                    'receivable_item_id' => (int) $receivable['id'],
+                    'receivable_amount_to_settle' => $allocationAmount,
+                    'payment_currency' => $currency,
+                    'rate_from_currency' => $currency,
+                    'rate_to_currency' => $currency,
+                    'exchange_rate' => 1.0,
+                    'exchange_rate_effective_date' => $payload['receipt_date'],
+                    'allocation_note' => 'Customer paid supplier on agency instruction.',
+                    'actor_user_id' => $actorUserId,
+                ]);
+
+                $allocatedReceiptAmount = round((float) ($allocationResult['allocated_amount'] ?? 0), 2);
+                if ($allocatedReceiptAmount <= 0.005) {
+                    continue;
+                }
+
+                $customerAllocationLines[] = [
+                    'customer_receivable_item_id' => (int) $receivable['id'],
+                    'service_line_reference' => (string) ($receivable['service_line_reference'] ?? '') !== ''
+                        ? (string) $receivable['service_line_reference']
+                        : null,
+                    'allocated_amount' => $allocatedReceiptAmount,
+                ];
+                $affectedBookingReferences[(string) ($receivable['booking_reference'] ?? '')] = true;
+                $remainingAmount = round($remainingAmount - $allocatedReceiptAmount, 2);
+                $allocatedAmount = round($allocatedAmount + $allocatedReceiptAmount, 2);
+                $allocationCount++;
+            }
+
+            if ($remainingAmount > 0.005) {
+                throw new RuntimeException('Direct supplier payment could not be fully allocated to customer receivables.');
+            }
+
+            $journalEntryId = $accountingRepository->postCustomerDirectSupplierPayment([
+                'branch_id' => $branchId,
+                'booking_reference' => null,
+                'source_reference' => $receiptNo . '/' . $paymentNo . '-DIRECT-GLOBAL',
+                'supplier_obligation_id' => (int) ($obligation['id'] ?? 0),
+                'supplier_payment_id' => $supplierPaymentId,
+                'customer_receipt_id' => $receiptId,
+                'customer_allocations' => $customerAllocationLines,
+                'supplier_allocations' => $supplierAllocationLines,
+                'supplier_allocated_amount' => $supplierAppliedAmount,
+                'supplier_advance_amount' => $supplierAdvanceAmount,
+                'entry_date' => $payload['receipt_date'],
+                'currency' => $currency,
+                'narration' => 'Customer paid supplier; supplier payable settled first',
+                'actor_user_id' => $actorUserId,
+            ]);
+
+            $supplierAdvanceId = null;
+            if ($supplierAdvanceAmount > 0.005) {
+                $supplierAdvanceId = $supplierRepository->registerAdvance([
+                    'supplier_id' => (int) ($obligation['supplier_id'] ?? $supplierId),
+                    'branch_id' => $branchId,
+                    'currency' => $currency,
+                    'deposit_amount' => $supplierAdvanceAmount,
+                    'available_amount' => $supplierAdvanceAmount,
+                    'reference_no' => trim((string) ($payload['reference_number'] ?? '')) !== ''
+                        ? (string) $payload['reference_number']
+                        : $paymentNo,
+                    'remarks' => 'Customer paid supplier; remaining excess moved to supplier advance. Customer receipt: ' . $receiptNo,
+                    'received_at' => $payload['receipt_date'],
+                    'payment_method' => self::DIRECT_SUPPLIER_PAYMENT_METHOD,
+                    'treasury_account_id' => null,
+                    'journal_entry_id' => $journalEntryId,
+                    'actor_user_id' => $actorUserId,
+                    'source_supplier_payment_id' => $supplierPaymentId,
+                ]);
+                $supplierRepository->convertSupplierPaymentExcessToAdvance(
+                    $supplierPaymentId,
+                    $supplierAdvanceId,
+                    $supplierAdvanceAmount,
+                    $actorUserId
+                );
+            }
+
+            if ($startedTransaction && $db->inTransaction()) {
+                $db->commit();
+            }
+
+            return [
+                'receipt' => $paymentRepository->findReceiptById($receiptId),
+                'receipt_no' => $receiptNo,
+                'branch_id' => $branchId,
+                'customer_name' => $customerName,
+                'currency' => $currency,
+                'received_amount' => $directAmount,
+                'allocated_amount' => $allocatedAmount,
+                'unallocated_amount' => 0.0,
+                'returned_amount' => 0.0,
+                'allocation_count' => $allocationCount,
+                'booking_count' => count(array_filter(array_keys($affectedBookingReferences))),
+                'supplier_payment_id' => $supplierPaymentId,
+                'supplier_payment_no' => $paymentNo,
+                'supplier_advance_amount' => $supplierAdvanceAmount,
+                'supplier_advance_id' => $supplierAdvanceId,
+            ];
+        } catch (\Throwable $exception) {
+            if ($startedTransaction && $db->inTransaction()) {
+                $db->rollBack();
+            }
+
+            if ($exception instanceof RuntimeException) {
+                throw $exception;
+            }
+
+            throw new RuntimeException('Direct supplier payment could not be saved.', 0, $exception);
         }
     }
 
@@ -761,26 +1172,10 @@ final class CustomerReceiptWorkspaceService extends Service
                 'narration' => 'Customer advance received',
             ]);
 
-            $openReceivables = $repository->openCustomerReceivablesForAdvance(
-                $branchId,
-                $travelerId,
-                $businessSourceId,
-                $currency
-            );
             $advanceApplication = [
                 'allocated_amount' => 0.0,
                 'allocation_count' => 0,
             ];
-            if ($openReceivables !== []) {
-                $advanceApplication = $this->applyCustomerAdvance([
-                    'branch_id' => $branchId,
-                    'traveler_id' => $travelerId,
-                    'receipt_currency' => $currency,
-                    'advance_receipt_id' => $receiptId,
-                    'global_customer_receivable_id' => array_column($openReceivables, 'id'),
-                    'allocation_date' => (string) $payload['receipt_date'],
-                ], $actorUserId, $accessibleBranchIds);
-            }
 
             if ($startedTransaction && $db->inTransaction()) {
                 $db->commit();
@@ -1084,22 +1479,25 @@ final class CustomerReceiptWorkspaceService extends Service
             $receipt = $repository->findReceiptById($receiptId);
             if ($receipt === null
                 || (string) ($receipt['receipt_purpose'] ?? '') !== 'customer_advance'
-                || (int) ($receipt['branch_id'] ?? 0) !== $branchId
                 || (int) ($receipt['traveler_id'] ?? 0) !== $travelerId
-                || strtoupper((string) ($receipt['currency'] ?? '')) !== $currency
             ) {
-                throw new RuntimeException('The selected customer advance does not match this customer, branch, and currency.');
+                throw new RuntimeException('The selected customer advance does not match this customer.');
             }
+            $originalBranchId = (int) ($receipt['branch_id'] ?? 0);
+            if ($originalBranchId <= 0 || ! in_array($originalBranchId, $accessibleBranchIds, true)) {
+                throw new RuntimeException('You cannot correct a customer advance from a branch outside your access.');
+            }
+            $oldCurrency = $this->normalizeCurrency((string) ($receipt['currency'] ?? 'PKR'));
 
             $oldJournalId = $repository->latestCustomerAdvanceReceiptJournalId($receiptId, (string) ($receipt['receipt_no'] ?? ''));
             $reversalJournalId = $oldJournalId !== null
                 ? $accountingRepository->reverseJournalEntry($oldJournalId, [
-                    'branch_id' => $branchId,
+                    'branch_id' => $originalBranchId,
                     'booking_reference' => null,
                     'source_type' => 'customer_advance_correction_reversal',
                     'source_reference' => (string) ($receipt['receipt_no'] ?? 'ADV') . '-ADV-REV-' . date('YmdHis'),
                     'entry_date' => $entryDate,
-                    'currency' => $currency,
+                    'currency' => $oldCurrency,
                     'narration' => 'Customer advance correction reversal',
                     'actor_user_id' => $actorUserId,
                     'line_description_prefix' => 'Correction reversal: ',
@@ -1110,9 +1508,9 @@ final class CustomerReceiptWorkspaceService extends Service
                 'customer_receipt_id' => $receiptId,
                 'branch_id' => $branchId,
                 'traveler_id' => $travelerId,
-                'receipt_date' => $entryDate,
+                'entry_date' => $entryDate,
                 'currency' => $currency,
-                'received_amount' => $amount,
+                'amount' => $amount,
                 'payment_method' => $paymentMethod,
                 'treasury_account_id' => $treasuryAccountId,
                 'reference_number' => $this->optionalText($input['reference_number'] ?? $input['advance_reference_number'] ?? null, 100),
@@ -1144,6 +1542,8 @@ final class CustomerReceiptWorkspaceService extends Service
                 'old_entry_date' => (string) ($old['receipt_date'] ?? ''),
                 'new_entry_date' => $entryDate,
                 'currency' => $currency,
+                'old_currency' => (string) ($old['currency'] ?? $oldCurrency),
+                'new_currency' => $currency,
                 'old_amount' => (float) ($old['received_amount'] ?? 0),
                 'new_amount' => $amount,
                 'old_payment_method' => (string) ($old['payment_method'] ?? ''),
@@ -2047,7 +2447,10 @@ final class CustomerReceiptWorkspaceService extends Service
                 $submittedTreasuryAccountId,
                 $branchId,
                 $currency,
-                $paymentMethod
+                $paymentMethod,
+                false,
+                true,
+                true
             )['id'] ?? 0);
         }
 
@@ -2094,9 +2497,161 @@ final class CustomerReceiptWorkspaceService extends Service
         return in_array($paymentMethod, ['cash', 'bank_transfer'], true);
     }
 
+    private function resolveAccountHolderBalanceFunding(
+        array $input,
+        int $branchId,
+        string $targetCurrency,
+        float $targetAmount,
+        int $fallbackBusinessSourceId = 0
+    ): array {
+        $mode = str_replace(' ', '_', mb_strtolower(trim((string) ($input['account_balance_mode'] ?? ''))));
+        $sourceCurrencyRaw = trim((string) ($input['account_balance_source_currency'] ?? ''));
+        if ($mode !== 'account_holder_balance' || $sourceCurrencyRaw === '') {
+            return [
+                'enabled' => false,
+                'business_source_id' => 0,
+                'business_source_name' => '',
+                'source_currency' => '',
+                'source_amount' => 0.0,
+                'exchange_rate' => 1.0,
+            ];
+        }
+        $sourceCurrency = $this->normalizeCurrency($sourceCurrencyRaw);
+
+        if ($targetAmount <= 0.005) {
+            throw new RuntimeException('Enter a payment amount before using account-holder balance.');
+        }
+
+        $businessSourceId = max(0, (int) ($input['account_balance_business_source_id'] ?? 0));
+        if ($businessSourceId <= 0) {
+            $businessSourceId = $fallbackBusinessSourceId;
+        }
+        if ($businessSourceId <= 0) {
+            throw new RuntimeException('Please select the Account Holder whose balance should fund this payment.');
+        }
+
+        $businessSource = (new MasterDataRepository($this->app))->find('business_sources', $businessSourceId);
+        if ($businessSource === null || (int) ($businessSource['is_active'] ?? 1) !== 1) {
+            throw new RuntimeException('The selected Account Holder is not valid anymore.');
+        }
+
+        $exchangeRate = 1.0;
+        if ($sourceCurrency !== $targetCurrency) {
+            $exchangeRate = $this->nonNegativeMoneyValue(
+                $input['account_balance_exchange_rate'] ?? 0,
+                'Account-holder FX rate'
+            );
+            if ($exchangeRate <= 0.00000001) {
+                throw new RuntimeException('Account-holder FX rate must be greater than zero.');
+            }
+        }
+
+        $sourceAmount = $sourceCurrency === $targetCurrency
+            ? round($targetAmount, 2)
+            : round($targetAmount / $exchangeRate, 2);
+        if ($sourceAmount <= 0.005) {
+            throw new RuntimeException('Account-holder source amount must be greater than zero.');
+        }
+
+        $balanceRepository = new AccountHolderBalanceRepository($this->app);
+        $availableAmount = $balanceRepository->availableAmount($branchId, $businessSourceId, $sourceCurrency);
+        if ($sourceAmount > $availableAmount + 0.005) {
+            throw new RuntimeException(
+                'Selected account-holder balance is not enough. Available: '
+                . number_format($availableAmount, 2)
+                . ' '
+                . $sourceCurrency
+                . '.'
+            );
+        }
+
+        return [
+            'enabled' => true,
+            'business_source_id' => $businessSourceId,
+            'business_source_name' => (string) ($businessSource['name'] ?? 'Account Holder'),
+            'source_currency' => $sourceCurrency,
+            'source_amount' => $sourceAmount,
+            'exchange_rate' => $exchangeRate,
+        ];
+    }
+
     private function isDirectSupplierPaymentMethod(string $paymentMethod): bool
     {
         return $paymentMethod === self::DIRECT_SUPPLIER_PAYMENT_METHOD;
+    }
+
+    private function resolveDirectSupplierSettlementPlan(
+        array $input,
+        SupplierRepository $supplierRepository,
+        string $bookingReference,
+        int $branchId,
+        string $currency
+    ): array {
+        $normalizedCurrency = strtoupper(trim($currency));
+        $postedSupplierId = max(0, (int) ($input['direct_supplier_id'] ?? 0));
+        if ($postedSupplierId > 0) {
+            $supplier = $supplierRepository->findSupplierById($postedSupplierId);
+            if ($supplier === null || (int) ($supplier['branch_id'] ?? 0) !== $branchId || (int) ($supplier['is_active'] ?? 1) !== 1) {
+                throw new RuntimeException('The selected supplier could not be found in this branch.');
+            }
+
+            $obligations = $supplierRepository->globalOpenObligations($branchId, $postedSupplierId, $normalizedCurrency);
+            if ($obligations === []) {
+                return [
+                    'primary_obligation' => [
+                        'id' => 0,
+                        'supplier_id' => $postedSupplierId,
+                        'branch_id' => $branchId,
+                        'booking_reference' => $bookingReference,
+                        'service_line_reference' => null,
+                        'currency' => $normalizedCurrency,
+                        'net_payable_amount' => 0.0,
+                        'supplier_name' => (string) ($supplier['name'] ?? 'Supplier'),
+                    ],
+                    'obligations' => [],
+                    'total_outstanding' => 0.0,
+                ];
+            }
+
+            return [
+                'primary_obligation' => $obligations[0],
+                'obligations' => $obligations,
+                'total_outstanding' => round(array_sum(array_map(
+                    static fn (array $row): float => max(0.0, (float) ($row['net_payable_amount'] ?? 0)),
+                    $obligations
+                )), 2),
+            ];
+        }
+
+        $supplierObligationId = $this->resolveDirectSupplierObligationId(
+            $input,
+            $supplierRepository,
+            $bookingReference,
+            $normalizedCurrency
+        );
+        $obligation = $supplierRepository->findObligationById($supplierObligationId);
+        if ($obligation === null) {
+            throw new RuntimeException('The selected supplier payable could not be found.');
+        }
+
+        if ((int) ($obligation['branch_id'] ?? 0) !== $branchId) {
+            throw new RuntimeException('Paid Supplier can settle only supplier payables from the same branch as this customer invoice.');
+        }
+
+        $obligationStatus = str_replace(' ', '_', mb_strtolower(trim((string) ($obligation['status'] ?? 'open'))));
+        if (! in_array($obligationStatus, ['open', 'partially_covered'], true)) {
+            throw new RuntimeException('The selected supplier payable is no longer open.');
+        }
+
+        if ((string) ($obligation['currency'] ?? '') !== $normalizedCurrency) {
+            throw new RuntimeException('The customer payment currency must match the selected supplier payable currency.');
+        }
+
+        return [
+            'primary_obligation' => $obligation,
+            'obligations' => [$obligation],
+            'total_outstanding' => round((float) ($obligation['net_payable_amount'] ?? 0), 2),
+        ];
     }
 
     private function resolveDirectSupplierObligationId(
@@ -2781,6 +3336,7 @@ final class CustomerReceiptWorkspaceService extends Service
             static fn (string $code): string => str_replace(' ', '_', mb_strtolower(trim($code))),
             array_keys((new MasterDataRepository($this->app))->activeCodeLabelMap('payment_methods'))
         );
+        $codes[] = 'account_holder_balance';
 
         return $codes !== [] ? array_values(array_unique($codes)) : ['cash', 'bank_transfer', 'debit_card', 'credit_card'];
     }

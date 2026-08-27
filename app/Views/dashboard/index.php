@@ -7,7 +7,7 @@ $branchLocalPeriods = $analytics['branchLocalPeriods'] ?? [];
 $expenseByBranch = $analytics['expenseByBranch'] ?? [];
 $expenseByCategory = $analytics['expenseByCategory'] ?? [];
 $branchLocalChartRows = is_array($branchLocalPeriods['this_month']['branches'] ?? null) ? $branchLocalPeriods['this_month']['branches'] : [];
-$branchExpenseChartRows = is_array($analytics['allTimeBranchRows'] ?? null) ? $analytics['allTimeBranchRows'] : [];
+$branchExpenseChartRows = is_array($analytics['monthlyBranchRows'] ?? null) ? $analytics['monthlyBranchRows'] : [];
 $branchLocalChartMax = max(1.0, ...array_map(static fn (array $row): float => max(
     abs((float) ($row['sales'] ?? 0)),
     abs((float) ($row['supplier_cost'] ?? 0)),
@@ -28,6 +28,7 @@ $branchExpenseChartMax = max(1.0, ...array_map(
         <a class="btn btn-primary" href="<?= e(url('/workspace')) ?>">Open Booking Workspace</a>
         <a class="btn" href="<?= e(url('/reports?report=reminder_hub')) ?>">Reminder Hub</a>
         <a class="btn" href="<?= e(url('/reports?report=management_summary')) ?>">Open Reports</a>
+        <a class="btn" href="<?= e(url('/salaries')) ?>">Salary</a>
         <a class="btn" href="<?= e(url('/expenses')) ?>">Business Expenses</a>
     </div>
 </section>
@@ -89,7 +90,7 @@ $branchExpenseChartMax = max(1.0, ...array_map(
         <?php if ($branchExpenseChartRows === []): ?>
             <div class="empty-cell">No expense chart data available yet.</div>
         <?php else: ?>
-            <div class="dashboard-expense-chart" aria-label="Total recorded branch expenses">
+            <div class="dashboard-expense-chart" aria-label="Current month branch expenses">
                 <?php foreach ($branchExpenseChartRows as $row): ?>
                     <div class="dashboard-expense-row">
                         <div>

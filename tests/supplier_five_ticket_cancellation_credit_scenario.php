@@ -423,7 +423,7 @@ try {
 
     $supplierAdvanceApplicationRows = array_values(array_filter(
         (array) ($ledgerBeforeApply['rows'] ?? []),
-        static fn (array $row): bool => (string) ($row['entry_type'] ?? '') === 'Supplier advance applied'
+        static fn (array $row): bool => (string) ($row['entry_type'] ?? '') === 'Supplier refund credit applied'
             && abs((float) ($row['raw_credit_amount'] ?? 0) - 400.00) <= 0.005
     ));
     $duplicateSupplierAdvancePaidRows = array_values(array_filter(
@@ -431,7 +431,7 @@ try {
         static fn (array $row): bool => (string) ($row['entry_type'] ?? '') === 'Supplier advance paid'
     ));
     $check(
-        'Supplier Ledger shows one PKR 400 application and no duplicate advance payment',
+        'Supplier Ledger keeps the PKR 400 retained-refund application without inventing a duplicate advance payment',
         count($supplierAdvanceApplicationRows) === 1 && $duplicateSupplierAdvancePaidRows === [],
         'application rows=' . count($supplierAdvanceApplicationRows)
             . '; duplicate advance-payment rows=' . count($duplicateSupplierAdvancePaidRows)

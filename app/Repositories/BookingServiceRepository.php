@@ -57,6 +57,7 @@ final class BookingServiceRepository extends BaseRepository
                 bs.service_status,
                 bs.remarks,
                 bs.loss_reason,
+                bs.updated_at,
                 bs.is_active,
                 sat.pnr,
                 sat.ticket_number,
@@ -176,6 +177,7 @@ final class BookingServiceRepository extends BaseRepository
                 bs.service_status,
                 bs.remarks,
                 bs.loss_reason,
+                bs.updated_at,
                 bs.is_active
              FROM booking_services bs
              INNER JOIN bookings b ON b.id = bs.booking_id
@@ -269,6 +271,7 @@ final class BookingServiceRepository extends BaseRepository
                 bs.service_status,
                 bs.remarks,
                 bs.loss_reason,
+                bs.updated_at,
                 bs.is_active,
                 sat.pnr,
                 sat.ticket_number,

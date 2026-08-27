@@ -67,6 +67,41 @@ try {
     ]);
     $advanceId = (int) $db->lastInsertId();
 
+    $insertSameCurrencyAdvance = $db->prepare(
+        'INSERT INTO supplier_advances (supplier_id, branch_id, currency, deposit_amount, available_amount, reference_no, remarks, received_at, created_by_user_id)
+         VALUES (:supplier_id, :branch_id, "PKR", 800.00, 800.00, "REG-FX-PKR", "PKR advance on duplicate supplier row", :received_at, 1)'
+    );
+    $insertSameCurrencyAdvance->execute([
+        'supplier_id' => $supplierId,
+        'branch_id' => $branchId,
+        'received_at' => date('Y-m-d'),
+    ]);
+    $sameCurrencyAdvanceId = (int) $db->lastInsertId();
+
+    $insertSameCurrencyObligation = $db->prepare(
+        'INSERT INTO supplier_obligations (supplier_id, branch_id, booking_reference, service_line_reference, currency, gross_amount, advance_applied_amount, net_payable_amount, status, created_by_user_id)
+         VALUES (:supplier_id, :branch_id, :booking_reference, "SV-PKR-AUTO", "PKR", 500.00, 0.00, 500.00, "open", 1)'
+    );
+    $insertSameCurrencyObligation->execute([
+        'supplier_id' => $bookingSupplierId,
+        'branch_id' => $branchId,
+        'booking_reference' => 'BK-FX-AUTO-' . random_int(10000, 99999),
+    ]);
+    $sameCurrencyObligationId = (int) $db->lastInsertId();
+
+    $sameCurrencyAutoResult = $repository->autoApplyAvailableAdvanceToObligation($sameCurrencyObligationId, 1);
+    $sameCurrencyAdvanceAfterAuto = $repository->findAdvanceById($sameCurrencyAdvanceId);
+    $sameCurrencyObligationAfterAuto = $repository->findObligationById($sameCurrencyObligationId);
+
+    $check(
+        'Automatic same-currency supplier advance applies across duplicate same-name supplier rows',
+        abs((float) ($sameCurrencyAutoResult['applied_amount'] ?? 0) - 500.00) < 0.005
+            && abs((float) ($sameCurrencyAdvanceAfterAuto['available_amount'] ?? 0) - 300.00) < 0.005
+            && abs((float) ($sameCurrencyObligationAfterAuto['advance_applied_amount'] ?? 0) - 500.00) < 0.005
+            && abs((float) ($sameCurrencyObligationAfterAuto['net_payable_amount'] ?? 0) - 0.00) < 0.005,
+        'auto=' . number_format((float) ($sameCurrencyAutoResult['applied_amount'] ?? 0), 2)
+    );
+
     $insertObligation = $db->prepare(
         'INSERT INTO supplier_obligations (supplier_id, branch_id, booking_reference, service_line_reference, currency, gross_amount, advance_applied_amount, net_payable_amount, status, created_by_user_id)
          VALUES (:supplier_id, :branch_id, :booking_reference, "SV-FX", "PKR", 150.00, 0.00, 150.00, "open", 1)'

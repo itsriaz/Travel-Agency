@@ -43,15 +43,13 @@ $check(
 );
 $check(
     'Changing the service amount currency invokes the shared default synchronization',
-    str_contains(
-        $source,
-        "if (serviceChargeCurrencyChanged) {\n                    syncInvoiceAndPaymentCurrenciesFromServiceAmount(target.value);"
-    )
+    str_contains($source, 'if (serviceChargeCurrencyChanged) {')
+        && str_contains($source, 'syncInvoiceAndPaymentCurrenciesFromServiceAmount(target.value);')
 );
 
 $invoiceBranchMatch = [];
 $invoiceBranchFound = preg_match(
-    '/else if \(invoiceCurrencyChanged\) \{(?<body>.*?)\n                \}/s',
+    '/if \(invoiceCurrencyChanged\) \{(?<body>.*?)\n                \}/s',
     $source,
     $invoiceBranchMatch
 ) === 1;
@@ -114,6 +112,42 @@ $check(
             "return convertAmountBetweenPricingCurrencies(\n                payable,\n                currentCostCurrencyCode(),\n                currentServiceChargeCurrencyCode()"
         )
         && str_contains($source, 'refreshServiceChargePercentAfterExchangeRate();')
+);
+$check(
+    'New-booking market fare and service amount changes use the two-choice currency dialog',
+    str_contains($source, "role: costCurrencyChanged ? 'cost' : 'service'")
+        && str_contains($source, "label: role === 'cost' ? 'Market Fare' : 'Service Amount'")
+        && str_contains($source, "if (decision.action === 'convert')")
+        && str_contains($source, 'refreshProfit(`pricing-${role}-amount-currency-${decision.action}`);')
+);
+$check(
+    'New-booking pricing currency selectors stay disabled until their amount exists',
+    str_contains($source, 'const syncWorkspacePricingCurrencyAvailability = () => {')
+        && str_contains($source, 'currencyField.disabled = !hasAmount;')
+        && str_contains($source, "syncField(serviceFields.costCurrency, serviceMetricInputs.sale, 'Market Fare');")
+        && str_contains($source, "serviceMetricInputs.serviceCharge,\n            'Service Amount'")
+);
+$check(
+    'Saved services retain the established Edit Invoice currency workflow',
+    str_contains($source, '&& currentPersistedServiceId() <= 0')
+        && str_contains($source, 'if (currentPersistedServiceId() > 0) {')
+);
+$check(
+    'Supplier-only workspace corrections can autosave without forcing a fresh pricing FX prompt',
+    str_contains($source, 'const hasSupplierOnlyServiceCorrectionPending = () => {')
+        && str_contains($source, 'allowSupplierOnlyWithoutPricingRate = false')
+        && str_contains($source, 'if (!(allowSupplierOnlyWithoutPricingRate && hasSupplierOnlyServiceCorrectionPending())) {')
+        && str_contains($source, 'bypassPricingRateValidation = false')
+        && str_contains($source, "persistServiceAutosave({")
+        && str_contains($source, 'bypassPricingRateValidation: true')
+);
+$check(
+    'Workspace service submit waits for in-flight supplier autosave before posting the full form',
+    str_contains($source, 'let allowNativeServiceSubmit = false;')
+        && str_contains($source, 'if (serviceAutosaveInFlight) {')
+        && str_contains($source, 'const autosavePayload = await serviceAutosavePromise;')
+        && str_contains($source, 'allowNativeServiceSubmit = true;')
+        && str_contains($source, 'serviceForm.requestSubmit();')
 );
 
 if ($failures !== []) {

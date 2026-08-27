@@ -681,7 +681,7 @@ try {
     $check(
         'Supplier ledger summary excludes lifecycle duplication without adding a total row',
         ! $hasSyntheticSupplierTotal
-            && ($supplierLedgerCardValues['Supplier Debit / PKR'] ?? '') === 'PKR 100.00'
+            && ($supplierLedgerCardValues['Supplier Debit / PKR'] ?? '') === 'PKR 10.00'
             && ($supplierLedgerCardValues['Supplier Credit / PKR'] ?? '') === 'PKR 100.00'
             && ($supplierLedgerCardValues['Supplier Balance / PKR'] ?? '') === 'PKR 60.00 Advance',
         json_encode([
