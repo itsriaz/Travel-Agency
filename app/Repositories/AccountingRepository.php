@@ -674,11 +674,17 @@ final class AccountingRepository extends BaseRepository
         $groups = [];
         foreach ($rows as $row) {
             $currencyKey = strtoupper(trim((string) ($row['currency'] ?? 'PKR')));
-            if (! isset($groups[$currencyKey])) {
-                $groups[$currencyKey] = [];
+            $branchId = (int) ($row['branch_id'] ?? $data['branch_id'] ?? 0);
+            $groupKey = $branchId . '|' . $currencyKey;
+            if (! isset($groups[$groupKey])) {
+                $groups[$groupKey] = [
+                    'branch_id' => $branchId,
+                    'currency' => $currencyKey,
+                    'rows' => [],
+                ];
             }
 
-            $groups[$currencyKey][] = $row;
+            $groups[$groupKey]['rows'][] = $row;
         }
 
         if ($groups === []) {
@@ -689,8 +695,11 @@ final class AccountingRepository extends BaseRepository
         $groupIndex = 0;
         $groupCount = count($groups);
 
-        foreach ($groups as $currencyKey => $currencyRows) {
+        foreach ($groups as $group) {
             $groupIndex++;
+            $branchId = (int) ($group['branch_id'] ?? $data['branch_id'] ?? 0);
+            $currencyKey = (string) ($group['currency'] ?? $data['currency'] ?? 'PKR');
+            $currencyRows = (array) ($group['rows'] ?? []);
             $lines = [];
             foreach ($currencyRows as $row) {
                 $debitAmount = round((float) ($row['debit_amount'] ?? 0), 2);
@@ -720,12 +729,23 @@ final class AccountingRepository extends BaseRepository
                 continue;
             }
 
+            $bookingReferences = array_values(array_unique(array_filter(array_map(
+                static fn (array $row): string => trim((string) ($row['booking_reference'] ?? '')),
+                $currencyRows
+            ))));
+            $hasUnscopedRows = count(array_filter(
+                $currencyRows,
+                static fn (array $row): bool => trim((string) ($row['booking_reference'] ?? '')) === ''
+            )) > 0;
+            $bookingReference = ! $hasUnscopedRows && count($bookingReferences) === 1
+                ? $bookingReferences[0]
+                : ($data['booking_reference'] ?? null);
             $journalId = $this->postJournalEntry([
-                'branch_id' => $data['branch_id'],
-                'booking_reference' => $data['booking_reference'],
+                'branch_id' => $branchId,
+                'booking_reference' => $bookingReference,
                 'source_type' => 'supplier_payment_void_reversed',
                 'source_reference' => $groupCount > 1
-                    ? (((string) ($data['source_reference'] ?? 'SUPPLIER-PAYMENT-VOID')) . '-' . $currencyKey)
+                    ? (((string) ($data['source_reference'] ?? 'SUPPLIER-PAYMENT-VOID')) . '-B' . $branchId . '-' . $currencyKey)
                     : ($data['source_reference'] ?? null),
                 'entry_date' => $data['entry_date'],
                 'currency' => $currencyKey,

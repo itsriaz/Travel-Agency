@@ -40,9 +40,9 @@ $check(
 );
 $check(
     'Financial corrections reverse and replace atomically while preserving scope',
-    str_contains($serviceCode, 'voidGlobalSupplierPayment')
+        str_contains($serviceCode, 'voidGlobalSupplierPayment')
         && str_contains($serviceCode, 'voidSupplierPayment')
-        && str_contains($serviceCode, 'Supplier settlement released for payment correction')
+        && ! str_contains($serviceCode, "'source_reference' => 'SUPPLIER-PAYMENT-CORRECTION-'")
         && str_contains($serviceCode, 'correctSupplierPaymentSupplier(')
         && str_contains($serviceCode, "'payment_scope' => \$isGlobal ? 'global' : 'booking'")
         && str_contains($serviceCode, "'supplier.payment.corrected'")
@@ -105,13 +105,18 @@ if ($actorId <= 0 || $candidate === false) {
 } else {
     $paymentId = (int) $candidate['id'];
     $allocationStatement = $db->prepare(
-        'SELECT supplier_obligation_id, allocated_amount
-         FROM supplier_payment_allocations
-         WHERE supplier_payment_id = :payment_id
-         ORDER BY id'
+        'SELECT a.supplier_obligation_id, a.allocated_amount, o.branch_id AS obligation_branch_id
+         FROM supplier_payment_allocations a
+         INNER JOIN supplier_obligations o ON o.id = a.supplier_obligation_id
+         WHERE a.supplier_payment_id = :payment_id
+         ORDER BY a.id'
     );
     $allocationStatement->execute(['payment_id' => $paymentId]);
     $beforeAllocations = $allocationStatement->fetchAll(PDO::FETCH_ASSOC) ?: [];
+    $accessibleBranchIds = array_values(array_unique(array_merge(
+        [(int) $candidate['branch_id']],
+        array_map(static fn (array $row): int => (int) ($row['obligation_branch_id'] ?? 0), $beforeAllocations)
+    )));
 
     $db->beginTransaction();
     try {
@@ -131,7 +136,7 @@ if ($actorId <= 0 || $candidate === false) {
                 'reference_number' => (string) ($candidate['reference_number'] ?? ''),
                 'bank_card_detail' => (string) ($candidate['bank_card_detail'] ?? ''),
                 'remarks' => (string) ($candidate['remarks'] ?? ''),
-            ], $actorId, [(int) $candidate['branch_id']]);
+            ], $actorId, $accessibleBranchIds);
         } catch (RuntimeException $exception) {
             $mismatchRejected = true;
             $mismatchMessage = $exception->getMessage();
@@ -166,7 +171,7 @@ if ($actorId <= 0 || $candidate === false) {
             'reference_number' => 'UNIFIED-META-' . $paymentId,
             'bank_card_detail' => (string) ($candidate['bank_card_detail'] ?? ''),
             'remarks' => (string) ($candidate['remarks'] ?? ''),
-        ], $actorId, [(int) $candidate['branch_id']]);
+        ], $actorId, $accessibleBranchIds);
         $allocationCountStatement = $db->prepare(
             'SELECT COUNT(*) FROM supplier_payment_allocations WHERE supplier_payment_id = :payment_id'
         );
@@ -196,7 +201,7 @@ if ($actorId <= 0 || $candidate === false) {
             'reference_number' => 'UNIFIED-FIN-' . $paymentId,
             'bank_card_detail' => (string) ($candidate['bank_card_detail'] ?? ''),
             'remarks' => (string) ($candidate['remarks'] ?? ''),
-        ], $actorId, [(int) $candidate['branch_id']]);
+        ], $actorId, $accessibleBranchIds);
         $replacementId = (int) ($financialResult['supplier_payment_id'] ?? 0);
         $oldStatusStatement = $db->prepare('SELECT status FROM supplier_payments WHERE id = :id');
         $oldStatusStatement->execute(['id' => $paymentId]);

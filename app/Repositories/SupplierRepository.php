@@ -425,8 +425,8 @@ final class SupplierRepository extends BaseRepository
         $statement = $this->db->prepare($sql);
         $statement->execute(array_merge(
             array_map('intval', $accessibleBranchIds),
-            array_map('intval', $accessibleBranchIds),
             $bookingSearchParams,
+            array_map('intval', $accessibleBranchIds),
             $advanceSearchParams
         ));
 
@@ -1817,6 +1817,46 @@ final class SupplierRepository extends BaseRepository
         ), static fn (int $id): bool => $id > 0)));
     }
 
+    public function supplierPaymentSettlementBranchIds(int $paymentId): array
+    {
+        if ($paymentId <= 0) {
+            return [];
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT DISTINCT o.branch_id
+             FROM supplier_payment_allocations a
+             INNER JOIN supplier_obligations o ON o.id = a.supplier_obligation_id
+             WHERE a.supplier_payment_id = :payment_id'
+        );
+        $statement->execute(['payment_id' => $paymentId]);
+        $branchIds = array_map('intval', $statement->fetchAll(\PDO::FETCH_COLUMN) ?: []);
+
+        if ($this->columnExists('supplier_advances', 'source_supplier_payment_id')
+            && $this->columnExists('supplier_payments', 'converted_advance_id')) {
+            $advanceStatement = $this->db->prepare(
+                'SELECT DISTINCT o.branch_id
+                 FROM supplier_payments p
+                 INNER JOIN supplier_advances sa
+                    ON sa.source_supplier_payment_id = p.id
+                    OR sa.id = p.converted_advance_id
+                 INNER JOIN supplier_advance_applications aa ON aa.supplier_advance_id = sa.id
+                 INNER JOIN supplier_obligations o ON o.id = aa.supplier_obligation_id
+                 WHERE p.id = :payment_id'
+            );
+            $advanceStatement->execute(['payment_id' => $paymentId]);
+            $branchIds = array_merge(
+                $branchIds,
+                array_map('intval', $advanceStatement->fetchAll(\PDO::FETCH_COLUMN) ?: [])
+            );
+        }
+
+        return array_values(array_unique(array_filter(
+            $branchIds,
+            static fn (int $branchId): bool => $branchId > 0
+        )));
+    }
+
     public function supplierPaymentAllocationCurrencies(int $paymentId): array
     {
         if ($paymentId <= 0) {
@@ -2372,6 +2412,55 @@ final class SupplierRepository extends BaseRepository
         return ['advance_id' => $advanceId, 'amount' => $convertedAmount];
     }
 
+    public function assertSupplierPaymentConvertedAdvanceUnused(int $paymentId): void
+    {
+        if (! $this->columnExists('supplier_payments', 'converted_advance_id')) {
+            return;
+        }
+
+        $paymentStatement = $this->db->prepare(
+            'SELECT converted_advance_id, converted_advance_amount
+             FROM supplier_payments
+             WHERE id = :payment_id
+             FOR UPDATE'
+        );
+        $paymentStatement->execute(['payment_id' => $paymentId]);
+        $payment = $paymentStatement->fetch();
+        $advanceId = (int) ($payment['converted_advance_id'] ?? 0);
+        $convertedAmount = round((float) ($payment['converted_advance_amount'] ?? 0), 2);
+        if ($payment === false || $advanceId <= 0 || $convertedAmount <= 0.005) {
+            return;
+        }
+
+        $advanceStatement = $this->db->prepare(
+            'SELECT deposit_amount, available_amount
+             FROM supplier_advances
+             WHERE id = :advance_id
+             FOR UPDATE'
+        );
+        $advanceStatement->execute(['advance_id' => $advanceId]);
+        $advance = $advanceStatement->fetch();
+        if ($advance === false) {
+            throw new RuntimeException('The supplier advance created by this overpayment could not be found. The payment was not edited.');
+        }
+
+        $applicationStatement = $this->db->prepare(
+            'SELECT COUNT(*) AS application_count,
+                    COALESCE(SUM(COALESCE(advance_amount_consumed, applied_amount)), 0) AS applied_amount
+             FROM supplier_advance_applications
+             WHERE supplier_advance_id = :advance_id'
+        );
+        $applicationStatement->execute(['advance_id' => $advanceId]);
+        $application = $applicationStatement->fetch() ?: [];
+        $depositAmount = round((float) ($advance['deposit_amount'] ?? 0), 2);
+        $availableAmount = round((float) ($advance['available_amount'] ?? 0), 2);
+        if ((int) ($application['application_count'] ?? 0) > 0
+            || round((float) ($application['applied_amount'] ?? 0), 2) > 0.005
+            || abs($depositAmount - $availableAmount) > 0.005) {
+            throw new RuntimeException('This payment created a supplier advance that has already been used. Reverse its advance applications before voiding or editing this payment.');
+        }
+    }
+
     public function convertSupplierPaymentExcessToAdvance(int $paymentId, int $advanceId, float $amount, ?int $actorUserId = null): void
     {
         if (! $this->columnExists('supplier_payments', 'converted_advance_amount')
@@ -2773,7 +2862,7 @@ final class SupplierRepository extends BaseRepository
 
             $allocationStatement = $this->db->prepare(
                 'SELECT a.id AS allocation_id, a.allocated_amount, o.id AS obligation_id,
-                        o.supplier_id, o.booking_reference, o.service_line_reference, o.currency
+                        o.supplier_id, o.branch_id, o.booking_reference, o.service_line_reference, o.currency
                  FROM supplier_payment_allocations a
                  INNER JOIN supplier_obligations o ON o.id = a.supplier_obligation_id
                  WHERE a.supplier_payment_id = :payment_id
@@ -2811,7 +2900,7 @@ final class SupplierRepository extends BaseRepository
                             COALESCE(aa.advance_amount_consumed, aa.applied_amount) AS advance_amount_consumed,
                             COALESCE(aa.advance_currency, sa.currency) AS advance_currency,
                             COALESCE(aa.obligation_currency, o.currency) AS obligation_currency,
-                            o.booking_reference, o.service_line_reference
+                            o.branch_id, o.booking_reference, o.service_line_reference
                      FROM supplier_advance_applications aa
                      INNER JOIN supplier_advances sa ON sa.id = aa.supplier_advance_id
                      INNER JOIN supplier_obligations o ON o.id = aa.supplier_obligation_id
@@ -2843,6 +2932,7 @@ final class SupplierRepository extends BaseRepository
                     continue;
                 }
                 $releasedSettlements[] = [
+                    'branch_id' => (int) ($allocation['branch_id'] ?? $payment['branch_id'] ?? 0),
                     'booking_reference' => (string) ($allocation['booking_reference'] ?? ''),
                     'service_line_reference' => (string) ($allocation['service_line_reference'] ?? ''),
                     'supplier_obligation_id' => (int) ($allocation['obligation_id'] ?? 0),
@@ -2857,6 +2947,7 @@ final class SupplierRepository extends BaseRepository
                     continue;
                 }
                 $releasedSettlements[] = [
+                    'branch_id' => (int) ($application['branch_id'] ?? $payment['branch_id'] ?? 0),
                     'booking_reference' => (string) ($application['booking_reference'] ?? ''),
                     'service_line_reference' => (string) ($application['service_line_reference'] ?? ''),
                     'supplier_obligation_id' => (int) ($application['supplier_obligation_id'] ?? 0),

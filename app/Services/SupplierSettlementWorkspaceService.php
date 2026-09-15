@@ -545,6 +545,7 @@ final class SupplierSettlementWorkspaceService extends Service
         if (str_replace(' ', '_', mb_strtolower(trim((string) ($payment['status'] ?? '')))) === 'void') {
             throw new RuntimeException('This supplier payment is already void.');
         }
+        $this->assertSupplierPaymentSettlementBranchesAccessible($repository, $paymentId, $accessibleIds);
 
         /** @var PDO $db */
         $db = $this->app->get('db');
@@ -968,6 +969,8 @@ final class SupplierSettlementWorkspaceService extends Service
         }
 
         try {
+            $this->assertSupplierPaymentSettlementBranchesAccessible($repository, $paymentId, $accessibleIds);
+            $repository->assertSupplierPaymentConvertedAdvanceUnused($paymentId);
             $originalAllocationIds = $repository->supplierPaymentAllocationObligationIds($paymentId);
             $scope = str_replace(' ', '_', mb_strtolower(trim((string) ($payment['payment_scope'] ?? 'booking'))));
             $isGlobal = $scope === 'global' || strtoupper(trim((string) ($payment['booking_reference'] ?? ''))) === 'GLOBAL';
@@ -975,32 +978,14 @@ final class SupplierSettlementWorkspaceService extends Service
             $accounting = new AccountingRepository($this->app);
             $linkedAdvanceAmount = round((float) ($payment['converted_advance_amount'] ?? 0), 2);
             if ($originalAllocationIds !== [] || $linkedAdvanceAmount > 0.005) {
-                $releaseResult = $repository->correctSupplierPaymentSupplier(
+                $repository->correctSupplierPaymentSupplier(
                     $paymentId,
                     (int) ($payment['supplier_id'] ?? 0),
                     $actorUserId,
                     $correctionReason
                 );
-                foreach ((array) ($releaseResult['released_settlements'] ?? []) as $index => $releasedSettlement) {
-                    $releasedAmount = round((float) ($releasedSettlement['released_amount'] ?? 0), 2);
-                    if ($releasedAmount <= 0.005) {
-                        continue;
-                    }
-                    $accounting->postSupplierSettlementRelease([
-                        'branch_id' => $branchId,
-                        'booking_reference' => (string) ($releasedSettlement['booking_reference'] ?? ''),
-                        'source_reference' => 'SUPPLIER-PAYMENT-CORRECTION-' . (string) ($payment['payment_no'] ?? $paymentId) . '-RELEASE-' . ($index + 1),
-                        'service_line_reference' => (string) ($releasedSettlement['service_line_reference'] ?? '') !== ''
-                            ? (string) $releasedSettlement['service_line_reference']
-                            : null,
-                        'supplier_obligation_id' => (int) ($releasedSettlement['supplier_obligation_id'] ?? 0),
-                        'released_amount' => $releasedAmount,
-                        'entry_date' => $corrected['payment_date'],
-                        'currency' => (string) ($releasedSettlement['currency'] ?? $corrected['currency']),
-                        'actor_user_id' => $actorUserId,
-                        'narration' => 'Supplier settlement released for payment correction',
-                    ]);
-                }
+                // The payment void below reverses the original allocation journals. Posting
+                // separate release journals here would reverse the same accounting twice.
             }
 
             if ($isGlobal) {
@@ -1035,12 +1020,18 @@ final class SupplierSettlementWorkspaceService extends Service
             );
 
             $targetBookingReference = $isGlobal ? null : (string) ($payment['booking_reference'] ?? '');
-            $obligations = $repository->openObligationsForCorrectedSupplierPayment(
-                $corrected['supplier_id'],
-                $branchId,
-                $corrected['currency'],
-                $targetBookingReference
-            );
+            $obligations = $isGlobal
+                ? $repository->openSupplierAccountObligationsForSettlement(
+                    $accessibleIds,
+                    $corrected['supplier_id'],
+                    $corrected['currency']
+                )
+                : $repository->openObligationsForCorrectedSupplierPayment(
+                    $corrected['supplier_id'],
+                    $branchId,
+                    $corrected['currency'],
+                    $targetBookingReference
+                );
             if ($corrected['supplier_id'] === (int) ($payment['supplier_id'] ?? 0) && $originalAllocationIds !== []) {
                 $priority = array_flip($originalAllocationIds);
                 usort($obligations, static function (array $left, array $right) use ($priority): int {
@@ -1108,7 +1099,7 @@ final class SupplierSettlementWorkspaceService extends Service
                     $actorUserId
                 );
                 $accounting->postSupplierPaymentAllocation([
-                    'branch_id' => $branchId,
+                    'branch_id' => (int) ($obligation['branch_id'] ?? $branchId),
                     'booking_reference' => (string) ($obligation['booking_reference'] ?? ''),
                     'source_reference' => $paymentNo . '-ALLOC-' . $allocationId,
                     'service_line_reference' => (string) ($obligation['service_line_reference'] ?? '') !== ''
@@ -1244,6 +1235,7 @@ final class SupplierSettlementWorkspaceService extends Service
         }
 
         try {
+            $this->assertSupplierPaymentSettlementBranchesAccessible($repository, $paymentId, $accessibleIds);
             $result = $repository->correctSupplierPaymentSupplier(
                 $paymentId,
                 $replacementSupplierId,
@@ -1259,7 +1251,7 @@ final class SupplierSettlementWorkspaceService extends Service
                     continue;
                 }
                 $releaseJournalIds[] = $accounting->postSupplierSettlementRelease([
-                    'branch_id' => (int) ($result['branch_id'] ?? 0),
+                    'branch_id' => (int) ($releasedSettlement['branch_id'] ?? $result['branch_id'] ?? 0),
                     'booking_reference' => (string) ($releasedSettlement['booking_reference'] ?? ''),
                     'source_reference' => 'SUPPLIER-CORRECTION-' . (string) ($result['payment_no'] ?? $paymentId) . '-RELEASE-' . ($index + 1),
                     'service_line_reference' => (string) ($releasedSettlement['service_line_reference'] ?? '') !== ''
@@ -1278,12 +1270,20 @@ final class SupplierSettlementWorkspaceService extends Service
             $targetBookingReference = $paymentScope === 'global'
                 ? null
                 : (string) ($result['booking_reference'] ?? '');
-            $targetObligations = $repository->openObligationsForCorrectedSupplierPayment(
-                $replacementSupplierId,
-                (int) ($result['branch_id'] ?? 0),
-                (string) ($result['currency'] ?? 'PKR'),
-                $targetBookingReference
-            );
+            $isGlobal = $paymentScope === 'global'
+                || strtoupper(trim((string) ($result['booking_reference'] ?? ''))) === 'GLOBAL';
+            $targetObligations = $isGlobal
+                ? $repository->openSupplierAccountObligationsForSettlement(
+                    $accessibleIds,
+                    $replacementSupplierId,
+                    (string) ($result['currency'] ?? 'PKR')
+                )
+                : $repository->openObligationsForCorrectedSupplierPayment(
+                    $replacementSupplierId,
+                    (int) ($result['branch_id'] ?? 0),
+                    (string) ($result['currency'] ?? 'PKR'),
+                    $targetBookingReference
+                );
 
             $remainingAmount = round((float) ($result['reallocatable_amount'] ?? 0), 2);
             $reallocatedAmount = 0.0;
@@ -1306,7 +1306,7 @@ final class SupplierSettlementWorkspaceService extends Service
                     $actorUserId
                 );
                 $accounting->postSupplierPaymentAllocation([
-                    'branch_id' => (int) ($result['branch_id'] ?? 0),
+                    'branch_id' => (int) ($obligation['branch_id'] ?? $result['branch_id'] ?? 0),
                     'booking_reference' => (string) ($obligation['booking_reference'] ?? ''),
                     'source_reference' => (string) ($result['payment_no'] ?? $paymentId) . '-REALLOC-' . $allocationId,
                     'service_line_reference' => (string) ($obligation['service_line_reference'] ?? '') !== ''
@@ -2154,6 +2154,20 @@ final class SupplierSettlementWorkspaceService extends Service
         ), static fn (int $id): bool => $id > 0)));
 
         return $ids;
+    }
+
+    private function assertSupplierPaymentSettlementBranchesAccessible(
+        SupplierRepository $repository,
+        int $paymentId,
+        array $accessibleBranchIds
+    ): void {
+        $accessibleBranchIds = array_values(array_unique(array_map('intval', $accessibleBranchIds)));
+        $settlementBranchIds = $repository->supplierPaymentSettlementBranchIds($paymentId);
+        if (array_diff($settlementBranchIds, $accessibleBranchIds) !== []) {
+            throw new RuntimeException(
+                'This supplier payment affects obligations in a branch you cannot access. A user with access to every affected branch must perform the correction.'
+            );
+        }
     }
 
     private function normalizeCurrency(string $value): string

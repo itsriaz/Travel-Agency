@@ -72,6 +72,7 @@ if ($candidate === false) {
     $paymentId = (int) $candidate['id'];
     $allocationStatement = $db->prepare(
         'SELECT a.supplier_obligation_id, a.allocated_amount,
+                o.branch_id AS obligation_branch_id,
                 o.gross_amount, o.advance_applied_amount, o.net_payable_amount
          FROM supplier_payment_allocations a
          INNER JOIN supplier_obligations o ON o.id = a.supplier_obligation_id
@@ -80,13 +81,17 @@ if ($candidate === false) {
     );
     $allocationStatement->execute(['payment_id' => $paymentId]);
     $beforeAllocations = $allocationStatement->fetchAll(PDO::FETCH_ASSOC) ?: [];
+    $accessibleBranchIds = array_values(array_unique(array_merge(
+        [(int) $candidate['branch_id']],
+        array_map(static fn (array $row): int => (int) ($row['obligation_branch_id'] ?? 0), $beforeAllocations)
+    )));
 
     $db->beginTransaction();
     try {
         $result = (new \App\Services\SupplierSettlementWorkspaceService($app))->voidGlobalSupplierPayment([
             'supplier_payment_id' => $paymentId,
             'void_reason' => 'Automated rollback-only correction regression',
-        ], $actorId, [(int) $candidate['branch_id']]);
+        ], $actorId, $accessibleBranchIds);
 
         $statusStatement = $db->prepare('SELECT status, reversal_journal_entry_id FROM supplier_payments WHERE id = :id');
         $statusStatement->execute(['id' => $paymentId]);

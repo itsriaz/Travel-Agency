@@ -375,6 +375,12 @@ $currentCurrencyJournalBranchMismatches = $fetchAll(
      FROM journal_entries je
      INNER JOIN bookings b ON b.booking_reference = je.booking_reference
      WHERE je.branch_id <> b.branch_id
+       AND je.source_type <> "data_repair_journal_reversal"
+       AND NOT EXISTS (
+            SELECT 1
+            FROM journal_entries repair
+            WHERE repair.source_reference = CONCAT("DATA-REPAIR-REVERSE-JE-", je.id)
+       )
        AND EXISTS (
             SELECT 1
             FROM booking_services bs
@@ -387,6 +393,60 @@ $check(
     'Current-currency booking journals belong to the booking branch',
     $currentCurrencyJournalBranchMismatches === [],
     $currentCurrencyJournalBranchMismatches === [] ? 'No current-currency journal branch split found' : json_encode($currentCurrencyJournalBranchMismatches, JSON_UNESCAPED_SLASHES)
+);
+
+$unrepairedSupplierCorrectionReleases = $fetchAll(
+    'SELECT je.id, je.branch_id, je.booking_reference, je.source_reference
+     FROM journal_entries je
+     WHERE je.source_type = "supplier_settlement_released"
+       AND je.source_reference LIKE "SUPPLIER-PAYMENT-CORRECTION-%"
+       AND NOT EXISTS (
+            SELECT 1
+            FROM journal_entries repair
+            WHERE repair.source_reference = CONCAT("DATA-REPAIR-REVERSE-JE-", je.id)
+       )
+     LIMIT 10'
+);
+$check(
+    'Financial supplier payment corrections do not contain unrepaired duplicate release journals',
+    $unrepairedSupplierCorrectionReleases === [],
+    $unrepairedSupplierCorrectionReleases === []
+        ? 'No duplicate financial-correction release journal found'
+        : json_encode($unrepairedSupplierCorrectionReleases, JSON_UNESCAPED_SLASHES)
+);
+
+$unrepairedSupplierVoidBranchMismatches = $fetchAll(
+    'SELECT DISTINCT je.id, je.source_reference, je.branch_id AS journal_branch_id,
+            jel.supplier_obligation_id, so.branch_id AS obligation_branch_id
+     FROM journal_entries je
+     INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+     INNER JOIN supplier_obligations so ON so.id = jel.supplier_obligation_id
+     WHERE je.source_type = "supplier_payment_void_reversed"
+       AND je.branch_id <> so.branch_id
+       AND (
+            NOT EXISTS (
+                SELECT 1 FROM journal_entries repair_out
+                WHERE repair_out.source_reference = CONCAT(
+                    "DATA-REPAIR-VOID-BRANCH-OUT-JE-", je.id,
+                    "-O-", jel.supplier_obligation_id
+                )
+            )
+            OR NOT EXISTS (
+                SELECT 1 FROM journal_entries repair_in
+                WHERE repair_in.source_reference = CONCAT(
+                    "DATA-REPAIR-VOID-BRANCH-IN-JE-", je.id,
+                    "-O-", jel.supplier_obligation_id
+                )
+            )
+       )
+     LIMIT 10'
+);
+$check(
+    'Supplier payment void reversals remain in each obligation branch',
+    $unrepairedSupplierVoidBranchMismatches === [],
+    $unrepairedSupplierVoidBranchMismatches === []
+        ? 'No unrepaired supplier void branch split found'
+        : json_encode($unrepairedSupplierVoidBranchMismatches, JSON_UNESCAPED_SLASHES)
 );
 
 $journalImbalances = $fetchAll(

@@ -224,7 +224,11 @@ if ($actorId <= 0 || $branchId <= 0) {
         ) !== [];
         $check(
             'Supplier finder hides neutralized zero-value advance artifacts and shows the replacement advance once',
-            ! $oldNeutralizedAdvanceVisible && $newAvailableAdvanceVisible
+            ! $oldNeutralizedAdvanceVisible && $newAvailableAdvanceVisible,
+            json_encode([
+                'old_rows' => $oldSupplierFinderRows,
+                'new_rows' => $newSupplierFinderRows,
+            ], JSON_UNESCAPED_SLASHES)
         );
 
         $journalBalance = $db->prepare(

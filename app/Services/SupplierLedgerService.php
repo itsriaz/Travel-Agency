@@ -210,6 +210,7 @@ final class SupplierLedgerService extends Service
             ];
 
             if ($isVoidedPayment) {
+                $creditSummary[$currency] ??= 0.0;
                 continue;
             }
             switch ($sourceEntryType) {
