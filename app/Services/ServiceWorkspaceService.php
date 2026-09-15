@@ -1742,6 +1742,12 @@ final class ServiceWorkspaceService extends Service
         if (! is_array($refundPayload)) {
             $refundPayload = [];
         }
+        $partialReversals = is_array($refundPayload['partial_reversals'] ?? null)
+            ? $refundPayload['partial_reversals']
+            : [];
+        $isLegacyCombinedRefund = ($hasCustomerRefund && $hasSupplierRefund)
+            || isset($partialReversals['customer'])
+            || isset($partialReversals['supplier']);
         $restoreCustomerCreditCurrency = $this->normalizeCurrency((string) (
             $refundPayload['customer_receipt_credit_currency']
             ?? $existingService['currency']
@@ -1806,7 +1812,7 @@ final class ServiceWorkspaceService extends Service
             );
         }
 
-        if ($hasCustomerRefund && $hasSupplierRefund) {
+        if ($isLegacyCombinedRefund) {
             $selectedCustomerRefundAmount = $refundScope === 'customer' ? $customerRefundAmount : 0.0;
             $selectedSupplierRefundAmount = $refundScope === 'supplier' && ! $supplierRefundRetainedAsCredit
                 ? $supplierRefundAmount
@@ -1846,9 +1852,11 @@ final class ServiceWorkspaceService extends Service
                 'actor_user_id' => $actorUserId,
             ]);
 
+            $remainingCustomerRefundAmount = $refundScope === 'customer' ? 0.0 : $customerRefundAmount;
+            $remainingSupplierRefundAmount = $refundScope === 'supplier' ? 0.0 : $supplierRefundAmount;
             $eventRepository->updateRefundFinancials($refundEventId, [
-                'customer_refund_amount' => $refundScope === 'customer' ? 0 : $customerRefundAmount,
-                'supplier_refund_amount' => $refundScope === 'supplier' ? 0 : $supplierRefundAmount,
+                'customer_refund_amount' => $remainingCustomerRefundAmount,
+                'supplier_refund_amount' => $remainingSupplierRefundAmount,
                 'payload_patch' => [
                     'partial_reversals' => [
                         $refundScope => [
@@ -1861,6 +1869,50 @@ final class ServiceWorkspaceService extends Service
                     ],
                 ],
             ]);
+
+            $combinedEventCompleted = $remainingCustomerRefundAmount <= 0.005
+                && $remainingSupplierRefundAmount <= 0.005;
+            $voidResult = null;
+            if ($combinedEventCompleted) {
+                $completionReference = 'VOID-REFUND-EVT-' . $refundEventId . '-COMPONENTS';
+                $completionJournalEntryId = (int) ($reversalJournalEntryId ?? 0);
+                if ($completionJournalEntryId <= 0) {
+                    $completionJournalEntryId = (int) ($refundEvent['reversal_journal_entry_id'] ?? 0);
+                }
+                if ($completionJournalEntryId <= 0) {
+                    foreach (['supplier', 'customer'] as $completedScope) {
+                        $completionJournalEntryId = (int) ($partialReversals[$completedScope]['reversal_journal_entry_id'] ?? 0);
+                        if ($completionJournalEntryId > 0) {
+                            break;
+                        }
+                    }
+                }
+                $voidResult = $eventRepository->voidEvent(
+                    $refundEventId,
+                    $reason,
+                    $actorUserId,
+                    $completionReference,
+                    $completionJournalEntryId > 0 ? $completionJournalEntryId : null,
+                    [
+                        'reversal_reason' => $reason,
+                        'refund_scope' => 'combined',
+                        'component_reversal_complete' => true,
+                        'component_reversal_completed_at' => date('c'),
+                    ]
+                );
+
+                app_write_log('service.refund.legacy_combined_reversal_completed', 'Legacy combined refund event was retired after both components were reversed.', array_merge(
+                    app_request_log_context(),
+                    [
+                        'booking_id' => $bookingId,
+                        'booking_reference' => $bookingReference,
+                        'service_id' => $serviceId,
+                        'service_line_reference' => (string) ($existingService['line_reference'] ?? ''),
+                        'refund_event_id' => $refundEventId,
+                        'completion_reference' => $completionReference,
+                    ]
+                ));
+            }
 
             AuditLog::record($this->app, 'service.refund.partial_reversed', [
                 'user_id' => $actorUserId,
@@ -1877,6 +1929,8 @@ final class ServiceWorkspaceService extends Service
                 'supplier_refund_amount' => $selectedSupplierRefundAmount,
                 'restored_customer_credit_amount' => (float) ($restoredCustomerCredit['restored_amount'] ?? 0),
                 'restored_customer_credit_receipt_ids' => $restoredCustomerCredit['affected_receipt_ids'] ?? [],
+                'combined_event_completed' => $combinedEventCompleted,
+                'void_result' => $voidResult,
                 'reason' => $reason,
             ]);
 
@@ -2172,7 +2226,7 @@ final class ServiceWorkspaceService extends Service
             }
 
             foreach (['customer', 'supplier'] as $refundScope) {
-                $refundEvent = $refundScope === 'customer' ? $latestCustomerRefundEvent : $latestSupplierRefundEvent;
+                $refundEvent = $this->latestRefundEventForScope($eventRepository, $serviceId, $refundScope);
                 if ($refundEvent !== null) {
                     $this->reverseRefundMutation(
                         $bookingId,

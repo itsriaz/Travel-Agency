@@ -55,15 +55,17 @@ $check(
         && str_contains($serviceSource, "'current_booking_credit_cap_applied' => ! \$hasModernAvailableCredit")
 );
 $check(
-    'Legacy modern settlements without refund-currency metadata fall back to target refund credit',
+    'Legacy mixed-currency settlements derive refund truth from source-currency amounts before raw fallbacks',
     str_contains($serviceSource, 'private function resolveModernCustomerRefundTruthAmount(array $cancelPayload, string $currency): float')
-        && str_contains($serviceSource, '$targetAmount = round((float) ($cancelPayload[\'target_customer_refund_credit\'] ?? 0), 2);')
-        && str_contains($serviceSource, 'if ($targetAmount > 0.005 && ($targetCurrency === \'\' || $targetCurrency === $currency)) {')
-        && str_contains($serviceSource, 'return $targetAmount;')
+        && str_contains($serviceSource, '$derivedTargetAmount = $this->deriveModernCustomerRefundTruthAmount($cancelPayload, $currency);')
+        && str_contains($serviceSource, 'private function deriveModernCustomerRefundTruthAmount(array $cancelPayload, string $currency): float')
+        && str_contains($serviceSource, '$expectedSupplierRefundSourceAmount - $customerPenaltySourceAmount + $agencyFeeRefundAmount')
 );
 $check(
     'Service refund can consume synthetic settlement-backed customer credit when no receipt rows exist in the refund truth currency',
-    str_contains($serviceSource, '$allowSyntheticSettlementCredit = $customerRefundCurrency !== $currency')
+    str_contains($serviceSource, '$allowSyntheticSettlementCredit = $customerRefundAmount > 0.005')
+        && str_contains($serviceSource, '$customerReceiptCreditConsumptionAmount <= 0.005')
+        && str_contains($serviceSource, "(float) (\$customerRefundState['service_remaining_customer_refund_credit'] ?? 0) > 0.005")
         && str_contains($serviceSource, '$customerPaymentRepository->applyRefundAgainstBookingReceiptCredit(')
         && str_contains($serviceSource, '$allowSyntheticSettlementCredit')
 );
@@ -92,8 +94,8 @@ $check(
 $check(
     'Customer refund workflow only offers the settled due currency in the main workspace form',
     str_contains($viewSource, 'Customer refund is paid in the settled due currency.')
-        && str_contains($viewSource, '<select name="customer_refund_currency" data-refund-fx-currency-trigger="customer" aria-label="Actual customer refund currency">')
-        && str_contains($viewSource, '<option value="<?= e((string) ($activeService[\'customerRefundTruthCurrency\'] ?? $activeService[\'currency\'] ?? $invoiceCurrency)) ?>" selected>')
+        && str_contains($viewSource, '<input type="hidden" name="customer_refund_currency" value="<?= e($customerRefundFixedCurrency) ?>">')
+        && str_contains($viewSource, '<span class="legacy-service-event-money-currency" aria-hidden="true"><?= e($customerRefundFixedCurrency) ?></span>')
 );
 $check(
     'Customer refund correction form is locked to booking currency with rate 1',
