@@ -1492,7 +1492,15 @@ final class ReportService extends Service
             }
         }
 
+        $linkedSettlementHistory = ['rows' => [], 'columns' => []];
+        if ($mode !== 'csv' && in_array($filters['report'], ['customer_ledger', 'supplier_ledger'], true)) {
+            $linkedSettlementHistory = (new LinkedSettlementHistoryService($this->app))->report(
+                $filters['branchScopeIds'], $filters, $filters['report'] === 'supplier_ledger' ? 'supplier' : 'account'
+            );
+        }
+
         return [
+            'linkedSettlementHistory' => $linkedSettlementHistory,
             'title' => 'Reports',
             'reportOptions' => $this->sortedReportOptions(),
             'selectedReport' => $filters['report'],

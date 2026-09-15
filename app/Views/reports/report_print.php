@@ -491,6 +491,8 @@ $displayValue = static function (array $row, array $column) use ($formatDate, $f
             </table>
         </div>
 
+        <?php require __DIR__ . '/partials/linked_settlement_history.php'; ?>
+
         <footer class="report-print-footer">
             <div>Generated on <?= e($generatedAt) ?></div>
             <div><?= e($selectedReportLabel) ?> | <?= e($selectedBranchLabel) ?></div>

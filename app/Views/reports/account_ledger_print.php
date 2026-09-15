@@ -540,6 +540,8 @@ $ledgerExportLabel = $selectedCustomerName !== ''
             </table>
         </div>
 
+        <?php require __DIR__ . '/partials/linked_settlement_history.php'; ?>
+
         <footer class="ledger-print-footer">
             <div>Generated on <?= e(date('d/m/Y H:i')) ?></div>
             <?php if ($summaryBalanceText !== ''): ?>

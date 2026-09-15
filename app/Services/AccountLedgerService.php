@@ -393,6 +393,9 @@ final class AccountLedgerService extends Service
                 $this->movementDetail($transfer)
             );
             $row['is_internal_transfer'] = true;
+            // Incoming credit settles an invoice; outgoing credit consumes the source's credit balance.
+            // Keep the displayed Debit/Credit convention separate from the balance effect, as for receipts.
+            $row['running_balance_delta'] = (float) $row['raw_credit_amount'] - (float) $row['raw_debit_amount'];
             if ((string) ($transfer['receipt_purpose'] ?? '') === 'customer_advance') {
                 $row['is_customer_advance_transfer'] = true;
                 $row['ledger_entry'] = $isSource

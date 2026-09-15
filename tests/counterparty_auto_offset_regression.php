@@ -60,16 +60,23 @@ try {
     $receivable = $db->query('SELECT outstanding_amount FROM customer_receivable_items WHERE id = ' . $receivableId)->fetchColumn();
     $payable = $db->query('SELECT net_payable_amount FROM supplier_obligations WHERE id = ' . $obligationId)->fetchColumn();
 
-    $check('Matching PKR 45,000 is adjusted automatically', count($settlements) === 1 && abs((float) $settlements[0]['amount'] - 45000) <= 0.005);
+    $check('Matching balances are not adjusted automatically', $settlements === []);
     $check('Customer receipt does not reduce the independent account-holder sale balance', abs((float) $receivable - 30000) <= 0.005);
-    $check('Supplier payable retains PKR 55,000', abs((float) $payable - 55000) <= 0.005);
-    $check('Automatic settlement is identifiable in its reference', str_starts_with((string) ($settlements[0]['offset_no'] ?? ''), 'AUTO-OFFSET-'));
+    $check('Supplier payable remains PKR 100,000', abs((float) $payable - 100000) <= 0.005);
+    $linkId = (int) $db->query('SELECT id FROM business_source_supplier_links WHERE business_source_id = ' . $businessSourceId)->fetchColumn();
+    $check('Link reconciliation cannot auto-settle', $service->autoSettleLink($linkId, date('Y-m-d'), $actorId) === []);
+    $check('Existing-balance reconciliation cannot auto-settle', $service->autoSettleExisting([$branchId], date('Y-m-d'), $actorId) === []);
+    $linked = (new \App\Services\CounterpartyLinkService($app))->linkAccountToSupplier($businessSourceId, $supplierId, $actorId);
+    $check('Saving the same link cannot auto-settle', $linked['automatic_settlements'] === []);
+    $linkService = new \App\Services\CounterpartyLinkService($app);
+    $linkService->unlinkAccountFromSupplier($linkId, $actorId, 'QA manual-only policy');
+    $newLink = $linkService->linkAccountToSupplier($businessSourceId, $supplierId, $actorId);
+    $check('Creating a link with matching balances cannot auto-settle', $newLink['action'] === 'linked' && $newLink['automatic_settlements'] === []);
     $check('No cash or bank movement is created', (int) $db->query('SELECT COUNT(*) FROM treasury_transactions')->fetchColumn() === $beforeTreasury);
 
-    $service->void((int) $settlements[0]['id'], 'QA automatic reversal', $actorId, [$branchId]);
     $restoredReceivable = $db->query('SELECT outstanding_amount FROM customer_receivable_items WHERE id = ' . $receivableId)->fetchColumn();
     $restoredPayable = $db->query('SELECT net_payable_amount FROM supplier_obligations WHERE id = ' . $obligationId)->fetchColumn();
-    $check('Reversal restores supplier balance and leaves customer due unchanged', abs((float) $restoredReceivable - 30000) <= 0.005 && abs((float) $restoredPayable - 100000) <= 0.005);
+    $check('All automatic entry points leave supplier balance and customer due unchanged', abs((float) $restoredReceivable - 30000) <= 0.005 && abs((float) $restoredPayable - 100000) <= 0.005);
 } finally {
     if ($db->inTransaction()) $db->rollBack();
 }

@@ -56,9 +56,9 @@ $check(
         && substr_count($repository, 'is_active = 1') >= 2
 );
 $check(
-    'The page explains automatic same-branch and same-currency adjustment without cash movement',
-    str_contains($view, 'same branch and currency')
-        && str_contains($view, 'adjusted automatically')
+    'The page explains separate balances and manual invoice adjustment without cash movement',
+    str_contains($view, 'Linking keeps balances separate')
+        && str_contains($view, 'manual adjustment')
         && str_contains($view, 'without moving cash or bank money')
 );
 

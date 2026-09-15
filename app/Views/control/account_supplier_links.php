@@ -34,7 +34,7 @@ $recentHistory = is_array($recentHistory ?? null) ? $recentHistory : [];
     <div class="panel-header">
         <div>
             <h2>Create Link</h2>
-            <p class="panel-meta">Matching balances in the same branch and currency will be adjusted automatically without moving cash or bank money.</p>
+            <p class="panel-meta">Linking keeps balances separate. Select individual invoices in View Adjustments to post a manual adjustment without moving cash or bank money.</p>
         </div>
     </div>
 

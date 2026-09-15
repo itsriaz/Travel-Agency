@@ -29,25 +29,26 @@ $check(
         && substr_count($controller, 'Csrf::verify') >= 2
 );
 $check(
-    'Screen is a compact automatic settlement history with audited reversal',
-    str_contains($view, 'Automatic Linked Settlements')
+    'Screen offers manual invoice selection and history with audited reversal',
+    str_contains($view, 'Manual Linked Settlements')
         && str_contains($view, 'Settlement History')
-        && str_contains($view, 'account-holder recovery balances')
+        && str_contains(strtolower($view), 'account-holder recovery balances')
         && str_contains($view, 'Reverse')
-        && ! str_contains($view, 'Settle Balance')
-        && ! str_contains($view, 'Save Settlement')
+        && str_contains($view, 'name="customer_receivable_item_id"')
+        && str_contains($view, 'name="supplier_obligation_id"')
+        && str_contains($view, 'Confirm Manual Adjustment')
 );
 $check(
     'Screen identifies the action as non-cash and does not request a treasury account',
-    str_contains(strtolower($view), 'moving cash or bank money')
+    str_contains(strtolower($view), 'moves cash or bank money')
         && ! str_contains($view, 'treasury_account_id')
         && ! str_contains($view, 'payment_method')
 );
 $check(
-    'Automatic settlement service supports transaction-time and existing-balance reconciliation',
+    'Legacy automatic entry points remain compatible without an automatic posting path',
     str_contains($service, 'autoSettleForFinancialContext')
         && str_contains($service, 'autoSettleExisting')
-        && str_contains($service, 'AUTO-OFFSET-')
+        && ! str_contains($service, 'AUTO-OFFSET-')
 );
 $check(
     'Booking financial synchronization invokes automatic linked-party settlement',

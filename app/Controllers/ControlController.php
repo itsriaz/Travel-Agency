@@ -340,19 +340,10 @@ final class ControlController extends BaseController
                 (int) Auth::id(),
                 (string) ($_POST['reason'] ?? '')
             );
-            $automaticSettlements = (array) ($result['automatic_settlements'] ?? []);
-            $adjustedAmount = array_reduce(
-                $automaticSettlements,
-                static fn (float $total, array $row): float => $total + (float) ($row['amount'] ?? 0),
-                0.0
-            );
             Flash::success(
-                $automaticSettlements !== []
-                    ? 'Account holder linked and matching balances adjusted automatically ('
-                        . number_format($adjustedAmount, 2) . ').'
-                    : (($result['action'] ?? '') === 'unchanged'
+                ($result['action'] ?? '') === 'unchanged'
                     ? 'This account holder and supplier are already linked.'
-                    : 'Account holder linked to supplier successfully.')
+                    : 'Account holder linked to supplier. Balances remain separate until manually adjusted.'
             );
         } catch (RuntimeException $exception) {
             Flash::error($exception->getMessage());
@@ -369,6 +360,21 @@ final class ControlController extends BaseController
         $selectedAccountAllocations = [];
         $selectedPayableAllocations = [];
         $selectedOffsetId = (int) ($_GET['offset_id'] ?? 0);
+        $positions = $repository->positions($branchIds);
+        $manualPosition = null;
+        $manualAccounts = [];
+        $manualPayables = [];
+        foreach ($positions as $position) {
+            if ((int) $position['link_id'] === (int) ($_GET['link_id'] ?? 0)
+                && (int) $position['branch_id'] === (int) ($_GET['branch_id'] ?? 0)
+                && (string) $position['currency'] === (string) ($_GET['currency'] ?? '')
+            ) {
+                $manualPosition = $position;
+                $manualAccounts = $repository->openAccountPositions((int) $position['business_source_id'], (int) $position['branch_id'], (string) $position['currency']);
+                $manualPayables = $repository->openPayables((int) $position['supplier_id'], (int) $position['branch_id'], (string) $position['currency']);
+                break;
+            }
+        }
 
         if ($selectedOffsetId > 0) {
             $candidate = $repository->find($selectedOffsetId);
@@ -386,6 +392,10 @@ final class ControlController extends BaseController
 
         return $this->view('control/linked_party_settlements', [
             'title' => 'Linked Party Settlements',
+            'positions' => $positions,
+            'manualPosition' => $manualPosition,
+            'manualAccounts' => $manualAccounts,
+            'manualPayables' => $manualPayables,
             'recentOffsets' => $repository->recent($branchIds),
             'selectedOffset' => $selectedOffset,
             'selectedAccountAllocations' => $selectedAccountAllocations,

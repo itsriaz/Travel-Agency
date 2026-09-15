@@ -2,6 +2,15 @@
 
 declare(strict_types=1);
 
+if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
+$arguments = array_slice($argv, 1);
+if (array_diff($arguments, ['--apply', '--rehearse']) !== []
+    || (in_array('--apply', $arguments, true) && in_array('--rehearse', $arguments, true))) {
+    fwrite(STDERR, "Usage: php scripts/repair_bk000001_bk000002_account_supplier_offset.php [--rehearse | --apply]\n");
+    exit(1);
+}
+$rehearse = in_array('--rehearse', $arguments, true);
+
 defined('BASE_PATH') || define('BASE_PATH', dirname(__DIR__));
 require_once BASE_PATH . '/app/Helpers/functions.php';
 require_once BASE_PATH . '/app/Core/bootstrap.php';
@@ -12,7 +21,7 @@ $db = $app->get('db');
 $apply = in_array('--apply', $argv, true);
 
 echo 'BK-000001 / BK-000002 account-supplier offset repair' . PHP_EOL;
-echo 'Mode: ' . ($apply ? 'APPLY' : 'DRY RUN') . PHP_EOL;
+echo 'Mode: ' . ($apply ? 'APPLY' : ($rehearse ? 'REHEARSE (ROLLBACK)' : 'DRY RUN')) . PHP_EOL;
 
 $saleStatement = $db->prepare(
     'SELECT cri.*, b.business_source_id, b.branch_id AS booking_branch_id, bs.name AS account_name
@@ -20,34 +29,42 @@ $saleStatement = $db->prepare(
      INNER JOIN bookings b ON b.booking_reference = cri.booking_reference
      INNER JOIN business_sources bs ON bs.id = b.business_source_id
      WHERE cri.booking_reference = "BK-000001" AND cri.due_group = "service_sale"
-     ORDER BY cri.id LIMIT 1'
+     ORDER BY cri.id LIMIT 2'
 );
 $saleStatement->execute();
-$sale = $saleStatement->fetch(PDO::FETCH_ASSOC);
+$saleRows = $saleStatement->fetchAll(PDO::FETCH_ASSOC);
+$sale = count($saleRows) === 1 ? $saleRows[0] : false;
 
 $purchaseStatement = $db->prepare(
     'SELECT so.*, s.name AS supplier_name
      FROM supplier_obligations so
      INNER JOIN suppliers s ON s.id = so.supplier_id
      WHERE so.booking_reference = "BK-000002" AND so.obligation_group = "service_cost"
-     ORDER BY so.id LIMIT 1'
+     ORDER BY so.id LIMIT 2'
 );
 $purchaseStatement->execute();
-$purchase = $purchaseStatement->fetch(PDO::FETCH_ASSOC);
+$purchaseRows = $purchaseStatement->fetchAll(PDO::FETCH_ASSOC);
+$purchase = count($purchaseRows) === 1 ? $purchaseRows[0] : false;
 
 $bk2CustomerStatement = $db->prepare(
     'SELECT * FROM customer_receivable_items
      WHERE booking_reference = "BK-000002" AND due_group = "service_sale"
-     ORDER BY id LIMIT 1'
+     ORDER BY id LIMIT 2'
 );
 $bk2CustomerStatement->execute();
-$bk2Customer = $bk2CustomerStatement->fetch(PDO::FETCH_ASSOC);
+$customerRows = $bk2CustomerStatement->fetchAll(PDO::FETCH_ASSOC);
+$bk2Customer = count($customerRows) === 1 ? $customerRows[0] : false;
 
 if (! is_array($sale) || ! is_array($purchase) || ! is_array($bk2Customer)) {
-    throw new RuntimeException('The expected BK-000001 sale or BK-000002 customer/supplier position was not found. No data changed.');
+    throw new RuntimeException('The expected BK-000001 sale or BK-000002 customer/supplier position is missing or ambiguous. No data changed.');
 }
 if ((int) $sale['branch_id'] !== (int) $purchase['branch_id'] || strtoupper((string) $sale['currency']) !== strtoupper((string) $purchase['currency'])) {
     throw new RuntimeException('The linked account sale and supplier payable are not in the same branch and currency. No data changed.');
+}
+if (strtoupper((string) $sale['currency']) !== 'PKR'
+    || strtoupper((string) $bk2Customer['currency']) !== 'PKR'
+    || (int) $bk2Customer['branch_id'] !== (int) $sale['branch_id']) {
+    throw new RuntimeException('This historical repair is limited to its approved PKR branch scope. No data changed.');
 }
 if (abs((float) $sale['due_amount'] - 1200) > 0.005 || abs((float) $purchase['gross_amount'] - 3000) > 0.005) {
     throw new RuntimeException('The expected PKR 1,200 account sale or PKR 3,000 supplier payable has changed. Stop for manual review.');
@@ -74,15 +91,19 @@ $offsetStatement = $db->prepare(
      WHERE o.status = "posted"
        AND aa.customer_receivable_item_id = :receivable_id
        AND pa.supplier_obligation_id = :obligation_id
-     ORDER BY o.id DESC LIMIT 1'
+     ORDER BY o.id DESC LIMIT 2'
 );
 $offsetStatement->execute([
     'receivable_id' => (int) $sale['id'],
     'obligation_id' => (int) $purchase['id'],
 ]);
-$incorrectOffset = $offsetStatement->fetch(PDO::FETCH_ASSOC);
+$offsetRows = $offsetStatement->fetchAll(PDO::FETCH_ASSOC);
+$incorrectOffset = count($offsetRows) === 1 ? $offsetRows[0] : false;
 if (! is_array($incorrectOffset)) {
-    throw new RuntimeException('The existing BK-000001/BK-000002 linked settlement was not found. No data changed.');
+    throw new RuntimeException('The existing BK-000001/BK-000002 linked settlement is missing or ambiguous. No data changed.');
+}
+if ((string) ($incorrectOffset['reference_no'] ?? '') === 'REPAIR-BK1-BK2') {
+    throw new RuntimeException('This repair has already been posted. Do not void and recreate it. No data changed.');
 }
 
 $actorId = (int) $db->query(
@@ -101,7 +122,7 @@ echo '[CURRENT] Incorrect linked offset: PKR ' . number_format((float) $incorrec
 echo '[PLAN] Replace it with PKR 1,200 Account Riaz to Supplier Riaz non-cash settlement.' . PHP_EOL;
 echo '[EXPECTED] Jalal due PKR 900; Ghazan due PKR 3,300; Supplier Riaz payable PKR 1,800.' . PHP_EOL;
 
-if (! $apply) {
+if (! $apply && ! $rehearse) {
     echo 'Dry run complete. No data changed. Re-run with --apply after confirmation.' . PHP_EOL;
     exit(0);
 }
@@ -127,6 +148,8 @@ try {
         'currency' => (string) $sale['currency'],
         'offset_date' => date('Y-m-d'),
         'amount' => 1200,
+        'customer_receivable_item_id' => (int) $sale['id'],
+        'supplier_obligation_id' => (int) $purchase['id'],
         'reference_no' => 'REPAIR-BK1-BK2',
         'remarks' => 'Account Riaz sale responsibility applied against Supplier Riaz; customer payments remain independent.',
     ], $actorId, [(int) $sale['branch_id']]);
@@ -169,12 +192,13 @@ try {
         throw new RuntimeException('A receipt, supplier payment, or treasury movement changed unexpectedly. All changes were rolled back.');
     }
 
-    $db->commit();
+    if ($rehearse) { $db->rollBack(); } else { $db->commit(); }
     echo '[PASS] Jalal still owes PKR 900; the PKR 300 customer receipt is unchanged.' . PHP_EOL;
     echo '[PASS] Ghazan still owes PKR 3,300.' . PHP_EOL;
     echo '[PASS] Supplier Riaz payable is PKR 1,800 after the PKR 1,200 account settlement.' . PHP_EOL;
     echo '[PASS] No customer payment, supplier payment, cash, or bank movement was created.' . PHP_EOL;
-    echo 'Repair complete: ' . $new['offset_no'] . PHP_EOL;
+    echo $rehearse ? 'Rehearsal passed. All database changes rolled back.' . PHP_EOL
+        : 'Repair complete: ' . $new['offset_no'] . PHP_EOL;
 } catch (Throwable $exception) {
     if ($db->inTransaction()) $db->rollBack();
     throw $exception;

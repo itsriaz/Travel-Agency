@@ -17,7 +17,7 @@ final class CounterpartyOffsetService extends Service
     {
         $this->assertFinancialAdminActor($actorUserId, 'Only a financial administrator can settle linked-party balances.');
 
-        return $this->postSettlement($input, $actorUserId, $accessibleBranchIds, false);
+        return $this->postSettlement($input, $actorUserId, $accessibleBranchIds);
     }
 
     public function autoSettleForFinancialContext(
@@ -28,156 +28,35 @@ final class CounterpartyOffsetService extends Service
         string $entryDate,
         int $actorUserId
     ): array {
-        if ($actorUserId <= 0 || $branchId <= 0) {
-            return [];
-        }
-
-        $linkRepository = new CounterpartyLinkRepository($this->app);
-        $links = [];
-        if ($businessSourceId > 0) {
-            $link = $linkRepository->findByBusinessSourceId($businessSourceId);
-            if ($link !== null) {
-                $links[(int) $link['id']] = $link;
-            }
-        }
-        if ($supplierId > 0) {
-            $link = $linkRepository->findBySupplierId($supplierId);
-            if ($link !== null) {
-                $links[(int) $link['id']] = $link;
-            }
-        }
-
-        $currencyCodes = array_values(array_unique(array_filter(array_map(
-            static fn (mixed $currency): string => strtoupper(trim((string) $currency)),
-            $currencies
-        ), static fn (string $currency): bool => preg_match('/^[A-Z]{3}$/', $currency) === 1)));
-        $settlements = [];
-        foreach (array_keys($links) as $linkId) {
-            foreach ($currencyCodes as $currency) {
-                $settlement = $this->postAvailableSettlement(
-                    $linkId,
-                    $branchId,
-                    $currency,
-                    $entryDate,
-                    $actorUserId,
-                    true
-                );
-                if ($settlement !== null) {
-                    $settlements[] = $settlement;
-                }
-            }
-        }
-
-        return $settlements;
+        // Compatibility entry points: old callers must never settle balances automatically.
+        return [];
     }
 
     public function autoSettleLink(int $linkId, string $entryDate, int $actorUserId): array
     {
-        if ($linkId <= 0 || $actorUserId <= 0) {
-            return [];
-        }
-
-        $positions = (new CounterpartyOffsetRepository($this->app))->positions();
-        $settlements = [];
-        foreach ($positions as $position) {
-            if ((int) ($position['link_id'] ?? 0) !== $linkId
-                || (float) ($position['available_offset'] ?? 0) <= 0.005
-            ) {
-                continue;
-            }
-
-            $settlement = $this->postAvailableSettlement(
-                $linkId,
-                (int) ($position['branch_id'] ?? 0),
-                (string) ($position['currency'] ?? ''),
-                $entryDate,
-                $actorUserId,
-                true
-            );
-            if ($settlement !== null) {
-                $settlements[] = $settlement;
-            }
-        }
-
-        return $settlements;
+        return [];
     }
 
     public function autoSettleExisting(array $accessibleBranchIds, string $entryDate, int $actorUserId): array
     {
-        $this->assertFinancialAdminActor(
-            $actorUserId,
-            'Only a financial administrator can reconcile existing linked-party balances.'
-        );
-
-        $positions = (new CounterpartyOffsetRepository($this->app))->positions($accessibleBranchIds);
-        $settlements = [];
-        foreach ($positions as $position) {
-            if ((float) ($position['available_offset'] ?? 0) <= 0.005) {
-                continue;
-            }
-
-            $settlement = $this->postAvailableSettlement(
-                (int) ($position['link_id'] ?? 0),
-                (int) ($position['branch_id'] ?? 0),
-                (string) ($position['currency'] ?? ''),
-                $entryDate,
-                $actorUserId,
-                true
-            );
-            if ($settlement !== null) {
-                $settlements[] = $settlement;
-            }
-        }
-
-        return $settlements;
-    }
-
-    private function postAvailableSettlement(
-        int $linkId,
-        int $branchId,
-        string $currency,
-        string $entryDate,
-        int $actorUserId,
-        bool $automatic
-    ): ?array {
-        $currency = strtoupper(trim($currency));
-        if ($linkId <= 0 || $branchId <= 0 || preg_match('/^[A-Z]{3}$/', $currency) !== 1) {
-            return null;
-        }
-
-        $repository = new CounterpartyOffsetRepository($this->app);
-        $link = (new CounterpartyLinkRepository($this->app))->findById($linkId);
-        if ($link === null) {
-            return null;
-        }
-        $accountPositions = $repository->openAccountPositions((int) $link['business_source_id'], $branchId, $currency);
-        $payables = $repository->openPayables((int) $link['supplier_id'], $branchId, $currency);
-        $maximum = round(min($this->sum($accountPositions, 'available_account_amount'), $this->sum($payables, 'net_payable_amount')), 2);
-        if ($maximum <= 0.005) {
-            return null;
-        }
-
-        return $this->postSettlement([
-            'link_id' => $linkId,
-            'branch_id' => $branchId,
-            'currency' => $currency,
-            'offset_date' => $entryDate,
-            'amount' => $maximum,
-            'reference_no' => $automatic ? 'AUTO' : null,
-            'remarks' => $automatic ? 'Automatically adjusted linked account-holder and supplier balances.' : null,
-        ], $actorUserId, [$branchId], $automatic);
+        $this->assertFinancialAdminActor($actorUserId, 'Only a financial administrator can reconcile linked-party balances.');
+        return [];
     }
 
     private function postSettlement(
         array $input,
         int $actorUserId,
-        array $accessibleBranchIds,
-        bool $automatic
+        array $accessibleBranchIds
     ): array {
         $linkId = (int) ($input['link_id'] ?? 0);
         $branchId = (int) ($input['branch_id'] ?? 0);
         $currency = strtoupper(trim((string) ($input['currency'] ?? '')));
         $requestedAmount = round((float) ($input['amount'] ?? 0), 2);
+        $receivableId = (int) ($input['customer_receivable_item_id'] ?? 0);
+        $obligationId = (int) ($input['supplier_obligation_id'] ?? 0);
+        if ($receivableId <= 0 || $obligationId <= 0 || ! is_finite($requestedAmount) || $requestedAmount <= 0) {
+            throw new RuntimeException('Select an account-holder invoice, a supplier invoice, and a positive adjustment amount.');
+        }
         $offsetDate = $this->validDate((string) ($input['offset_date'] ?? ''));
         $reference = $this->optionalText($input['reference_no'] ?? null, 100, 'Reference');
         $remarks = $this->optionalText($input['remarks'] ?? null, 2000, 'Remarks');
@@ -208,18 +87,23 @@ final class CounterpartyOffsetService extends Service
 
             $accountPositions = $repository->openAccountPositions((int) $link['business_source_id'], $branchId, $currency, true);
             $payables = $repository->openPayables((int) $link['supplier_id'], $branchId, $currency, true);
+            $accountPositions = array_values(array_filter($accountPositions, static fn (array $row): bool => (int) $row['id'] === $receivableId));
+            $payables = array_values(array_filter($payables, static fn (array $row): bool => (int) $row['id'] === $obligationId));
+            if ($accountPositions === [] || $payables === []) {
+                throw new RuntimeException('The selected invoices must have available balances for this linked party, branch, and currency.');
+            }
             $accountPositionTotal = $this->sum($accountPositions, 'available_account_amount');
             $payableTotal = $this->sum($payables, 'net_payable_amount');
             $maximum = round(min($accountPositionTotal, $payableTotal), 2);
             if ($maximum <= 0.005) {
                 throw new RuntimeException('No matching account-holder recovery balance and supplier payable are available in this branch and currency.');
             }
-            $amount = $requestedAmount > 0 ? $requestedAmount : $maximum;
+            $amount = $requestedAmount;
             if ($amount <= 0 || $amount - $maximum > 0.005) {
                 throw new RuntimeException('The settlement cannot exceed ' . $currency . ' ' . number_format($maximum, 2) . '.');
             }
 
-            $offsetNo = ($automatic ? 'AUTO-OFFSET-' : 'OFFSET-') . date('YmdHis') . '-' . strtoupper(bin2hex(random_bytes(3)));
+            $offsetNo = 'OFFSET-' . date('YmdHis') . '-' . strtoupper(bin2hex(random_bytes(3)));
             $offsetId = $repository->createOffset([
                 'offset_no' => $offsetNo,
                 'link_id' => $linkId,
@@ -243,7 +127,7 @@ final class CounterpartyOffsetService extends Service
                 'source_reference' => $offsetNo,
                 'entry_date' => $offsetDate,
                 'currency' => $currency,
-                'narration' => ($automatic ? 'Automatic linked-party' : 'Linked-party')
+                'narration' => 'Linked-party'
                     . ' account-holder recovery and supplier payable settled without cash movement',
                 'actor_user_id' => $actorUserId,
             ], [[
@@ -259,10 +143,11 @@ final class CounterpartyOffsetService extends Service
             ]]);
             $repository->setJournalEntry($offsetId, $journalId);
 
-            AuditLog::record($this->app, $automatic ? 'counterparty.offset.auto_posted' : 'counterparty.offset.posted', [
+            AuditLog::record($this->app, 'counterparty.offset.posted', [
                 'user_id' => $actorUserId, 'offset_id' => $offsetId, 'offset_no' => $offsetNo,
                 'link_id' => $linkId, 'branch_id' => $branchId, 'currency' => $currency, 'amount' => $amount,
-                'journal_entry_id' => $journalId, 'automatic' => $automatic,
+                'journal_entry_id' => $journalId, 'automatic' => false,
+                'customer_receivable_item_id' => $receivableId, 'supplier_obligation_id' => $obligationId,
             ]);
             if ($startedTransaction && $db->inTransaction()) {
                 $db->commit();
@@ -307,7 +192,9 @@ final class CounterpartyOffsetService extends Service
             if ($allowedBranches !== [] && ! in_array((int) $offset['branch_id'], $allowedBranches, true)) {
                 throw new RuntimeException('You do not have access to this settlement branch.');
             }
-            $reversalId = $accounting->reverseJournalEntry((int) $offset['journal_entry_id'], [
+            $remainingAmount = $repository->validatedRemainingReversalAmount($offset);
+            // Prior releases already reversed part of the original journal. Reverse only what remains.
+            $reversalId = $remainingAmount > 0.005 ? $accounting->postJournalEntry([
                 'branch_id' => (int) $offset['branch_id'],
                 'source_type' => 'linked_party_offset_void',
                 'source_reference' => 'VOID-' . (string) $offset['offset_no'],
@@ -315,14 +202,22 @@ final class CounterpartyOffsetService extends Service
                 'currency' => (string) $offset['currency'],
                 'narration' => 'Void linked-party settlement ' . (string) $offset['offset_no'],
                 'actor_user_id' => $actorUserId,
-            ]);
-            if ($reversalId === null) {
-                throw new RuntimeException('The settlement journal could not be reversed.');
-            }
+            ], [[
+                'account_code' => 'AR_CONTROL',
+                'line_description' => 'Remaining linked account-holder recovery restored',
+                'debit_amount' => $remainingAmount,
+                'credit_amount' => 0,
+            ], [
+                'account_code' => 'AP_CONTROL',
+                'line_description' => 'Remaining linked supplier payable restored',
+                'debit_amount' => 0,
+                'credit_amount' => $remainingAmount,
+            ]]) : null;
             $repository->voidOffset($offsetId, $actorUserId, $reason, $reversalId);
             AuditLog::record($this->app, 'counterparty.offset.voided', [
                 'user_id' => $actorUserId, 'offset_id' => $offsetId, 'offset_no' => $offset['offset_no'],
                 'reason' => $reason, 'reversal_journal_entry_id' => $reversalId,
+                'reversed_remaining_amount' => $remainingAmount,
             ]);
             if ($startedTransaction && $db->inTransaction()) {
                 $db->commit();

@@ -334,7 +334,45 @@ final class CounterpartyOffsetRepository extends BaseRepository
         ];
     }
 
-    public function voidOffset(int $offsetId, int $actorUserId, string $reason, int $reversalJournalId): void
+    public function validatedRemainingReversalAmount(array $offset): float
+    {
+        $statement = $this->db->prepare(
+            'SELECT j.branch_id, j.currency, j.source_type, j.source_reference, c.code, l.debit_amount, l.credit_amount
+             FROM journal_entries j JOIN journal_entry_lines l ON l.journal_entry_id = j.id
+             JOIN chart_of_accounts c ON c.id = l.account_id
+             WHERE j.id = :id ORDER BY l.id'
+        );
+        $statement->execute(['id' => (int) ($offset['journal_entry_id'] ?? 0)]);
+        $lines = $statement->fetchAll() ?: [];
+        $originalAmount = 0.0;
+        $originalCredit = 0.0;
+        foreach ($lines as $line) {
+            if ((int) $line['branch_id'] !== (int) $offset['branch_id'] || $line['currency'] !== $offset['currency']
+                || $line['source_type'] !== 'linked_party_offset' || $line['source_reference'] !== $offset['offset_no']
+                || !in_array($line['code'], ['AP_CONTROL', 'AR_CONTROL'], true)
+                || ($line['code'] === 'AP_CONTROL' && (float) $line['credit_amount'] !== 0.0)
+                || ($line['code'] === 'AR_CONTROL' && (float) $line['debit_amount'] !== 0.0)
+                || (float) $line['debit_amount'] < 0 || (float) $line['credit_amount'] < 0) {
+                throw new \RuntimeException('The settlement journal requires review before reversal.');
+            }
+            $originalAmount += (float) $line['debit_amount'];
+            $originalCredit += (float) $line['credit_amount'];
+        }
+        $remaining = round((float) $offset['amount'], 2);
+        if ($originalAmount <= 0 || abs($originalAmount - $originalCredit) > 0.005
+            || $remaining < 0 || $remaining - $originalAmount > 0.005) {
+            throw new \RuntimeException('The settlement amount does not reconcile with its original journal.');
+        }
+        $account = array_merge($this->allocations((int) $offset['id'], 'account'), $this->allocations((int) $offset['id'], 'receivable'));
+        $payable = $this->allocations((int) $offset['id'], 'payable');
+        if (abs(array_sum(array_column($account, 'allocated_amount')) - $remaining) > 0.005
+            || abs(array_sum(array_column($payable, 'allocated_amount')) - $remaining) > 0.005) {
+            throw new \RuntimeException('The remaining settlement allocations do not reconcile. Review them before reversal.');
+        }
+        return $remaining;
+    }
+
+    public function voidOffset(int $offsetId, int $actorUserId, string $reason, ?int $reversalJournalId): void
     {
         // Legacy offsets changed customer receivables directly. Preserve their
         // reversal path while all new offsets use account allocations only.
@@ -496,10 +534,11 @@ final class CounterpartyOffsetRepository extends BaseRepository
         array &$affectedPayableIds
     ): float {
         $statement = $this->db->prepare(
-            'SELECT id, counterparty_offset_id, customer_receivable_item_id, allocated_amount
-             FROM ' . $table . '
-             WHERE customer_receivable_item_id = :receivable_id
-             ORDER BY counterparty_offset_id DESC, id DESC
+            'SELECT a.id, a.counterparty_offset_id, a.customer_receivable_item_id, a.allocated_amount
+             FROM ' . $table . ' a
+             INNER JOIN counterparty_offsets o ON o.id = a.counterparty_offset_id AND o.status = "posted"
+             WHERE a.customer_receivable_item_id = :receivable_id
+             ORDER BY a.counterparty_offset_id DESC, a.id DESC
              FOR UPDATE'
         );
         $statement->execute(['receivable_id' => $receivableId]);
@@ -593,6 +632,12 @@ final class CounterpartyOffsetRepository extends BaseRepository
             'DELETE FROM counterparty_offset_payable_allocations
              WHERE id = :id'
         );
+        $restorePayable = $this->db->prepare(
+            'UPDATE supplier_obligations
+             SET net_payable_amount = net_payable_amount + :amount,
+                 status = CASE WHEN net_payable_amount + 0.005 >= gross_amount THEN "open" ELSE "partially_covered" END
+             WHERE id = :id'
+        );
 
         foreach ($payableAllocations as $allocation) {
             if ($remaining <= 0.005) {
@@ -615,6 +660,7 @@ final class CounterpartyOffsetRepository extends BaseRepository
                 $deletePayableAllocation->execute(['id' => (int) $allocation['id']]);
             }
 
+            $restorePayable->execute(['amount' => $releaseAmount, 'id' => (int) $allocation['supplier_obligation_id']]);
             $remaining = round(max($remaining - $releaseAmount, 0), 2);
             $affectedPayableIds[] = (int) $allocation['supplier_obligation_id'];
         }

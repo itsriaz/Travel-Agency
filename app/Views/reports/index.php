@@ -2797,6 +2797,8 @@ if ($selectedReport === 'receivable_aging') {
     </div>
 </section>
 
+<?php require __DIR__ . '/partials/linked_settlement_history.php'; ?>
+
 <?php if (in_array($selectedReport, ['prepaid_supplier_ledger', 'supplier_prepaid_payments'], true) && $canCorrectSupplierAdvances): ?>
     <section class="advance-correction-modal" data-supplier-advance-correction-modal hidden aria-hidden="true">
         <div class="advance-correction-dialog" role="dialog" aria-modal="true" aria-labelledby="supplier-advance-correction-title">

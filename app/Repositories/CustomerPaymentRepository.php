@@ -1730,13 +1730,13 @@ final class CustomerPaymentRepository extends BaseRepository
                     ], [[
                         'account_code' => 'AR_CONTROL',
                         'line_description' => 'Account-holder recovery released from linked supplier settlement',
-                        'debit_amount' => 0,
-                        'credit_amount' => $releasedLinkedOffsetAmount,
+                        'debit_amount' => $releasedLinkedOffsetAmount,
+                        'credit_amount' => 0,
                     ], [
                         'account_code' => 'AP_CONTROL',
                         'line_description' => 'Supplier payable restored after linked customer release',
-                        'debit_amount' => $releasedLinkedOffsetAmount,
-                        'credit_amount' => 0,
+                        'debit_amount' => 0,
+                        'credit_amount' => $releasedLinkedOffsetAmount,
                     ]]);
                 }
             }
@@ -1878,14 +1878,16 @@ final class CustomerPaymentRepository extends BaseRepository
         }
 
         $currentDueAmount = round((float) ($receivable['due_amount'] ?? 0), 2);
-        $newOutstandingAmount = round(max($currentDueAmount - $targetAllocatedAmount, 0), 2);
+        // A linked-account release target can exceed actual customer payments; releasing cannot create a payment.
+        $remainingCustomerAllocatedAmount = min($currentAllocatedAmount, $targetAllocatedAmount);
+        $newOutstandingAmount = round(max($currentDueAmount - $remainingCustomerAllocatedAmount, 0), 2);
         $newStatus = $currentDueAmount <= 0.005
             ? 'cancelled'
-            : ($newOutstandingAmount <= 0.005 ? 'paid' : ($targetAllocatedAmount > 0.005 ? 'partially_paid' : 'open'));
+            : ($newOutstandingAmount <= 0.005 ? 'paid' : ($remainingCustomerAllocatedAmount > 0.005 ? 'partially_paid' : 'open'));
 
         $updateReceivableStatement->execute([
             'receivable_id' => $receivableItemId,
-            'allocated_amount' => $targetAllocatedAmount,
+            'allocated_amount' => $remainingCustomerAllocatedAmount,
             'outstanding_amount' => $newOutstandingAmount,
             'status' => $newStatus,
         ]);

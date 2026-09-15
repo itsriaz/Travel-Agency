@@ -14,7 +14,7 @@ $sumAdjusted = static fn (array $rows): float => round(array_reduce(
 ?>
 <section class="page-head linked-settlement-head">
     <div>
-        <h1>Automatic Linked Settlements</h1>
+        <h1>Manual Linked Settlements</h1>
     </div>
     <div class="page-actions">
         <a class="btn" href="<?= e(url('/master-data/account-supplier-links')) ?>">Manage Links</a>
@@ -25,6 +25,47 @@ $sumAdjusted = static fn (array $rows): float => round(array_reduce(
     <article class="stat-card"><div class="stat-label">Active Settlements</div><div class="stat-value"><?= e((string) $postedCount) ?></div></article>
     <article class="stat-card"><div class="stat-label">Reversed</div><div class="stat-value"><?= e((string) $voidCount) ?></div></article>
 </section>
+
+<section class="panel compact-panel">
+    <div class="panel-header"><h2>Separate Balances</h2></div>
+    <p class="panel-meta">Account-holder recovery balances and supplier payables remain separate until you select invoices and confirm an adjustment. No adjustment marks a passenger invoice paid or moves cash or bank money.</p>
+    <div class="dense-table-wrap"><table class="dense-table">
+        <thead><tr><th>Account Holder</th><th>Supplier</th><th>Branch</th><th>Currency</th><th>Account Recovery Available</th><th>Supplier Payable</th><th>Action</th></tr></thead>
+        <tbody>
+        <?php foreach (($positions ?? []) as $position): ?>
+            <tr>
+                <td><?= e($position['business_source_name']) ?></td><td><?= e($position['supplier_name']) ?></td>
+                <td><?= e($position['branch_name']) ?></td><td><?= e($position['currency']) ?></td>
+                <td><?= e($money($position['receivable'])) ?></td><td><?= e($money($position['payable'])) ?></td>
+                <td><?php if ((float) $position['available_offset'] > 0): ?><a class="btn btn-sm" href="<?= e(url('/linked-party-settlements?' . http_build_query(['link_id' => $position['link_id'], 'branch_id' => $position['branch_id'], 'currency' => $position['currency']]))) ?>">Select Invoices</a><?php endif; ?></td>
+            </tr>
+        <?php endforeach; ?>
+        <?php if (empty($positions)): ?><tr><td colspan="7">No linked balances available.</td></tr><?php endif; ?>
+        </tbody>
+    </table></div>
+</section>
+<?php if (! empty($manualPosition)): ?>
+<section class="panel compact-panel">
+    <div class="panel-header"><h2>Manual Adjustment: <?= e($manualPosition['business_source_name']) ?> / <?= e($manualPosition['currency']) ?></h2></div>
+    <form method="post" action="<?= e(url('/linked-party-settlements/save')) ?>" class="manual-offset-form">
+        <?= \App\Helpers\Csrf::input() ?>
+        <input type="hidden" name="link_id" value="<?= e((string) $manualPosition['link_id']) ?>">
+        <input type="hidden" name="branch_id" value="<?= e((string) $manualPosition['branch_id']) ?>">
+        <input type="hidden" name="currency" value="<?= e($manualPosition['currency']) ?>">
+        <label>Account-Holder Invoice<select name="customer_receivable_item_id" required><option value="">Select invoice</option>
+            <?php foreach ($manualAccounts as $item): ?><option value="<?= e((string) $item['id']) ?>"><?= e($item['booking_reference'] . ' / ' . $item['service_line_reference'] . ' - Available ' . $money($item['available_account_amount'])) ?></option><?php endforeach; ?>
+        </select></label>
+        <label>Supplier Invoice<select name="supplier_obligation_id" required><option value="">Select invoice</option>
+            <?php foreach ($manualPayables as $item): ?><option value="<?= e((string) $item['id']) ?>"><?= e($item['booking_reference'] . ' / ' . $item['service_line_reference'] . ' - Payable ' . $money($item['net_payable_amount'])) ?></option><?php endforeach; ?>
+        </select></label>
+        <label>Amount<input type="number" name="amount" min="0.01" step="0.01" required></label>
+        <label>Date<input type="date" name="offset_date" value="<?= e(date('Y-m-d')) ?>" required></label>
+        <label>Reference<input name="reference_no" maxlength="100"></label>
+        <label>Remarks<input name="remarks" maxlength="2000"></label>
+        <button class="btn btn-primary" type="submit">Confirm Manual Adjustment</button>
+    </form>
+</section>
+<?php endif; ?>
 
 <?php if ($selectedOffset !== null): ?>
 <section class="panel compact-panel linked-settlement-detail">
@@ -104,7 +145,7 @@ $sumAdjusted = static fn (array $rows): float => round(array_reduce(
     <div class="panel-header linked-settlement-toolbar">
         <div>
             <h2>Settlement History</h2>
-            <p class="panel-meta">Every automatic adjustment is recorded here and can be reversed with an audit reason.</p>
+            <p class="panel-meta">Individual allocations and historical automatic adjustments are recorded here. Reversal requires an audit reason.</p>
         </div>
         <div class="linked-settlement-toolbar-actions">
             <button class="btn btn-sm" type="button" id="linked-settlement-expand-button">Open Wide View</button>
@@ -116,7 +157,7 @@ $sumAdjusted = static fn (array $rows): float => round(array_reduce(
             <thead><tr><th>Date</th><th>Settlement</th><th>Account Holder</th><th>Supplier</th><th>Branch</th><th>Curr.</th><th>Adjusted</th><th>Status</th><th>Action</th></tr></thead>
             <tbody>
             <?php if ($recentOffsets === []): ?>
-                <tr><td colspan="9" class="empty-cell">No automatic linked settlement has been recorded yet.</td></tr>
+                <tr><td colspan="9" class="empty-cell">No linked settlement has been recorded yet.</td></tr>
             <?php else: ?>
                 <?php foreach ($recentOffsets as $offset): ?>
                     <?php $isPosted = ($offset['status'] ?? '') === 'posted'; ?>
@@ -156,6 +197,10 @@ $sumAdjusted = static fn (array $rows): float => round(array_reduce(
 </section>
 
 <style>
+    .manual-offset-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .manual-offset-form label { display: grid; gap: 4px; min-width: 0; }
+    .manual-offset-form select, .manual-offset-form input { width: 100%; min-width: 0; }
+    @media (max-width: 650px) { .manual-offset-form { grid-template-columns: 1fr; } }
     .linked-settlement-stats { grid-template-columns: repeat(2, minmax(170px, 250px)); justify-content: start; }
     .linked-settlement-history { padding: 14px 16px; }
     .linked-settlement-history.is-expanded {
