@@ -6,6 +6,7 @@ defined('BASE_PATH') || define('BASE_PATH', dirname(__DIR__));
 
 require_once BASE_PATH . '/app/Helpers/functions.php';
 require_once BASE_PATH . '/app/Core/bootstrap.php';
+require_once BASE_PATH . '/tests/support/CrossBranchSupplierAllocationAudit.php';
 
 $app = (isset($app) && $app instanceof \App\Core\App)
     ? $app
@@ -344,13 +345,23 @@ $activeMoneyBranchMismatches = $fetchAll(
         INNER JOIN supplier_obligations so ON so.id = spa.supplier_obligation_id
         WHERE sp.status <> "void"
           AND sp.branch_id <> so.branch_id
+          AND NOT (sp.payment_scope = "global" AND UPPER(sp.booking_reference) = "GLOBAL")
      ) money_branch_mismatches
      LIMIT 10'
 );
 $check(
-    'Active money and allocations remain within their financial branch',
+    'Active money stays branch-bound unless supplier allocation is explicitly global',
     $activeMoneyBranchMismatches === [],
-    $activeMoneyBranchMismatches === [] ? 'No active cross-branch money allocation found' : json_encode($activeMoneyBranchMismatches, JSON_UNESCAPED_SLASHES)
+    $activeMoneyBranchMismatches === [] ? 'No invalid non-global cross-branch money allocation found' : json_encode($activeMoneyBranchMismatches, JSON_UNESCAPED_SLASHES)
+);
+
+$crossBranchSupplierAllocationBreaks = CrossBranchSupplierAllocationAudit::failures($db);
+$check(
+    'Cross-branch global supplier allocations preserve scope, dimensions and accounting evidence',
+    $crossBranchSupplierAllocationBreaks === [],
+    $crossBranchSupplierAllocationBreaks === []
+        ? 'Every cross-branch global supplier allocation is fully evidenced'
+        : json_encode($crossBranchSupplierAllocationBreaks, JSON_UNESCAPED_SLASHES)
 );
 
 $currentCurrencyJournalBranchMismatches = $fetchAll(
