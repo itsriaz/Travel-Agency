@@ -2821,7 +2821,6 @@ final class ServiceWorkspaceService extends Service
                 ? $customerRepository->linkedPartyOffsetAmountForReceivableItem((int) ($receivable['id'] ?? 0))
                 : 0.0;
             $customerSettledAmount = round(max($allocatedCustomerAmount, $linkedCustomerOffsetAmount, 0.0), 2);
-            $customerOutstandingBeforeSettlement = round(max($currentCustomerDueAmount - $customerSettledAmount, 0.0), 2);
             $customerRefundBasis = $customerSettledAmount;
             $supplierCostBasis = round((float) ($existingService['purchase_cost'] ?? 0), 2);
             $supplierCostBasisBooking = $this->convertSettlementTruthAmountToBookingCurrency(
@@ -2874,13 +2873,6 @@ final class ServiceWorkspaceService extends Service
                 $currentCustomerDueAmount - $expectedSupplierRefundAmount + $customerPenaltyAmount - $agencyFeeRefundAmount,
                 2
             );
-            if ($customerSettledAmount > 0.005 && $customerOutstandingBeforeSettlement > 0.005) {
-                // Cancellation should not re-charge an unpaid short-payment gap after some customer money was already received.
-                $customerFinalChargeAmount = round(
-                    $customerFinalChargeAmount - $customerOutstandingBeforeSettlement,
-                    2
-                );
-            }
             $customerFinalChargeAmount = round(max($customerFinalChargeAmount, 0.0), 2);
             $targetCustomerRefundCredit = round(max($customerSettledAmount - $customerFinalChargeAmount, 0.0), 2);
 

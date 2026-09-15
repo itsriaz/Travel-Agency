@@ -973,11 +973,11 @@ try {
     $serviceWorkspace->settleCancellationFinancials([
         'booking_id' => $lossBookingId,
         'service_id' => $lossServiceId,
-        'settlement_reason' => 'Regression 600 refund settlement',
+        'settlement_reason' => 'Regression 592 refund settlement',
         'settlement_event_date' => $today,
         'customer_penalty_amount' => '53.00',
         'expected_supplier_refund_amount' => '653.00',
-        'settlement_notes' => 'Regression should release 600 customer credit',
+        'settlement_notes' => 'Regression should release 592 customer credit',
     ], $actorUserId, $accessibleBranchIds);
 
     $lossSettledReceivable = $receivableRepository->findReceivableByServiceLine($lossBookingReference, $lossLineReference);
@@ -994,12 +994,12 @@ try {
         }
     }
     $check(
-        'Cancellation refund pass-through does not reduce customer refund by old sale loss',
+        'Cancellation keeps a real short-payment gap in the final customer calculation',
         $lossSettledReceivable !== null
             && $lossLatestCancelEvent !== null
-            && round((float) ($lossSettledReceivable['due_amount'] ?? 0), 2) === 580.00
-            && round((float) ($lossSettledReceivable['allocated_amount'] ?? 0), 2) === 580.00
-            && round((float) ($lossLatestCancelEvent['customer_credit_amount'] ?? 0), 2) === 600.00
+            && round((float) ($lossSettledReceivable['due_amount'] ?? 0), 2) === 588.00
+            && round((float) ($lossSettledReceivable['allocated_amount'] ?? 0), 2) === 588.00
+            && round((float) ($lossLatestCancelEvent['customer_credit_amount'] ?? 0), 2) === 592.00
             && round((float) ($lossLatestCancelEvent['supplier_credit_amount'] ?? 0), 2) === 653.00
             && $lossSupplierReceivable !== null
             && round((float) ($lossSupplierReceivable['supplier_receivable_balance'] ?? 0), 2) === 653.00,
@@ -1015,7 +1015,7 @@ try {
         'service_id' => $lossServiceId,
         'refund_reason' => 'Regression later supplier refund received',
         'refund_event_date' => $today,
-        'customer_refund_amount' => '600.00',
+        'customer_refund_amount' => '592.00',
         'customer_refund_treatment' => 'pay_now',
         'supplier_refund_amount' => '653.00',
         'refund_payment_method' => 'cash',

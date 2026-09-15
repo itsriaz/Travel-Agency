@@ -196,9 +196,9 @@ echo '[PASS] Normal 1188 sale with 1180 received leaves 8 Cr outstanding and no 
 $normalCancellationSource = array_merge($partialPaymentSource, [
     'refund_customer_paid_amount' => 1180.00,
     'refund_customer_penalty_amount' => 53.00,
-    'refund_customer_final_charge_amount' => 580.00,
-    'refund_customer_refund_expected' => 600.00,
-    'refund_customer_refund_posted' => 600.00,
+    'refund_customer_final_charge_amount' => 588.00,
+    'refund_customer_refund_expected' => 592.00,
+    'refund_customer_refund_posted' => 592.00,
     'refund_supplier_penalty_amount' => 535.00,
     'refund_event_count' => 1,
 ]);
@@ -221,7 +221,7 @@ if (abs($normalCancellationDebit - $normalCancellationCredit) > 0.005) {
     fwrite(STDERR, 'Normal short-payment cancellation must close at zero after the refund is paid.' . PHP_EOL);
     exit(1);
 }
-echo '[PASS] Short-payment cancellation reverses 8 outstanding, debits 600 refund due, and closes at zero.' . PHP_EOL;
+echo '[PASS] Short-payment cancellation reverses 8 outstanding, debits 592 refund due, and closes at zero.' . PHP_EOL;
 
 $unpaidRefundSource = array_merge($source, [
     'refund_customer_refund_posted' => 0.00,

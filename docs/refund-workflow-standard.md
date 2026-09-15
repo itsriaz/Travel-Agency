@@ -256,21 +256,22 @@ If customer had advance money already in system:
 
 ## Profit / Loss Handling
 
-Difference between customer paid and supplier cost may create profit or loss.
+An unpaid invoice balance is not an approved sale loss and must not be waived automatically during cancellation.
 
 Example:
 
+- customer invoice = 1188
 - customer paid = 1180
-- supplier paid = 1188
-- initial loss = 8
+- expected supplier refund = 653
 - customer penalty = 53
 
 Result:
 
-- first 8 recovers prior loss
-- remaining 45 becomes net gain from cancellation penalty
+- final customer charge = 1188 - 653 + 53 = 588
+- customer refund credit = 1180 - 588 = 592
+- no extra 8 is added to the refund
 
-This should be reflected in accounting, not guessed manually.
+If the agreed sale price was 1180, the invoice must be recorded as 1180 rather than treating an unpaid balance as a sale loss.
 
 ## Correction Rules
 
@@ -348,4 +349,3 @@ The refund module is considered standard-compliant when:
 6. no refund is blocked when legitimate supplier receivable exists
 7. every correction leaves a full audit trail
 8. UI does not mislead users after settlement is already complete
-
