@@ -313,18 +313,21 @@ final class AccountLedgerService extends Service
             $movementType = (string) ($movement['movement_type'] ?? '');
             $isReturn = $movementType === 'Customer advance returned';
             $isApplication = $movementType === 'Customer advance applied';
+            $isAccountHolderReceipt = $movementType === 'Account-holder payment received';
             $row = $this->movementRow(
                 $movement,
                 (string) ($movement['movement_date'] ?? ''),
                 (string) ($movement['movement_reference'] ?? ''),
-                $isApplication
+                $isAccountHolderReceipt
+                    ? 'Account-holder payment received'
+                    : ($isApplication
                     ? 'Customer advance applied to ' . (string) ($movement['target_booking_reference'] ?? 'invoice')
-                    : ($isReturn ? 'Customer advance returned' : 'Customer advance received'),
+                    : ($isReturn ? 'Customer advance returned' : 'Customer advance received')),
                 (string) ($movement['customer_name'] ?? 'Customer'),
                 $this->amount($movement['debit_amount'] ?? 0),
                 $this->amount($movement['credit_amount'] ?? 0),
-                $isApplication ? 14 : ($isReturn ? 12 : 11),
-                $isApplication ? 'Advance Applied' : ($isReturn ? 'Returned' : 'Received'),
+                $isAccountHolderReceipt ? 10 : ($isApplication ? 14 : ($isReturn ? 12 : 11)),
+                $isAccountHolderReceipt ? 'Received' : ($isApplication ? 'Advance Applied' : ($isReturn ? 'Returned' : 'Received')),
                 $this->movementDetail($movement)
             );
             if ($isApplication) {
@@ -645,7 +648,7 @@ final class AccountLedgerService extends Service
                     break;
             }
             $bookingReference = trim((string) ($row['booking_reference'] ?? ''));
-            if ($bookingReference !== '' && strtoupper($bookingReference) !== 'ADVANCE') {
+            if ($bookingReference !== '' && ! in_array(strtoupper($bookingReference), ['ADVANCE', 'ACCOUNT-HOLDER'], true)) {
                 $positionSummaries[$summaryKey]['invoiceReferences'][$bookingReference] = true;
             }
             unset($row['__row_id']);

@@ -110,6 +110,36 @@ final class CustomerPaymentRepository extends BaseRepository
         return $row !== false ? $row : null;
     }
 
+    public function accountHolderReceipts(int $businessSourceId, int $branchId, string $currency, int $limit = 30): array
+    {
+        if ($businessSourceId <= 0 || $branchId <= 0) {
+            return [];
+        }
+
+        $limit = max(1, min($limit, 100));
+        $statement = $this->db->prepare(
+            'SELECT cr.id, cr.receipt_no, cr.receipt_date, cr.currency, cr.received_amount,
+                    cr.allocated_amount, cr.unallocated_amount, cr.payment_method,
+                    cr.reference_number, cr.remarks, cr.status, cr.treasury_account_id,
+                    cr.void_reason, cr.voided_at, ta.account_name AS treasury_account_name
+             FROM customer_receipts cr
+             LEFT JOIN treasury_accounts ta ON ta.id = cr.treasury_account_id
+             WHERE cr.business_source_id = :business_source_id
+               AND cr.branch_id = :branch_id
+               AND cr.currency = :currency
+               AND cr.receipt_purpose = "account_holder_receipt"
+             ORDER BY cr.receipt_date DESC, cr.id DESC
+             LIMIT ' . $limit
+        );
+        $statement->execute([
+            'business_source_id' => $businessSourceId,
+            'branch_id' => $branchId,
+            'currency' => strtoupper(trim($currency)),
+        ]);
+
+        return $statement->fetchAll() ?: [];
+    }
+
     public function voidReceipt(
         int $receiptId,
         string $voidReason,

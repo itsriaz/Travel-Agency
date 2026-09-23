@@ -143,7 +143,7 @@ final class AccountLedgerRepository extends BaseRepository
         }
         $customerName = trim((string) ($filters['customerName'] ?? ''));
         if ($customerName !== '') {
-            $where[] = 'LOWER(COALESCE(NULLIF(t.full_name, ""), "Customer")) = LOWER(:advance_customer_name)';
+            $where[] = 'LOWER(CASE WHEN movement_rows.movement_type = "Account-holder payment received" THEN bs.name ELSE COALESCE(NULLIF(t.full_name, ""), "Customer") END) = LOWER(:advance_customer_name)';
             $params['advance_customer_name'] = $customerName;
         }
         $reference = trim((string) ($filters['bookingReference'] ?? ''));
@@ -200,10 +200,11 @@ final class AccountLedgerRepository extends BaseRepository
 
         return $this->fetchRows(
             'SELECT movement_rows.*, br.name AS branch_name, COALESCE(bs.name, "Unassigned Account") AS business_source_name,
-                    COALESCE(NULLIF(t.full_name, ""), "Customer") AS customer_name,
+                    CASE WHEN movement_rows.movement_type = "Account-holder payment received" THEN bs.name ELSE COALESCE(NULLIF(t.full_name, ""), "Customer") END AS customer_name,
                     COALESCE(NULLIF(t.mobile, ""), "") AS contact_mobile,
-                    "ADVANCE" AS booking_reference, 0 AS booking_id, movement_rows.lead_traveler_id,
-                    COALESCE(NULLIF(t.full_name, ""), "Customer") AS passenger_name,
+                    CASE WHEN movement_rows.movement_type = "Account-holder payment received" THEN "ACCOUNT-HOLDER" ELSE "ADVANCE" END AS booking_reference,
+                    0 AS booking_id, movement_rows.lead_traveler_id,
+                    CASE WHEN movement_rows.movement_type = "Account-holder payment received" THEN bs.name ELSE COALESCE(NULLIF(t.full_name, ""), "Customer") END AS passenger_name,
                     "N/A" AS pnr, "N/A" AS route
              FROM (
                 SELECT cr.id AS movement_id, cr.branch_id, cr.business_source_id, cr.traveler_id AS lead_traveler_id,
@@ -215,6 +216,16 @@ final class AccountLedgerRepository extends BaseRepository
                 FROM customer_receipts cr
                 LEFT JOIN treasury_accounts ta ON ta.id = cr.treasury_account_id
                 WHERE cr.status <> "void" AND cr.receipt_purpose = "customer_advance" AND cr.business_source_id IS NOT NULL
+                UNION ALL
+                SELECT cr.id AS movement_id, cr.branch_id, cr.business_source_id, NULL AS lead_traveler_id,
+                    cr.receipt_no AS movement_reference, cr.receipt_date AS movement_date, cr.currency,
+                    cr.received_amount AS debit_amount, 0 AS credit_amount, "Account-holder payment received" AS movement_type,
+                    cr.payment_method, COALESCE(NULLIF(ta.account_name, ""), "Treasury") AS treasury_account_name,
+                    COALESCE(NULLIF(cr.reference_number, ""), cr.receipt_no) AS external_reference,
+                    "" AS target_booking_reference
+                FROM customer_receipts cr
+                LEFT JOIN treasury_accounts ta ON ta.id = cr.treasury_account_id
+                WHERE cr.status <> "void" AND cr.receipt_purpose = "account_holder_receipt" AND cr.business_source_id IS NOT NULL
                 UNION ALL
                 ' . $applicationSelect . '
                 UNION ALL

@@ -13,12 +13,14 @@ use App\Repositories\BookingRepository;
 use App\Repositories\BookingServiceRepository;
 use App\Repositories\CounterpartyLinkRepository;
 use App\Repositories\CounterpartyOffsetRepository;
+use App\Repositories\CustomerPaymentRepository;
 use App\Repositories\ExpenseRepository;
 use App\Repositories\MasterDataRepository;
 use App\Repositories\SupplierRepository;
 use App\Repositories\TreasuryRepository;
 use App\Services\AccountingFoundationService;
 use App\Services\AccountingSetupService;
+use App\Services\AccountHolderReceiptService;
 use App\Services\CustomerPaymentFoundationService;
 use App\Services\CounterpartyLinkService;
 use App\Services\CounterpartyOffsetService;
@@ -364,6 +366,8 @@ final class ControlController extends BaseController
         $manualPosition = null;
         $manualAccounts = [];
         $manualPayables = [];
+        $accountHolderReceiptAccounts = [];
+        $accountHolderReceipts = [];
         foreach ($positions as $position) {
             if ((int) $position['link_id'] === (int) ($_GET['link_id'] ?? 0)
                 && (int) $position['branch_id'] === (int) ($_GET['branch_id'] ?? 0)
@@ -372,6 +376,17 @@ final class ControlController extends BaseController
                 $manualPosition = $position;
                 $manualAccounts = $repository->openAccountPositions((int) $position['business_source_id'], (int) $position['branch_id'], (string) $position['currency']);
                 $manualPayables = $repository->openPayables((int) $position['supplier_id'], (int) $position['branch_id'], (string) $position['currency']);
+                $accountHolderReceiptAccounts = array_values(array_filter(
+                    (new TreasuryRepository($this->app))->accounts([(int) $position['branch_id']]),
+                    static fn (array $account): bool => (int) ($account['is_active'] ?? 0) === 1
+                        && strtoupper((string) ($account['currency'] ?? '')) === strtoupper((string) $position['currency'])
+                        && in_array((string) ($account['account_type'] ?? ''), ['cash', 'bank'], true)
+                ));
+                $accountHolderReceipts = (new CustomerPaymentRepository($this->app))->accountHolderReceipts(
+                    (int) $position['business_source_id'],
+                    (int) $position['branch_id'],
+                    (string) $position['currency']
+                );
                 break;
             }
         }
@@ -396,6 +411,8 @@ final class ControlController extends BaseController
             'manualPosition' => $manualPosition,
             'manualAccounts' => $manualAccounts,
             'manualPayables' => $manualPayables,
+            'accountHolderReceiptAccounts' => $accountHolderReceiptAccounts,
+            'accountHolderReceipts' => $accountHolderReceipts,
             'recentOffsets' => $repository->recent($branchIds),
             'selectedOffset' => $selectedOffset,
             'selectedAccountAllocations' => $selectedAccountAllocations,
@@ -419,6 +436,43 @@ final class ControlController extends BaseController
         $this->redirect('/linked-party-settlements');
     }
 
+    public function saveAccountHolderReceipt(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+        try {
+            $receipt = (new AccountHolderReceiptService($this->app))->record(
+                $_POST,
+                (int) Auth::id(),
+                Authorization::accessibleBranchIds()
+            );
+            Flash::success(
+                (string) ($receipt['receipt_no'] ?? 'Receipt')
+                . ' recorded as unallocated account-holder money. No ticket was adjusted.'
+            );
+        } catch (RuntimeException $exception) {
+            Flash::error($exception->getMessage());
+        }
+
+        $this->redirectToLinkedPartyPosition($_POST);
+    }
+
+    public function voidAccountHolderReceipt(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+        try {
+            (new AccountHolderReceiptService($this->app))->void(
+                $_POST,
+                (int) Auth::id(),
+                Authorization::accessibleBranchIds()
+            );
+            Flash::success('Account-holder receipt voided and its accounting entry reversed.');
+        } catch (RuntimeException $exception) {
+            Flash::error($exception->getMessage());
+        }
+
+        $this->redirectToLinkedPartyPosition($_POST);
+    }
+
     public function voidLinkedPartySettlement(): never
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);
@@ -434,6 +488,16 @@ final class ControlController extends BaseController
             Flash::error($exception->getMessage());
         }
         $this->redirect('/linked-party-settlements');
+    }
+
+    private function redirectToLinkedPartyPosition(array $input): never
+    {
+        $query = http_build_query([
+            'link_id' => max(0, (int) ($input['link_id'] ?? 0)),
+            'branch_id' => max(0, (int) ($input['branch_id'] ?? 0)),
+            'currency' => strtoupper(trim((string) ($input['currency'] ?? ''))),
+        ]);
+        $this->redirect('/linked-party-settlements?' . $query);
     }
 
     public function unlinkAccountSupplierLink(): never

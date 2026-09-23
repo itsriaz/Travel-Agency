@@ -20,7 +20,7 @@ final class LinkedPartyLedgerService extends Service
             if ((bool) ($row['is_financial_position_only'] ?? false)) {
                 $debit = $sourceDebit;
                 $credit = $sourceCredit;
-            } elseif (in_array($entry, ['Customer payment received', 'Customer advance received'], true)) {
+            } elseif (in_array($entry, ['Customer payment received', 'Customer advance received', 'Account-holder payment received'], true)) {
                 $credit = $sourceDebit;
             } elseif (in_array($entry, ['Customer refund paid', 'Customer advance returned'], true)) {
                 $debit = $sourceCredit;

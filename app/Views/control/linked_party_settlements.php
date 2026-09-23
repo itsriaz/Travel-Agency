@@ -3,6 +3,8 @@ $recentOffsets = is_array($recentOffsets ?? null) ? $recentOffsets : [];
 $selectedOffset = is_array($selectedOffset ?? null) ? $selectedOffset : null;
 $selectedAccountAllocations = is_array($selectedAccountAllocations ?? null) ? $selectedAccountAllocations : [];
 $selectedPayableAllocations = is_array($selectedPayableAllocations ?? null) ? $selectedPayableAllocations : [];
+$accountHolderReceiptAccounts = is_array($accountHolderReceiptAccounts ?? null) ? $accountHolderReceiptAccounts : [];
+$accountHolderReceipts = is_array($accountHolderReceipts ?? null) ? $accountHolderReceipts : [];
 $money = static fn (mixed $value): string => number_format((float) $value, 2);
 $postedCount = count(array_filter($recentOffsets, static fn (array $row): bool => ($row['status'] ?? '') === 'posted'));
 $voidCount = count($recentOffsets) - $postedCount;
@@ -45,6 +47,76 @@ $sumAdjusted = static fn (array $rows): float => round(array_reduce(
     </table></div>
 </section>
 <?php if (! empty($manualPosition)): ?>
+<section class="panel compact-panel account-holder-receipt-panel">
+    <div class="panel-header">
+        <div>
+            <h2>Receive Account-Holder Payment</h2>
+            <p class="panel-meta">Record cash or bank money from <?= e($manualPosition['business_source_name']) ?> without selecting or settling any ticket. The full amount remains unallocated; ticket-level allocation, if later required, is a separate action.</p>
+        </div>
+    </div>
+    <form method="post" action="<?= e(url('/linked-party-settlements/receipts/save')) ?>" class="account-holder-receipt-form" id="account-holder-receipt-form">
+        <?= \App\Helpers\Csrf::input() ?>
+        <input type="hidden" name="link_id" value="<?= e((string) $manualPosition['link_id']) ?>">
+        <input type="hidden" name="branch_id" value="<?= e((string) $manualPosition['branch_id']) ?>">
+        <input type="hidden" name="currency" value="<?= e((string) $manualPosition['currency']) ?>">
+        <label>Amount (<?= e((string) $manualPosition['currency']) ?>)<input type="number" name="amount" min="0.01" step="0.01" required></label>
+        <label>Date<input type="date" name="receipt_date" value="<?= e(date('Y-m-d')) ?>" required></label>
+        <label>Method<select name="payment_method" id="account-holder-payment-method" required><option value="cash">Cash</option><option value="bank_transfer">Bank Transfer</option></select></label>
+        <label>Cash / Bank Account<select name="treasury_account_id" id="account-holder-treasury-account" required>
+            <option value="">Select account</option>
+            <?php foreach ($accountHolderReceiptAccounts as $account): ?>
+                <option value="<?= e((string) ($account['id'] ?? '')) ?>" data-account-type="<?= e((string) ($account['account_type'] ?? '')) ?>">
+                    <?= e((string) ($account['account_name'] ?? 'Account') . ' - ' . ucfirst((string) ($account['account_type'] ?? '')) . ' (' . (string) ($account['currency'] ?? '') . ')') ?>
+                </option>
+            <?php endforeach; ?>
+        </select></label>
+        <label>Reference<input name="reference_number" maxlength="100"></label>
+        <label>Remarks<input name="remarks" maxlength="4000"></label>
+        <button class="btn btn-primary" type="submit" <?= $accountHolderReceiptAccounts === [] ? 'disabled' : '' ?>>Record Unallocated Receipt</button>
+    </form>
+    <?php if ($accountHolderReceiptAccounts === []): ?><p class="panel-meta form-warning">No active <?= e((string) $manualPosition['currency']) ?> cash or bank account is configured for this branch.</p><?php endif; ?>
+
+    <div class="dense-table-wrap account-holder-receipt-history"><table class="dense-table">
+        <thead><tr><th>Date</th><th>Receipt</th><th>Method</th><th>Cash / Bank</th><th>Amount</th><th>Unallocated</th><th>Status</th><th>Action</th></tr></thead>
+        <tbody>
+        <?php if ($accountHolderReceipts === []): ?>
+            <tr><td colspan="8" class="empty-cell">No account-holder cash or bank receipt has been recorded for this branch and currency.</td></tr>
+        <?php else: ?>
+            <?php foreach ($accountHolderReceipts as $receipt): ?>
+                <?php $receiptIsActive = (string) ($receipt['status'] ?? '') !== 'void'; ?>
+                <tr>
+                    <td><?= e((string) ($receipt['receipt_date'] ?? '')) ?></td>
+                    <td><strong><?= e((string) ($receipt['receipt_no'] ?? '')) ?></strong><?php if ((string) ($receipt['reference_number'] ?? '') !== ''): ?><br><small><?= e((string) $receipt['reference_number']) ?></small><?php endif; ?></td>
+                    <td><?= e(ucwords(str_replace('_', ' ', (string) ($receipt['payment_method'] ?? '')))) ?></td>
+                    <td><?= e((string) ($receipt['treasury_account_name'] ?? '')) ?></td>
+                    <td><?= e($money($receipt['received_amount'] ?? 0)) ?></td>
+                    <td><?= e($money($receipt['unallocated_amount'] ?? 0)) ?></td>
+                    <td><span class="admin-record-tag <?= $receiptIsActive ? 'is-custom' : 'is-system' ?>"><?= e($receiptIsActive ? 'Received' : 'Voided') ?></span></td>
+                    <td>
+                        <?php if ($receiptIsActive): ?>
+                            <details class="linked-settlement-reverse">
+                                <summary class="btn btn-sm btn-danger">Void</summary>
+                                <form method="post" action="<?= e(url('/linked-party-settlements/receipts/void')) ?>">
+                                    <?= \App\Helpers\Csrf::input() ?>
+                                    <input type="hidden" name="link_id" value="<?= e((string) $manualPosition['link_id']) ?>">
+                                    <input type="hidden" name="branch_id" value="<?= e((string) $manualPosition['branch_id']) ?>">
+                                    <input type="hidden" name="currency" value="<?= e((string) $manualPosition['currency']) ?>">
+                                    <input type="hidden" name="customer_receipt_id" value="<?= e((string) ($receipt['id'] ?? 0)) ?>">
+                                    <input type="text" name="void_reason" minlength="5" maxlength="1000" required placeholder="Reason for void">
+                                    <button class="btn btn-sm btn-danger" type="submit">Confirm</button>
+                                </form>
+                            </details>
+                        <?php else: ?>
+                            <small><?= e((string) ($receipt['void_reason'] ?? 'Voided')) ?></small>
+                        <?php endif; ?>
+                    </td>
+                </tr>
+            <?php endforeach; ?>
+        <?php endif; ?>
+        </tbody>
+    </table></div>
+</section>
+
 <section class="panel compact-panel">
     <div class="panel-header"><h2>Manual Adjustment: <?= e($manualPosition['business_source_name']) ?> / <?= e($manualPosition['currency']) ?></h2></div>
     <form method="post" action="<?= e(url('/linked-party-settlements/save')) ?>" class="manual-offset-form">
@@ -197,10 +269,17 @@ $sumAdjusted = static fn (array $rows): float => round(array_reduce(
 </section>
 
 <style>
+    .account-holder-receipt-panel { border-left: 5px solid #138a72; }
+    .account-holder-receipt-form { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; align-items: end; }
+    .account-holder-receipt-form label { display: grid; gap: 4px; min-width: 0; }
+    .account-holder-receipt-form select, .account-holder-receipt-form input { width: 100%; min-width: 0; }
+    .account-holder-receipt-history { margin-top: 14px; }
+    .form-warning { color: #9b4d12; font-weight: 700; }
     .manual-offset-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
     .manual-offset-form label { display: grid; gap: 4px; min-width: 0; }
     .manual-offset-form select, .manual-offset-form input { width: 100%; min-width: 0; }
-    @media (max-width: 650px) { .manual-offset-form { grid-template-columns: 1fr; } }
+    @media (max-width: 850px) { .account-holder-receipt-form { grid-template-columns: 1fr 1fr; } }
+    @media (max-width: 650px) { .manual-offset-form, .account-holder-receipt-form { grid-template-columns: 1fr; } }
     .linked-settlement-stats { grid-template-columns: repeat(2, minmax(170px, 250px)); justify-content: start; }
     .linked-settlement-history { padding: 14px 16px; }
     .linked-settlement-history.is-expanded {
@@ -285,6 +364,30 @@ $sumAdjusted = static fn (array $rows): float => round(array_reduce(
 
 <script>
 (() => {
+    const paymentMethod = document.getElementById('account-holder-payment-method');
+    const treasuryAccount = document.getElementById('account-holder-treasury-account');
+    const filterTreasuryAccounts = () => {
+        if (!paymentMethod || !treasuryAccount) {
+            return;
+        }
+        const requiredType = paymentMethod.value === 'bank_transfer' ? 'bank' : 'cash';
+        let selectedStillVisible = false;
+        Array.from(treasuryAccount.options).forEach((option) => {
+            if (option.value === '') {
+                return;
+            }
+            const visible = option.dataset.accountType === requiredType;
+            option.hidden = !visible;
+            option.disabled = !visible;
+            selectedStillVisible = selectedStillVisible || (visible && option.selected);
+        });
+        if (!selectedStillVisible) {
+            treasuryAccount.value = '';
+        }
+    };
+    paymentMethod?.addEventListener('change', filterTreasuryAccounts);
+    filterTreasuryAccounts();
+
     const panel = document.querySelector('.linked-settlement-history');
     const openButton = document.getElementById('linked-settlement-expand-button');
     const closeButton = document.getElementById('linked-settlement-close-button');
