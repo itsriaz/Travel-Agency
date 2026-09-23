@@ -29,17 +29,32 @@ $sumAdjusted = static fn (array $rows): float => round(array_reduce(
 </section>
 
 <section class="panel compact-panel">
-    <div class="panel-header"><h2>Separate Balances</h2></div>
-    <p class="panel-meta">Account-holder recovery balances and supplier payables remain separate until you select invoices and confirm an adjustment. No adjustment marks a passenger invoice paid or moves cash or bank money.</p>
+    <div class="panel-header"><h2>Linked Party Balance Reconciliation</h2></div>
+    <p class="panel-meta">Review open account-holder receivables and supplier payables by branch and currency. Invoice matching is available only when both sides have an open balance; it does not mark a passenger invoice paid or move cash or bank money.</p>
     <div class="dense-table-wrap"><table class="dense-table">
-        <thead><tr><th>Account Holder</th><th>Supplier</th><th>Branch</th><th>Currency</th><th>Account Recovery Available</th><th>Supplier Payable</th><th>Action</th></tr></thead>
+        <thead><tr><th>Account Holder</th><th>Supplier</th><th>Branch</th><th>Currency</th><th>Account Receivable</th><th>Supplier Payable</th><th>Action</th></tr></thead>
         <tbody>
         <?php foreach (($positions ?? []) as $position): ?>
+            <?php
+            $receivable = round((float) ($position['receivable'] ?? 0), 2);
+            $payable = round((float) ($position['payable'] ?? 0), 2);
+            $canMatchInvoices = (float) ($position['available_offset'] ?? 0) > 0.005;
+            ?>
             <tr>
                 <td><?= e($position['business_source_name']) ?></td><td><?= e($position['supplier_name']) ?></td>
                 <td><?= e($position['branch_name']) ?></td><td><?= e($position['currency']) ?></td>
-                <td><?= e($money($position['receivable'])) ?></td><td><?= e($money($position['payable'])) ?></td>
-                <td><?php if ((float) $position['available_offset'] > 0): ?><a class="btn btn-sm" href="<?= e(url('/linked-party-settlements?' . http_build_query(['link_id' => $position['link_id'], 'branch_id' => $position['branch_id'], 'currency' => $position['currency']]))) ?>">Select Invoices</a><?php endif; ?></td>
+                <td><?= e($money($receivable)) ?></td><td><?= e($money($payable)) ?></td>
+                <td>
+                    <?php if ($canMatchInvoices): ?>
+                        <a class="btn btn-sm" href="<?= e(url('/linked-party-settlements?' . http_build_query(['link_id' => $position['link_id'], 'branch_id' => $position['branch_id'], 'currency' => $position['currency']]))) ?>">Match Invoices</a>
+                    <?php elseif ($receivable <= 0.005 && $payable > 0.005): ?>
+                        <span class="panel-meta">No account receivable</span>
+                    <?php elseif ($payable <= 0.005 && $receivable > 0.005): ?>
+                        <span class="panel-meta">No supplier payable</span>
+                    <?php else: ?>
+                        <span class="panel-meta">No balance to match</span>
+                    <?php endif; ?>
+                </td>
             </tr>
         <?php endforeach; ?>
         <?php if (empty($positions)): ?><tr><td colspan="7">No linked balances available.</td></tr><?php endif; ?>

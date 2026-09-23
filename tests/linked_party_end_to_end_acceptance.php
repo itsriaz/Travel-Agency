@@ -550,6 +550,52 @@ foreach ($protectedTables as $table) {
     );
 }
 
+$positions = [[
+    'link_id' => 1,
+    'branch_id' => $branchId,
+    'business_source_name' => 'Matchable Account',
+    'supplier_name' => 'Matchable Supplier',
+    'branch_name' => 'QA Branch',
+    'currency' => 'PKR',
+    'receivable' => 1000,
+    'payable' => 700,
+    'available_offset' => 700,
+], [
+    'link_id' => 2,
+    'branch_id' => $branchId,
+    'business_source_name' => 'Payable Only Account',
+    'supplier_name' => 'Payable Only Supplier',
+    'branch_name' => 'QA Branch',
+    'currency' => 'AED',
+    'receivable' => 0,
+    'payable' => 6086,
+    'available_offset' => 0,
+], [
+    'link_id' => 3,
+    'branch_id' => $branchId,
+    'business_source_name' => 'Receivable Only Account',
+    'supplier_name' => 'Receivable Only Supplier',
+    'branch_name' => 'QA Branch',
+    'currency' => 'USD',
+    'receivable' => 500,
+    'payable' => 0,
+    'available_offset' => 0,
+]];
+$manualPosition = [];
+$recentOffsets = [];
+ob_start();
+require BASE_PATH . '/app/Views/control/linked_party_settlements.php';
+$reconciliationView = (string) ob_get_clean();
+$check('Linked balance table uses professional reconciliation terminology',
+    str_contains($reconciliationView, 'Linked Party Balance Reconciliation')
+    && str_contains($reconciliationView, 'Account Receivable')
+    && ! str_contains($reconciliationView, 'Separate Balances')
+    && ! str_contains($reconciliationView, 'Account Recovery Available'));
+$check('Linked balance actions explain every matchable and unmatched state',
+    substr_count($reconciliationView, 'Match Invoices') === 1
+    && str_contains($reconciliationView, 'No account receivable')
+    && str_contains($reconciliationView, 'No supplier payable'));
+
 if ($failures !== []) {
     fwrite(STDERR, 'Acceptance scenario failed: ' . implode(', ', $failures) . PHP_EOL);
     exit(1);
