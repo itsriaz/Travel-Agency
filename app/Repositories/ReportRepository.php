@@ -1519,16 +1519,30 @@ final class ReportRepository extends BaseRepository
 
         $customerRows = $this->fetchRows(
             'SELECT
-                "customer_receipt" AS source_key,
-                "Customer Receipt Credit" AS source_type,
+                CASE
+                    WHEN cr.receipt_purpose = "account_holder_receipt" THEN "account_holder_receipt"
+                    ELSE "customer_receipt"
+                END AS source_key,
+                CASE
+                    WHEN cr.receipt_purpose = "account_holder_receipt" THEN "Account-Holder Payment on Account"
+                    ELSE "Customer Receipt Credit"
+                END AS source_type,
                 cr.id AS entity_id,
                 COALESCE(b.id, 0) AS booking_id,
                 cr.branch_id,
                 br.name AS branch_name,
-                cr.booking_reference,
+                CASE
+                    WHEN cr.receipt_purpose = "account_holder_receipt" THEN ""
+                    ELSE cr.booking_reference
+                END AS booking_reference,
                 cr.receipt_no AS document_no,
                 cr.receipt_date AS document_date,
-                COALESCE(bp.lead_traveler_name, cr.booking_reference, "Customer") AS counterparty_name,
+                CASE
+                    WHEN cr.receipt_purpose = "account_holder_receipt" THEN COALESCE(bs.name, "Account Holder")
+                    ELSE COALESCE(bp.lead_traveler_name, cr.booking_reference, "Customer")
+                END AS counterparty_name,
+                cr.receipt_purpose,
+                COALESCE(cpl.id, 0) AS linked_party_id,
                 cr.currency,
                 cr.received_amount AS original_amount,
                 cr.allocated_amount AS allocated_amount,
@@ -1540,6 +1554,8 @@ final class ReportRepository extends BaseRepository
              FROM customer_receipts cr
              LEFT JOIN bookings b ON b.booking_reference = cr.booking_reference
              LEFT JOIN booking_parties bp ON bp.booking_id = b.id
+             LEFT JOIN business_sources bs ON bs.id = cr.business_source_id
+             LEFT JOIN business_source_supplier_links cpl ON cpl.business_source_id = cr.business_source_id
              INNER JOIN branches br ON br.id = cr.branch_id
              WHERE cr.branch_id ' . $clause . '
                AND cr.status <> "void"

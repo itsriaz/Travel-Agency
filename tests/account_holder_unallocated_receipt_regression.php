@@ -163,6 +163,30 @@ try {
     $check('Synthetic account-holder receipt does not increase invoice count',
         array_sum(array_map(static fn (array $row): int => (int) ($row['invoice_count'] ?? 0), (array) ($accountReport['summaryRows'] ?? []))) === 0);
 
+    $unallocatedReport = (new \App\Services\ReportService($app))->reportState([
+        'report' => 'unallocated_money',
+        'branch_id' => $branchId,
+        'currency' => 'PKR',
+    ], [$branchId], $actorId);
+    $onAccountRows = array_values(array_filter(
+        (array) ($unallocatedReport['rows'] ?? []),
+        static fn (array $row): bool => (string) ($row['document_no'] ?? '') === (string) $result['receipt_no']
+    ));
+    $onAccountRow = $onAccountRows[0] ?? [];
+    $columnLabels = array_column((array) ($unallocatedReport['columns'] ?? []), 'label', 'key');
+    $summaryLabels = array_column((array) ($unallocatedReport['summaryCards'] ?? []), 'label');
+    $check('Open-money report identifies the PKR 300 as received on account, not a ticket allocation',
+        count($onAccountRows) === 1
+        && (string) ($onAccountRow['source_type'] ?? '') === 'Account-Holder Payment on Account'
+        && (string) ($onAccountRow['counterparty_name'] ?? '') === 'QA Receipt Account ' . $suffix
+        && (string) ($onAccountRow['booking_reference'] ?? '') === '-'
+        && (string) ($onAccountRow['allocated_amount'] ?? '') === '0'
+        && (string) ($onAccountRow['unallocated_amount'] ?? '') === '300'
+        && (string) ($onAccountRow['status'] ?? '') === 'Received On Account'
+        && str_contains((string) ($onAccountRow['document_no_href'] ?? ''), '/linked-party-settlements?')
+        && ($columnLabels['unallocated_amount'] ?? '') === 'Open / Available'
+        && in_array('Account-Holder On Account / PKR', $summaryLabels, true));
+
     $positions = [];
     $manualPosition = [
         'link_id' => $linkId,

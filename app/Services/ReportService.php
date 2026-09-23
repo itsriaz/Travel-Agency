@@ -497,7 +497,7 @@ final class ReportService extends Service
                     ['key' => 'currency', 'label' => 'Currency'],
                     ['key' => 'original_amount', 'label' => 'Original Amount'],
                     ['key' => 'allocated_amount', 'label' => 'Allocated / Used'],
-                    ['key' => 'unallocated_amount', 'label' => 'Unallocated'],
+                    ['key' => 'unallocated_amount', 'label' => 'Open / Available'],
                     ['key' => 'age_days', 'label' => 'Age Days'],
                     ['key' => 'status', 'label' => 'Status'],
                     ['key' => 'reference_number', 'label' => 'Reference'],
@@ -2945,6 +2945,7 @@ final class ReportService extends Service
     {
         $openTotals = [];
         $customerTotals = [];
+        $accountHolderTotals = [];
         $supplierTotals = [];
         $reportRows = [];
 
@@ -2953,11 +2954,18 @@ final class ReportService extends Service
             $sourceKey = (string) ($row['source_key'] ?? '');
             $bookingId = (int) ($row['booking_id'] ?? 0);
             $entityId = (int) ($row['entity_id'] ?? 0);
+            $linkedPartyId = (int) ($row['linked_party_id'] ?? 0);
             $unallocated = (float) ($row['unallocated_amount'] ?? 0);
             $documentNo = (string) ($row['document_no'] ?? '');
 
             $documentHref = '';
-            if ($sourceKey === 'customer_receipt' && $bookingId > 0 && $entityId > 0) {
+            if ($sourceKey === 'account_holder_receipt' && $linkedPartyId > 0) {
+                $documentHref = url('/linked-party-settlements?' . http_build_query([
+                    'link_id' => $linkedPartyId,
+                    'branch_id' => (int) ($row['branch_id'] ?? 0),
+                    'currency' => $currency,
+                ]));
+            } elseif ($sourceKey === 'customer_receipt' && $bookingId > 0 && $entityId > 0) {
                 $documentHref = url('/workspace/output?booking_id=' . $bookingId . '&doc=customer_receipt&receipt_id=' . $entityId);
             } elseif ($sourceKey === 'supplier_payment' && $bookingId > 0 && $entityId > 0) {
                 $documentHref = url('/workspace/output?booking_id=' . $bookingId . '&doc=supplier_voucher&supplier_payment_id=' . $entityId);
@@ -2984,13 +2992,17 @@ final class ReportService extends Service
                 'allocated_amount' => $this->money((float) ($row['allocated_amount'] ?? 0)),
                 'unallocated_amount' => $this->money($unallocated),
                 'age_days' => (string) max(0, (int) ($row['age_days'] ?? 0)),
-                'status' => ucwords(str_replace('_', ' ', (string) ($row['status'] ?? 'open'))),
+                'status' => $sourceKey === 'account_holder_receipt'
+                    ? 'Received On Account'
+                    : ucwords(str_replace('_', ' ', (string) ($row['status'] ?? 'open'))),
                 'reference_number' => (string) (($row['reference_number'] ?? '') !== '' ? $row['reference_number'] : 'N/A'),
                 'remarks' => (string) (($row['remarks'] ?? '') !== '' ? $row['remarks'] : ''),
             ];
 
             $openTotals[$currency] = ($openTotals[$currency] ?? 0.0) + $unallocated;
-            if ($sourceKey === 'customer_receipt') {
+            if ($sourceKey === 'account_holder_receipt') {
+                $accountHolderTotals[$currency] = ($accountHolderTotals[$currency] ?? 0.0) + $unallocated;
+            } elseif ($sourceKey === 'customer_receipt') {
                 $customerTotals[$currency] = ($customerTotals[$currency] ?? 0.0) + $unallocated;
             } else {
                 $supplierTotals[$currency] = ($supplierTotals[$currency] ?? 0.0) + $unallocated;
@@ -2998,8 +3010,9 @@ final class ReportService extends Service
         }
 
         return [$reportRows, array_merge(
-            $this->currencySummaryCards('Total Unallocated', $openTotals),
+            $this->currencySummaryCards('Total Open / Available', $openTotals),
             $this->currencySummaryCards('Customer Credit', $customerTotals),
+            $this->currencySummaryCards('Account-Holder On Account', $accountHolderTotals),
             $this->currencySummaryCards('Supplier Open Money', $supplierTotals)
         )];
     }
