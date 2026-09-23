@@ -156,6 +156,9 @@ try {
         $check(ucfirst($side) . ' history uses saved audit invoice IDs after full release', count($filteredHistory) === 5);
         $check(ucfirst($side) . ' history excludes unrelated bookings', $historyRepository->reversed([$branchId], $historyFilters + ['bookingReference' => 'QA-UNRELATED'], $side) === []);
     }
+    $check('Standalone history booking filter finds either account or supplier invoice',
+        count($historyRepository->reversed([$branchId], $historyFilters + ['bookingReference' => $saleBooking], 'both')) === 5
+        && count($historyRepository->reversed([$branchId], $historyFilters + ['bookingReference' => $buyBooking], 'both')) === 5);
     $check('History fails closed for empty and inaccessible branch scopes',
         $historyRepository->reversed([], $historyFilters, 'account') === []
         && $historyRepository->reversed([PHP_INT_MAX], $historyFilters, 'supplier') === []);
@@ -184,13 +187,24 @@ try {
     $check('Reversal history never enters account ledger balances or summary calculations', $accountAfterHistory === $accountReport);
     $supplierAfterHistory = (new \App\Repositories\ReportRepository($app))->supplierLedger([$branchId], null, null, 'PKR', '', $supplierId, 0, $buyBooking);
     $check('Reversal history never reactivates voided supplier allocations', count(array_filter($supplierAfterHistory, static fn (array $row): bool => ($row['entry_type'] ?? '') === 'Linked Account Balance Adjustment')) === 1);
-    $linkedSettlementHistory = $formattedHistory;
-    $linkedSettlementHistory['rows'][0]['detail'] = '<script>alert("test")</script>';
+    $historyState = (new \App\Services\ReportService($app))->reportState([
+        'report' => 'reversed_linked_adjustments',
+        'branch_id' => $branchId,
+        'business_source_id' => $businessSourceId,
+        'supplier_id' => $supplierId,
+    ], [$branchId], $actorId, 'screen');
+    $historyState['rows'][0]['detail'] = '<script>alert("test")</script>';
     ob_start();
-    require BASE_PATH . '/app/Views/reports/partials/linked_settlement_history.php';
+    (static function (array $state): void {
+        extract($state);
+        require BASE_PATH . '/app/Views/reports/index.php';
+    })($historyState);
     $historyHtml = (string) ob_get_clean();
-    $check('History view renders both entries and escapes stored text', str_contains($historyHtml, 'Original adjustment (now void)')
-        && str_contains($historyHtml, 'Void / reversal') && ! str_contains($historyHtml, '<script>') && str_contains($historyHtml, '&lt;script&gt;'));
+    $historyEscaped = str_contains($historyHtml, 'Original adjustment (now void)')
+        && str_contains($historyHtml, 'Void / reversal')
+        && ! str_contains($historyHtml, '<script>alert("test")</script>')
+        && str_contains($historyHtml, '&lt;script&gt;alert(&quot;test&quot;)&lt;/script&gt;');
+    $check('Dedicated history report renders both entries and escapes stored text', $historyEscaped);
 } finally {
     if ($db->inTransaction()) $db->rollBack();
 }

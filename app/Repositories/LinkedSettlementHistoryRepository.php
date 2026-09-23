@@ -15,7 +15,7 @@ final class LinkedSettlementHistoryRepository extends BaseRepository
         if ($branchIds === [] || ! $this->tableExists('counterparty_offsets')) {
             return [];
         }
-        if (! in_array($side, ['account', 'supplier'], true)) {
+        if (! in_array($side, ['account', 'supplier', 'both'], true)) {
             throw new \InvalidArgumentException('Invalid linked settlement history side.');
         }
 
@@ -52,7 +52,9 @@ final class LinkedSettlementHistoryRepository extends BaseRepository
         $customer = trim((string) ($filters['customerName'] ?? ''));
         $airline = trim((string) ($filters['airline'] ?? ''));
         if ($reference !== '' || $customer !== '' || $airline !== '') {
-            $associations = $this->bookingAssociations($side);
+            $associations = $side === 'both'
+                ? $this->bookingAssociations('account') . ' UNION ' . $this->bookingAssociations('supplier')
+                : $this->bookingAssociations($side);
             $bookingWhere = ['related.offset_id = o.id', 'b.branch_id = o.branch_id'];
             if ($reference !== '') {
                 $bookingWhere[] = 'b.booking_reference LIKE :booking_reference';
@@ -80,7 +82,8 @@ final class LinkedSettlementHistoryRepository extends BaseRepository
 
         $statement = $this->db->prepare(
             'SELECT o.id, o.offset_no, o.offset_date, o.amount AS remaining_at_void, o.currency,
-                    o.branch_id, br.name AS branch_name, src.name AS account_name, s.name AS supplier_name,
+                    o.branch_id, o.business_source_id, o.supplier_id,
+                    br.name AS branch_name, src.name AS account_name, s.name AS supplier_name,
                     o.journal_entry_id, o.reversal_journal_entry_id,
                     DATE(COALESCE(r.entry_date, o.voided_at)) AS void_date, o.void_reason,
                     (SELECT SUM(l.debit_amount - l.credit_amount)

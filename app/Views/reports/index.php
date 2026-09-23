@@ -39,12 +39,12 @@ $supplierOptions = is_array($supplierOptions ?? null) ? $supplierOptions : [];
 $selectedReport = (string) ($selectedReport ?? 'receivable_aging');
 $showTraceColumn = (bool) ($showTraceColumn ?? false);
 $customerLedgerReports = ['customer_outstanding', 'customer_ledger', 'customer_detail_ledger'];
-$accountFilteredReports = array_merge($customerLedgerReports, ['customer_advance_ledger', 'actual_money_voucher_ledger', 'booking_voucher_ledger', 'financial_correction_register', 'receivable_aging', 'payable_aging', 'supplier_ledger', 'supplier_outstanding', 'supplier_receivable', 'payable_refunds', 'service_profit', 'loss_report', 'salary_report', 'reminder_hub']);
-$supplierFilteredReports = ['prepaid_supplier_ledger', 'supplier_postpaid_payments', 'supplier_prepaid_payments', 'supplier_all_payments', 'supplier_outstanding', 'supplier_receivable', 'payable_refunds', 'payable_aging', 'supplier_ledger', 'actual_money_voucher_ledger', 'booking_voucher_ledger', 'service_profit', 'loss_report'];
+$accountFilteredReports = array_merge($customerLedgerReports, ['customer_advance_ledger', 'actual_money_voucher_ledger', 'booking_voucher_ledger', 'financial_correction_register', 'reversed_linked_adjustments', 'receivable_aging', 'payable_aging', 'supplier_ledger', 'supplier_outstanding', 'supplier_receivable', 'payable_refunds', 'service_profit', 'loss_report', 'salary_report', 'reminder_hub']);
+$supplierFilteredReports = ['prepaid_supplier_ledger', 'supplier_postpaid_payments', 'supplier_prepaid_payments', 'supplier_all_payments', 'supplier_outstanding', 'supplier_receivable', 'payable_refunds', 'payable_aging', 'supplier_ledger', 'reversed_linked_adjustments', 'actual_money_voucher_ledger', 'booking_voucher_ledger', 'service_profit', 'loss_report'];
 $debitCreditFilteredReports = ['money_in_out_ledger', 'cash_bank_ledger', 'customer_outstanding', 'customer_ledger', 'customer_detail_ledger', 'supplier_ledger', 'booking_voucher_ledger', 'actual_money_voucher_ledger'];
 $customerFilteredReports = ['customer_outstanding', 'receivable_aging', 'customer_ledger', 'customer_detail_ledger', 'customer_advance_ledger', 'actual_money_voucher_ledger', 'booking_voucher_ledger', 'loss_report', 'reminder_hub'];
-$wideViewReports = array_merge($customerLedgerReports, ['customer_advance_ledger', 'actual_money_voucher_ledger', 'booking_voucher_ledger', 'receivable_aging', 'airline_payable_report', 'supplier_receivable', 'payable_refunds', 'supplier_ledger', 'supplier_prepaid_payments', 'prepaid_supplier_ledger', 'financial_correction_register', 'expense_register', 'salary_report', 'money_in_out_ledger', 'internal_treasury_transfer', 'cash_bank_ledger', 'issue_reissue_refund_register', 'service_profit', 'loss_report', 'reminder_hub']);
-$printableReportKeys = ['receivable_aging', 'customer_outstanding', 'customer_detail_ledger', 'customer_advance_ledger', 'actual_money_voucher_ledger', 'booking_voucher_ledger', 'customer_departure_register', 'expense_register', 'salary_report', 'money_in_out_ledger', 'internal_treasury_transfer', 'cash_bank_ledger', 'cash_flow', 'cash_bank_position', 'supplier_ledger', 'supplier_outstanding', 'supplier_receivable', 'payable_refunds', 'airline_payable_report', 'supplier_postpaid_payments', 'supplier_prepaid_payments', 'supplier_all_payments', 'prepaid_supplier_ledger', 'service_profit', 'loss_report'];
+$wideViewReports = array_merge($customerLedgerReports, ['customer_advance_ledger', 'actual_money_voucher_ledger', 'booking_voucher_ledger', 'receivable_aging', 'airline_payable_report', 'supplier_receivable', 'payable_refunds', 'supplier_ledger', 'supplier_prepaid_payments', 'prepaid_supplier_ledger', 'financial_correction_register', 'reversed_linked_adjustments', 'expense_register', 'salary_report', 'money_in_out_ledger', 'internal_treasury_transfer', 'cash_bank_ledger', 'issue_reissue_refund_register', 'service_profit', 'loss_report', 'reminder_hub']);
+$printableReportKeys = ['receivable_aging', 'customer_outstanding', 'customer_detail_ledger', 'customer_advance_ledger', 'actual_money_voucher_ledger', 'booking_voucher_ledger', 'customer_departure_register', 'expense_register', 'salary_report', 'money_in_out_ledger', 'internal_treasury_transfer', 'cash_bank_ledger', 'cash_flow', 'cash_bank_position', 'supplier_ledger', 'supplier_outstanding', 'supplier_receivable', 'payable_refunds', 'airline_payable_report', 'supplier_postpaid_payments', 'supplier_prepaid_payments', 'supplier_all_payments', 'prepaid_supplier_ledger', 'reversed_linked_adjustments', 'service_profit', 'loss_report'];
 $canCorrectSupplierAdvances = \App\Helpers\Auth::isFinancialAdmin();
 
 $formatReportDate = static function (?string $value): string {
@@ -329,6 +329,14 @@ if ($selectedReport === 'receivable_aging') {
         . ' | Branch: ' . $selectedBranchLabel
         . ' | Currency: ' . $currencyLabel
         . ' | Scope: Voided customer receipts and supplier payments with reversal references, reasons, users, and journal linkage where available.';
+} elseif ($selectedReport === 'reversed_linked_adjustments') {
+    $currencyLabel = $selectedCurrency !== '' ? $selectedCurrency : 'All currencies';
+    $reportContextLine = 'Period: ' . $reportPeriodLabel
+        . ' | Branch: ' . $selectedBranchLabel
+        . ' | Account: ' . $selectedBusinessSourceLabel
+        . ' | Supplier: ' . $selectedSupplierLabel
+        . ' | Currency: ' . $currencyLabel
+        . ' | Scope: Historical linked adjustments and their reversals only. Both entries remain visible when either date matches. No amount here changes a current ledger balance.';
 } elseif ($selectedReport === 'finance_audit_trail') {
     $currencyLabel = $selectedCurrency !== '' ? $selectedCurrency : 'All currencies';
     $reportContextLine = 'Period: ' . $reportPeriodLabel
@@ -510,7 +518,7 @@ $formatReportTotal = static function (float $amount): string {
     return number_format($amount, 2);
 };
 
-$formatLedgerBalance = static function (string $value, string $report): string {
+$formatLedgerBalance = static function (string $value, string $report) use ($isLinkedPartyLedger): string {
     $text = trim($value);
     if ($text === '' || strtoupper($text) === 'N/A' || $text === '-') {
         return $value;
@@ -522,11 +530,15 @@ $formatLedgerBalance = static function (string $value, string $report): string {
     }
 
     $amount = (float) $numeric;
+    $precision = $isLinkedPartyLedger && in_array($report, ['customer_ledger', 'supplier_ledger'], true) ? 0 : 2;
     if (abs($amount) < 0.005) {
-        return number_format(0, 2);
+        return number_format(0, $precision);
     }
 
     if ($report === 'supplier_ledger') {
+        if ($isLinkedPartyLedger) {
+            return number_format(abs($amount), 0) . ($amount > 0 ? ' Payable' : ' Receivable');
+        }
         $isAdvance = stripos($text, 'advance') !== false || ($amount < 0 && stripos($text, 'payable') === false);
 
         return number_format(abs($amount), 2) . ($isAdvance ? ' Advance' : ' Payable');
@@ -534,7 +546,20 @@ $formatLedgerBalance = static function (string $value, string $report): string {
 
     $suffix = $amount > 0 ? 'Dr' : 'Cr';
 
-    return number_format(abs($amount), 2) . ' ' . $suffix;
+    return number_format(abs($amount), $precision) . ' ' . $suffix;
+};
+
+$formatLinkedClosingBalance = static function (string $value, string $report): string {
+    $amount = (float) str_replace(',', '', $value);
+    if (abs($amount) < 0.005) {
+        return '0 Balance';
+    }
+
+    if ($report === 'supplier_ledger') {
+        return number_format(abs($amount), 0) . ($amount > 0 ? ' Payable' : ' Receivable');
+    }
+
+    return number_format(abs($amount), 0) . ($amount > 0 ? ' Receivable' : ' Payable');
 };
 
 $summableColumnKeys = [
@@ -700,7 +725,10 @@ if ($selectedReport === 'receivable_aging') {
     }
 } elseif (in_array($selectedReport, ['service_profit', 'loss_report'], true)) {
     // Currency-aware footer rows are prepared by ReportService.
-} elseif ($selectedReport !== 'supplier_ledger') {
+} elseif (
+    $selectedReport !== 'supplier_ledger'
+    && ! ($selectedReport === 'customer_ledger' && ($isLinkedPartyLedger ?? false))
+) {
     $reportFooterTotals = [];
     foreach ($columns as $column) {
         $columnKey = (string) ($column['key'] ?? '');
@@ -2098,7 +2126,7 @@ if ($selectedReport === 'receivable_aging') {
                 >
             </label>
         <?php endif; ?>
-        <?php if (in_array($selectedReport, ['supplier_ledger', 'customer_ledger', 'customer_detail_ledger', 'receivable_aging', 'payable_aging', 'issue_reissue_refund_register', 'financial_correction_register', 'booking_voucher_ledger', 'actual_money_voucher_ledger', 'payable_refunds', 'service_profit', 'loss_report'], true)): ?>
+        <?php if (in_array($selectedReport, ['supplier_ledger', 'customer_ledger', 'customer_detail_ledger', 'receivable_aging', 'payable_aging', 'issue_reissue_refund_register', 'financial_correction_register', 'reversed_linked_adjustments', 'booking_voucher_ledger', 'actual_money_voucher_ledger', 'payable_refunds', 'service_profit', 'loss_report'], true)): ?>
             <label class="station-field span-2">
                 <span>Booking Ref.</span>
                 <input
@@ -2481,6 +2509,9 @@ if ($selectedReport === 'receivable_aging') {
             <?php endif; ?>
         </div>
     <?php endif; ?>
+    <?php if ($selectedReport === 'reversed_linked_adjustments'): ?>
+        <p class="report-context-line"><?= e($reportContextLine) ?> Amounts are full adjustment totals, not individual invoice shares.</p>
+    <?php endif; ?>
     <?php if ($selectedReport === 'receivable_aging' && $receivableAgingSummaryRows !== []): ?>
         <div class="dense-table-wrap customer-ledger-summary-wrap">
             <table class="dense-table supplier-advance-summary-table">
@@ -2610,7 +2641,7 @@ if ($selectedReport === 'receivable_aging') {
             <thead>
                 <tr>
                     <?php foreach ($columns as $column): ?>
-                        <th<?= $selectedReport === 'reminder_hub' ? ' class="reminder-column--' . e((string) ($column['key'] ?? '')) . '"' : '' ?>><?= $renderReportHeaderLabel($selectedReport, (string) ($column['key'] ?? ''), (string) ($column['label'] ?? '')) ?></th>
+                        <th data-column-key="<?= e((string) ($column['key'] ?? '')) ?>"<?= $selectedReport === 'reminder_hub' ? ' class="reminder-column--' . e((string) ($column['key'] ?? '')) . '"' : '' ?>><?= $renderReportHeaderLabel($selectedReport, (string) ($column['key'] ?? ''), (string) ($column['label'] ?? '')) ?></th>
                     <?php endforeach; ?>
                 </tr>
             </thead>
@@ -2641,7 +2672,7 @@ if ($selectedReport === 'receivable_aging') {
                         <?php endif; ?>
                     >
                         <?php foreach ($columns as $column): ?>
-                            <td<?= $selectedReport === 'reminder_hub' ? ' class="reminder-column--' . e((string) ($column['key'] ?? '')) . '"' : '' ?>>
+                            <td data-column-key="<?= e((string) ($column['key'] ?? '')) ?>"<?= $selectedReport === 'reminder_hub' ? ' class="reminder-column--' . e((string) ($column['key'] ?? '')) . '"' : '' ?>>
                                 <?php
                                 $columnKey = (string) ($column['key'] ?? '');
                                 $cellValue = (string) ($row[$columnKey] ?? '');
@@ -2770,7 +2801,7 @@ if ($selectedReport === 'receivable_aging') {
                     </tr>
                 <?php endforeach; ?>
             </tbody>
-            <?php if ($reportFooterRows !== [] && ! in_array($selectedReport, ['customer_ledger', 'customer_detail_ledger'], true)): ?>
+            <?php if ($reportFooterRows !== [] && (! in_array($selectedReport, ['customer_ledger', 'customer_detail_ledger'], true) || ($selectedReport === 'customer_ledger' && ($isLinkedPartyLedger ?? false)))): ?>
                 <tfoot>
                     <?php foreach ($reportFooterRows as $footerRow): ?>
                         <tr class="report-total-row">
@@ -2780,10 +2811,18 @@ if ($selectedReport === 'receivable_aging') {
                                 $columnKey = (string) ($column['key'] ?? '');
                                 $totalValue = (string) ($footerRow[$columnKey] ?? '');
                                 ?>
-                                <td>
+                                <td data-column-key="<?= e($columnKey) ?>">
                                     <?php if ($totalValue !== ''): ?>
-                                        <strong><?= e($totalValue) ?></strong>
-                                    <?php elseif (! $totalLabelPrinted): ?>
+                                        <strong><?= e(
+                                            ($isLinkedPartyLedger ?? false)
+                                            && in_array($selectedReport, ['customer_ledger', 'supplier_ledger'], true)
+                                            && $columnKey === 'balance_amount'
+                                                ? $formatLinkedClosingBalance($totalValue, $selectedReport)
+                                                : $totalValue
+                                        ) ?></strong>
+                                    <?php elseif ($selectedReport === 'customer_ledger' && ($isLinkedPartyLedger ?? false) && $columnKey === 'ledger_entry'): ?>
+                                        <strong><?= e((string) ($footerRow['_label'] ?? 'Totals')) ?></strong>
+                                    <?php elseif (! ($selectedReport === 'customer_ledger' && ($isLinkedPartyLedger ?? false)) && ! $totalLabelPrinted): ?>
                                         <?php $totalLabelPrinted = true; ?>
                                         <strong><?= e((string) ($footerRow['_label'] ?? 'Totals')) ?></strong>
                                     <?php endif; ?>
@@ -2797,7 +2836,7 @@ if ($selectedReport === 'receivable_aging') {
     </div>
 </section>
 
-<?php require __DIR__ . '/partials/linked_settlement_history.php'; ?>
+<?php require __DIR__ . '/partials/ledger_closing_summary.php'; ?>
 
 <?php if (in_array($selectedReport, ['prepaid_supplier_ledger', 'supplier_prepaid_payments'], true) && $canCorrectSupplierAdvances): ?>
     <section class="advance-correction-modal" data-supplier-advance-correction-modal hidden aria-hidden="true">

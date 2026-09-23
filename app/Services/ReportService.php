@@ -6,6 +6,7 @@ namespace App\Services;
 
 use App\Helpers\AuditLog;
 use App\Repositories\BookingRepository;
+use App\Repositories\CounterpartyLinkRepository;
 use App\Repositories\ExchangeRateRepository;
 use App\Repositories\MasterDataRepository;
 use App\Repositories\ReportRepository;
@@ -40,6 +41,7 @@ final class ReportService extends Service
         'supplier_all_payments' => 'Supplier Payments',
         'unallocated_money' => 'Unallocated Money Trace',
         'void_reversal_register' => 'Void / Reversal Register',
+        'reversed_linked_adjustments' => 'Reversed Linked Adjustments',
         'finance_audit_trail' => 'Finance Audit Trail',
         'financial_correction_register' => 'Edited Invoices/Bookings',
         'expense_register' => 'Expense Register',
@@ -95,8 +97,17 @@ final class ReportService extends Service
         $supplierAdvanceSummaryRows = [];
         $supplierAdvanceSummaryColumns = [];
         $footerRows = [];
+        $isLinkedPartyLedger = false;
 
         switch ($filters['report']) {
+
+            case 'reversed_linked_adjustments':
+                $history = (new LinkedSettlementHistoryService($this->app))->report(
+                    $filters['branchScopeIds'], $filters, 'both'
+                );
+                $rows = $history['rows'];
+                $columns = $history['columns'];
+                break;
 
             case 'cash_bank_position':
                 $reportData = $repository->cashBankPosition(
@@ -835,13 +846,51 @@ final class ReportService extends Service
                 break;
 
             case 'customer_ledger':
-                $accountLedgerState = (new AccountLedgerService($this->app))->report(
-                    $filters,
-                    $filters['branchScopeIds']
-                );
+                $link = null;
+                if ($filters['businessSourceId'] > 0) {
+                    $link = (new CounterpartyLinkRepository($this->app))->findByBusinessSourceId($filters['businessSourceId']);
+                    if ($link !== null && $filters['supplierId'] > 0 && (int) $link['supplier_id'] !== $filters['supplierId']) {
+                        $link = null;
+                    }
+                }
+                $isLinkedPartyLedger = $link !== null;
+                $accountFilters = $filters;
+                if ($isLinkedPartyLedger) {
+                    $accountFilters['dateFrom'] = null;
+                    $accountFilters['dateTo'] = null;
+                    $accountFilters['currency'] = '';
+                    $accountFilters['supplierId'] = 0;
+                }
+                $accountLedgerService = new AccountLedgerService($this->app);
+                $accountLedgerState = $accountLedgerService->report($accountFilters, $filters['branchScopeIds']);
                 $rows = (array) ($accountLedgerState['rows'] ?? []);
                 $summaryCards = (array) ($accountLedgerState['summaryCards'] ?? []);
                 $customerOutstandingSummaryRows = (array) ($accountLedgerState['summaryRows'] ?? []);
+                if ($isLinkedPartyLedger) {
+                    // The combined statement needs full history for opening balances, while
+                    // the ordinary Account Ledger summaries must still respect active filters.
+                    $filteredAccountLedgerState = $accountLedgerService->report($filters, $filters['branchScopeIds']);
+                    $summaryCards = (array) ($filteredAccountLedgerState['summaryCards'] ?? []);
+                    $customerOutstandingSummaryRows = (array) ($filteredAccountLedgerState['summaryRows'] ?? []);
+                    $supplierFilters = $accountFilters;
+                    $supplierFilters['businessSourceId'] = 0;
+                    $supplierFilters['supplierId'] = (int) $link['supplier_id'];
+                    $supplierRows = (new SupplierLedgerService($this->app))->report(
+                        $supplierFilters,
+                        $filters['branchScopeIds']
+                    )['rows'];
+                    if ($filters['customerName'] !== '') {
+                        $supplierRows = array_values(array_filter($supplierRows, static fn (array $row): bool =>
+                            mb_strtolower(trim((string) ($row['customer_name'] ?? '')))
+                            === mb_strtolower(trim((string) $filters['customerName']))
+                        ));
+                    }
+                    $linkedStatement = (new LinkedPartyLedgerService($this->app))->buildReport(
+                        $rows, $supplierRows, $filters['dateFrom'], $filters['dateTo'], $filters['currency']
+                    );
+                    $rows = $linkedStatement['rows'];
+                    $footerRows = $linkedStatement['footerRows'];
+                }
                 $customerOutstandingSummaryColumns = [
                     ['key' => 'lead_traveler_name', 'label' => 'Customer'],
                     ['key' => 'contact_mobile', 'label' => 'Mobile'],
@@ -1051,10 +1100,49 @@ final class ReportService extends Service
                 break;
 
             case 'supplier_ledger':
-                $supplierLedgerState = (new SupplierLedgerService($this->app))->report(
-                    $filters,
-                    $filters['branchScopeIds']
-                );
+                $link = null;
+                if ($filters['supplierId'] > 0) {
+                    $link = (new CounterpartyLinkRepository($this->app))->findBySupplierId($filters['supplierId']);
+                    if ($link !== null
+                        && $filters['businessSourceId'] > 0
+                        && (int) $link['business_source_id'] !== $filters['businessSourceId']) {
+                        $link = null;
+                    }
+                }
+                $isLinkedPartyLedger = $link !== null;
+                $supplierLedgerService = new SupplierLedgerService($this->app);
+                if ($isLinkedPartyLedger) {
+                    $supplierFilters = $filters;
+                    $supplierFilters['dateFrom'] = null;
+                    $supplierFilters['dateTo'] = null;
+                    $supplierFilters['currency'] = '';
+                    $supplierFilters['businessSourceId'] = 0;
+                    $supplierLedgerState = $supplierLedgerService->report(
+                        $supplierFilters,
+                        $filters['branchScopeIds']
+                    );
+                    $accountFilters = $supplierFilters;
+                    $accountFilters['supplierId'] = 0;
+                    $accountFilters['businessSourceId'] = (int) $link['business_source_id'];
+                    $accountRows = (new AccountLedgerService($this->app))->report(
+                        $accountFilters,
+                        $filters['branchScopeIds']
+                    )['rows'];
+                    $supplierLedgerState = (new LinkedPartyLedgerService($this->app))->buildSupplierReport(
+                        $accountRows,
+                        (array) ($supplierLedgerState['rows'] ?? []),
+                        $filters['dateFrom'],
+                        $filters['dateTo'],
+                        $filters['currency'],
+                        (string) ($link['supplier_name'] ?? 'Supplier')
+                    );
+                    $footerRows = (array) ($supplierLedgerState['footerRows'] ?? []);
+                } else {
+                    $supplierLedgerState = $supplierLedgerService->report(
+                        $filters,
+                        $filters['branchScopeIds']
+                    );
+                }
                 $rows = (array) ($supplierLedgerState['rows'] ?? []);
                 $summaryCards = (array) ($supplierLedgerState['summaryCards'] ?? []);
                 $columns = [
@@ -1492,15 +1580,8 @@ final class ReportService extends Service
             }
         }
 
-        $linkedSettlementHistory = ['rows' => [], 'columns' => []];
-        if ($mode !== 'csv' && in_array($filters['report'], ['customer_ledger', 'supplier_ledger'], true)) {
-            $linkedSettlementHistory = (new LinkedSettlementHistoryService($this->app))->report(
-                $filters['branchScopeIds'], $filters, $filters['report'] === 'supplier_ledger' ? 'supplier' : 'account'
-            );
-        }
-
         return [
-            'linkedSettlementHistory' => $linkedSettlementHistory,
+            'isLinkedPartyLedger' => $isLinkedPartyLedger,
             'title' => 'Reports',
             'reportOptions' => $this->sortedReportOptions(),
             'selectedReport' => $filters['report'],

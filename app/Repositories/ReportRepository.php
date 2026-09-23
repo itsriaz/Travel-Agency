@@ -4616,6 +4616,12 @@ final class ReportRepository extends BaseRepository
                 ledger_rows.business_source_id = :ledger_business_source_id
                 OR EXISTS (
                     SELECT 1
+                    FROM business_source_supplier_links linked_party
+                    WHERE linked_party.business_source_id = :ledger_linked_party_business_source_id
+                      AND linked_party.supplier_id = ledger_rows.supplier_id
+                )
+                OR EXISTS (
+                    SELECT 1
                     FROM counterparty_offset_payable_allocations account_filter_allocation
                     INNER JOIN counterparty_offsets account_filter_offset
                         ON account_filter_offset.id = account_filter_allocation.counterparty_offset_id
@@ -4629,6 +4635,7 @@ final class ReportRepository extends BaseRepository
                 )
             )';
             $params['ledger_business_source_id'] = $businessSourceId;
+            $params['ledger_linked_party_business_source_id'] = $businessSourceId;
             $params['ledger_linked_business_source_id'] = $businessSourceId;
         }
         $bookingReferenceSql = '';

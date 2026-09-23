@@ -182,7 +182,10 @@ final class SupplierLedgerService extends Service
             );
 
             $reportRows[] = [
+                'branch_id' => (int) ($row['branch_id'] ?? 0),
+                'branch_name' => (string) ($row['branch_name'] ?? ''),
                 'supplier_name' => $supplierName,
+                'customer_name' => (string) ($row['customer_name'] ?? ''),
                 'ledger_date' => (string) (($row['ledger_date'] ?? '') !== '' ? $row['ledger_date'] : 'N/A'),
                 'booking_id' => $bookingId,
                 'booking_reference' => (string) (($row['booking_reference'] ?? '') !== '' ? $row['booking_reference'] : 'N/A'),

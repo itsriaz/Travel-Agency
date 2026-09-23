@@ -59,6 +59,54 @@ final class CounterpartyLinkRepository extends BaseRepository
         return $statement->fetchAll() ?: [];
     }
 
+    public function openLedgerPositions(int $businessSourceId, int $supplierId, array $branchIds, string $currency = ''): array
+    {
+        $branchIds = array_values(array_unique(array_filter(array_map('intval', $branchIds), static fn (int $id): bool => $id > 0)));
+        if ($businessSourceId <= 0 || $supplierId <= 0 || $branchIds === []) {
+            return [];
+        }
+
+        $branchPlaceholders = implode(', ', array_fill(0, count($branchIds), '?'));
+        $currency = strtoupper(trim($currency));
+        $currencyWhere = $currency !== '' ? ' AND position_rows.currency = ?' : '';
+        $statement = $this->db->prepare(
+            'SELECT position_rows.branch_id, br.name AS branch_name, position_rows.currency,
+                    ROUND(SUM(position_rows.customer_receivable), 2) AS customer_receivable,
+                    ROUND(SUM(position_rows.supplier_payable), 2) AS supplier_payable
+             FROM (
+                 SELECT cri.branch_id, cri.currency,
+                        SUM(cri.outstanding_amount) AS customer_receivable, 0 AS supplier_payable
+                 FROM customer_receivable_items cri
+                 INNER JOIN bookings b ON b.booking_reference = cri.booking_reference
+                 WHERE b.business_source_id = ?
+                   AND cri.branch_id IN (' . $branchPlaceholders . ')
+                   AND cri.status <> "cancelled"
+                   AND cri.outstanding_amount > 0.005
+                 GROUP BY cri.branch_id, cri.currency
+                 UNION ALL
+                 SELECT so.branch_id, so.currency,
+                        0 AS customer_receivable, SUM(so.net_payable_amount) AS supplier_payable
+                 FROM supplier_obligations so
+                 WHERE so.supplier_id = ?
+                   AND so.branch_id IN (' . $branchPlaceholders . ')
+                   AND so.status <> "cancelled"
+                   AND so.net_payable_amount > 0.005
+                 GROUP BY so.branch_id, so.currency
+             ) position_rows
+             INNER JOIN branches br ON br.id = position_rows.branch_id
+             WHERE 1 = 1' . $currencyWhere . '
+             GROUP BY position_rows.branch_id, br.name, position_rows.currency
+             ORDER BY br.name, position_rows.currency'
+        );
+        $params = array_merge([$businessSourceId], $branchIds, [$supplierId], $branchIds);
+        if ($currency !== '') {
+            $params[] = $currency;
+        }
+        $statement->execute($params);
+
+        return $statement->fetchAll() ?: [];
+    }
+
     public function availableBusinessSources(): array
     {
         $statement = $this->db->query(

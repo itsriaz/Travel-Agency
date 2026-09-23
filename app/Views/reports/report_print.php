@@ -11,6 +11,7 @@ $supplierOptions = is_array($supplierOptions ?? null) ? $supplierOptions : [];
 $treasurySourceTypeOptions = is_array($treasurySourceTypeOptions ?? null) ? $treasurySourceTypeOptions : [];
 
 $selectedReport = (string) ($selectedReport ?? ($filters['report'] ?? ''));
+$isLinkedPartyLedger = (bool) ($isLinkedPartyLedger ?? false);
 $selectedReportLabel = (string) ($reportOptions[$selectedReport] ?? 'Report');
 $selectedBranchId = (int) ($filters['branchId'] ?? 0);
 $selectedCategoryId = (int) ($filters['expenseCategoryId'] ?? 0);
@@ -103,7 +104,7 @@ $hasBookingColumn = static function (string $columnKey): bool {
     return in_array($columnKey, ['booking_reference', 'booking_invoice', 'booking_no'], true);
 };
 
-$formatLedgerBalance = static function (string $value, string $report): string {
+$formatLedgerBalance = static function (string $value, string $report) use ($isLinkedPartyLedger): string {
     $text = trim($value);
     if ($text === '' || strtoupper($text) === 'N/A' || $text === '-') {
         return $value;
@@ -116,10 +117,13 @@ $formatLedgerBalance = static function (string $value, string $report): string {
 
     $amount = (float) $numeric;
     if (abs($amount) < 0.005) {
-        return number_format(0, 2);
+        return number_format(0, $isLinkedPartyLedger ? 0 : 2);
     }
 
     if ($report === 'supplier_ledger') {
+        if ($isLinkedPartyLedger) {
+            return number_format(abs($amount), 0) . ($amount > 0 ? ' Payable' : ' Receivable');
+        }
         $isAdvance = stripos($text, 'advance') !== false || ($amount < 0 && stripos($text, 'payable') === false);
 
         return number_format(abs($amount), 2) . ($isAdvance ? ' Advance' : ' Payable');
@@ -429,6 +433,9 @@ $displayValue = static function (array $row, array $column) use ($formatDate, $f
                 <button class="btn btn-sm" type="button" onclick="window.close()">Close</button>
             </div>
         </header>
+        <?php if ($selectedReport === 'reversed_linked_adjustments'): ?>
+            <p>Historical reference only. Amounts are full adjustment totals, not invoice shares, and do not change current ledger balances. Original and reversal entries are shown together when either date matches the filter.</p>
+        <?php endif; ?>
 
         <section class="report-print-meta">
             <?php foreach ($metaCards as $metaCard): ?>
@@ -491,7 +498,7 @@ $displayValue = static function (array $row, array $column) use ($formatDate, $f
             </table>
         </div>
 
-        <?php require __DIR__ . '/partials/linked_settlement_history.php'; ?>
+        <?php require __DIR__ . '/partials/ledger_closing_summary.php'; ?>
 
         <footer class="report-print-footer">
             <div>Generated on <?= e($generatedAt) ?></div>

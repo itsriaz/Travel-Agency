@@ -1,5 +1,10 @@
 # Item 2: reversed linked adjustments in ledgers
 
+> Superseded on 2026-09-22: reversal history is now in the standalone
+> "Reversed Linked Adjustments" report under Reports, with screen, CSV and
+> print output. It is no longer appended to Account or Supplier Ledgers.
+> The notes below document the original 2026-09-10 implementation.
+
 Local implementation and verification: 2026-09-10. Production not modified.
 
 ## Scope

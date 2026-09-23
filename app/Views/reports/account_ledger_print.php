@@ -7,6 +7,7 @@ $filters = is_array($filters ?? null) ? $filters : [];
 $branchOptions = is_array($branchOptions ?? null) ? $branchOptions : [];
 $businessSourceOptions = is_array($businessSourceOptions ?? null) ? $businessSourceOptions : [];
 $customerOutstandingSummaryRows = is_array($customerOutstandingSummaryRows ?? null) ? $customerOutstandingSummaryRows : [];
+$footerRows = is_array($footerRows ?? null) ? $footerRows : [];
 $groupedSummaryCards = [];
 $regularSummaryCards = [];
 foreach ($summaryCards as $summaryCard) {
@@ -97,7 +98,7 @@ $parseMoney = static function (string $value): ?float {
     return $negative ? -1 * abs($amount) : $amount;
 };
 
-$formatDebitNormalBalance = static function (string $value): string {
+$formatDebitNormalBalance = static function (string $value) use ($isLinkedPartyLedger): string {
     $text = trim($value);
     if ($text === '' || strtoupper($text) === 'N/A' || $text === '-') {
         return $value;
@@ -109,11 +110,20 @@ $formatDebitNormalBalance = static function (string $value): string {
     }
 
     $amount = (float) $numeric;
+    $precision = ($isLinkedPartyLedger ?? false) ? 0 : 2;
     if (abs($amount) < 0.005) {
-        return number_format(0, 2);
+        return number_format(0, $precision);
     }
 
-    return number_format(abs($amount), 2) . ($amount > 0 ? ' Dr' : ' Cr');
+    return number_format(abs($amount), $precision) . ($amount > 0 ? ' Dr' : ' Cr');
+};
+$formatLinkedClosingBalance = static function (string $value): string {
+    $amount = (float) str_replace(',', '', $value);
+    if (abs($amount) < 0.005) {
+        return '0 Balance';
+    }
+
+    return number_format(abs($amount), 0) . ($amount > 0 ? ' Receivable' : ' Payable');
 };
 
 $footerTotals = [];
@@ -135,15 +145,26 @@ if (! $isAccountLedgerPrint) {
     $footerTotals['balance_amount'] = $footerTotals['debit_amount'] - $footerTotals['credit_amount'];
 }
 
-$summaryBalanceText = '0.00';
-foreach ($summaryCards as $summaryCard) {
-    $label = strtolower(trim((string) ($summaryCard['label'] ?? '')));
-    if (str_starts_with($label, 'balance / ') || str_starts_with($label, 'closing balance / ')) {
-        $summaryBalanceText = (string) ($summaryCard['value'] ?? $summaryBalanceText);
-        break;
+$summaryBalanceText = '';
+if ($isAccountLedgerPrint) {
+    $outstandingByCurrency = [];
+    foreach ($summaryCards as $summaryCard) {
+        $label = trim((string) ($summaryCard['label'] ?? ''));
+        if (preg_match('/^Total Outstanding \/ ([A-Z]{3})$/', $label, $matches) === 1) {
+            $outstandingByCurrency[] = $matches[1] . ' ' . (string) ($summaryCard['value'] ?? '0.00');
+        }
+    }
+    $summaryBalanceText = implode(' | ', $outstandingByCurrency);
+} else {
+    foreach ($summaryCards as $summaryCard) {
+        $label = strtolower(trim((string) ($summaryCard['label'] ?? '')));
+        if (str_starts_with($label, 'balance / ') || str_starts_with($label, 'closing balance / ')) {
+            $summaryBalanceText = (string) ($summaryCard['value'] ?? '');
+            break;
+        }
     }
 }
-if ($summaryCards === [] && count($customerOutstandingSummaryRows) === 1) {
+if (! $isAccountLedgerPrint && $summaryCards === [] && count($customerOutstandingSummaryRows) === 1) {
     $summaryBalanceText = (string) ($customerOutstandingSummaryRows[0]['cash_balance'] ?? $summaryBalanceText);
 }
 
@@ -198,6 +219,13 @@ $ledgerExportLabel = $selectedCustomerName !== ''
         gap: 10px;
         align-items: center;
         flex-wrap: wrap;
+    }
+
+    .ledger-print-hint {
+        flex-basis: 100%;
+        color: #5b7390;
+        font-size: 11px;
+        text-align: right;
     }
 
     .ledger-print-chip {
@@ -370,23 +398,155 @@ $ledgerExportLabel = $selectedCustomerName !== ''
     @media print {
         @page {
             size: A4 landscape;
-            margin: 10mm;
+            margin: 6mm;
         }
 
+        html,
+        body,
         body.print-shell {
-            background: #ffffff;
+            width: auto !important;
+            min-width: 0 !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            background: #ffffff !important;
         }
 
         .ledger-print-shell {
+            width: 100%;
             max-width: none;
+            margin: 0;
             padding: 0;
             background: #ffffff;
         }
 
         .ledger-print-card {
+            width: 100%;
             border: none;
             border-radius: 0;
             box-shadow: none;
+            overflow: visible;
+        }
+
+        .ledger-print-header {
+            padding: 0 0 3mm;
+            border-bottom: 1px solid #b8c9da;
+            background: #ffffff;
+        }
+
+        .ledger-print-title {
+            font-size: 19px;
+        }
+
+        .ledger-print-meta {
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 2mm;
+            padding: 3mm 0;
+            background: #ffffff;
+        }
+
+        .ledger-print-meta-card {
+            min-width: 0;
+            padding: 2mm 2.5mm;
+            border-radius: 2mm;
+        }
+
+        .ledger-print-meta-label {
+            margin-bottom: 1mm;
+            font-size: 7px;
+        }
+
+        .ledger-print-meta-value {
+            font-size: 10px;
+            overflow-wrap: anywhere;
+        }
+
+        .ledger-print-summary {
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 2mm;
+            padding: 2mm 0 1mm;
+        }
+
+        .ledger-print-summary-card {
+            padding: 2mm 2.5mm;
+            border-radius: 2mm;
+        }
+
+        .ledger-print-summary-card span {
+            margin-bottom: 1mm;
+            font-size: 7px;
+        }
+
+        .ledger-print-summary-card strong {
+            font-size: 12px;
+        }
+
+        .ledger-print-context {
+            margin: 1.5mm 0 1mm;
+            font-size: 7.5px;
+            line-height: 1.25;
+        }
+
+        .ledger-print-group {
+            padding: 1mm 0;
+        }
+
+        .ledger-print-table-wrap {
+            width: 100%;
+            padding: 2mm 0 0;
+            overflow: visible;
+        }
+
+        .ledger-print-table {
+            width: 100%;
+            table-layout: fixed;
+            border-collapse: collapse;
+            border-radius: 0;
+        }
+
+        .ledger-print-table thead {
+            display: table-header-group;
+        }
+
+        .ledger-print-table tfoot {
+            display: table-row-group;
+        }
+
+        .ledger-print-table tr {
+            break-inside: avoid;
+            page-break-inside: avoid;
+        }
+
+        .ledger-print-table thead th {
+            padding: 1.4mm 1mm;
+            font-size: 6.8px;
+            line-height: 1.1;
+            letter-spacing: 0.02em;
+            white-space: normal;
+            overflow-wrap: anywhere;
+        }
+
+        .ledger-print-table tbody td,
+        .ledger-print-table tfoot td {
+            padding: 1.25mm 1mm;
+            font-size: 7.2px;
+            line-height: 1.15;
+            white-space: normal;
+            overflow-wrap: anywhere;
+            word-break: normal;
+        }
+
+        .ledger-print-booking {
+            color: #12304f;
+        }
+
+        .ledger-print-footer {
+            padding: 2mm 0 0;
+            font-size: 7px;
+            border-top: none;
+        }
+
+        .ledger-print-balance {
+            font-size: 9px;
         }
 
         .no-print {
@@ -404,6 +564,7 @@ $ledgerExportLabel = $selectedCustomerName !== ''
             <div class="ledger-print-actions no-print">
                 <button class="btn btn-primary btn-sm" type="button" onclick="window.print()">Print / Save PDF</button>
                 <button class="btn btn-sm" type="button" onclick="window.close()">Close</button>
+                <span class="ledger-print-hint">Use A4 Landscape and disable browser headers and footers.</span>
             </div>
         </header>
 
@@ -435,10 +596,12 @@ $ledgerExportLabel = $selectedCustomerName !== ''
                 <span>Customers in Summary</span>
                 <strong><?= e((string) count($customerOutstandingSummaryRows)) ?></strong>
             </div>
-            <div class="ledger-print-summary-card">
-                <span>Total Balance</span>
-                <strong><?= e($summaryBalanceText) ?></strong>
-            </div>
+            <?php if ($summaryBalanceText !== ''): ?>
+                <div class="ledger-print-summary-card">
+                    <span><?= e($isAccountLedgerPrint ? 'Selected Account Receivable' : 'Total Balance') ?></span>
+                    <strong><?= e($summaryBalanceText) ?></strong>
+                </div>
+            <?php endif; ?>
         </section>
 
         <?php if ($regularSummaryCards !== []): ?>
@@ -474,13 +637,12 @@ $ledgerExportLabel = $selectedCustomerName !== ''
                 </div>
             </section>
         <?php endforeach; ?>
-
         <div class="ledger-print-table-wrap">
             <table class="ledger-print-table">
                 <thead>
                     <tr>
                         <?php foreach ($columns as $column): ?>
-                            <th><?= e((string) ($column['label'] ?? '')) ?></th>
+                            <th data-column-key="<?= e((string) ($column['key'] ?? '')) ?>"><?= e((string) ($column['label'] ?? '')) ?></th>
                         <?php endforeach; ?>
                     </tr>
                 </thead>
@@ -503,7 +665,7 @@ $ledgerExportLabel = $selectedCustomerName !== ''
                                     $displayValue = $formatDebitNormalBalance($value);
                                 }
                                 ?>
-                                <td>
+                                <td data-column-key="<?= e($columnKey) ?>">
                                     <?php if ($columnKey === 'booking_reference' && (int) ($row['booking_id'] ?? 0) > 0): ?>
                                         <a class="ledger-print-booking" href="<?= e(url('/workspace?booking_id=' . (int) $row['booking_id'])) ?>"><?= e($displayValue) ?></a>
                                     <?php else: ?>
@@ -514,7 +676,28 @@ $ledgerExportLabel = $selectedCustomerName !== ''
                         </tr>
                     <?php endforeach; ?>
                 </tbody>
-                <?php if (! $isAccountLedgerPrint): ?>
+                <?php if ($isAccountLedgerPrint && ($isLinkedPartyLedger ?? false) && $footerRows !== []): ?>
+                    <tfoot>
+                        <?php foreach ($footerRows as $footerRow): ?>
+                            <tr>
+                                <?php foreach ($columns as $index => $column): ?>
+                                    <?php $columnKey = (string) ($column['key'] ?? ''); ?>
+                                    <td data-column-key="<?= e($columnKey) ?>">
+                                        <?php if ($columnKey === 'currency'): ?>
+                                            <?= e((string) ($footerRow['currency'] ?? '')) ?>
+                                        <?php elseif (in_array($columnKey, ['debit_amount', 'credit_amount'], true)): ?>
+                                            <?= e((string) ($footerRow[$columnKey] ?? '')) ?>
+                                        <?php elseif ($columnKey === 'balance_amount'): ?>
+                                            <?= e($formatLinkedClosingBalance((string) ($footerRow[$columnKey] ?? ''))) ?>
+                                        <?php elseif ($columnKey === 'ledger_entry'): ?>
+                                            <?= e((string) ($footerRow['_label'] ?? 'Total')) ?>
+                                        <?php endif; ?>
+                                    </td>
+                                <?php endforeach; ?>
+                            </tr>
+                        <?php endforeach; ?>
+                    </tfoot>
+                <?php elseif (! $isAccountLedgerPrint): ?>
                     <tfoot>
                         <tr>
                             <?php foreach ($columns as $index => $column): ?>
@@ -540,12 +723,12 @@ $ledgerExportLabel = $selectedCustomerName !== ''
             </table>
         </div>
 
-        <?php require __DIR__ . '/partials/linked_settlement_history.php'; ?>
+        <?php require __DIR__ . '/partials/ledger_closing_summary.php'; ?>
 
         <footer class="ledger-print-footer">
             <div>Generated on <?= e(date('d/m/Y H:i')) ?></div>
             <?php if ($summaryBalanceText !== ''): ?>
-                <div class="ledger-print-balance">Closing Balance: <?= e($summaryBalanceText) ?></div>
+                <div class="ledger-print-balance"><?= e($isAccountLedgerPrint ? 'Selected Account Receivable' : 'Closing Balance') ?>: <?= e($summaryBalanceText) ?></div>
             <?php endif; ?>
         </footer>
     </article>
