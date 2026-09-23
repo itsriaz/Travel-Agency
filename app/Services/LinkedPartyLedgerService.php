@@ -22,6 +22,12 @@ final class LinkedPartyLedgerService extends Service
                 $credit = $sourceCredit;
             } elseif (in_array($entry, ['Customer payment received', 'Customer advance received', 'Net payment received'], true)) {
                 $credit = $sourceDebit;
+            } elseif ($entry === 'Account balance applied to linked supplier') {
+                // Keep both legs of a manual linked adjustment visible. The supplier
+                // ledger contributes the equal opposite leg, so the combined balance
+                // is unchanged while the itemized matching remains auditable.
+                $debit = $sourceDebit;
+                $credit = $sourceCredit;
             } elseif (in_array($entry, ['Customer refund paid', 'Customer advance returned'], true)) {
                 $debit = $sourceCredit;
             } elseif ((bool) ($row['is_internal_transfer'] ?? false)

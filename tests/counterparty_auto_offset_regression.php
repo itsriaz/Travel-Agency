@@ -213,6 +213,80 @@ try {
         ]
             && (float) $paymentStatement['footerRows'][0]['balance_amount'] === -300.0
     );
+    $fullyReconciledStatement = (new \App\Services\LinkedPartyLedgerService($app))->buildReport(
+        [[
+            'branch_id' => $branchId, 'branch_name' => 'Test Branch', 'entry_date_raw' => '2026-01-01',
+            'currency' => 'PKR', 'ledger_entry' => 'Customer invoice', 'is_financial_position_only' => true,
+            'raw_debit_amount' => 1000, 'raw_credit_amount' => 0,
+        ], [
+            'branch_id' => $branchId, 'branch_name' => 'Test Branch', 'entry_date_raw' => '2026-01-03',
+            'currency' => 'PKR', 'ledger_entry' => 'Net payment received',
+            'raw_debit_amount' => 300, 'raw_credit_amount' => 0,
+        ], [
+            'branch_id' => $branchId, 'branch_name' => 'Test Branch', 'entry_date_raw' => '2026-01-02',
+            'currency' => 'PKR', 'ledger_entry' => 'Account balance applied to linked supplier',
+            'raw_debit_amount' => 0, 'raw_credit_amount' => 700,
+        ]],
+        [[
+            'branch_id' => $branchId, 'branch_name' => 'Test Branch', 'ledger_date' => '2026-01-01',
+            'currency' => 'PKR', 'entry_type' => 'Supplier invoice recorded',
+            'raw_debit_amount' => 700, 'raw_credit_amount' => 0,
+        ], [
+            'branch_id' => $branchId, 'branch_name' => 'Test Branch', 'ledger_date' => '2026-01-02',
+            'currency' => 'PKR', 'entry_type' => 'Linked account balance adjustment',
+            'raw_debit_amount' => 0, 'raw_credit_amount' => 700,
+        ]],
+        null,
+        null,
+        'PKR'
+    );
+    $check(
+        'Itemized PKR 1,000 sale, PKR 700 purchase, PKR 700 manual match, and PKR 300 receipt close at zero',
+        array_column($fullyReconciledStatement['rows'], 'ledger_entry') === [
+            'Customer invoice',
+            'Supplier invoice recorded',
+            'Account balance applied to linked supplier',
+            'Linked account balance adjustment',
+            'Net payment received',
+        ]
+            && (float) str_replace(',', '', (string) $fullyReconciledStatement['footerRows'][0]['debit_amount']) === 1700.0
+            && (float) str_replace(',', '', (string) $fullyReconciledStatement['footerRows'][0]['credit_amount']) === 1700.0
+            && (float) str_replace(',', '', (string) $fullyReconciledStatement['footerRows'][0]['balance_amount']) === 0.0
+    );
+    $fullyReconciledSupplierStatement = (new \App\Services\LinkedPartyLedgerService($app))->buildSupplierReport(
+        [[
+            'branch_id' => $branchId, 'branch_name' => 'Test Branch', 'entry_date_raw' => '2026-01-01',
+            'currency' => 'PKR', 'ledger_entry' => 'Customer invoice', 'is_financial_position_only' => true,
+            'raw_debit_amount' => 1000, 'raw_credit_amount' => 0,
+        ], [
+            'branch_id' => $branchId, 'branch_name' => 'Test Branch', 'entry_date_raw' => '2026-01-03',
+            'currency' => 'PKR', 'ledger_entry' => 'Net payment received',
+            'raw_debit_amount' => 300, 'raw_credit_amount' => 0,
+        ], [
+            'branch_id' => $branchId, 'branch_name' => 'Test Branch', 'entry_date_raw' => '2026-01-02',
+            'currency' => 'PKR', 'ledger_entry' => 'Account balance applied to linked supplier',
+            'raw_debit_amount' => 0, 'raw_credit_amount' => 700,
+        ]],
+        [[
+            'branch_id' => $branchId, 'branch_name' => 'Test Branch', 'ledger_date' => '2026-01-01',
+            'currency' => 'PKR', 'entry_type' => 'Supplier invoice recorded',
+            'raw_debit_amount' => 700, 'raw_credit_amount' => 0,
+        ], [
+            'branch_id' => $branchId, 'branch_name' => 'Test Branch', 'ledger_date' => '2026-01-02',
+            'currency' => 'PKR', 'entry_type' => 'Linked account balance adjustment',
+            'raw_debit_amount' => 0, 'raw_credit_amount' => 700,
+        ]],
+        null,
+        null,
+        'PKR',
+        'Linked Supplier'
+    );
+    $check(
+        'The linked Supplier Ledger shows the same itemized reconciliation and zero balance',
+        count($fullyReconciledSupplierStatement['rows']) === 5
+            && (float) str_replace(',', '', (string) $fullyReconciledSupplierStatement['footerRows'][0]['balance_amount']) === 0.0
+            && str_contains((string) $fullyReconciledSupplierStatement['summaryCards'][2]['value'], 'PKR 0')
+    );
     $advanceStatement = (new \App\Services\LinkedPartyLedgerService($app))->buildReport(
         [[
             'branch_id' => $branchId, 'branch_name' => 'Test Branch', 'entry_date_raw' => '2026-01-01',
