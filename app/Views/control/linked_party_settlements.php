@@ -117,23 +117,74 @@ $sumAdjusted = static fn (array $rows): float => round(array_reduce(
 </section>
 
 <section class="panel compact-panel">
-    <div class="panel-header"><h2>Manual Adjustment: <?= e($manualPosition['business_source_name']) ?> / <?= e($manualPosition['currency']) ?></h2></div>
-    <form method="post" action="<?= e(url('/linked-party-settlements/save')) ?>" class="manual-offset-form">
+    <div class="panel-header">
+        <div>
+            <h2>Manual Invoice Adjustment: <?= e($manualPosition['business_source_name']) ?> / <?= e($manualPosition['currency']) ?></h2>
+            <p class="panel-meta">Enter amounts only beside invoices you want to match. Both selected totals must be equal. Nothing is selected automatically and no cash or bank money moves.</p>
+        </div>
+    </div>
+    <form method="post" action="<?= e(url('/linked-party-settlements/save')) ?>" class="manual-offset-form" id="manual-offset-form" data-currency="<?= e($manualPosition['currency']) ?>">
         <?= \App\Helpers\Csrf::input() ?>
         <input type="hidden" name="link_id" value="<?= e((string) $manualPosition['link_id']) ?>">
         <input type="hidden" name="branch_id" value="<?= e((string) $manualPosition['branch_id']) ?>">
         <input type="hidden" name="currency" value="<?= e($manualPosition['currency']) ?>">
-        <label>Account-Holder Invoice<select name="customer_receivable_item_id" required><option value="">Select invoice</option>
-            <?php foreach ($manualAccounts as $item): ?><option value="<?= e((string) $item['id']) ?>"><?= e($item['booking_reference'] . ' / ' . $item['service_line_reference'] . ' - Available ' . $money($item['available_account_amount'])) ?></option><?php endforeach; ?>
-        </select></label>
-        <label>Supplier Invoice<select name="supplier_obligation_id" required><option value="">Select invoice</option>
-            <?php foreach ($manualPayables as $item): ?><option value="<?= e((string) $item['id']) ?>"><?= e($item['booking_reference'] . ' / ' . $item['service_line_reference'] . ' - Payable ' . $money($item['net_payable_amount'])) ?></option><?php endforeach; ?>
-        </select></label>
-        <label>Amount<input type="number" name="amount" min="0.01" step="0.01" required></label>
-        <label>Date<input type="date" name="offset_date" value="<?= e(date('Y-m-d')) ?>" required></label>
-        <label>Reference<input name="reference_no" maxlength="100"></label>
-        <label>Remarks<input name="remarks" maxlength="2000"></label>
-        <button class="btn btn-primary" type="submit">Confirm Manual Adjustment</button>
+        <div class="manual-allocation-grid">
+            <article class="manual-allocation-card">
+                <div class="manual-allocation-heading">
+                    <h3>Account-Holder Invoices</h3>
+                    <strong><?= e($manualPosition['currency']) ?> <span id="manual-account-total">0.00</span></strong>
+                </div>
+                <div class="dense-table-wrap manual-allocation-table-wrap">
+                    <table class="dense-table manual-allocation-table">
+                        <thead><tr><th>Booking</th><th>Service</th><th>Available</th><th>Adjust Amount</th></tr></thead>
+                        <tbody>
+                        <?php foreach ($manualAccounts as $item): ?>
+                            <?php $available = round((float) ($item['available_account_amount'] ?? 0), 2); ?>
+                            <tr>
+                                <td><?= e((string) ($item['booking_reference'] ?? '')) ?></td>
+                                <td><?= e((string) ($item['service_line_reference'] ?? '')) ?></td>
+                                <td><?= e($money($available)) ?></td>
+                                <td><input class="manual-allocation-input" data-side="account" type="number" inputmode="decimal" name="account_allocations[<?= e((string) $item['id']) ?>]" min="0" max="<?= e(number_format($available, 2, '.', '')) ?>" step="0.01" placeholder="0.00" aria-label="Account-holder adjustment for <?= e((string) ($item['booking_reference'] ?? 'invoice')) ?>"></td>
+                            </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </article>
+            <article class="manual-allocation-card">
+                <div class="manual-allocation-heading">
+                    <h3>Supplier Invoices</h3>
+                    <strong><?= e($manualPosition['currency']) ?> <span id="manual-payable-total">0.00</span></strong>
+                </div>
+                <div class="dense-table-wrap manual-allocation-table-wrap">
+                    <table class="dense-table manual-allocation-table">
+                        <thead><tr><th>Booking</th><th>Service</th><th>Payable</th><th>Adjust Amount</th></tr></thead>
+                        <tbody>
+                        <?php foreach ($manualPayables as $item): ?>
+                            <?php $payable = round((float) ($item['net_payable_amount'] ?? 0), 2); ?>
+                            <tr>
+                                <td><?= e((string) ($item['booking_reference'] ?? '')) ?></td>
+                                <td><?= e((string) ($item['service_line_reference'] ?? '')) ?></td>
+                                <td><?= e($money($payable)) ?></td>
+                                <td><input class="manual-allocation-input" data-side="payable" type="number" inputmode="decimal" name="payable_allocations[<?= e((string) $item['id']) ?>]" min="0" max="<?= e(number_format($payable, 2, '.', '')) ?>" step="0.01" placeholder="0.00" aria-label="Supplier adjustment for <?= e((string) ($item['booking_reference'] ?? 'invoice')) ?>"></td>
+                            </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </article>
+        </div>
+        <div class="manual-offset-footer">
+            <div class="manual-offset-fields">
+                <label>Date<input type="date" name="offset_date" value="<?= e(date('Y-m-d')) ?>" required></label>
+                <label>Reference<input name="reference_no" maxlength="100"></label>
+                <label>Remarks<input name="remarks" maxlength="2000"></label>
+            </div>
+            <div class="manual-offset-confirmation">
+                <div class="manual-offset-balance" id="manual-offset-balance" aria-live="polite">Enter equal amounts on both sides.</div>
+                <button class="btn btn-primary" id="manual-offset-submit" type="submit" disabled>Confirm Manual Adjustment</button>
+            </div>
+        </div>
     </form>
 </section>
 <?php endif; ?>
@@ -274,11 +325,35 @@ $sumAdjusted = static fn (array $rows): float => round(array_reduce(
     .account-holder-receipt-form select, .account-holder-receipt-form input { width: 100%; min-width: 0; }
     .account-holder-receipt-history { margin-top: 14px; }
     .form-warning { color: #9b4d12; font-weight: 700; }
-    .manual-offset-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .manual-offset-form { display: grid; gap: 14px; }
     .manual-offset-form label { display: grid; gap: 4px; min-width: 0; }
     .manual-offset-form select, .manual-offset-form input { width: 100%; min-width: 0; }
+    .manual-allocation-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .manual-allocation-card { min-width: 0; overflow: hidden; border: 1px solid #cbddeb; border-radius: 14px; background: #fff; }
+    .manual-allocation-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 13px; background: #eef7fc; border-bottom: 1px solid #cbddeb; }
+    .manual-allocation-heading h3 { margin: 0; }
+    .manual-allocation-table-wrap { max-height: 360px; overflow: auto; border: 0; border-radius: 0; }
+    .manual-allocation-table { min-width: 540px; }
+    .manual-allocation-table th { position: sticky; top: 0; z-index: 1; background: #f5f9fc; }
+    .manual-allocation-table th:nth-child(3), .manual-allocation-table td:nth-child(3) { text-align: right; }
+    .manual-allocation-table input { min-width: 120px; }
+    .manual-offset-footer { display: flex; align-items: end; justify-content: space-between; gap: 16px; }
+    .manual-offset-fields { flex: 1; display: grid; grid-template-columns: minmax(150px, .65fr) repeat(2, minmax(190px, 1fr)); gap: 10px; }
+    .manual-offset-confirmation { display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
+    .manual-offset-balance { color: #9b4d12; font-weight: 700; text-align: right; }
+    .manual-offset-balance.is-ready { color: #08745f; }
+    #manual-offset-submit:disabled { cursor: not-allowed; opacity: .55; }
     @media (max-width: 850px) { .account-holder-receipt-form { grid-template-columns: 1fr 1fr; } }
-    @media (max-width: 650px) { .manual-offset-form, .account-holder-receipt-form { grid-template-columns: 1fr; } }
+    @media (max-width: 980px) {
+        .manual-allocation-grid { grid-template-columns: 1fr; }
+        .manual-offset-footer { align-items: stretch; flex-direction: column; }
+        .manual-offset-confirmation { justify-content: space-between; }
+    }
+    @media (max-width: 650px) {
+        .account-holder-receipt-form, .manual-offset-fields { grid-template-columns: 1fr; }
+        .manual-offset-confirmation { align-items: stretch; flex-direction: column; }
+        .manual-offset-balance { text-align: left; }
+    }
     .linked-settlement-stats { grid-template-columns: repeat(2, minmax(170px, 250px)); justify-content: start; }
     .linked-settlement-history { padding: 14px 16px; }
     .linked-settlement-history.is-expanded {
@@ -386,6 +461,38 @@ $sumAdjusted = static fn (array $rows): float => round(array_reduce(
     };
     paymentMethod?.addEventListener('change', filterTreasuryAccounts);
     filterTreasuryAccounts();
+
+    const manualForm = document.getElementById('manual-offset-form');
+    const manualInputs = Array.from(document.querySelectorAll('.manual-allocation-input'));
+    const accountTotalOutput = document.getElementById('manual-account-total');
+    const payableTotalOutput = document.getElementById('manual-payable-total');
+    const balanceOutput = document.getElementById('manual-offset-balance');
+    const manualSubmit = document.getElementById('manual-offset-submit');
+    const manualCurrency = manualForm?.dataset.currency || '';
+    const sideTotal = (side) => Math.round(manualInputs
+        .filter((input) => input.dataset.side === side)
+        .reduce((total, input) => total + Math.max(0, Number(input.value) || 0), 0) * 100) / 100;
+    const updateManualTotals = () => {
+        if (!manualForm || !accountTotalOutput || !payableTotalOutput || !balanceOutput || !manualSubmit) {
+            return;
+        }
+        const accountTotal = sideTotal('account');
+        const payableTotal = sideTotal('payable');
+        const difference = Math.round(Math.abs(accountTotal - payableTotal) * 100) / 100;
+        const validInputs = manualInputs.every((input) => input.value === '' || input.checkValidity());
+        const ready = validInputs && accountTotal > 0 && difference < 0.005;
+        accountTotalOutput.textContent = accountTotal.toFixed(2);
+        payableTotalOutput.textContent = payableTotal.toFixed(2);
+        balanceOutput.classList.toggle('is-ready', ready);
+        balanceOutput.textContent = ready
+            ? `Ready to adjust ${manualCurrency} ${accountTotal.toFixed(2)}.`
+            : difference > 0
+                ? `Difference: ${manualCurrency} ${difference.toFixed(2)}. Both totals must match.`
+                : 'Enter equal positive amounts on both sides.';
+        manualSubmit.disabled = !ready;
+    };
+    manualInputs.forEach((input) => input.addEventListener('input', updateManualTotals));
+    updateManualTotals();
 
     const panel = document.querySelector('.linked-settlement-history');
     const openButton = document.getElementById('linked-settlement-expand-button');

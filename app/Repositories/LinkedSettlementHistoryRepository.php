@@ -120,9 +120,14 @@ final class LinkedSettlementHistoryRepository extends BaseRepository
         // Full releases can remove allocation rows. Modern manual postings retain the selected IDs in audit.
         if ($this->tableExists('audit_logs')) {
             $payload = 'CASE WHEN JSON_VALID(log.payload_json) THEN log.payload_json ELSE "{}" END';
+            $itemIdsKey = $side === 'account' ? 'customer_receivable_item_ids' : 'supplier_obligation_ids';
             $parts[] = 'SELECT CAST(JSON_UNQUOTE(JSON_EXTRACT(' . $payload . ', "$.offset_id")) AS UNSIGNED) AS offset_id, i.booking_reference
                 FROM audit_logs log JOIN ' . $itemTable . ' i
                   ON i.id = CAST(JSON_UNQUOTE(JSON_EXTRACT(' . $payload . ', "$.' . $itemKey . '")) AS UNSIGNED)
+                  OR JSON_CONTAINS(
+                      COALESCE(JSON_EXTRACT(' . $payload . ', "$.' . $itemIdsKey . '"), "[]"),
+                      CAST(i.id AS CHAR)
+                  ) = 1
                 WHERE log.event_name = "counterparty.offset.posted"';
         }
         return $parts === [] ? 'SELECT NULL AS offset_id, NULL AS booking_reference WHERE 1 = 0' : implode(' UNION ', $parts);

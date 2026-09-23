@@ -51,11 +51,14 @@ final class CounterpartyOffsetService extends Service
         $linkId = (int) ($input['link_id'] ?? 0);
         $branchId = (int) ($input['branch_id'] ?? 0);
         $currency = strtoupper(trim((string) ($input['currency'] ?? '')));
-        $requestedAmount = round((float) ($input['amount'] ?? 0), 2);
-        $receivableId = (int) ($input['customer_receivable_item_id'] ?? 0);
-        $obligationId = (int) ($input['supplier_obligation_id'] ?? 0);
-        if ($receivableId <= 0 || $obligationId <= 0 || ! is_finite($requestedAmount) || $requestedAmount <= 0) {
-            throw new RuntimeException('Select an account-holder invoice, a supplier invoice, and a positive adjustment amount.');
+        [$accountAllocations, $payableAllocations] = $this->requestedAllocations($input);
+        $accountTotal = round(array_sum($accountAllocations), 2);
+        $payableTotal = round(array_sum($payableAllocations), 2);
+        if ($accountAllocations === [] || $payableAllocations === [] || $accountTotal <= 0.005 || $payableTotal <= 0.005) {
+            throw new RuntimeException('Enter a positive adjustment amount beside at least one account-holder invoice and one supplier invoice.');
+        }
+        if (abs($accountTotal - $payableTotal) > 0.005) {
+            throw new RuntimeException('Account-holder and supplier adjustment totals must be exactly equal.');
         }
         $offsetDate = $this->validDate((string) ($input['offset_date'] ?? ''));
         $reference = $this->optionalText($input['reference_no'] ?? null, 100, 'Reference');
@@ -87,21 +90,19 @@ final class CounterpartyOffsetService extends Service
 
             $accountPositions = $repository->openAccountPositions((int) $link['business_source_id'], $branchId, $currency, true);
             $payables = $repository->openPayables((int) $link['supplier_id'], $branchId, $currency, true);
-            $accountPositions = array_values(array_filter($accountPositions, static fn (array $row): bool => (int) $row['id'] === $receivableId));
-            $payables = array_values(array_filter($payables, static fn (array $row): bool => (int) $row['id'] === $obligationId));
-            if ($accountPositions === [] || $payables === []) {
-                throw new RuntimeException('The selected invoices must have available balances for this linked party, branch, and currency.');
-            }
-            $accountPositionTotal = $this->sum($accountPositions, 'available_account_amount');
-            $payableTotal = $this->sum($payables, 'net_payable_amount');
-            $maximum = round(min($accountPositionTotal, $payableTotal), 2);
-            if ($maximum <= 0.005) {
-                throw new RuntimeException('No matching account-holder recovery balance and supplier payable are available in this branch and currency.');
-            }
-            $amount = $requestedAmount;
-            if ($amount <= 0 || $amount - $maximum > 0.005) {
-                throw new RuntimeException('The settlement cannot exceed ' . $currency . ' ' . number_format($maximum, 2) . '.');
-            }
+            $this->validateRequestedAllocations(
+                $accountAllocations,
+                $accountPositions,
+                'available_account_amount',
+                'account-holder'
+            );
+            $this->validateRequestedAllocations(
+                $payableAllocations,
+                $payables,
+                'net_payable_amount',
+                'supplier'
+            );
+            $amount = $accountTotal;
 
             $offsetNo = 'OFFSET-' . date('YmdHis') . '-' . strtoupper(bin2hex(random_bytes(3)));
             $offsetId = $repository->createOffset([
@@ -118,8 +119,12 @@ final class CounterpartyOffsetService extends Service
                 'created_by_user_id' => $actorUserId,
             ]);
 
-            $this->allocateAccountPositions($repository, $offsetId, $accountPositions, $amount);
-            $this->allocatePayables($repository, $offsetId, $payables, $amount);
+            foreach ($accountAllocations as $receivableId => $allocationAmount) {
+                $repository->allocateAccountPosition($offsetId, $receivableId, $allocationAmount);
+            }
+            foreach ($payableAllocations as $obligationId => $allocationAmount) {
+                $repository->allocatePayable($offsetId, $obligationId, $allocationAmount);
+            }
             $journalId = $accounting->postJournalEntry([
                 'branch_id' => $branchId,
                 'booking_reference' => null,
@@ -147,7 +152,12 @@ final class CounterpartyOffsetService extends Service
                 'user_id' => $actorUserId, 'offset_id' => $offsetId, 'offset_no' => $offsetNo,
                 'link_id' => $linkId, 'branch_id' => $branchId, 'currency' => $currency, 'amount' => $amount,
                 'journal_entry_id' => $journalId, 'automatic' => false,
-                'customer_receivable_item_id' => $receivableId, 'supplier_obligation_id' => $obligationId,
+                'customer_receivable_item_id' => count($accountAllocations) === 1 ? array_key_first($accountAllocations) : null,
+                'supplier_obligation_id' => count($payableAllocations) === 1 ? array_key_first($payableAllocations) : null,
+                'customer_receivable_item_ids' => array_keys($accountAllocations),
+                'supplier_obligation_ids' => array_keys($payableAllocations),
+                'account_allocations' => $accountAllocations,
+                'payable_allocations' => $payableAllocations,
             ]);
             if ($startedTransaction && $db->inTransaction()) {
                 $db->commit();
@@ -234,37 +244,93 @@ final class CounterpartyOffsetService extends Service
         }
     }
 
-    private function allocateAccountPositions(CounterpartyOffsetRepository $repository, int $offsetId, array $items, float $amount): void
+    /**
+     * Accept the new itemized form while preserving the legacy one-invoice API used by repair scripts.
+     *
+     * @return array{0: array<int, float>, 1: array<int, float>}
+     */
+    private function requestedAllocations(array $input): array
     {
-        $remaining = $amount;
-        foreach ($items as $item) {
-            if ($remaining <= 0.005) break;
-            $applied = round(min($remaining, (float) $item['available_account_amount']), 2);
-            if ($applied > 0) {
-                $repository->allocateAccountPosition($offsetId, (int) $item['id'], $applied);
-                $remaining = round($remaining - $applied, 2);
-            }
+        if (array_key_exists('account_allocations', $input) || array_key_exists('payable_allocations', $input)) {
+            return [
+                $this->allocationMap($input['account_allocations'] ?? null, 'Account-holder allocations'),
+                $this->allocationMap($input['payable_allocations'] ?? null, 'Supplier allocations'),
+            ];
         }
-        if ($remaining > 0.005) throw new RuntimeException('Account-holder recovery balance changed. Please retry.');
+
+        $amount = $this->positiveAmount($input['amount'] ?? null, 'Adjustment amount');
+        $receivableId = (int) ($input['customer_receivable_item_id'] ?? 0);
+        $obligationId = (int) ($input['supplier_obligation_id'] ?? 0);
+        if ($receivableId <= 0 || $obligationId <= 0 || $amount <= 0.005) {
+            throw new RuntimeException('Select an account-holder invoice, a supplier invoice, and a positive adjustment amount.');
+        }
+
+        return [[$receivableId => $amount], [$obligationId => $amount]];
     }
 
-    private function allocatePayables(CounterpartyOffsetRepository $repository, int $offsetId, array $items, float $amount): void
+    /** @return array<int, float> */
+    private function allocationMap(mixed $rawAllocations, string $label): array
     {
-        $remaining = $amount;
-        foreach ($items as $item) {
-            if ($remaining <= 0.005) break;
-            $applied = round(min($remaining, (float) $item['net_payable_amount']), 2);
-            if ($applied > 0) {
-                $repository->allocatePayable($offsetId, (int) $item['id'], $applied);
-                $remaining = round($remaining - $applied, 2);
+        if (! is_array($rawAllocations)) {
+            throw new RuntimeException($label . ' must be submitted as invoice amounts.');
+        }
+        $allocations = [];
+        foreach ($rawAllocations as $rawId => $rawAmount) {
+            if ($rawAmount === '' || $rawAmount === null) {
+                continue;
+            }
+            $id = filter_var($rawId, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
+            if ($id === false) {
+                throw new RuntimeException($label . ' contains an invalid invoice.');
+            }
+            $amount = $this->positiveAmount($rawAmount, $label . ' amount');
+            if ($amount <= 0.005) {
+                continue;
+            }
+            $allocations[(int) $id] = $amount;
+            if (count($allocations) > 500) {
+                throw new RuntimeException($label . ' cannot contain more than 500 selected invoices.');
             }
         }
-        if ($remaining > 0.005) throw new RuntimeException('Supplier payable allocation changed. Please retry.');
+
+        return $allocations;
     }
 
-    private function sum(array $items, string $key): float
+    private function positiveAmount(mixed $rawAmount, string $label): float
     {
-        return round(array_reduce($items, static fn (float $sum, array $item): float => $sum + (float) ($item[$key] ?? 0), 0.0), 2);
+        if (is_array($rawAmount) || is_object($rawAmount) || ! is_numeric($rawAmount)) {
+            throw new RuntimeException($label . ' must be a valid number.');
+        }
+        $amount = round((float) $rawAmount, 2);
+        if (! is_finite($amount) || $amount < 0) {
+            throw new RuntimeException($label . ' must be a positive number.');
+        }
+        return $amount;
+    }
+
+    /** @param array<int, float> $requested */
+    private function validateRequestedAllocations(
+        array $requested,
+        array $availableRows,
+        string $balanceKey,
+        string $side
+    ): void
+    {
+        $availableById = [];
+        foreach ($availableRows as $row) {
+            $availableById[(int) $row['id']] = round((float) ($row[$balanceKey] ?? 0), 2);
+        }
+        foreach ($requested as $itemId => $amount) {
+            if (! isset($availableById[$itemId]) || $availableById[$itemId] <= 0.005) {
+                throw new RuntimeException('A selected ' . $side . ' invoice is unavailable for this linked party, branch, and currency.');
+            }
+            if ($amount - $availableById[$itemId] > 0.005) {
+                throw new RuntimeException(
+                    'The ' . $side . ' adjustment for invoice #' . $itemId . ' cannot exceed '
+                    . number_format($availableById[$itemId], 2) . '.'
+                );
+            }
+        }
     }
 
     private function validDate(string $date): string
