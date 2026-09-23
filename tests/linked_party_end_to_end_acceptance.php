@@ -595,6 +595,11 @@ $check('Linked balance actions explain every matchable and unmatched state',
     substr_count($reconciliationView, 'Match Invoices') === 1
     && str_contains($reconciliationView, 'No account receivable')
     && str_contains($reconciliationView, 'No supplier payable'));
+$check('Settlement history preserves readable column and action spacing',
+    str_contains($reconciliationView, 'linked-settlement-reference')
+    && str_contains($reconciliationView, 'linked-settlement-reversal-note')
+    && str_contains($reconciliationView, 'min-width: 1480px')
+    && str_contains($reconciliationView, 'overflow-wrap: anywhere'));
 
 if ($failures !== []) {
     fwrite(STDERR, 'Acceptance scenario failed: ' . implode(', ', $failures) . PHP_EOL);

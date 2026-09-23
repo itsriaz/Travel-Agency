@@ -300,7 +300,7 @@ $sumAdjusted = static fn (array $rows): float => round(array_reduce(
                     <?php $isPosted = ($offset['status'] ?? '') === 'posted'; ?>
                     <tr>
                         <td><?= e((string) ($offset['offset_date'] ?? '')) ?></td>
-                        <td><strong><?= e((string) ($offset['offset_no'] ?? '')) ?></strong></td>
+                        <td><strong class="linked-settlement-reference"><?= e((string) ($offset['offset_no'] ?? '')) ?></strong></td>
                         <td><?= e((string) ($offset['business_source_name'] ?? '')) ?></td>
                         <td><?= e((string) ($offset['supplier_name'] ?? '')) ?></td>
                         <td><?= e((string) ($offset['branch_name'] ?? '')) ?></td>
@@ -321,7 +321,7 @@ $sumAdjusted = static fn (array $rows): float => round(array_reduce(
                                         </form>
                                     </details>
                                 <?php else: ?>
-                                    <small><?= e((string) ($offset['void_reason'] ?? 'Reversed')) ?></small>
+                                    <small class="linked-settlement-reversal-note"><?= e((string) ($offset['void_reason'] ?? 'Reversed')) ?></small>
                                 <?php endif; ?>
                             </div>
                         </td>
@@ -413,27 +413,42 @@ $sumAdjusted = static fn (array $rows): float => round(array_reduce(
     }
     .linked-settlement-history.is-expanded .linked-settlement-table {
         width: 100%;
-        min-width: 1180px;
+        min-width: 1480px;
     }
-    .linked-settlement-table { table-layout: fixed; min-width: 1180px; }
+    .linked-settlement-history > .dense-table-wrap { overflow-x: auto; }
+    .linked-settlement-table { width: 100%; min-width: 1480px; table-layout: fixed; }
     .linked-settlement-table th,
-    .linked-settlement-table td { vertical-align: middle; padding: 13px 12px; }
-    .linked-settlement-table th:nth-child(1) { width: 96px; }
-    .linked-settlement-table th:nth-child(2) { width: 260px; }
-    .linked-settlement-table th:nth-child(3) { width: 145px; }
-    .linked-settlement-table th:nth-child(4) { width: 170px; }
-    .linked-settlement-table th:nth-child(5) { width: 120px; }
-    .linked-settlement-table th:nth-child(6) { width: 72px; }
-    .linked-settlement-table th:nth-child(7) { width: 120px; }
+    .linked-settlement-table td { vertical-align: top; padding: 14px 13px; line-height: 1.4; }
+    .linked-settlement-table th:nth-child(1) { width: 105px; }
+    .linked-settlement-table th:nth-child(2) { width: 300px; }
+    .linked-settlement-table th:nth-child(3) { width: 175px; }
+    .linked-settlement-table th:nth-child(4) { width: 195px; }
+    .linked-settlement-table th:nth-child(5) { width: 145px; }
+    .linked-settlement-table th:nth-child(6) { width: 70px; }
+    .linked-settlement-table th:nth-child(7) { width: 115px; }
     .linked-settlement-table th:nth-child(8) { width: 120px; }
-    .linked-settlement-table th:nth-child(9) { width: 235px; }
+    .linked-settlement-table th:nth-child(9) { width: 255px; }
     .linked-settlement-table td:nth-child(1),
-    .linked-settlement-table td:nth-child(2),
     .linked-settlement-table td:nth-child(6),
     .linked-settlement-table td:nth-child(7) { white-space: nowrap; }
-    .linked-settlement-table td:nth-child(2) strong { font-size: .93rem; letter-spacing: -.01em; }
-    .linked-settlement-actions { display: flex; align-items: center; gap: 9px; white-space: nowrap; }
+    .linked-settlement-reference {
+        display: block;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+        font-size: .9rem;
+        letter-spacing: -.01em;
+    }
+    .linked-settlement-actions { display: grid; justify-items: start; gap: 8px; min-width: 0; white-space: normal; }
     .linked-settlement-actions .btn { min-width: 0; white-space: nowrap; }
+    .linked-settlement-reversal-note { display: block; max-width: 100%; color: #516b80; line-height: 1.4; overflow-wrap: anywhere; }
+    .linked-settlement-history .linked-settlement-reverse { width: 100%; }
+    .linked-settlement-history .linked-settlement-reverse form {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        width: 100%;
+        min-width: 0;
+    }
+    .linked-settlement-history .linked-settlement-reverse input { width: 100%; min-width: 0; }
     .linked-settlement-detail { padding: 14px 16px; border-left: 5px solid #2f9fc8; }
     .linked-settlement-allocation-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
     .linked-settlement-allocation-card { min-width: 0; overflow: hidden; border: 1px solid #cbddeb; border-radius: 14px; background: #fff; }
