@@ -319,7 +319,7 @@ final class AccountLedgerService extends Service
                 (string) ($movement['movement_date'] ?? ''),
                 (string) ($movement['movement_reference'] ?? ''),
                 $isAccountHolderReceipt
-                    ? 'Account-holder payment received'
+                    ? 'Net payment received'
                     : ($isApplication
                     ? 'Customer advance applied to ' . (string) ($movement['target_booking_reference'] ?? 'invoice')
                     : ($isReturn ? 'Customer advance returned' : 'Customer advance received')),

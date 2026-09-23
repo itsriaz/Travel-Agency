@@ -50,8 +50,8 @@ $sumAdjusted = static fn (array $rows): float => round(array_reduce(
 <section class="panel compact-panel account-holder-receipt-panel">
     <div class="panel-header">
         <div>
-            <h2>Receive Account-Holder Payment</h2>
-            <p class="panel-meta">Record cash or bank money from <?= e($manualPosition['business_source_name']) ?> without selecting or settling any ticket. The full amount remains unallocated; ticket-level allocation, if later required, is a separate action.</p>
+            <h2>Receive Net Payment</h2>
+            <p class="panel-meta">Record cash or bank money from <?= e($manualPosition['business_source_name']) ?> against the linked-party balance without selecting a ticket. Ticket-level allocation, if later required, remains a separate manual action.</p>
         </div>
     </div>
     <form method="post" action="<?= e(url('/linked-party-settlements/receipts/save')) ?>" class="account-holder-receipt-form" id="account-holder-receipt-form">
@@ -72,15 +72,15 @@ $sumAdjusted = static fn (array $rows): float => round(array_reduce(
         </select></label>
         <label>Reference<input name="reference_number" maxlength="100"></label>
         <label>Remarks<input name="remarks" maxlength="4000"></label>
-        <button class="btn btn-primary" type="submit" <?= $accountHolderReceiptAccounts === [] ? 'disabled' : '' ?>>Record Unallocated Receipt</button>
+        <button class="btn btn-primary" type="submit" <?= $accountHolderReceiptAccounts === [] ? 'disabled' : '' ?>>Record Net Payment</button>
     </form>
     <?php if ($accountHolderReceiptAccounts === []): ?><p class="panel-meta form-warning">No active <?= e((string) $manualPosition['currency']) ?> cash or bank account is configured for this branch.</p><?php endif; ?>
 
     <div class="dense-table-wrap account-holder-receipt-history"><table class="dense-table">
-        <thead><tr><th>Date</th><th>Receipt</th><th>Method</th><th>Cash / Bank</th><th>Amount</th><th>Unallocated</th><th>Status</th><th>Action</th></tr></thead>
+        <thead><tr><th>Date</th><th>Receipt</th><th>Method</th><th>Cash / Bank</th><th>Amount</th><th>Status</th><th>Action</th></tr></thead>
         <tbody>
         <?php if ($accountHolderReceipts === []): ?>
-            <tr><td colspan="8" class="empty-cell">No account-holder cash or bank receipt has been recorded for this branch and currency.</td></tr>
+            <tr><td colspan="7" class="empty-cell">No net cash or bank payment has been recorded for this branch and currency.</td></tr>
         <?php else: ?>
             <?php foreach ($accountHolderReceipts as $receipt): ?>
                 <?php $receiptIsActive = (string) ($receipt['status'] ?? '') !== 'void'; ?>
@@ -90,8 +90,7 @@ $sumAdjusted = static fn (array $rows): float => round(array_reduce(
                     <td><?= e(ucwords(str_replace('_', ' ', (string) ($receipt['payment_method'] ?? '')))) ?></td>
                     <td><?= e((string) ($receipt['treasury_account_name'] ?? '')) ?></td>
                     <td><?= e($money($receipt['received_amount'] ?? 0)) ?></td>
-                    <td><?= e($money($receipt['unallocated_amount'] ?? 0)) ?></td>
-                    <td><span class="admin-record-tag <?= $receiptIsActive ? 'is-custom' : 'is-system' ?>"><?= e($receiptIsActive ? 'Received' : 'Voided') ?></span></td>
+                    <td><span class="admin-record-tag <?= $receiptIsActive ? 'is-custom' : 'is-system' ?>"><?= e($receiptIsActive ? 'Received on account' : 'Voided') ?></span></td>
                     <td>
                         <?php if ($receiptIsActive): ?>
                             <details class="linked-settlement-reverse">

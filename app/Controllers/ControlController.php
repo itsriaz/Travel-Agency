@@ -447,7 +447,7 @@ final class ControlController extends BaseController
             );
             Flash::success(
                 (string) ($receipt['receipt_no'] ?? 'Receipt')
-                . ' recorded as unallocated account-holder money. No ticket was adjusted.'
+                . ' recorded as a net payment received on account. No ticket was adjusted.'
             );
         } catch (RuntimeException $exception) {
             Flash::error($exception->getMessage());

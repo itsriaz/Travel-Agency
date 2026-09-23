@@ -141,7 +141,7 @@ try {
     ], [$branchId]);
     $receiptRows = array_values(array_filter(
         (array) ($accountReport['rows'] ?? []),
-        static fn (array $row): bool => ($row['ledger_entry'] ?? '') === 'Account-holder payment received'
+        static fn (array $row): bool => ($row['ledger_entry'] ?? '') === 'Net payment received'
     ));
     $check('Account ledger shows one itemized PKR 300 account-holder receipt',
         count($receiptRows) === 1 && (float) ($receiptRows[0]['raw_debit_amount'] ?? 0) === 300.0);
@@ -154,7 +154,7 @@ try {
     );
     $linkedReceiptRows = array_values(array_filter(
         (array) ($linkedStatement['rows'] ?? []),
-        static fn (array $row): bool => ($row['ledger_entry'] ?? '') === 'Account-holder payment received'
+        static fn (array $row): bool => ($row['ledger_entry'] ?? '') === 'Net payment received'
     ));
     $check('Linked ledger treats the received PKR 300 as one credit',
         count($linkedReceiptRows) === 1
@@ -190,11 +190,13 @@ try {
     ob_start();
     require BASE_PATH . '/app/Views/control/linked_party_settlements.php';
     $receiptView = (string) ob_get_clean();
-    $check('Financial-admin view renders the unallocated receipt form and history',
-        str_contains($receiptView, 'Receive Account-Holder Payment')
+    $check('Financial-admin view renders the net-payment form and on-account history',
+        str_contains($receiptView, 'Receive Net Payment')
         && str_contains($receiptView, '/linked-party-settlements/receipts/save')
         && str_contains($receiptView, (string) $result['receipt_no'])
-        && str_contains($receiptView, 'Record Unallocated Receipt'));
+        && str_contains($receiptView, 'Record Net Payment')
+        && str_contains($receiptView, 'Received on account')
+        && ! str_contains($receiptView, '<th>Unallocated</th>'));
 
     $voided = $service->void([
         'link_id' => $linkId,
@@ -208,7 +210,7 @@ try {
                 'currency' => 'PKR',
                 'businessSourceId' => $businessSourceId,
             ], [$branchId])['rows'] ?? [],
-            static fn (array $row): bool => ($row['ledger_entry'] ?? '') === 'Account-holder payment received'
+            static fn (array $row): bool => ($row['ledger_entry'] ?? '') === 'Net payment received'
         )) === 0);
     $journalIds = implode(',', [(int) $journalRow['id'], (int) $voided['reversal_journal_entry_id']]);
     $journalNet = $db->query(
