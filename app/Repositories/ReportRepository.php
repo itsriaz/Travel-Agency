@@ -4799,7 +4799,7 @@ final class ReportRepository extends BaseRepository
                         b.id AS booking_id,
                         b.booking_reference,
                         so.service_line_reference,
-                        o.currency,
+                        COALESCE(o.supplier_currency, o.currency),
                         COALESCE(b.business_source_id, 0) AS business_source_id,
                         COALESCE(bs_src.name, "Unassigned Account") AS business_source_name,
                         s.id AS supplier_id,

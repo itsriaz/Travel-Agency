@@ -1,6 +1,6 @@
 # Linked-party automatic reversal: refreshed production snapshot
 
-Local review and repair: 2026-09-22. Production was not modified.
+Local review and repair: 2026-09-22. Production application and verification were reported by the operator on 2026-09-22.
 
 ## Scope and Evidence
 
@@ -24,6 +24,16 @@ After local apply: zero posted automatic offsets; all 48 remain as void history;
 
 To test the exact final script after those guards were added, the pre-repair SQL backup was imported into a separate local database, `travel_agency_repair_rehearsal_20260922`. Both rollback rehearsal and apply passed there, including booking-header hashes and the second service-cost check. The clone and main local database each ended with zero posted automatic offsets and AED 39,464 on the affected supplier payables. The clone is a local test database, not a production target.
 
+## Production Application
+
+The following evidence came from the operator's SSH output, not direct access to the production host:
+
+- The deployed critical application and repair-script hashes matched the tested local files. Production CLI PHP was 8.3.33; migrations reported 71 applied and zero pending.
+- The live read-only preview matched fingerprint `a37321e2ede20f3b4b4dfa63b8c9f9080b6c379016bb38458fa5fb49cddbf2ce` and found the same 48 posted automatic offsets. Validation-only and rollback rehearsal passed before apply.
+- The full frozen production SQL export was placed at `storage/backups/linked-reversal-backup-20260922.sql`: 24,930,400 bytes, SHA-256 `90A6D38232D852535A0D11586BC3CC1BE6DCC74A30D675FD948CB25DA6C8269A`. An earlier size check observed the upload while it was still in progress; the completed file matched both size and hash before apply.
+- The guarded `--apply` command reported 48 offsets reversed, AED 48,920 original offset amount, 51 supplier invoices restored to AED 39,464 payable, receivables 273 and 441 reopened, three release journals reversed, and all protected-data checks passed. The 51 new journal IDs were 6305-6355.
+- Independent read-only post-apply queries reported 48 void and zero posted automatic offsets; 51 open supplier payables totaling AED 39,464; receivables 273 and 441 open for AED 585 and AED 1,540 with zero customer allocations; one repair audit event; and 51 reversal journals with AED 49,450 debit and AED 49,450 credit.
+
 ## Verification and Remaining Blockers
 
 - Dedicated linked-party offset, no-auto-offset, PKR/AED/USD manual-settlement, linked-history, and account/supplier-link tests passed after apply.
@@ -31,11 +41,11 @@ To test the exact final script after those guards were added, the pre-repair SQL
 - The full financial-invariant audit still fails in five unrelated categories already present **before** this repair: three customer receipt/treasury branch mismatches; missing cross-branch supplier treasury-funding journals for several global payments; an incorrect-branch journal for `SPAY-000113`; duplicate supplier correction release journals including `SPAY-000113`/`SPAY-000115`; and an incorrect-branch void for `SPAY-000113`.
 - The older `BK-000277` account-ledger credit assertion and the live `BK-000038` supplier-ledger fixture check also fail on this imported snapshot. They were not changed as part of the linked-party repair.
 
-Do not claim whole-system or production readiness from the linked-party result alone. Production may still be running automatic linked-party posting code: the imported database includes offsets through 2026-09-18 even though current local code disables those entry points. Uploading only the repair script while leaving an older application version live could recreate offsets. Before production action, freeze users, verify the deployed application version, take a fresh full backup, and rerun the read-only preview. If the production preview differs from the reviewed file, the script will refuse to apply and a new review is required. Never run the old 27-offset script on this snapshot.
+The linked-party production change is verified, but this is not whole-system certification. The five unrelated financial-invariant categories above remain. Do not rerun the one-off repair or the older 27-offset script. Deployment also left duplicate `database/app` and `database/database` directories under the protected database path and an incomplete earlier SQL upload; these are cleanup items, not inputs to this repair. The intended `database/migrate.php` was restored and returned 71 applied, zero pending.
 
 ## Files, SQL, Security, Done Criteria
 
-- Files changed: new one-off repair script and this verification note. Existing runtime application code was not edited.
-- SQL migration: none. Local data repair only, in one transaction with append-only journals and a mandatory audit event. No production SQL was run.
+- Files changed for this verification update: this note only. The one-off repair script and runtime code were already prepared and deployed before this update.
+- SQL migration: none. Local and production data repairs each used one transaction with append-only journals and a mandatory audit event.
 - Security: CLI-only, active super-admin actor required, exact snapshot fingerprint, backup-file gate, locked rows, narrow hard-coded scope, rollback on exception.
-- Done for this phase: linked-party reversal is locally applied and verified. Production repair remains pending because unrelated imported-data invariants fail and the live application version is not yet confirmed.
+- Done for this phase: the scoped linked-party reversal is locally and production-applied, with matching post-apply checks. Unrelated imported-data invariants remain separate follow-up work.

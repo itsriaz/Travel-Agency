@@ -86,6 +86,33 @@ final class CounterpartyOffsetRepository extends BaseRepository
         return $statement->fetchAll() ?: [];
     }
 
+    public function openAccountPositionsForLink(int $businessSourceId, array $branchIds, bool $forUpdate = false): array
+    {
+        $params = ['business_source_id' => $businessSourceId];
+        $branchSql = $this->branchSql('cri.branch_id', $branchIds, $params);
+        $statement = $this->db->prepare(
+            'SELECT cri.*, br.name AS branch_name,
+                    GREATEST(cri.due_amount - COALESCE(account_used.allocated_amount, 0), 0) AS available_account_amount
+             FROM customer_receivable_items cri
+             INNER JOIN bookings b ON b.booking_reference = cri.booking_reference
+             INNER JOIN branches br ON br.id = cri.branch_id
+             LEFT JOIN (
+                SELECT aa.customer_receivable_item_id, SUM(aa.allocated_amount) AS allocated_amount
+                FROM counterparty_offset_account_allocations aa
+                INNER JOIN counterparty_offsets ao ON ao.id = aa.counterparty_offset_id AND ao.status = "posted"
+                GROUP BY aa.customer_receivable_item_id
+             ) account_used ON account_used.customer_receivable_item_id = cri.id
+             WHERE b.business_source_id = :business_source_id
+               AND cri.due_amount > 0.005
+               AND GREATEST(cri.due_amount - COALESCE(account_used.allocated_amount, 0), 0) > 0.005'
+             . $branchSql .
+            ' ORDER BY br.name, cri.currency, COALESCE(cri.due_date, "9999-12-31"), cri.created_at, cri.id'
+            . ($forUpdate ? ' FOR UPDATE' : '')
+        );
+        $statement->execute($params);
+        return $statement->fetchAll() ?: [];
+    }
+
     public function openPayables(int $supplierId, int $branchId, string $currency, bool $forUpdate = false): array
     {
         $statement = $this->db->prepare(
@@ -98,13 +125,36 @@ final class CounterpartyOffsetRepository extends BaseRepository
         return $statement->fetchAll() ?: [];
     }
 
+    public function openPayablesForLink(int $supplierId, array $branchIds, bool $forUpdate = false): array
+    {
+        $params = ['supplier_id' => $supplierId];
+        $branchSql = $this->branchSql('so.branch_id', $branchIds, $params);
+        $statement = $this->db->prepare(
+            'SELECT so.*, br.name AS branch_name
+             FROM supplier_obligations so
+             INNER JOIN branches br ON br.id = so.branch_id
+             WHERE so.supplier_id = :supplier_id
+               AND so.status IN ("open", "partially_covered")
+               AND so.net_payable_amount > 0.005'
+             . $branchSql .
+            ' ORDER BY br.name, so.currency, COALESCE(so.due_date, "9999-12-31"), so.created_at, so.id'
+            . ($forUpdate ? ' FOR UPDATE' : '')
+        );
+        $statement->execute($params);
+        return $statement->fetchAll() ?: [];
+    }
+
     public function createOffset(array $data): int
     {
         $statement = $this->db->prepare(
             'INSERT INTO counterparty_offsets (offset_no, link_id, business_source_id, supplier_id, branch_id, currency,
-                offset_date, amount, reference_no, remarks, created_by_user_id)
+                account_branch_id, supplier_branch_id, account_currency, supplier_currency,
+                offset_date, amount, account_amount, supplier_amount, exchange_rate, exchange_rate_effective_date,
+                reference_no, remarks, created_by_user_id)
              VALUES (:offset_no, :link_id, :business_source_id, :supplier_id, :branch_id, :currency,
-                :offset_date, :amount, :reference_no, :remarks, :created_by_user_id)'
+                :account_branch_id, :supplier_branch_id, :account_currency, :supplier_currency,
+                :offset_date, :amount, :account_amount, :supplier_amount, :exchange_rate, :exchange_rate_effective_date,
+                :reference_no, :remarks, :created_by_user_id)'
         );
         $statement->execute($data);
         return (int) $this->db->lastInsertId();
@@ -135,15 +185,32 @@ final class CounterpartyOffsetRepository extends BaseRepository
         $statement->execute(['journal_id' => $journalEntryId, 'id' => $offsetId]);
     }
 
+    public function setSettlementJournals(int $offsetId, int $accountJournalId, ?int $supplierJournalId): void
+    {
+        $statement = $this->db->prepare(
+            'UPDATE counterparty_offsets
+             SET journal_entry_id = :account_journal_id, supplier_journal_entry_id = :supplier_journal_id
+             WHERE id = :id'
+        );
+        $statement->execute([
+            'account_journal_id' => $accountJournalId,
+            'supplier_journal_id' => $supplierJournalId,
+            'id' => $offsetId,
+        ]);
+    }
+
     public function find(int $offsetId, bool $forUpdate = false): ?array
     {
         $statement = $this->db->prepare(
             'SELECT o.*, bs.name AS business_source_name, bs.code AS business_source_code,
-                    s.name AS supplier_name, s.code AS supplier_code, br.name AS branch_name
+                    s.name AS supplier_name, s.code AS supplier_code,
+                    abr.name AS account_branch_name, sbr.name AS supplier_branch_name,
+                    abr.name AS branch_name
              FROM counterparty_offsets o
              INNER JOIN business_sources bs ON bs.id = o.business_source_id
              INNER JOIN suppliers s ON s.id = o.supplier_id
-             INNER JOIN branches br ON br.id = o.branch_id
+             INNER JOIN branches abr ON abr.id = COALESCE(o.account_branch_id, o.branch_id)
+             INNER JOIN branches sbr ON sbr.id = COALESCE(o.supplier_branch_id, o.branch_id)
              WHERE o.id = :id LIMIT 1' . ($forUpdate ? ' FOR UPDATE' : '')
         );
         $statement->execute(['id' => $offsetId]);
@@ -193,6 +260,7 @@ final class CounterpartyOffsetRepository extends BaseRepository
                 'affected_account_receivable_ids' => [],
             ];
         }
+        $this->assertSingleDimensionRelease('payable', $obligationId);
 
         $payableAllocationStatement = $this->db->prepare(
             'SELECT
@@ -231,7 +299,9 @@ final class CounterpartyOffsetRepository extends BaseRepository
         );
         $updateOffsetAmount = $this->db->prepare(
             'UPDATE counterparty_offsets
-             SET amount = :amount
+             SET amount = :amount,
+                 account_amount = :account_amount,
+                 supplier_amount = :supplier_amount
              WHERE id = :id'
         );
 
@@ -268,6 +338,8 @@ final class CounterpartyOffsetRepository extends BaseRepository
             $newOffsetAmount = round(max((float) ($allocation['offset_amount'] ?? 0) - $releaseAmount, 0), 2);
             $updateOffsetAmount->execute([
                 'amount' => $newOffsetAmount,
+                'account_amount' => $newOffsetAmount,
+                'supplier_amount' => $newOffsetAmount,
                 'id' => (int) $allocation['counterparty_offset_id'],
             ]);
 
@@ -298,6 +370,7 @@ final class CounterpartyOffsetRepository extends BaseRepository
                 'affected_payable_ids' => [],
             ];
         }
+        $this->assertSingleDimensionRelease('account', $receivableId);
 
         $releasedAmount = 0.0;
         $affectedOffsetIds = [];
@@ -372,7 +445,13 @@ final class CounterpartyOffsetRepository extends BaseRepository
         return $remaining;
     }
 
-    public function voidOffset(int $offsetId, int $actorUserId, string $reason, ?int $reversalJournalId): void
+    public function voidOffset(
+        int $offsetId,
+        int $actorUserId,
+        string $reason,
+        ?int $reversalJournalId,
+        ?int $supplierReversalJournalId = null
+    ): void
     {
         // Legacy offsets changed customer receivables directly. Preserve their
         // reversal path while all new offsets use account allocations only.
@@ -397,9 +476,16 @@ final class CounterpartyOffsetRepository extends BaseRepository
         }
         $statement = $this->db->prepare(
             'UPDATE counterparty_offsets SET status = "void", reversal_journal_entry_id = :reversal_journal_id,
+                supplier_reversal_journal_entry_id = :supplier_reversal_journal_id,
                 voided_by_user_id = :user_id, voided_at = NOW(), void_reason = :reason WHERE id = :id AND status = "posted"'
         );
-        $statement->execute(['reversal_journal_id' => $reversalJournalId, 'user_id' => $actorUserId, 'reason' => $reason, 'id' => $offsetId]);
+        $statement->execute([
+            'reversal_journal_id' => $reversalJournalId,
+            'supplier_reversal_journal_id' => $supplierReversalJournalId,
+            'user_id' => $actorUserId,
+            'reason' => $reason,
+            'id' => $offsetId,
+        ]);
         if ($statement->rowCount() !== 1) {
             throw new \RuntimeException('The settlement could not be voided.');
         }
@@ -562,7 +648,9 @@ final class CounterpartyOffsetRepository extends BaseRepository
         );
         $updateOffsetAmount = $this->db->prepare(
             'UPDATE counterparty_offsets
-             SET amount = :amount
+             SET amount = :amount,
+                 account_amount = :account_amount,
+                 supplier_amount = :supplier_amount
              WHERE id = :id'
         );
 
@@ -596,6 +684,8 @@ final class CounterpartyOffsetRepository extends BaseRepository
             $offsetAmount = round((float) $offsetAmountStatement->fetchColumn(), 2);
             $updateOffsetAmount->execute([
                 'amount' => round(max($offsetAmount - $releaseAmount, 0), 2),
+                'account_amount' => round(max($offsetAmount - $releaseAmount, 0), 2),
+                'supplier_amount' => round(max($offsetAmount - $releaseAmount, 0), 2),
                 'id' => (int) $allocation['counterparty_offset_id'],
             ]);
 
@@ -675,19 +765,50 @@ final class CounterpartyOffsetRepository extends BaseRepository
     public function recent(array $branchIds = [], int $limit = 100): array
     {
         $params = [];
-        $branchSql = $this->branchSql('o.branch_id', $branchIds, $params);
+        $branchSql = $this->branchSql('COALESCE(o.account_branch_id, o.branch_id)', $branchIds, $params);
         $statement = $this->db->prepare(
-            'SELECT o.*, bs.name AS business_source_name, s.name AS supplier_name, br.name AS branch_name,
+            'SELECT o.*, bs.name AS business_source_name, s.name AS supplier_name,
+                    abr.name AS account_branch_name, sbr.name AS supplier_branch_name,
+                    abr.name AS branch_name,
                     u.name AS created_by_name
              FROM counterparty_offsets o
              INNER JOIN business_sources bs ON bs.id = o.business_source_id
              INNER JOIN suppliers s ON s.id = o.supplier_id
-             INNER JOIN branches br ON br.id = o.branch_id
+             INNER JOIN branches abr ON abr.id = COALESCE(o.account_branch_id, o.branch_id)
+             INNER JOIN branches sbr ON sbr.id = COALESCE(o.supplier_branch_id, o.branch_id)
              LEFT JOIN users u ON u.id = o.created_by_user_id
              WHERE 1=1 ' . $branchSql . ' ORDER BY o.id DESC LIMIT ' . max(1, min(250, $limit))
         );
         $statement->execute($params);
         return $statement->fetchAll() ?: [];
+    }
+
+    private function assertSingleDimensionRelease(string $side, int $itemId): void
+    {
+        $allocationTable = $side === 'payable'
+            ? 'counterparty_offset_payable_allocations'
+            : 'counterparty_offset_account_allocations';
+        $itemColumn = $side === 'payable' ? 'supplier_obligation_id' : 'customer_receivable_item_id';
+        $statement = $this->db->prepare(
+            'SELECT COUNT(*)
+             FROM ' . $allocationTable . ' allocation
+             INNER JOIN counterparty_offsets offset_record ON offset_record.id = allocation.counterparty_offset_id
+             WHERE allocation.' . $itemColumn . ' = :item_id
+               AND offset_record.status = "posted"
+               AND (
+                    COALESCE(offset_record.account_branch_id, offset_record.branch_id)
+                        <> COALESCE(offset_record.supplier_branch_id, offset_record.branch_id)
+                    OR COALESCE(offset_record.account_currency, offset_record.currency)
+                        <> COALESCE(offset_record.supplier_currency, offset_record.currency)
+               )'
+        );
+        $statement->execute(['item_id' => $itemId]);
+        if ((int) $statement->fetchColumn() > 0) {
+            throw new \RuntimeException(
+                'This invoice is part of a cross-branch or cross-currency linked settlement. '
+                . 'Void that settlement before correcting or cancelling the invoice.'
+            );
+        }
     }
 
     private function branchSql(string $column, array $branchIds, array &$params): string

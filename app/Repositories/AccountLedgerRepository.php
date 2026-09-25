@@ -37,7 +37,7 @@ final class AccountLedgerRepository extends BaseRepository
             $holders[] = ':' . $key;
             $params[$key] = $branchId;
         }
-        $where = ['o.status = "posted"', 'o.branch_id IN (' . implode(', ', $holders) . ')'];
+        $where = ['o.status = "posted"', 'COALESCE(o.account_branch_id, o.branch_id) IN (' . implode(', ', $holders) . ')'];
         $dateFrom = trim((string) ($filters['dateFrom'] ?? ''));
         if ($dateFrom !== '') {
             $where[] = 'o.offset_date >= :account_offset_date_from';
@@ -50,7 +50,7 @@ final class AccountLedgerRepository extends BaseRepository
         }
         $currency = strtoupper(trim((string) ($filters['currency'] ?? '')));
         if ($currency !== '') {
-            $where[] = 'o.currency = :account_offset_currency';
+            $where[] = 'COALESCE(o.account_currency, o.currency) = :account_offset_currency';
             $params['account_offset_currency'] = $currency;
         }
         $businessSourceId = (int) ($filters['businessSourceId'] ?? 0);
@@ -72,12 +72,13 @@ final class AccountLedgerRepository extends BaseRepository
 
         return $this->fetchRows(
             'SELECT o.id AS movement_id, o.offset_no AS movement_reference, o.offset_date AS movement_date,
-                    o.branch_id, br.name AS branch_name, o.business_source_id, bs_src.name AS business_source_name,
+                    COALESCE(o.account_branch_id, o.branch_id) AS branch_id, br.name AS branch_name,
+                    o.business_source_id, bs_src.name AS business_source_name,
                     b.id AS booking_id, b.booking_reference, b.lead_traveler_id,
                     COALESCE(NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Booking Party") AS customer_name,
                     COALESCE(NULLIF(bp.contact_mobile, ""), NULLIF(t_lead.mobile, ""), "") AS contact_mobile,
                     cri.service_line_reference,
-                    o.currency, aa.allocated_amount, s.name AS supplier_name,
+                    COALESCE(o.account_currency, o.currency) AS currency, aa.allocated_amount, s.name AS supplier_name,
                     COALESCE(NULLIF(t_service.full_name, ""), NULLIF(bs.passenger_name_snapshot, ""), "Passenger") AS passenger_name,
                     COALESCE(NULLIF(sat.pnr, ""), "N/A") AS pnr,
                     COALESCE(NULLIF(CONCAT_WS("/", NULLIF(sat.sector_from, ""), NULLIF(sat.sector_to, "")), ""), "N/A") AS route,
@@ -86,7 +87,7 @@ final class AccountLedgerRepository extends BaseRepository
              INNER JOIN counterparty_offsets o ON o.id = aa.counterparty_offset_id
              INNER JOIN customer_receivable_items cri ON cri.id = aa.customer_receivable_item_id
              INNER JOIN bookings b ON b.booking_reference = cri.booking_reference
-             INNER JOIN branches br ON br.id = o.branch_id
+             INNER JOIN branches br ON br.id = COALESCE(o.account_branch_id, o.branch_id)
              INNER JOIN business_sources bs_src ON bs_src.id = o.business_source_id
              INNER JOIN suppliers s ON s.id = o.supplier_id
              LEFT JOIN booking_parties bp ON bp.booking_id = b.id

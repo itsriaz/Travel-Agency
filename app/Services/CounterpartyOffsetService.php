@@ -49,28 +49,19 @@ final class CounterpartyOffsetService extends Service
         array $accessibleBranchIds
     ): array {
         $linkId = (int) ($input['link_id'] ?? 0);
-        $branchId = (int) ($input['branch_id'] ?? 0);
-        $currency = strtoupper(trim((string) ($input['currency'] ?? '')));
         [$accountAllocations, $payableAllocations] = $this->requestedAllocations($input);
         $accountTotal = round(array_sum($accountAllocations), 2);
         $payableTotal = round(array_sum($payableAllocations), 2);
         if ($accountAllocations === [] || $payableAllocations === [] || $accountTotal <= 0.005 || $payableTotal <= 0.005) {
             throw new RuntimeException('Enter a positive adjustment amount beside at least one account-holder invoice and one supplier invoice.');
         }
-        if (abs($accountTotal - $payableTotal) > 0.005) {
-            throw new RuntimeException('Account-holder and supplier adjustment totals must be exactly equal.');
-        }
         $offsetDate = $this->validDate((string) ($input['offset_date'] ?? ''));
+        $rateDate = $this->validDate((string) ($input['exchange_rate_effective_date'] ?? $offsetDate));
         $reference = $this->optionalText($input['reference_no'] ?? null, 100, 'Reference');
         $remarks = $this->optionalText($input['remarks'] ?? null, 2000, 'Remarks');
 
-        if ($linkId <= 0 || $branchId <= 0 || ! preg_match('/^[A-Z]{3}$/', $currency)) {
-            throw new RuntimeException('Please select a linked party, branch, and currency.');
-        }
+        if ($linkId <= 0) throw new RuntimeException('Please select a linked account holder and supplier.');
         $allowedBranches = array_values(array_unique(array_filter(array_map('intval', $accessibleBranchIds))));
-        if ($allowedBranches !== [] && ! in_array($branchId, $allowedBranches, true)) {
-            throw new RuntimeException('You do not have access to the selected branch.');
-        }
 
         /** @var PDO $db */
         $db = $this->app->get('db');
@@ -88,8 +79,8 @@ final class CounterpartyOffsetService extends Service
                 throw new RuntimeException('The account holder and supplier are no longer linked.');
             }
 
-            $accountPositions = $repository->openAccountPositions((int) $link['business_source_id'], $branchId, $currency, true);
-            $payables = $repository->openPayables((int) $link['supplier_id'], $branchId, $currency, true);
+            $accountPositions = $repository->openAccountPositionsForLink((int) $link['business_source_id'], $allowedBranches, true);
+            $payables = $repository->openPayablesForLink((int) $link['supplier_id'], $allowedBranches, true);
             $this->validateRequestedAllocations(
                 $accountAllocations,
                 $accountPositions,
@@ -102,7 +93,30 @@ final class CounterpartyOffsetService extends Service
                 'net_payable_amount',
                 'supplier'
             );
-            $amount = $accountTotal;
+            [$accountBranchId, $accountCurrency] = $this->selectedDimension($accountAllocations, $accountPositions, 'account-holder');
+            [$supplierBranchId, $supplierCurrency] = $this->selectedDimension($payableAllocations, $payables, 'supplier');
+            $legacyBranchId = (int) ($input['branch_id'] ?? 0);
+            $legacyCurrency = strtoupper(trim((string) ($input['currency'] ?? '')));
+            if (($legacyBranchId > 0 && $legacyBranchId !== $accountBranchId)
+                || ($legacyCurrency !== '' && $legacyCurrency !== $accountCurrency)) {
+                throw new RuntimeException('The selected account-holder invoices do not match the submitted branch and currency.');
+            }
+            foreach ([$accountBranchId, $supplierBranchId] as $selectedBranchId) {
+                if ($allowedBranches !== [] && ! in_array($selectedBranchId, $allowedBranches, true)) {
+                    throw new RuntimeException('You do not have access to one of the selected invoice branches.');
+                }
+            }
+
+            $sameCurrency = $accountCurrency === $supplierCurrency;
+            $exchangeRate = $sameCurrency ? 1.0 : $this->positiveRate($input['exchange_rate'] ?? null);
+            $expectedSupplierTotal = round($accountTotal * $exchangeRate, 2);
+            if (abs($expectedSupplierTotal - $payableTotal) > 0.005) {
+                throw new RuntimeException(
+                    $sameCurrency
+                        ? 'Account-holder and supplier adjustment totals must be exactly equal.'
+                        : 'Supplier total must equal account-holder total multiplied by the entered exchange rate.'
+                );
+            }
 
             $offsetNo = 'OFFSET-' . date('YmdHis') . '-' . strtoupper(bin2hex(random_bytes(3)));
             $offsetId = $repository->createOffset([
@@ -110,10 +124,18 @@ final class CounterpartyOffsetService extends Service
                 'link_id' => $linkId,
                 'business_source_id' => (int) $link['business_source_id'],
                 'supplier_id' => (int) $link['supplier_id'],
-                'branch_id' => $branchId,
-                'currency' => $currency,
+                'branch_id' => $accountBranchId,
+                'currency' => $accountCurrency,
+                'account_branch_id' => $accountBranchId,
+                'supplier_branch_id' => $supplierBranchId,
+                'account_currency' => $accountCurrency,
+                'supplier_currency' => $supplierCurrency,
                 'offset_date' => $offsetDate,
-                'amount' => $amount,
+                'amount' => $accountTotal,
+                'account_amount' => $accountTotal,
+                'supplier_amount' => $payableTotal,
+                'exchange_rate' => $exchangeRate,
+                'exchange_rate_effective_date' => $rateDate,
                 'reference_no' => $reference,
                 'remarks' => $remarks,
                 'created_by_user_id' => $actorUserId,
@@ -125,33 +147,61 @@ final class CounterpartyOffsetService extends Service
             foreach ($payableAllocations as $obligationId => $allocationAmount) {
                 $repository->allocatePayable($offsetId, $obligationId, $allocationAmount);
             }
+            $sameDimension = $accountBranchId === $supplierBranchId && $sameCurrency;
             $journalId = $accounting->postJournalEntry([
-                'branch_id' => $branchId,
+                'branch_id' => $accountBranchId,
                 'booking_reference' => null,
                 'source_type' => 'linked_party_offset',
                 'source_reference' => $offsetNo,
                 'entry_date' => $offsetDate,
-                'currency' => $currency,
+                'currency' => $accountCurrency,
                 'narration' => 'Linked-party'
                     . ' account-holder recovery and supplier payable settled without cash movement',
                 'actor_user_id' => $actorUserId,
-            ], [[
-                'account_code' => 'AP_CONTROL',
-                'line_description' => 'Supplier payable settled against linked account-holder recovery',
-                'debit_amount' => $amount,
-                'credit_amount' => 0,
+            ], $sameDimension ? [[
+                'account_code' => 'AP_CONTROL', 'line_description' => 'Supplier payable settled against linked account-holder recovery',
+                'debit_amount' => $accountTotal, 'credit_amount' => 0,
             ], [
                 'account_code' => 'AR_CONTROL',
                 'line_description' => 'Account-holder recovery applied against linked supplier payable',
-                'debit_amount' => 0,
-                'credit_amount' => $amount,
+                'debit_amount' => 0, 'credit_amount' => $accountTotal,
+            ]] : [[
+                'account_code' => 'LINKED_PARTY_CLEARING', 'line_description' => 'Linked supplier value received for account-holder recovery',
+                'debit_amount' => $accountTotal, 'credit_amount' => 0,
+            ], [
+                'account_code' => 'AR_CONTROL', 'line_description' => 'Account-holder recovery applied in linked settlement',
+                'debit_amount' => 0, 'credit_amount' => $accountTotal,
             ]]);
-            $repository->setJournalEntry($offsetId, $journalId);
+
+            $supplierJournalId = null;
+            if (! $sameDimension) {
+                $supplierJournalId = $accounting->postJournalEntry([
+                    'branch_id' => $supplierBranchId,
+                    'booking_reference' => null,
+                    'source_type' => 'linked_party_offset_supplier',
+                    'source_reference' => $offsetNo,
+                    'entry_date' => $offsetDate,
+                    'currency' => $supplierCurrency,
+                    'narration' => 'Linked supplier payable settled without cash movement',
+                    'actor_user_id' => $actorUserId,
+                ], [[
+                    'account_code' => 'AP_CONTROL', 'line_description' => 'Linked supplier payable settled',
+                    'debit_amount' => $payableTotal, 'credit_amount' => 0,
+                ], [
+                    'account_code' => 'LINKED_PARTY_CLEARING', 'line_description' => 'Account-holder value applied to linked supplier payable',
+                    'debit_amount' => 0, 'credit_amount' => $payableTotal,
+                ]]);
+            }
+            $repository->setSettlementJournals($offsetId, $journalId, $supplierJournalId);
 
             AuditLog::record($this->app, 'counterparty.offset.posted', [
                 'user_id' => $actorUserId, 'offset_id' => $offsetId, 'offset_no' => $offsetNo,
-                'link_id' => $linkId, 'branch_id' => $branchId, 'currency' => $currency, 'amount' => $amount,
-                'journal_entry_id' => $journalId, 'automatic' => false,
+                'link_id' => $linkId, 'branch_id' => $accountBranchId, 'currency' => $accountCurrency, 'amount' => $accountTotal,
+                'account_branch_id' => $accountBranchId, 'supplier_branch_id' => $supplierBranchId,
+                'account_currency' => $accountCurrency, 'supplier_currency' => $supplierCurrency,
+                'account_amount' => $accountTotal, 'supplier_amount' => $payableTotal,
+                'exchange_rate' => $exchangeRate, 'journal_entry_id' => $journalId,
+                'supplier_journal_entry_id' => $supplierJournalId, 'automatic' => false,
                 'customer_receivable_item_id' => count($accountAllocations) === 1 ? array_key_first($accountAllocations) : null,
                 'supplier_obligation_id' => count($payableAllocations) === 1 ? array_key_first($payableAllocations) : null,
                 'customer_receivable_item_ids' => array_keys($accountAllocations),
@@ -162,7 +212,7 @@ final class CounterpartyOffsetService extends Service
             if ($startedTransaction && $db->inTransaction()) {
                 $db->commit();
             }
-            return $repository->find($offsetId) ?? ['id' => $offsetId, 'offset_no' => $offsetNo, 'amount' => $amount];
+            return $repository->find($offsetId) ?? ['id' => $offsetId, 'offset_no' => $offsetNo, 'amount' => $accountTotal];
         } catch (\Throwable $exception) {
             if ($startedTransaction && $db->inTransaction()) {
                 $db->rollBack();
@@ -199,20 +249,40 @@ final class CounterpartyOffsetService extends Service
                 throw new RuntimeException('This linked-party settlement is unavailable or already void.');
             }
             $allowedBranches = array_values(array_unique(array_filter(array_map('intval', $accessibleBranchIds))));
-            if ($allowedBranches !== [] && ! in_array((int) $offset['branch_id'], $allowedBranches, true)) {
-                throw new RuntimeException('You do not have access to this settlement branch.');
+            $accountBranchId = (int) ($offset['account_branch_id'] ?? $offset['branch_id']);
+            $supplierBranchId = (int) ($offset['supplier_branch_id'] ?? $offset['branch_id']);
+            if ($allowedBranches !== [] && (! in_array($accountBranchId, $allowedBranches, true)
+                || ! in_array($supplierBranchId, $allowedBranches, true))) {
+                throw new RuntimeException('You do not have access to both settlement branches.');
             }
-            $remainingAmount = $repository->validatedRemainingReversalAmount($offset);
+            $accountAmount = round((float) ($offset['account_amount'] ?? $offset['amount']), 2);
+            $supplierAmount = round((float) ($offset['supplier_amount'] ?? $offset['amount']), 2);
+            $accountAllocations = $repository->allocations($offsetId, 'account');
+            if ($accountAllocations === []) $accountAllocations = $repository->allocations($offsetId, 'receivable');
+            $payableAllocations = $repository->allocations($offsetId, 'payable');
+            if (abs(array_sum(array_column($accountAllocations, 'allocated_amount')) - $accountAmount) > 0.005
+                || abs(array_sum(array_column($payableAllocations, 'allocated_amount')) - $supplierAmount) > 0.005) {
+                throw new RuntimeException('The remaining settlement allocations do not reconcile. Review them before reversal.');
+            }
+            $crossDimension = $accountBranchId !== $supplierBranchId
+                || (string) ($offset['account_currency'] ?? $offset['currency']) !== (string) ($offset['supplier_currency'] ?? $offset['currency']);
+            $remainingAmount = $crossDimension ? $accountAmount : $repository->validatedRemainingReversalAmount($offset);
             // Prior releases already reversed part of the original journal. Reverse only what remains.
             $reversalId = $remainingAmount > 0.005 ? $accounting->postJournalEntry([
-                'branch_id' => (int) $offset['branch_id'],
+                'branch_id' => $accountBranchId,
                 'source_type' => 'linked_party_offset_void',
                 'source_reference' => 'VOID-' . (string) $offset['offset_no'],
                 'entry_date' => date('Y-m-d'),
-                'currency' => (string) $offset['currency'],
+                'currency' => (string) ($offset['account_currency'] ?? $offset['currency']),
                 'narration' => 'Void linked-party settlement ' . (string) $offset['offset_no'],
                 'actor_user_id' => $actorUserId,
-            ], [[
+            ], $crossDimension ? [[
+                'account_code' => 'AR_CONTROL', 'line_description' => 'Remaining linked account-holder recovery restored',
+                'debit_amount' => $accountAmount, 'credit_amount' => 0,
+            ], [
+                'account_code' => 'LINKED_PARTY_CLEARING', 'line_description' => 'Linked settlement clearing reversed',
+                'debit_amount' => 0, 'credit_amount' => $accountAmount,
+            ]] : [[
                 'account_code' => 'AR_CONTROL',
                 'line_description' => 'Remaining linked account-holder recovery restored',
                 'debit_amount' => $remainingAmount,
@@ -223,11 +293,30 @@ final class CounterpartyOffsetService extends Service
                 'debit_amount' => 0,
                 'credit_amount' => $remainingAmount,
             ]]) : null;
-            $repository->voidOffset($offsetId, $actorUserId, $reason, $reversalId);
+            $supplierReversalId = null;
+            if ($crossDimension && $supplierAmount > 0.005) {
+                $supplierReversalId = $accounting->postJournalEntry([
+                    'branch_id' => $supplierBranchId,
+                    'source_type' => 'linked_party_offset_supplier_void',
+                    'source_reference' => 'VOID-' . (string) $offset['offset_no'],
+                    'entry_date' => date('Y-m-d'),
+                    'currency' => (string) ($offset['supplier_currency'] ?? $offset['currency']),
+                    'narration' => 'Void linked supplier settlement ' . (string) $offset['offset_no'],
+                    'actor_user_id' => $actorUserId,
+                ], [[
+                    'account_code' => 'LINKED_PARTY_CLEARING', 'line_description' => 'Linked settlement clearing reversed',
+                    'debit_amount' => $supplierAmount, 'credit_amount' => 0,
+                ], [
+                    'account_code' => 'AP_CONTROL', 'line_description' => 'Remaining linked supplier payable restored',
+                    'debit_amount' => 0, 'credit_amount' => $supplierAmount,
+                ]]);
+            }
+            $repository->voidOffset($offsetId, $actorUserId, $reason, $reversalId, $supplierReversalId);
             AuditLog::record($this->app, 'counterparty.offset.voided', [
                 'user_id' => $actorUserId, 'offset_id' => $offsetId, 'offset_no' => $offset['offset_no'],
                 'reason' => $reason, 'reversal_journal_entry_id' => $reversalId,
-                'reversed_remaining_amount' => $remainingAmount,
+                'supplier_reversal_journal_entry_id' => $supplierReversalId,
+                'reversed_remaining_amount' => $remainingAmount, 'reversed_supplier_amount' => $supplierAmount,
             ]);
             if ($startedTransaction && $db->inTransaction()) {
                 $db->commit();
@@ -306,6 +395,34 @@ final class CounterpartyOffsetService extends Service
             throw new RuntimeException($label . ' must be a positive number.');
         }
         return $amount;
+    }
+
+    private function positiveRate(mixed $rawRate): float
+    {
+        if (is_array($rawRate) || is_object($rawRate) || ! is_numeric($rawRate)) {
+            throw new RuntimeException('Enter the supplier amount per 1 account currency.');
+        }
+        $rate = round((float) $rawRate, 8);
+        if (! is_finite($rate) || $rate <= 0) throw new RuntimeException('Exchange rate must be greater than zero.');
+        return $rate;
+    }
+
+    /** @return array{0:int,1:string} */
+    private function selectedDimension(array $requested, array $rows, string $side): array
+    {
+        $rowsById = [];
+        foreach ($rows as $row) $rowsById[(int) $row['id']] = $row;
+        $dimensions = [];
+        foreach (array_keys($requested) as $id) {
+            $row = $rowsById[$id] ?? null;
+            if ($row === null) throw new RuntimeException('A selected ' . $side . ' invoice is unavailable.');
+            $key = (int) $row['branch_id'] . '|' . strtoupper((string) $row['currency']);
+            $dimensions[$key] = [(int) $row['branch_id'], strtoupper((string) $row['currency'])];
+        }
+        if (count($dimensions) !== 1) {
+            throw new RuntimeException('Select ' . $side . ' invoices from one branch and currency per settlement.');
+        }
+        return array_values($dimensions)[0];
     }
 
     /** @param array<int, float> $requested */

@@ -301,7 +301,7 @@ $clearHistoryUrl = url('/suppliers/settlements/global?' . http_build_query(array
                 <div>
                     <strong>Payment Details</strong>
                     <p class="global-settlement-payment-entry__hint">
-                        Enter amount in <?= e($selectedCurrency) ?>. If source account is in another currency, enter FX rate as 1 source = ? <?= e($selectedCurrency) ?>.
+                        Enter the supplier payment in <?= e($selectedCurrency) ?>. If the source account uses another currency, confirm whether to convert the amount or correct its currency.
                     </p>
                 </div>
                 <span class="global-settlement-payment-entry__currency"><?= e($selectedCurrency) ?></span>
@@ -335,10 +335,14 @@ $clearHistoryUrl = url('/suppliers/settlements/global?' . http_build_query(array
                     <?php endforeach; ?>
                 </select>
             </label>
-            <label class="station-field span-3" data-global-supplier-exchange-row hidden style="display:none;">
-                <span>FX Rate</span>
-                <input type="number" step="0.00000001" min="0.00000001" name="supplier_exchange_rate_to_booking" value="<?= e((string) ($recreateDraft['exchange_rate_to_booking'] ?? '')) ?>" data-global-supplier-exchange-input placeholder="1 source = ? payment">
-            </label>
+            <div class="station-field span-3" data-global-supplier-exchange-row hidden style="display:none;">
+                <span>Funding Currency</span>
+                <input type="hidden" name="supplier_exchange_rate_to_booking" value="<?= e((string) ($recreateDraft['exchange_rate_to_booking'] ?? '')) ?>" data-global-supplier-exchange-input>
+                <div class="supplier-currency-review-control">
+                    <button class="btn btn-sm" type="button" data-global-supplier-exchange-review>Review Currency Conversion</button>
+                    <small class="muted-text" data-global-supplier-exchange-note>Confirm how the payment amount should be handled.</small>
+                </div>
+            </div>
             <label class="station-field span-3">
                 <span>Reference</span>
                 <input type="text" name="supplier_reference_number" value="<?= e((string) ($recreateDraft['reference_number'] ?? '')) ?>" maxlength="100">
@@ -568,9 +572,17 @@ $clearHistoryUrl = url('/suppliers/settlements/global?' . http_build_query(array
         const exchangeRow = form.querySelector('[data-global-supplier-exchange-row]');
         const exchangeInput = form.querySelector('[data-global-supplier-exchange-input]');
         const exchangeNote = form.querySelector('[data-global-supplier-exchange-note]');
+        const exchangeReview = form.querySelector('[data-global-supplier-exchange-review]');
         const paymentCurrency = '<?= e($selectedCurrency) ?>';
+        let supplierCurrencyDecisionOpen = false;
 
         const money = (value) => Number(value || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        const roundMoney = (value) => Math.round(Number(value || 0) * 100) / 100;
+        const roundRate = (value) => Math.round(Number(value || 0) * 100000000) / 100000000;
+        const formatCurrencyAmount = (currency, value) => `${currency} ${money(value)}`;
+        const supplierPromptPair = (fromCurrency, toCurrency) => fromCurrency === 'PKR' && toCurrency !== 'PKR'
+            ? { from: toCurrency, to: fromCurrency }
+            : { from: fromCurrency, to: toCurrency };
         const selectedTotal = () => Math.max(Number(accountPosition?.dataset.supplierAccountPayable || 0), 0);
         const syncTotal = () => {
             const total = selectedTotal();
@@ -627,18 +639,140 @@ $clearHistoryUrl = url('/suppliers/settlements/global?' . http_build_query(array
                 exchangeRow.style.display = requiresRate ? '' : 'none';
             }
             if (exchangeInput instanceof HTMLInputElement) {
-                if (requiresRate) {
-                    exchangeInput.placeholder = `1 ${sourceCurrency} = ? ${targetCurrency}`;
-                } else {
+                if (!requiresRate) {
                     exchangeInput.value = '';
-                    exchangeInput.placeholder = '1 source = ? payment';
                 }
             }
             if (exchangeNote instanceof HTMLElement) {
-                exchangeNote.textContent = requiresRate
-                    ? `Enter today's exact rate: 1 ${sourceCurrency} = how many ${targetCurrency}.`
-                    : 'Enter the exact source-to-payment rate.';
+                const paymentAmount = Math.max(Number(amountField?.value || 0), 0);
+                const sourceToPaymentRate = Math.max(Number(exchangeInput?.value || 0), 0);
+                const sourceAmount = sourceToPaymentRate > 0 ? roundMoney(paymentAmount / sourceToPaymentRate) : 0;
+                exchangeNote.textContent = !requiresRate
+                    ? 'Source account and supplier payment use the same currency.'
+                    : sourceToPaymentRate > 0
+                        ? `${formatCurrencyAmount(targetCurrency, paymentAmount)} will use ${formatCurrencyAmount(sourceCurrency, sourceAmount)} from the selected account.`
+                        : `Confirm how ${formatCurrencyAmount(targetCurrency, paymentAmount)} should be funded from the ${sourceCurrency} account.`;
             }
+            if (exchangeReview instanceof HTMLButtonElement) {
+                exchangeReview.textContent = Number(exchangeInput?.value || 0) > 0
+                    ? 'Review Currency Conversion'
+                    : 'Confirm Currency Conversion';
+            }
+        };
+        const requestSupplierCurrencyDecision = () => {
+            if (supplierCurrencyDecisionOpen || !(sourceField instanceof HTMLSelectElement)) {
+                return;
+            }
+            const selectedOption = sourceField.selectedOptions[0] || null;
+            const sourceCurrency = selectedOption ? String(selectedOption.dataset.currency || '').trim().toUpperCase() : '';
+            const targetCurrency = String(paymentCurrency || '').trim().toUpperCase();
+            const amount = Math.max(Number(amountField?.value || 0), 0);
+            if (sourceCurrency === '' || sourceCurrency === targetCurrency) {
+                return;
+            }
+            if (amount <= 0) {
+                if (feedback) {
+                    feedback.hidden = false;
+                    feedback.textContent = 'Enter the supplier payment amount before confirming its funding currency.';
+                }
+                amountField?.focus();
+                return;
+            }
+
+            const promptPair = supplierPromptPair(targetCurrency, sourceCurrency);
+            const existingSourceToPaymentRate = Math.max(Number(exchangeInput?.value || 0), 0);
+            const existingPaymentToSourceRate = existingSourceToPaymentRate > 0 ? 1 / existingSourceToPaymentRate : 0;
+            const existingPromptRate = existingPaymentToSourceRate > 0
+                ? (promptPair.from === targetCurrency ? existingPaymentToSourceRate : 1 / existingPaymentToSourceRate)
+                : 0;
+            const modal = document.createElement('section');
+            modal.className = 'financial-currency-decision supplier-payment-currency-decision';
+            modal.setAttribute('aria-hidden', 'false');
+            modal.innerHTML = `
+                <div class="financial-currency-decision__backdrop" data-supplier-payment-currency-cancel></div>
+                <div class="financial-currency-decision__dialog" role="dialog" aria-modal="true" aria-labelledby="global-supplier-payment-currency-title">
+                    <header class="financial-currency-decision__header">
+                        <div>
+                            <strong id="global-supplier-payment-currency-title">Change Supplier Payment Currency</strong>
+                            <span>Change from ${targetCurrency} to ${sourceCurrency} - Current amount ${formatCurrencyAmount(targetCurrency, amount)}</span>
+                        </div>
+                        <button class="btn btn-sm" type="button" data-supplier-payment-currency-cancel>Close</button>
+                    </header>
+                    <div class="financial-currency-decision__body">
+                        <label class="financial-currency-decision__rate">
+                            <span>1 ${promptPair.from} equals</span>
+                            <span class="financial-currency-decision__rate-control">
+                                <input type="number" min="0.00000001" step="0.00000001" inputmode="decimal" data-supplier-payment-currency-rate>
+                                <strong>${promptPair.to}</strong>
+                            </span>
+                        </label>
+                        <div class="financial-currency-decision__choices">
+                            <button class="financial-currency-decision__choice" type="button" data-supplier-payment-currency-action="convert">
+                                <strong>Convert Existing Amount</strong>
+                                <span data-supplier-payment-currency-convert-preview></span>
+                            </button>
+                            <button class="financial-currency-decision__choice" type="button" data-supplier-payment-currency-action="keep">
+                                <strong>Keep Number, Correct Currency</strong>
+                                <span>${money(amount)} remains ${money(amount)} and will be treated as ${sourceCurrency}</span>
+                            </button>
+                        </div>
+                        <p class="financial-currency-decision__error" data-supplier-payment-currency-error hidden></p>
+                    </div>
+                </div>`;
+            document.body.appendChild(modal);
+            supplierCurrencyDecisionOpen = true;
+
+            const rateInput = modal.querySelector('[data-supplier-payment-currency-rate]');
+            const convertPreview = modal.querySelector('[data-supplier-payment-currency-convert-preview]');
+            const error = modal.querySelector('[data-supplier-payment-currency-error]');
+            if (rateInput instanceof HTMLInputElement && existingPromptRate > 0) {
+                rateInput.value = String(roundRate(existingPromptRate));
+            }
+            const paymentToSourceRate = () => {
+                const enteredRate = Math.max(Number(rateInput?.value || 0), 0);
+                if (enteredRate <= 0) {
+                    return 0;
+                }
+                return promptPair.from === targetCurrency ? enteredRate : roundRate(1 / enteredRate);
+            };
+            const refreshPreview = () => {
+                const conversionRate = paymentToSourceRate();
+                if (convertPreview) {
+                    convertPreview.textContent = conversionRate > 0
+                        ? `${formatCurrencyAmount(targetCurrency, amount)} becomes ${formatCurrencyAmount(sourceCurrency, roundMoney(amount * conversionRate))}`
+                        : `Enter the ${promptPair.from} to ${promptPair.to} rate to preview`;
+                }
+            };
+            const close = () => {
+                supplierCurrencyDecisionOpen = false;
+                modal.remove();
+            };
+            modal.querySelectorAll('[data-supplier-payment-currency-cancel]').forEach((button) => button.addEventListener('click', close));
+            modal.querySelectorAll('[data-supplier-payment-currency-action]').forEach((button) => button.addEventListener('click', () => {
+                const conversionRate = paymentToSourceRate();
+                if (conversionRate <= 0) {
+                    if (error) {
+                        error.textContent = 'Enter a valid exchange rate before continuing.';
+                        error.hidden = false;
+                    }
+                    rateInput?.focus();
+                    return;
+                }
+                const sourceToPaymentRate = roundRate(1 / conversionRate);
+                if (exchangeInput instanceof HTMLInputElement) {
+                    exchangeInput.value = String(sourceToPaymentRate);
+                }
+                if (button.dataset.supplierPaymentCurrencyAction === 'keep' && amountField instanceof HTMLInputElement) {
+                    amountField.value = roundMoney(amount * sourceToPaymentRate).toFixed(2);
+                    amountField.dataset.autofilled = '0';
+                }
+                close();
+                syncTotal();
+                syncExchangeField();
+            }));
+            rateInput?.addEventListener('input', refreshPreview);
+            refreshPreview();
+            window.setTimeout(() => rateInput?.focus(), 0);
         };
 
         const markAmountAsManual = () => {
@@ -652,12 +786,20 @@ $clearHistoryUrl = url('/suppliers/settlements/global?' . http_build_query(array
         amountField?.addEventListener('input', () => {
             markAmountAsManual();
             syncTotal();
+            syncExchangeField();
         });
         methodField?.addEventListener('change', () => {
             syncSourceAccounts();
             syncExchangeField();
         });
-        sourceField?.addEventListener('change', syncExchangeField);
+        sourceField?.addEventListener('change', () => {
+            if (exchangeInput instanceof HTMLInputElement) {
+                exchangeInput.value = '';
+            }
+            syncExchangeField();
+            requestSupplierCurrencyDecision();
+        });
+        exchangeReview?.addEventListener('click', requestSupplierCurrencyDecision);
         form.addEventListener('submit', (event) => {
             const total = selectedTotal();
             const amount = Number(amountField?.value || 0);
@@ -671,7 +813,7 @@ $clearHistoryUrl = url('/suppliers/settlements/global?' . http_build_query(array
             } else if (['cash', 'bank_transfer'].includes(String(methodField?.value || '')) && String(sourceField?.value || '') === '') {
                 message = 'Please select the source cash or bank account.';
             } else if (requiresRate && (!Number.isFinite(fxRate) || fxRate <= 0)) {
-                message = `Enter today's FX rate for ${sourceCurrency} to ${paymentCurrency}.`;
+                message = 'Confirm the supplier payment currency conversion before saving.';
             }
 
             if (message !== '') {
@@ -679,6 +821,9 @@ $clearHistoryUrl = url('/suppliers/settlements/global?' . http_build_query(array
                 if (feedback) {
                     feedback.hidden = false;
                     feedback.textContent = message;
+                }
+                if (requiresRate && (!Number.isFinite(fxRate) || fxRate <= 0)) {
+                    requestSupplierCurrencyDecision();
                 }
             }
         });

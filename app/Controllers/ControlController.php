@@ -363,6 +363,18 @@ final class ControlController extends BaseController
         $selectedPayableAllocations = [];
         $selectedOffsetId = (int) ($_GET['offset_id'] ?? 0);
         $positions = $repository->positions($branchIds);
+        $linkTotals = [];
+        foreach ($positions as $position) {
+            $linkId = (int) ($position['link_id'] ?? 0);
+            $linkTotals[$linkId]['receivable'] = ($linkTotals[$linkId]['receivable'] ?? 0.0) + (float) ($position['receivable'] ?? 0);
+            $linkTotals[$linkId]['payable'] = ($linkTotals[$linkId]['payable'] ?? 0.0) + (float) ($position['payable'] ?? 0);
+        }
+        foreach ($positions as &$position) {
+            $totals = $linkTotals[(int) ($position['link_id'] ?? 0)] ?? [];
+            $position['can_match_globally'] = (float) ($totals['receivable'] ?? 0) > 0.005
+                && (float) ($totals['payable'] ?? 0) > 0.005;
+        }
+        unset($position);
         $manualPosition = null;
         $manualAccounts = [];
         $manualPayables = [];
@@ -374,8 +386,8 @@ final class ControlController extends BaseController
                 && (string) $position['currency'] === (string) ($_GET['currency'] ?? '')
             ) {
                 $manualPosition = $position;
-                $manualAccounts = $repository->openAccountPositions((int) $position['business_source_id'], (int) $position['branch_id'], (string) $position['currency']);
-                $manualPayables = $repository->openPayables((int) $position['supplier_id'], (int) $position['branch_id'], (string) $position['currency']);
+                $manualAccounts = $repository->openAccountPositionsForLink((int) $position['business_source_id'], $branchIds);
+                $manualPayables = $repository->openPayablesForLink((int) $position['supplier_id'], $branchIds);
                 $accountHolderReceiptAccounts = array_values(array_filter(
                     (new TreasuryRepository($this->app))->accounts([(int) $position['branch_id']]),
                     static fn (array $account): bool => (int) ($account['is_active'] ?? 0) === 1
@@ -394,7 +406,10 @@ final class ControlController extends BaseController
         if ($selectedOffsetId > 0) {
             $candidate = $repository->find($selectedOffsetId);
             if ($candidate !== null
-                && ($branchIds === [] || in_array((int) $candidate['branch_id'], $branchIds, true))
+                && ($branchIds === [] || (
+                    in_array((int) ($candidate['account_branch_id'] ?? $candidate['branch_id']), $branchIds, true)
+                    && in_array((int) ($candidate['supplier_branch_id'] ?? $candidate['branch_id']), $branchIds, true)
+                ))
             ) {
                 $selectedOffset = $candidate;
                 $selectedAccountAllocations = $repository->allocations($selectedOffsetId, 'account');

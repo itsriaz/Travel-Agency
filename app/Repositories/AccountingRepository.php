@@ -469,10 +469,14 @@ final class AccountingRepository extends BaseRepository
         $journalCurrency = strtoupper(trim((string) ($data['currency'] ?? 'PKR')));
         $treasuryCurrency = strtoupper(trim((string) ($data['treasury_currency'] ?? $journalCurrency)));
         $treasuryAmount = round((float) ($data['treasury_amount'] ?? ($paidAmount + $chargesAmount)), 2);
-        $crossCurrencyFunding = (int) ($data['treasury_account_id'] ?? 0) > 0
-            && $treasuryCurrency !== ''
-            && $treasuryCurrency !== $journalCurrency;
-        $bridgeAccount = $crossCurrencyFunding
+        $treasuryAccountId = (int) ($data['treasury_account_id'] ?? 0);
+        $treasuryReference = $treasuryAccountId > 0
+            ? $this->treasuryAccountLedgerReference($treasuryAccountId)
+            : null;
+        $separateTreasuryFunding = $treasuryReference !== null
+            && ($treasuryCurrency !== $journalCurrency
+                || (int) ($treasuryReference['branch_id'] ?? 0) !== (int) ($data['branch_id'] ?? 0));
+        $bridgeAccount = $separateTreasuryFunding
             ? $this->ensureAccountByCode(
                 'SUPPLIER_PAYMENT_FX_CLEARING',
                 'Supplier Payment FX Clearing',
@@ -502,11 +506,11 @@ final class AccountingRepository extends BaseRepository
         }
 
         $lines[] = [
-            'account_code' => $crossCurrencyFunding ? (string) ($bridgeAccount['account_code'] ?? '') : $sourceAccount['account_code'],
-            'account_id' => $crossCurrencyFunding ? (int) ($bridgeAccount['account_id'] ?? 0) : $sourceAccount['account_id'],
+            'account_code' => $separateTreasuryFunding ? (string) ($bridgeAccount['account_code'] ?? '') : $sourceAccount['account_code'],
+            'account_id' => $separateTreasuryFunding ? (int) ($bridgeAccount['account_id'] ?? 0) : $sourceAccount['account_id'],
             'supplier_payment_id' => $data['supplier_payment_id'] ?? null,
-            'line_description' => $crossCurrencyFunding
-                ? 'Cross-currency supplier payment bridge credited'
+            'line_description' => $separateTreasuryFunding
+                ? 'Supplier payment funding bridge credited'
                 : 'Cash or bank supplier outflow',
             'debit_amount' => 0,
             'credit_amount' => $paidAmount + $chargesAmount,
@@ -523,11 +527,7 @@ final class AccountingRepository extends BaseRepository
             'actor_user_id' => $data['actor_user_id'] ?? null,
         ], $lines);
 
-        if ($crossCurrencyFunding && $bridgeAccount !== null && $treasuryAmount > 0) {
-            $treasuryReference = $this->treasuryAccountLedgerReference((int) ($data['treasury_account_id'] ?? 0));
-            if ($treasuryReference === null) {
-                throw new RuntimeException('Cross-currency supplier payment requires a valid treasury account.');
-            }
+        if ($separateTreasuryFunding && $bridgeAccount !== null && $treasuryReference !== null && $treasuryAmount > 0) {
             $fundingReference = (string) ($data['source_reference'] ?? $data['payment_no'] ?? '');
             if ($fundingReference === '') {
                 $fundingReference = 'SUPPLIER-PAYMENT';
@@ -551,7 +551,7 @@ final class AccountingRepository extends BaseRepository
                     'account_code' => (string) $bridgeAccount['account_code'],
                     'account_id' => (int) $bridgeAccount['account_id'],
                     'supplier_payment_id' => $data['supplier_payment_id'] ?? null,
-                    'line_description' => 'Cross-currency supplier payment bridge debited',
+                    'line_description' => 'Supplier payment funding bridge debited',
                     'debit_amount' => $treasuryAmount,
                     'credit_amount' => 0,
                 ],

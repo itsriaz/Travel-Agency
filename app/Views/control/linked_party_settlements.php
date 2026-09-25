@@ -13,6 +13,15 @@ $sumAdjusted = static fn (array $rows): float => round(array_reduce(
     static fn (float $total, array $row): float => $total + (float) ($row['adjusted_amount'] ?? $row['allocated_amount'] ?? 0),
     0.0
 ), 2);
+$displayVoidReason = static function (mixed $reason): string {
+    $cleaned = preg_replace(
+        '/[;,.]?\s*keep receivables and supplier payables separate\.?/i',
+        '',
+        trim((string) $reason)
+    );
+
+    return trim((string) $cleaned, " \t\n\r\0\x0B;,. ");
+};
 ?>
 <section class="page-head linked-settlement-head">
     <div>
@@ -30,7 +39,7 @@ $sumAdjusted = static fn (array $rows): float => round(array_reduce(
 
 <section class="panel compact-panel">
     <div class="panel-header"><h2>Linked Party Balance Reconciliation</h2></div>
-    <p class="panel-meta">Review open account-holder receivables and supplier payables by branch and currency. Invoice matching is available only when both sides have an open balance; it does not mark a passenger invoice paid or move cash or bank money.</p>
+    <p class="panel-meta">Review open account-holder receivables and supplier payables. A linked pair may be matched manually across branches and currencies; no cash or bank money moves.</p>
     <div class="dense-table-wrap"><table class="dense-table">
         <thead><tr><th>Account Holder</th><th>Supplier</th><th>Branch</th><th>Currency</th><th>Account Receivable</th><th>Supplier Payable</th><th>Action</th></tr></thead>
         <tbody>
@@ -38,7 +47,9 @@ $sumAdjusted = static fn (array $rows): float => round(array_reduce(
             <?php
             $receivable = round((float) ($position['receivable'] ?? 0), 2);
             $payable = round((float) ($position['payable'] ?? 0), 2);
-            $canMatchInvoices = (float) ($position['available_offset'] ?? 0) > 0.005;
+            $canMatchInvoices = array_key_exists('can_match_globally', $position)
+                ? ! empty($position['can_match_globally'])
+                : (float) ($position['available_offset'] ?? 0) > 0.005;
             ?>
             <tr>
                 <td><?= e($position['business_source_name']) ?></td><td><?= e($position['supplier_name']) ?></td>
@@ -134,32 +145,31 @@ $sumAdjusted = static fn (array $rows): float => round(array_reduce(
 <section class="panel compact-panel">
     <div class="panel-header">
         <div>
-            <h2>Manual Invoice Adjustment: <?= e($manualPosition['business_source_name']) ?> / <?= e($manualPosition['currency']) ?></h2>
-            <p class="panel-meta">Enter amounts only beside invoices you want to match. Both selected totals must be equal. Nothing is selected automatically and no cash or bank money moves.</p>
+            <h2>Manual Invoice Adjustment: <?= e($manualPosition['business_source_name']) ?> / <?= e($manualPosition['supplier_name']) ?></h2>
+            <p class="panel-meta">Choose invoice amounts from one account branch/currency and one supplier branch/currency. For different currencies, enter the supplier amount per 1 account currency. Nothing is selected automatically.</p>
         </div>
     </div>
     <form method="post" action="<?= e(url('/linked-party-settlements/save')) ?>" class="manual-offset-form" id="manual-offset-form" data-currency="<?= e($manualPosition['currency']) ?>">
         <?= \App\Helpers\Csrf::input() ?>
         <input type="hidden" name="link_id" value="<?= e((string) $manualPosition['link_id']) ?>">
-        <input type="hidden" name="branch_id" value="<?= e((string) $manualPosition['branch_id']) ?>">
-        <input type="hidden" name="currency" value="<?= e($manualPosition['currency']) ?>">
         <div class="manual-allocation-grid">
             <article class="manual-allocation-card">
                 <div class="manual-allocation-heading">
                     <h3>Account-Holder Invoices</h3>
-                    <strong><?= e($manualPosition['currency']) ?> <span id="manual-account-total">0.00</span></strong>
+                    <strong><span id="manual-account-currency">-</span> <span id="manual-account-total">0.00</span></strong>
                 </div>
                 <div class="dense-table-wrap manual-allocation-table-wrap">
                     <table class="dense-table manual-allocation-table">
-                        <thead><tr><th>Booking</th><th>Service</th><th>Available</th><th>Adjust Amount</th></tr></thead>
+                        <thead><tr><th>Branch</th><th>Curr.</th><th>Booking</th><th>Available</th><th>Adjust Amount</th></tr></thead>
                         <tbody>
                         <?php foreach ($manualAccounts as $item): ?>
                             <?php $available = round((float) ($item['available_account_amount'] ?? 0), 2); ?>
                             <tr>
+                                <td><?= e((string) ($item['branch_name'] ?? '')) ?></td>
+                                <td><?= e((string) ($item['currency'] ?? '')) ?></td>
                                 <td><?= e((string) ($item['booking_reference'] ?? '')) ?></td>
-                                <td><?= e((string) ($item['service_line_reference'] ?? '')) ?></td>
                                 <td><?= e($money($available)) ?></td>
-                                <td><input class="manual-allocation-input" data-side="account" type="number" inputmode="decimal" name="account_allocations[<?= e((string) $item['id']) ?>]" min="0" max="<?= e(number_format($available, 2, '.', '')) ?>" step="0.01" placeholder="0.00" aria-label="Account-holder adjustment for <?= e((string) ($item['booking_reference'] ?? 'invoice')) ?>"></td>
+                                <td><input class="manual-allocation-input" data-side="account" data-branch-id="<?= e((string) ($item['branch_id'] ?? '')) ?>" data-currency="<?= e((string) ($item['currency'] ?? '')) ?>" type="number" inputmode="decimal" name="account_allocations[<?= e((string) $item['id']) ?>]" min="0" max="<?= e(number_format($available, 2, '.', '')) ?>" step="0.01" placeholder="0.00" aria-label="Account-holder adjustment for <?= e((string) ($item['booking_reference'] ?? 'invoice')) ?>"></td>
                             </tr>
                         <?php endforeach; ?>
                         </tbody>
@@ -169,19 +179,20 @@ $sumAdjusted = static fn (array $rows): float => round(array_reduce(
             <article class="manual-allocation-card">
                 <div class="manual-allocation-heading">
                     <h3>Supplier Invoices</h3>
-                    <strong><?= e($manualPosition['currency']) ?> <span id="manual-payable-total">0.00</span></strong>
+                    <strong><span id="manual-payable-currency">-</span> <span id="manual-payable-total">0.00</span></strong>
                 </div>
                 <div class="dense-table-wrap manual-allocation-table-wrap">
                     <table class="dense-table manual-allocation-table">
-                        <thead><tr><th>Booking</th><th>Service</th><th>Payable</th><th>Adjust Amount</th></tr></thead>
+                        <thead><tr><th>Branch</th><th>Curr.</th><th>Booking</th><th>Payable</th><th>Adjust Amount</th></tr></thead>
                         <tbody>
                         <?php foreach ($manualPayables as $item): ?>
                             <?php $payable = round((float) ($item['net_payable_amount'] ?? 0), 2); ?>
                             <tr>
+                                <td><?= e((string) ($item['branch_name'] ?? '')) ?></td>
+                                <td><?= e((string) ($item['currency'] ?? '')) ?></td>
                                 <td><?= e((string) ($item['booking_reference'] ?? '')) ?></td>
-                                <td><?= e((string) ($item['service_line_reference'] ?? '')) ?></td>
                                 <td><?= e($money($payable)) ?></td>
-                                <td><input class="manual-allocation-input" data-side="payable" type="number" inputmode="decimal" name="payable_allocations[<?= e((string) $item['id']) ?>]" min="0" max="<?= e(number_format($payable, 2, '.', '')) ?>" step="0.01" placeholder="0.00" aria-label="Supplier adjustment for <?= e((string) ($item['booking_reference'] ?? 'invoice')) ?>"></td>
+                                <td><input class="manual-allocation-input" data-side="payable" data-branch-id="<?= e((string) ($item['branch_id'] ?? '')) ?>" data-currency="<?= e((string) ($item['currency'] ?? '')) ?>" type="number" inputmode="decimal" name="payable_allocations[<?= e((string) $item['id']) ?>]" min="0" max="<?= e(number_format($payable, 2, '.', '')) ?>" step="0.01" placeholder="0.00" aria-label="Supplier adjustment for <?= e((string) ($item['booking_reference'] ?? 'invoice')) ?>"></td>
                             </tr>
                         <?php endforeach; ?>
                         </tbody>
@@ -192,6 +203,8 @@ $sumAdjusted = static fn (array $rows): float => round(array_reduce(
         <div class="manual-offset-footer">
             <div class="manual-offset-fields">
                 <label>Date<input type="date" name="offset_date" value="<?= e(date('Y-m-d')) ?>" required></label>
+                <label id="manual-exchange-rate-label">Supplier amount per 1 account currency<input id="manual-exchange-rate" type="number" inputmode="decimal" name="exchange_rate" min="0.00000001" step="0.00000001" value="1" required></label>
+                <label>FX rate date<input type="date" name="exchange_rate_effective_date" value="<?= e(date('Y-m-d')) ?>" required></label>
                 <label>Reference<input name="reference_no" maxlength="100"></label>
                 <label>Remarks<input name="remarks" maxlength="2000"></label>
             </div>
@@ -211,8 +224,10 @@ $sumAdjusted = static fn (array $rows): float => round(array_reduce(
             <h2>Adjusted Invoice Details</h2>
             <p class="panel-meta">
                 <?= e((string) ($selectedOffset['offset_no'] ?? 'Settlement')) ?>
-                · <?= e((string) ($selectedOffset['currency'] ?? '')) ?>
-                <?= e($money($selectedOffset['amount'] ?? 0)) ?>
+                · <?= e((string) ($selectedOffset['account_currency'] ?? $selectedOffset['currency'] ?? '')) ?>
+                <?= e($money($selectedOffset['account_amount'] ?? $selectedOffset['amount'] ?? 0)) ?>
+                → <?= e((string) ($selectedOffset['supplier_currency'] ?? $selectedOffset['currency'] ?? '')) ?>
+                <?= e($money($selectedOffset['supplier_amount'] ?? $selectedOffset['amount'] ?? 0)) ?>
             </p>
         </div>
         <a class="btn btn-sm" href="<?= e(url('/linked-party-settlements')) ?>">Close Details</a>
@@ -224,19 +239,18 @@ $sumAdjusted = static fn (array $rows): float => round(array_reduce(
                     <h3>Account-Holder Invoices</h3>
                     <small><?= e((string) count($selectedAccountAllocations)) ?> invoice(s)</small>
                 </div>
-                <strong><?= e((string) ($selectedOffset['currency'] ?? '')) ?> <?= e($money($sumAdjusted($selectedAccountAllocations))) ?></strong>
+                <strong><?= e((string) ($selectedOffset['account_currency'] ?? $selectedOffset['currency'] ?? '')) ?> <?= e($money($sumAdjusted($selectedAccountAllocations))) ?></strong>
             </div>
             <div class="dense-table-wrap">
                 <table class="dense-table">
-                    <thead><tr><th>Booking</th><th>Service</th><th>Invoice Amount</th><th>Adjusted</th></tr></thead>
+                    <thead><tr><th>Booking</th><th>Invoice Amount</th><th>Adjusted</th></tr></thead>
                     <tbody>
                     <?php if ($selectedAccountAllocations === []): ?>
-                        <tr><td colspan="4" class="empty-cell">No account-holder invoice allocations were recorded.</td></tr>
+                        <tr><td colspan="3" class="empty-cell">No account-holder invoice allocations were recorded.</td></tr>
                     <?php else: ?>
                         <?php foreach ($selectedAccountAllocations as $allocation): ?>
                             <tr>
                                 <td><a href="<?= e(url('/workspace?booking_reference=' . rawurlencode((string) ($allocation['booking_reference'] ?? '')))) ?>"><?= e((string) ($allocation['booking_reference'] ?? '')) ?></a></td>
-                                <td><?= e((string) ($allocation['service_line_reference'] ?? '')) ?></td>
                                 <td><?= e($money($allocation['original_amount'] ?? 0)) ?></td>
                                 <td><strong><?= e($money($allocation['adjusted_amount'] ?? $allocation['allocated_amount'] ?? 0)) ?></strong></td>
                             </tr>
@@ -252,19 +266,18 @@ $sumAdjusted = static fn (array $rows): float => round(array_reduce(
                     <h3>Supplier Invoices</h3>
                     <small><?= e((string) count($selectedPayableAllocations)) ?> invoice(s)</small>
                 </div>
-                <strong><?= e((string) ($selectedOffset['currency'] ?? '')) ?> <?= e($money($sumAdjusted($selectedPayableAllocations))) ?></strong>
+                <strong><?= e((string) ($selectedOffset['supplier_currency'] ?? $selectedOffset['currency'] ?? '')) ?> <?= e($money($sumAdjusted($selectedPayableAllocations))) ?></strong>
             </div>
             <div class="dense-table-wrap">
                 <table class="dense-table">
-                    <thead><tr><th>Booking</th><th>Service</th><th>Supplier Cost</th><th>Adjusted</th></tr></thead>
+                    <thead><tr><th>Booking</th><th>Supplier Cost</th><th>Adjusted</th></tr></thead>
                     <tbody>
                     <?php if ($selectedPayableAllocations === []): ?>
-                        <tr><td colspan="4" class="empty-cell">No supplier invoice allocations were recorded.</td></tr>
+                        <tr><td colspan="3" class="empty-cell">No supplier invoice allocations were recorded.</td></tr>
                     <?php else: ?>
                         <?php foreach ($selectedPayableAllocations as $allocation): ?>
                             <tr>
                                 <td><a href="<?= e(url('/workspace?booking_reference=' . rawurlencode((string) ($allocation['booking_reference'] ?? '')))) ?>"><?= e((string) ($allocation['booking_reference'] ?? '')) ?></a></td>
-                                <td><?= e((string) ($allocation['service_line_reference'] ?? '')) ?></td>
                                 <td><?= e($money($allocation['original_amount'] ?? 0)) ?></td>
                                 <td><strong><?= e($money($allocation['adjusted_amount'] ?? $allocation['allocated_amount'] ?? 0)) ?></strong></td>
                             </tr>
@@ -291,21 +304,19 @@ $sumAdjusted = static fn (array $rows): float => round(array_reduce(
     </div>
     <div class="dense-table-wrap">
         <table class="dense-table linked-settlement-table">
-            <thead><tr><th>Date</th><th>Settlement</th><th>Account Holder</th><th>Supplier</th><th>Branch</th><th>Curr.</th><th>Adjusted</th><th>Status</th><th>Action</th></tr></thead>
+            <thead><tr><th>Date</th><th>Account Holder</th><th>Supplier</th><th>Account Side</th><th>Supplier Side</th><th>Status</th><th>Action</th></tr></thead>
             <tbody>
             <?php if ($recentOffsets === []): ?>
-                <tr><td colspan="9" class="empty-cell">No linked settlement has been recorded yet.</td></tr>
+                <tr><td colspan="7" class="empty-cell">No linked settlement has been recorded yet.</td></tr>
             <?php else: ?>
                 <?php foreach ($recentOffsets as $offset): ?>
                     <?php $isPosted = ($offset['status'] ?? '') === 'posted'; ?>
                     <tr>
                         <td><?= e((string) ($offset['offset_date'] ?? '')) ?></td>
-                        <td><strong class="linked-settlement-reference"><?= e((string) ($offset['offset_no'] ?? '')) ?></strong></td>
                         <td><?= e((string) ($offset['business_source_name'] ?? '')) ?></td>
                         <td><?= e((string) ($offset['supplier_name'] ?? '')) ?></td>
-                        <td><?= e((string) ($offset['branch_name'] ?? '')) ?></td>
-                        <td><?= e((string) ($offset['currency'] ?? '')) ?></td>
-                        <td><strong><?= e($money($offset['amount'] ?? 0)) ?></strong></td>
+                        <td><?= e((string) ($offset['account_branch_name'] ?? $offset['branch_name'] ?? '')) ?><br><strong><?= e((string) ($offset['account_currency'] ?? $offset['currency'] ?? '')) ?> <?= e($money($offset['account_amount'] ?? $offset['amount'] ?? 0)) ?></strong></td>
+                        <td><?= e((string) ($offset['supplier_branch_name'] ?? $offset['branch_name'] ?? '')) ?><br><strong><?= e((string) ($offset['supplier_currency'] ?? $offset['currency'] ?? '')) ?> <?= e($money($offset['supplier_amount'] ?? $offset['amount'] ?? 0)) ?></strong></td>
                         <td><span class="admin-record-tag <?= $isPosted ? 'is-custom' : 'is-system' ?>"><?= e($isPosted ? 'Adjusted' : 'Reversed') ?></span></td>
                         <td>
                             <div class="linked-settlement-actions">
@@ -321,7 +332,7 @@ $sumAdjusted = static fn (array $rows): float => round(array_reduce(
                                         </form>
                                     </details>
                                 <?php else: ?>
-                                    <small class="linked-settlement-reversal-note"><?= e((string) ($offset['void_reason'] ?? 'Reversed')) ?></small>
+                                    <small class="linked-settlement-reversal-note"><?= e($displayVoidReason($offset['void_reason'] ?? 'Reversed')) ?></small>
                                 <?php endif; ?>
                             </div>
                         </td>
@@ -350,7 +361,7 @@ $sumAdjusted = static fn (array $rows): float => round(array_reduce(
     .manual-allocation-table-wrap { max-height: 360px; overflow: auto; border: 0; border-radius: 0; }
     .manual-allocation-table { min-width: 540px; }
     .manual-allocation-table th { position: sticky; top: 0; z-index: 1; background: #f5f9fc; }
-    .manual-allocation-table th:nth-child(3), .manual-allocation-table td:nth-child(3) { text-align: right; }
+    .manual-allocation-table th:nth-child(4), .manual-allocation-table td:nth-child(4) { text-align: right; }
     .manual-allocation-table input { min-width: 120px; }
     .manual-offset-footer { display: flex; align-items: end; justify-content: space-between; gap: 16px; }
     .manual-offset-fields { flex: 1; display: grid; grid-template-columns: minmax(150px, .65fr) repeat(2, minmax(190px, 1fr)); gap: 10px; }
@@ -413,31 +424,20 @@ $sumAdjusted = static fn (array $rows): float => round(array_reduce(
     }
     .linked-settlement-history.is-expanded .linked-settlement-table {
         width: 100%;
-        min-width: 1480px;
+        min-width: 1280px;
     }
     .linked-settlement-history > .dense-table-wrap { overflow-x: auto; }
-    .linked-settlement-table { width: 100%; min-width: 1480px; table-layout: fixed; }
+    .linked-settlement-table { width: 100%; min-width: 1280px; table-layout: fixed; }
     .linked-settlement-table th,
     .linked-settlement-table td { vertical-align: top; padding: 14px 13px; line-height: 1.4; }
     .linked-settlement-table th:nth-child(1) { width: 105px; }
-    .linked-settlement-table th:nth-child(2) { width: 300px; }
-    .linked-settlement-table th:nth-child(3) { width: 175px; }
-    .linked-settlement-table th:nth-child(4) { width: 195px; }
-    .linked-settlement-table th:nth-child(5) { width: 145px; }
-    .linked-settlement-table th:nth-child(6) { width: 70px; }
-    .linked-settlement-table th:nth-child(7) { width: 115px; }
-    .linked-settlement-table th:nth-child(8) { width: 120px; }
-    .linked-settlement-table th:nth-child(9) { width: 255px; }
+    .linked-settlement-table th:nth-child(2) { width: 190px; }
+    .linked-settlement-table th:nth-child(3) { width: 195px; }
+    .linked-settlement-table th:nth-child(4), .linked-settlement-table th:nth-child(5) { width: 190px; }
+    .linked-settlement-table th:nth-child(6) { width: 120px; }
+    .linked-settlement-table th:nth-child(7) { width: 255px; }
     .linked-settlement-table td:nth-child(1),
-    .linked-settlement-table td:nth-child(6),
-    .linked-settlement-table td:nth-child(7) { white-space: nowrap; }
-    .linked-settlement-reference {
-        display: block;
-        overflow-wrap: anywhere;
-        word-break: break-word;
-        font-size: .9rem;
-        letter-spacing: -.01em;
-    }
+    .linked-settlement-table td:nth-child(6) { white-space: nowrap; }
     .linked-settlement-actions { display: grid; justify-items: start; gap: 8px; min-width: 0; white-space: normal; }
     .linked-settlement-actions .btn { min-width: 0; white-space: nowrap; }
     .linked-settlement-reversal-note { display: block; max-width: 100%; color: #516b80; line-height: 1.4; overflow-wrap: anywhere; }
@@ -496,32 +496,53 @@ $sumAdjusted = static fn (array $rows): float => round(array_reduce(
     const manualInputs = Array.from(document.querySelectorAll('.manual-allocation-input'));
     const accountTotalOutput = document.getElementById('manual-account-total');
     const payableTotalOutput = document.getElementById('manual-payable-total');
+    const accountCurrencyOutput = document.getElementById('manual-account-currency');
+    const payableCurrencyOutput = document.getElementById('manual-payable-currency');
     const balanceOutput = document.getElementById('manual-offset-balance');
     const manualSubmit = document.getElementById('manual-offset-submit');
-    const manualCurrency = manualForm?.dataset.currency || '';
+    const exchangeRateInput = document.getElementById('manual-exchange-rate');
     const sideTotal = (side) => Math.round(manualInputs
         .filter((input) => input.dataset.side === side)
         .reduce((total, input) => total + Math.max(0, Number(input.value) || 0), 0) * 100) / 100;
+    const selectedDimension = (side) => {
+        const selected = manualInputs.filter((input) => input.dataset.side === side && (Number(input.value) || 0) > 0);
+        const keys = [...new Set(selected.map((input) => `${input.dataset.branchId}|${input.dataset.currency}`))];
+        return { selected, keys, currency: keys.length === 1 ? keys[0].split('|')[1] : '' };
+    };
     const updateManualTotals = () => {
-        if (!manualForm || !accountTotalOutput || !payableTotalOutput || !balanceOutput || !manualSubmit) {
+        if (!manualForm || !accountTotalOutput || !payableTotalOutput || !accountCurrencyOutput
+            || !payableCurrencyOutput || !balanceOutput || !manualSubmit || !exchangeRateInput) {
             return;
         }
         const accountTotal = sideTotal('account');
         const payableTotal = sideTotal('payable');
-        const difference = Math.round(Math.abs(accountTotal - payableTotal) * 100) / 100;
+        const accountDimension = selectedDimension('account');
+        const payableDimension = selectedDimension('payable');
+        const dimensionsValid = accountDimension.keys.length === 1 && payableDimension.keys.length === 1;
+        const sameCurrency = dimensionsValid && accountDimension.currency === payableDimension.currency;
+        if (sameCurrency) exchangeRateInput.value = '1';
+        exchangeRateInput.readOnly = sameCurrency;
+        const exchangeRate = Number(exchangeRateInput.value) || 0;
+        const expectedPayable = Math.round(accountTotal * exchangeRate * 100) / 100;
+        const difference = Math.round(Math.abs(expectedPayable - payableTotal) * 100) / 100;
         const validInputs = manualInputs.every((input) => input.value === '' || input.checkValidity());
-        const ready = validInputs && accountTotal > 0 && difference < 0.005;
+        const ready = validInputs && dimensionsValid && exchangeRate > 0 && accountTotal > 0 && payableTotal > 0 && difference < 0.005;
         accountTotalOutput.textContent = accountTotal.toFixed(2);
         payableTotalOutput.textContent = payableTotal.toFixed(2);
+        accountCurrencyOutput.textContent = accountDimension.currency || '-';
+        payableCurrencyOutput.textContent = payableDimension.currency || '-';
         balanceOutput.classList.toggle('is-ready', ready);
         balanceOutput.textContent = ready
-            ? `Ready to adjust ${manualCurrency} ${accountTotal.toFixed(2)}.`
-            : difference > 0
-                ? `Difference: ${manualCurrency} ${difference.toFixed(2)}. Both totals must match.`
-                : 'Enter equal positive amounts on both sides.';
+            ? `Ready: ${accountDimension.currency} ${accountTotal.toFixed(2)} → ${payableDimension.currency} ${payableTotal.toFixed(2)}.`
+            : accountDimension.keys.length > 1 || payableDimension.keys.length > 1
+                ? 'Use one branch and currency on each side per settlement.'
+                : dimensionsValid && difference > 0
+                    ? `Supplier total differs by ${payableDimension.currency} ${difference.toFixed(2)}.`
+                    : 'Select positive invoice amounts on both sides.';
         manualSubmit.disabled = !ready;
     };
     manualInputs.forEach((input) => input.addEventListener('input', updateManualTotals));
+    exchangeRateInput?.addEventListener('input', updateManualTotals);
     updateManualTotals();
 
     const panel = document.querySelector('.linked-settlement-history');

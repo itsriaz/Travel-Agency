@@ -3418,7 +3418,14 @@ Kept here in case manual service save is needed again later.
                                 <label class="station-field span-2"><span>Amount</span><input type="number" step="0.01" name="supplier_paid_amount" value="<?= e($supplierDraftAmount) ?>" data-simple-postpaid-amount></label>
                                 <label class="station-field span-2"><span>Method</span><select name="supplier_payment_method"><?php foreach ($paymentMethodOptions as $paymentMethodValue => $paymentMethodLabel): ?><option value="<?= e((string) $paymentMethodValue) ?>" <?= $supplierDraftMethod === (string) $paymentMethodValue ? 'selected' : '' ?>><?= e((string) $paymentMethodLabel) ?></option><?php endforeach; ?></select></label>
                                 <label class="station-field span-2" data-supplier-treasury-row hidden><span>Source Account</span><select name="supplier_treasury_account_id" data-supplier-treasury-select><option value="">Select account</option></select></label>
-                                <label class="station-field span-2" data-supplier-exchange-row hidden><span>FX Rate</span><input type="number" step="0.00000001" min="0.00000001" name="supplier_exchange_rate_to_booking" value="" data-supplier-exchange-input placeholder="1 source = ? payable"><small class="muted-text" data-supplier-exchange-note>Enter the exact source-to-payable rate.</small></label>
+                                <div class="station-field span-2" data-supplier-exchange-row hidden>
+                                    <span>Funding Currency</span>
+                                    <input type="hidden" name="supplier_exchange_rate_to_booking" value="" data-supplier-exchange-input>
+                                    <div class="supplier-currency-review-control">
+                                        <button class="btn btn-sm" type="button" data-supplier-exchange-review>Review Currency Conversion</button>
+                                        <small class="muted-text" data-supplier-exchange-note>Confirm how the payment amount should be handled.</small>
+                                    </div>
+                                </div>
                                 <label class="station-field span-2"><span>Reference</span><input type="text" name="supplier_reference_number" value="<?= e($supplierDraftReferenceNumber) ?>"></label>
                                 <label class="station-field span-3"><span>Bank / Card Detail</span><input type="text" name="supplier_bank_card_detail" value="<?= e($supplierDraftBankCardDetail) ?>"></label>
                                 <label class="station-field span-3"><span>Remarks</span><input type="text" name="supplier_payment_remarks" value="<?= e($supplierDraftRemarks) ?>"></label>
@@ -3475,7 +3482,14 @@ Kept here in case manual service save is needed again later.
                                             <label class="station-field span-2"><span>Amount</span><input type="number" step="0.01" name="supplier_paid_amount" value="<?= e($supplierDraftAmount) ?>"></label>
                                             <label class="station-field span-2"><span>Method</span><select name="supplier_payment_method"><?php foreach ($paymentMethodOptions as $paymentMethodValue => $paymentMethodLabel): ?><option value="<?= e((string) $paymentMethodValue) ?>" <?= $supplierDraftMethod === (string) $paymentMethodValue ? 'selected' : '' ?>><?= e((string) $paymentMethodLabel) ?></option><?php endforeach; ?></select></label>
                                             <label class="station-field span-2" data-supplier-treasury-row hidden><span>Source Account</span><select name="supplier_treasury_account_id" data-supplier-treasury-select><option value="">Select account</option></select></label>
-                                            <label class="station-field span-2" data-supplier-exchange-row hidden><span>FX Rate</span><input type="number" step="0.00000001" min="0.00000001" name="supplier_exchange_rate_to_booking" value="" data-supplier-exchange-input placeholder="1 source = ? payment"><small class="muted-text" data-supplier-exchange-note>Enter the exact source-to-payment rate.</small></label>
+                                            <div class="station-field span-2" data-supplier-exchange-row hidden>
+                                                <span>Funding Currency</span>
+                                                <input type="hidden" name="supplier_exchange_rate_to_booking" value="" data-supplier-exchange-input>
+                                                <div class="supplier-currency-review-control">
+                                                    <button class="btn btn-sm" type="button" data-supplier-exchange-review>Review Currency Conversion</button>
+                                                    <small class="muted-text" data-supplier-exchange-note>Confirm how the payment amount should be handled.</small>
+                                                </div>
+                                            </div>
                                             <label class="station-field span-2"><span>Status</span><select name="supplier_payment_status"><option value="paid">Paid</option><?php if ($canPostServiceEvents): ?><option value="void">Void</option><?php endif; ?></select></label>
                                             <label class="station-field span-3"><span>Reference</span><input type="text" name="supplier_reference_number" value="<?= e($supplierDraftReferenceNumber) ?>"></label>
                                             <label class="station-field span-3"><span>Bank / Card Detail</span><input type="text" name="supplier_bank_card_detail" value="<?= e($supplierDraftBankCardDetail) ?>"></label>

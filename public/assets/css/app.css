@@ -3850,6 +3850,20 @@ textarea {
     grid-template-columns: 60px minmax(0, 1fr);
     gap: 6px 8px;
 }
+.supplier-currency-review-control {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+}
+.supplier-currency-review-control > .btn {
+    width: 100%;
+}
+.supplier-currency-review-control > .muted-text {
+    display: block;
+    min-width: 0;
+    line-height: 1.25;
+    white-space: nowrap;
+}
 #reports-filter-form {
     grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
     gap: 10px 12px;

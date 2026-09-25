@@ -131,17 +131,20 @@ $receivableHeaderVsAllocations = $fetchAll(
 if ($tableExists('counterparty_offsets')) {
     $brokenCounterpartyOffsets = $fetchAll(
         'SELECT o.id, o.offset_no, o.branch_id, o.currency, o.amount,
+                COALESCE(o.account_amount, o.amount) AS account_amount,
+                COALESCE(o.supplier_amount, o.amount) AS supplier_amount,
                 ROUND(COALESCE(a.account_total, 0), 2) AS account_total,
                 ROUND(COALESCE(p.payable_total, 0), 2) AS payable_total
          FROM counterparty_offsets o
          LEFT JOIN (SELECT counterparty_offset_id, SUM(allocated_amount) AS account_total FROM counterparty_offset_account_allocations GROUP BY counterparty_offset_id) a ON a.counterparty_offset_id = o.id
          LEFT JOIN (SELECT counterparty_offset_id, SUM(allocated_amount) AS payable_total FROM counterparty_offset_payable_allocations GROUP BY counterparty_offset_id) p ON p.counterparty_offset_id = o.id
          WHERE o.status = "posted"
-           AND (ABS(o.amount - COALESCE(a.account_total, 0)) > 0.005 OR ABS(o.amount - COALESCE(p.payable_total, 0)) > 0.005)
+           AND (ABS(COALESCE(o.account_amount, o.amount) - COALESCE(a.account_total, 0)) > 0.005
+                OR ABS(COALESCE(o.supplier_amount, o.amount) - COALESCE(p.payable_total, 0)) > 0.005)
          LIMIT 10'
     );
     $check(
-        'Linked-party offsets allocate equal account-holder and supplier value',
+        'Linked-party offsets conserve each side in its native currency',
         $brokenCounterpartyOffsets === [],
         $brokenCounterpartyOffsets === [] ? 'Every posted linked-party offset is conserved' : json_encode($brokenCounterpartyOffsets, JSON_UNESCAPED_SLASHES)
     );
@@ -154,11 +157,14 @@ if ($tableExists('counterparty_offsets')) {
          LEFT JOIN counterparty_offset_payable_allocations pa ON pa.counterparty_offset_id = o.id
          LEFT JOIN supplier_obligations so ON so.id = pa.supplier_obligation_id
          WHERE o.status = "posted"
-           AND (cri.branch_id <> o.branch_id OR cri.currency <> o.currency OR so.branch_id <> o.branch_id OR so.currency <> o.currency)
+           AND (cri.branch_id <> COALESCE(o.account_branch_id, o.branch_id)
+                OR cri.currency <> COALESCE(o.account_currency, o.currency)
+                OR so.branch_id <> COALESCE(o.supplier_branch_id, o.branch_id)
+                OR so.currency <> COALESCE(o.supplier_currency, o.currency))
          LIMIT 10'
     );
     $check(
-        'Linked-party offsets remain in one branch and currency',
+        'Linked-party offsets preserve both selected branch/currency dimensions',
         $crossDimensionOffsets === [],
         $crossDimensionOffsets === [] ? 'No cross-branch or cross-currency offset found' : json_encode($crossDimensionOffsets, JSON_UNESCAPED_SLASHES)
     );

@@ -3329,6 +3329,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const exchangeRow = form?.querySelector('[data-supplier-exchange-row]');
         const exchangeInput = form?.querySelector('[data-supplier-exchange-input]');
         const exchangeNote = form?.querySelector('[data-supplier-exchange-note]');
+        const exchangeReview = form?.querySelector('[data-supplier-exchange-review]');
+        const amountInput = form?.elements?.namedItem('supplier_paid_amount');
         const treasurySelect = form?.elements?.namedItem('supplier_treasury_account_id');
         const paymentCurrency = String(supplierTreasuryContext(form).currency || '').trim().toUpperCase();
         const selectedAccountId = treasurySelect instanceof HTMLSelectElement
@@ -3344,28 +3346,258 @@ document.addEventListener('DOMContentLoaded', () => {
             exchangeRow,
             exchangeInput,
             exchangeNote,
+            exchangeReview,
+            amountInput,
             sourceCurrency,
             paymentCurrency,
             requiresRate,
         };
+    };
+    const supplierCurrencyDecisionForms = new WeakSet();
+    let supplierPaymentCurrencyDecisionModal = null;
+    const ensureSupplierPaymentCurrencyDecisionModal = () => {
+        if (supplierPaymentCurrencyDecisionModal instanceof HTMLElement) {
+            return supplierPaymentCurrencyDecisionModal;
+        }
+
+        const modal = document.createElement('section');
+        modal.className = 'financial-currency-decision supplier-payment-currency-decision';
+        modal.hidden = true;
+        modal.setAttribute('aria-hidden', 'true');
+        modal.innerHTML = `
+            <div class="financial-currency-decision__backdrop" data-supplier-payment-currency-cancel></div>
+            <div class="financial-currency-decision__dialog" role="dialog" aria-modal="true" aria-labelledby="supplier-payment-currency-title">
+                <header class="financial-currency-decision__header">
+                    <div>
+                        <strong id="supplier-payment-currency-title">Change Supplier Payment Currency</strong>
+                        <span data-supplier-payment-currency-current></span>
+                    </div>
+                    <button class="btn btn-sm" type="button" data-supplier-payment-currency-cancel>Close</button>
+                </header>
+                <div class="financial-currency-decision__body">
+                    <label class="financial-currency-decision__rate">
+                        <span data-supplier-payment-currency-rate-label>Exchange Rate</span>
+                        <span class="financial-currency-decision__rate-control">
+                            <input type="number" min="0.00000001" step="0.00000001" inputmode="decimal" data-supplier-payment-currency-rate>
+                            <strong data-supplier-payment-currency-rate-target></strong>
+                        </span>
+                    </label>
+                    <div class="financial-currency-decision__choices">
+                        <button class="financial-currency-decision__choice" type="button" data-supplier-payment-currency-action="convert">
+                            <strong>Convert Existing Amount</strong>
+                            <span data-supplier-payment-currency-convert-preview></span>
+                        </button>
+                        <button class="financial-currency-decision__choice" type="button" data-supplier-payment-currency-action="keep">
+                            <strong>Keep Number, Correct Currency</strong>
+                            <span data-supplier-payment-currency-keep-preview></span>
+                        </button>
+                    </div>
+                    <p class="financial-currency-decision__error" data-supplier-payment-currency-error hidden></p>
+                </div>
+            </div>`;
+        document.body.appendChild(modal);
+        supplierPaymentCurrencyDecisionModal = modal;
+        return modal;
+    };
+    const requestSupplierPaymentCurrencyChoice = (
+        paymentCurrency,
+        sourceCurrency,
+        amount,
+        existingSourceToPaymentRate = 0
+    ) => new Promise((resolve) => {
+        const modal = ensureSupplierPaymentCurrencyDecisionModal();
+        const current = modal.querySelector('[data-supplier-payment-currency-current]');
+        const rateLabel = modal.querySelector('[data-supplier-payment-currency-rate-label]');
+        const rateInput = modal.querySelector('[data-supplier-payment-currency-rate]');
+        const rateTarget = modal.querySelector('[data-supplier-payment-currency-rate-target]');
+        const convertPreview = modal.querySelector('[data-supplier-payment-currency-convert-preview]');
+        const keepPreview = modal.querySelector('[data-supplier-payment-currency-keep-preview]');
+        const error = modal.querySelector('[data-supplier-payment-currency-error]');
+        const promptPair = pricingPromptPair(paymentCurrency, sourceCurrency);
+        const normalizedExistingRate = Math.max(toNumber(existingSourceToPaymentRate), 0);
+        const paymentToSourceRate = normalizedExistingRate > 0
+            ? roundExchangeRate(1 / normalizedExistingRate)
+            : 0;
+        const promptRate = paymentToSourceRate > 0
+            ? (promptPair.from === paymentCurrency ? paymentToSourceRate : roundExchangeRate(1 / paymentToSourceRate))
+            : 0;
+        let settled = false;
+
+        if (current instanceof HTMLElement) {
+            current.textContent = `Change from ${paymentCurrency} to ${sourceCurrency} - Current amount ${formatCurrencyAmount(paymentCurrency, amount)}`;
+        }
+        if (rateLabel instanceof HTMLElement) {
+            rateLabel.textContent = `1 ${promptPair.from} equals`;
+        }
+        if (rateTarget instanceof HTMLElement) {
+            rateTarget.textContent = promptPair.to;
+        }
+        if (rateInput instanceof HTMLInputElement) {
+            rateInput.value = promptRate > 0 ? String(promptRate) : '';
+            rateInput.setAttribute('aria-label', `1 ${promptPair.from} equals how many ${promptPair.to}`);
+        }
+        if (keepPreview instanceof HTMLElement) {
+            keepPreview.textContent = `${formatNumberInputValue(amount)} remains ${formatNumberInputValue(amount)} and will be treated as ${sourceCurrency}`;
+        }
+        if (error instanceof HTMLElement) {
+            error.hidden = true;
+            error.textContent = '';
+        }
+
+        const sourceRate = () => {
+            const enteredRate = toNumber(rateInput instanceof HTMLInputElement ? rateInput.value : 0);
+            if (enteredRate <= 0.005) {
+                return 0;
+            }
+            return promptPair.from === paymentCurrency
+                ? enteredRate
+                : roundExchangeRate(1 / enteredRate);
+        };
+        const refreshPreview = () => {
+            const conversionRate = sourceRate();
+            if (convertPreview instanceof HTMLElement) {
+                convertPreview.textContent = conversionRate > 0.005
+                    ? `${formatCurrencyAmount(paymentCurrency, amount)} becomes ${formatCurrencyAmount(sourceCurrency, roundToTwo(amount * conversionRate))}`
+                    : `Enter the ${promptPair.from} to ${promptPair.to} rate to preview`;
+            }
+        };
+        const finish = (result) => {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            modal.hidden = true;
+            modal.setAttribute('aria-hidden', 'true');
+            modal.querySelectorAll('[data-supplier-payment-currency-cancel]').forEach((button) => button.removeEventListener('click', cancel));
+            modal.querySelectorAll('[data-supplier-payment-currency-action]').forEach((button) => button.removeEventListener('click', choose));
+            rateInput?.removeEventListener('input', refreshPreview);
+            document.removeEventListener('keydown', onKeyDown);
+            resolve(result);
+        };
+        const cancel = () => finish(null);
+        const choose = (event) => {
+            const action = event.currentTarget instanceof HTMLElement
+                ? String(event.currentTarget.dataset.supplierPaymentCurrencyAction || '')
+                : '';
+            const conversionRate = sourceRate();
+            if (conversionRate <= 0.005) {
+                if (error instanceof HTMLElement) {
+                    error.textContent = 'Enter a valid exchange rate before continuing.';
+                    error.hidden = false;
+                }
+                rateInput?.focus();
+                return;
+            }
+            finish({
+                action,
+                convertedAmount: roundToTwo(amount * conversionRate),
+                conversionRate,
+            });
+        };
+        const onKeyDown = (event) => {
+            if (event.key === 'Escape') {
+                event.preventDefault();
+                cancel();
+            }
+        };
+
+        modal.querySelectorAll('[data-supplier-payment-currency-cancel]').forEach((button) => button.addEventListener('click', cancel));
+        modal.querySelectorAll('[data-supplier-payment-currency-action]').forEach((button) => button.addEventListener('click', choose));
+        rateInput?.addEventListener('input', refreshPreview);
+        document.addEventListener('keydown', onKeyDown);
+        refreshPreview();
+        modal.hidden = false;
+        modal.setAttribute('aria-hidden', 'false');
+        window.setTimeout(() => rateInput?.focus(), 0);
+    });
+    const clearSupplierCurrencyDecision = (form) => {
+        const context = supplierExchangeContext(form);
+        if (context.exchangeInput instanceof HTMLInputElement) {
+            context.exchangeInput.value = '';
+            delete context.exchangeInput.dataset.supplierExchangeAction;
+        }
     };
     const syncSupplierExchangeField = (form) => {
         const context = supplierExchangeContext(form);
         if (context.exchangeRow instanceof HTMLElement) {
             context.exchangeRow.hidden = !context.requiresRate;
         }
-        if (context.exchangeInput instanceof HTMLInputElement) {
-            if (context.requiresRate) {
-                context.exchangeInput.placeholder = `1 ${context.sourceCurrency} = ? ${context.paymentCurrency}`;
-            } else {
-                context.exchangeInput.value = '';
-                context.exchangeInput.placeholder = '1 source = ? payable';
-            }
+        if (!context.requiresRate && context.exchangeInput instanceof HTMLInputElement) {
+            context.exchangeInput.value = '';
+            delete context.exchangeInput.dataset.supplierExchangeAction;
         }
         if (context.exchangeNote instanceof HTMLElement) {
-            context.exchangeNote.textContent = context.requiresRate
-                ? `Enter today's exact rate: 1 ${context.sourceCurrency} = how many ${context.paymentCurrency}.`
-                : 'Enter the exact source-to-payment rate.';
+            const paymentAmount = Math.max(toNumber(
+                context.amountInput instanceof HTMLInputElement ? context.amountInput.value : 0
+            ), 0);
+            const sourceToPaymentRate = Math.max(toNumber(
+                context.exchangeInput instanceof HTMLInputElement ? context.exchangeInput.value : 0
+            ), 0);
+            const sourceAmount = sourceToPaymentRate > 0
+                ? roundToTwo(paymentAmount / sourceToPaymentRate)
+                : 0;
+            context.exchangeNote.textContent = !context.requiresRate
+                ? 'Source account and supplier payment use the same currency.'
+                : sourceToPaymentRate > 0
+                    ? `${formatCurrencyAmount(context.paymentCurrency, paymentAmount)} will use ${formatCurrencyAmount(context.sourceCurrency, sourceAmount)} from the selected account.`
+                    : `Confirm how ${formatCurrencyAmount(context.paymentCurrency, paymentAmount)} should be funded from the ${context.sourceCurrency} account.`;
+        }
+        if (context.exchangeReview instanceof HTMLButtonElement) {
+            context.exchangeReview.textContent = context.exchangeInput instanceof HTMLInputElement
+                && toNumber(context.exchangeInput.value) > 0
+                ? 'Review Currency Conversion'
+                : 'Confirm Currency Conversion';
+        }
+    };
+    const requestSupplierCurrencyDecision = async (form) => {
+        if (!(form instanceof HTMLFormElement) || supplierCurrencyDecisionForms.has(form)) {
+            return false;
+        }
+
+        const context = supplierExchangeContext(form);
+        const amount = Math.max(toNumber(
+            context.amountInput instanceof HTMLInputElement ? context.amountInput.value : 0
+        ), 0);
+        if (!context.requiresRate) {
+            syncSupplierExchangeField(form);
+            return true;
+        }
+        if (amount <= 0.005) {
+            showFeedback('Enter the supplier payment amount before confirming its funding currency.');
+            context.amountInput?.focus();
+            return false;
+        }
+
+        supplierCurrencyDecisionForms.add(form);
+        try {
+            const result = await requestSupplierPaymentCurrencyChoice(
+                context.paymentCurrency,
+                context.sourceCurrency,
+                amount,
+                context.exchangeInput instanceof HTMLInputElement ? context.exchangeInput.value : 0
+            );
+            if (!result) {
+                return false;
+            }
+
+            const paymentToSourceRate = Math.max(toNumber(result.conversionRate), 0);
+            if (paymentToSourceRate <= 0) {
+                showFeedback('The supplier payment currency conversion could not be resolved.');
+                return false;
+            }
+            const sourceToPaymentRate = roundExchangeRate(1 / paymentToSourceRate);
+            if (context.exchangeInput instanceof HTMLInputElement) {
+                context.exchangeInput.value = String(sourceToPaymentRate);
+                context.exchangeInput.dataset.supplierExchangeAction = String(result.action || 'convert');
+            }
+            if (result.action === 'keep' && context.amountInput instanceof HTMLInputElement) {
+                context.amountInput.value = String(roundToTwo(amount * sourceToPaymentRate));
+                context.amountInput.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+            syncSupplierExchangeField(form);
+            return true;
+        } finally {
+            supplierCurrencyDecisionForms.delete(form);
         }
     };
     const syncSupplierTreasurySelector = (select) => {
@@ -3434,10 +3666,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 return true;
             }
 
-            showFeedback(`Enter a valid exchange rate: 1 ${exchangeContext.sourceCurrency} = ? ${exchangeContext.paymentCurrency}.`);
-            if (exchangeContext.exchangeInput instanceof HTMLInputElement) {
-                exchangeContext.exchangeInput.focus();
-                exchangeContext.exchangeInput.select();
+            showFeedback('Confirm the supplier payment currency conversion before saving.');
+            if (exchangeContext.exchangeReview instanceof HTMLButtonElement) {
+                exchangeContext.exchangeReview.focus();
             }
             return false;
         }
@@ -22382,16 +22613,36 @@ document.addEventListener('DOMContentLoaded', () => {
         const methodField = form?.elements?.namedItem('supplier_payment_method');
         const currencyField = form?.elements?.namedItem('supplier_payment_currency');
         if (methodField instanceof HTMLSelectElement || methodField instanceof HTMLInputElement) {
-            methodField.addEventListener('change', syncSupplierTreasurySelectors);
+            methodField.addEventListener('change', () => {
+                clearSupplierCurrencyDecision(form);
+                syncSupplierTreasurySelectors();
+            });
         }
         if (currencyField instanceof HTMLSelectElement || currencyField instanceof HTMLInputElement) {
-            currencyField.addEventListener('change', syncSupplierTreasurySelectors);
-            currencyField.addEventListener('input', syncSupplierTreasurySelectors);
+            currencyField.addEventListener('change', () => {
+                clearSupplierCurrencyDecision(form);
+                syncSupplierTreasurySelectors();
+            });
+            currencyField.addEventListener('input', () => {
+                clearSupplierCurrencyDecision(form);
+                syncSupplierTreasurySelectors();
+            });
         }
-        select.addEventListener('change', () => syncSupplierExchangeField(form));
+        select.addEventListener('change', () => {
+            clearSupplierCurrencyDecision(form);
+            syncSupplierExchangeField(form);
+            void requestSupplierCurrencyDecision(form);
+        });
+        form?.querySelector('[data-supplier-exchange-review]')?.addEventListener('click', () => {
+            void requestSupplierCurrencyDecision(form);
+        });
+        form?.elements?.namedItem('supplier_paid_amount')?.addEventListener('input', () => {
+            syncSupplierExchangeField(form);
+        });
         form?.addEventListener('submit', (event) => {
             if (!ensureSupplierTreasuryReady(form)) {
                 event.preventDefault();
+                void requestSupplierCurrencyDecision(form);
             }
         });
     });

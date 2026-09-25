@@ -225,22 +225,53 @@ try {
             'actor_user_id' => $actorId,
         ]);
         $otherBranchObligationId = (int) $db->lastInsertId();
-        $crossBranchRejected = false;
-        try {
-            $service->settle([
-                'link_id' => $linkId,
-                'branch_id' => $branchId,
-                'currency' => 'PKR',
-                'offset_date' => date('Y-m-d'),
-                'amount' => 1,
-                'customer_receivable_item_id' => $pkr['receivableId'],
-                'supplier_obligation_id' => $otherBranchObligationId,
-            ], $actorId, $branchIds);
-        } catch (RuntimeException) {
-            $crossBranchRejected = true;
-        }
-        $check('An invoice pair cannot cross branches even when the administrator can access both', $crossBranchRejected);
+        $crossBranch = $service->settle([
+            'link_id' => $linkId,
+            'branch_id' => $branchId,
+            'currency' => 'PKR',
+            'offset_date' => date('Y-m-d'),
+            'amount' => 1,
+            'customer_receivable_item_id' => $pkr['receivableId'],
+            'supplier_obligation_id' => $otherBranchObligationId,
+        ], $actorId, $branchIds);
+        $check('A manual invoice pair can cross branches when the administrator can access both',
+            (int) ($crossBranch['account_branch_id'] ?? 0) === $branchId
+            && (int) ($crossBranch['supplier_branch_id'] ?? 0) === $otherBranchId
+            && (int) ($crossBranch['supplier_journal_entry_id'] ?? 0) > 0);
+        $service->void((int) $crossBranch['id'], 'QA cross-branch reversal', $actorId, $branchIds);
     }
+
+    $aed = $created['AED'];
+    $crossCurrency = $service->settle([
+        'link_id' => $linkId,
+        'offset_date' => date('Y-m-d'),
+        'exchange_rate_effective_date' => date('Y-m-d'),
+        'exchange_rate' => 77,
+        'account_allocations' => [$aed['receivableId'] => 10],
+        'payable_allocations' => [$pkr['obligationId'] => 770],
+    ], $actorId, $branchIds);
+    $check('A manual settlement preserves AED account value and PKR supplier value at the entered rate',
+        (string) ($crossCurrency['account_currency'] ?? '') === 'AED'
+        && (float) ($crossCurrency['account_amount'] ?? 0) === 10.0
+        && (string) ($crossCurrency['supplier_currency'] ?? '') === 'PKR'
+        && (float) ($crossCurrency['supplier_amount'] ?? 0) === 770.0
+        && (float) ($crossCurrency['exchange_rate'] ?? 0) === 77.0
+        && (int) ($crossCurrency['supplier_journal_entry_id'] ?? 0) > 0);
+    $crossCurrencyJournalIds = implode(',', array_map('intval', [
+        $crossCurrency['journal_entry_id'] ?? 0,
+        $crossCurrency['supplier_journal_entry_id'] ?? 0,
+    ]));
+    $crossCurrencyJournals = $db->query(
+        'SELECT branch_id, currency, SUM(debit_amount) debits, SUM(credit_amount) credits
+         FROM journal_entries j JOIN journal_entry_lines l ON l.journal_entry_id = j.id
+         WHERE j.id IN (' . $crossCurrencyJournalIds . ')
+         GROUP BY j.id, branch_id, currency ORDER BY j.id'
+    )->fetchAll(PDO::FETCH_ASSOC);
+    $check('Cross-currency settlement creates two separately balanced native-currency journals',
+        count($crossCurrencyJournals) === 2
+        && array_reduce($crossCurrencyJournals, static fn (bool $ok, array $row): bool =>
+            $ok && abs((float) $row['debits'] - (float) $row['credits']) < 0.005, true));
+    $service->void((int) $crossCurrency['id'], 'QA cross-currency reversal', $actorId, $branchIds);
 
     $duringMoneyRows = [
         'customer_receipts' => (int) $db->query('SELECT COUNT(*) FROM customer_receipts')->fetchColumn(),

@@ -582,7 +582,21 @@ $positions = [[
     'available_offset' => 0,
 ]];
 $manualPosition = [];
-$recentOffsets = [];
+$recentOffsets = [[
+    'id' => 999999,
+    'offset_date' => '2026-09-22',
+    'offset_no' => 'AUTO-OFFSET-QA',
+    'business_source_name' => 'QA Account',
+    'supplier_name' => 'QA Supplier',
+    'account_branch_name' => 'Noble Route',
+    'supplier_branch_name' => 'Imdad International Travel Agency',
+    'account_currency' => 'AED',
+    'supplier_currency' => 'PKR',
+    'account_amount' => 10,
+    'supplier_amount' => 770,
+    'status' => 'void',
+    'void_reason' => 'Reviewed 2026-09-22 AJWA automatic-settlement reversal; keep receivables and supplier payables separate.',
+]];
 ob_start();
 require BASE_PATH . '/app/Views/control/linked_party_settlements.php';
 $reconciliationView = (string) ob_get_clean();
@@ -596,10 +610,15 @@ $check('Linked balance actions explain every matchable and unmatched state',
     && str_contains($reconciliationView, 'No account receivable')
     && str_contains($reconciliationView, 'No supplier payable'));
 $check('Settlement history preserves readable column and action spacing',
-    str_contains($reconciliationView, 'linked-settlement-reference')
+    ! str_contains($reconciliationView, '<th>Settlement</th>')
+    && ! str_contains($reconciliationView, '<th>Service</th>')
     && str_contains($reconciliationView, 'linked-settlement-reversal-note')
-    && str_contains($reconciliationView, 'min-width: 1480px')
+    && str_contains($reconciliationView, 'min-width: 1280px')
     && str_contains($reconciliationView, 'overflow-wrap: anywhere'));
+$check('Settlement history hides internal identifiers and removes obsolete reversal wording',
+    ! str_contains($reconciliationView, 'AUTO-OFFSET-QA')
+    && ! str_contains($reconciliationView, 'keep receivables and supplier payables separate')
+    && str_contains($reconciliationView, 'Reviewed 2026-09-22 AJWA automatic-settlement reversal'));
 
 if ($failures !== []) {
     fwrite(STDERR, 'Acceptance scenario failed: ' . implode(', ', $failures) . PHP_EOL);
