@@ -6172,9 +6172,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (serviceCorrectionCustomerRefundRateInput instanceof HTMLInputElement) {
             if (switchedServiceLine || String(serviceCorrectionCustomerRefundRateInput.dataset.refundBound || '') !== '1') {
                 const customerRate = customerRefundPosted
-                    ? Math.max(toNumber(customerRefundDetail.refund_exchange_rate_to_booking || 1), 0.01)
-                    : Math.max(toNumber(customerPreferredDisplay.rate || 1), 0.01);
-                serviceCorrectionCustomerRefundRateInput.value = roundToTwo(customerRate).toFixed(2);
+                    ? Math.max(toNumber(customerRefundDetail.refund_exchange_rate_to_booking || 1), 0.00000001)
+                    : Math.max(toNumber(customerPreferredDisplay.rate || 1), 0.00000001);
+                serviceCorrectionCustomerRefundRateInput.value = formatNumberInputValue(customerRate, 8);
             }
             serviceCorrectionCustomerRefundRateInput.dataset.refundBound = '1';
             serviceCorrectionCustomerRefundRateInput.disabled = !customerRefundPosted;
@@ -6183,9 +6183,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (serviceCorrectionSupplierRefundRateInput instanceof HTMLInputElement) {
             if (switchedServiceLine || String(serviceCorrectionSupplierRefundRateInput.dataset.refundBound || '') !== '1') {
                 const supplierRate = supplierRefundPosted
-                    ? Math.max(toNumber(supplierRefundDetail.refund_exchange_rate_to_booking || 1), 0.01)
-                    : Math.max(toNumber(supplierPreferredDisplay.rate || 1), 0.01);
-                serviceCorrectionSupplierRefundRateInput.value = roundToTwo(supplierRate).toFixed(2);
+                    ? Math.max(toNumber(supplierRefundDetail.refund_exchange_rate_to_booking || 1), 0.00000001)
+                    : Math.max(toNumber(supplierPreferredDisplay.rate || 1), 0.00000001);
+                serviceCorrectionSupplierRefundRateInput.value = formatNumberInputValue(supplierRate, 8);
             }
             serviceCorrectionSupplierRefundRateInput.dataset.refundBound = '1';
             serviceCorrectionSupplierRefundRateInput.disabled = !supplierRefundPosted;

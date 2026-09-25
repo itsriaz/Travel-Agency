@@ -342,6 +342,17 @@ try {
     $receiptStatement->execute(['booking_reference' => $bookingReference]);
     $receiptTotals = $receiptStatement->fetch(PDO::FETCH_ASSOC) ?: [];
     $supplierPayment = $supplierRepository->findSupplierPaymentById($supplierPaymentId) ?? [];
+    $postedRefundRowsStatement = $db->prepare(
+        'SELECT id, currency, customer_refund_amount, supplier_refund_amount, journal_entry_id
+         FROM booking_service_events
+         WHERE booking_service_id = :service_id AND event_type = "refund" AND event_status = "posted"
+         ORDER BY id ASC'
+    );
+    $postedRefundRows = static function () use ($postedRefundRowsStatement, $serviceId): array {
+        $postedRefundRowsStatement->execute(['service_id' => $serviceId]);
+
+        return $postedRefundRowsStatement->fetchAll(PDO::FETCH_ASSOC) ?: [];
+    };
 
     $check(
         'Legacy combined event is retired only after both component reversals are recorded',
@@ -379,6 +390,128 @@ try {
             && round((float) ($supplierPayment['returned_amount'] ?? 0), 2) === 30.0
             && round($accountingRepository->accountNetBalanceForBooking($bookingReference, 'PKR', 'SUPPLIER_ADVANCES'), 2) === 60.0,
         json_encode($supplierPayment, JSON_UNESCAPED_SLASHES)
+    );
+
+    $refundRowsBeforeNoChange = $postedRefundRows();
+    $serviceWorkspace->correctPenaltyRefundWorkflow([
+        'booking_id' => $bookingId,
+        'service_id' => $serviceId,
+        'correction_reason' => 'Verify unchanged refunds remain protected',
+        'correction_event_date' => $today,
+        'customer_penalty_amount' => '40',
+        'customer_penalty_currency' => 'PKR',
+        'customer_penalty_exchange_rate' => '1',
+        'expected_supplier_refund_amount' => '90',
+        'expected_supplier_refund_currency' => 'PKR',
+        'expected_supplier_refund_exchange_rate' => '1',
+        'agency_fee_refund_amount' => '5',
+        'supplier_penalty_amount' => '10',
+        'supplier_penalty_currency' => 'PKR',
+        'supplier_penalty_exchange_rate' => '1',
+        'settlement_currency' => 'PKR',
+        'settlement_exchange_rate' => '1',
+        'customer_refund_amount' => '30',
+        'customer_refund_source_amount' => '30',
+        'customer_refund_currency' => 'PKR',
+        'customer_refund_exchange_rate' => '1',
+        'refund_payment_method' => 'cash',
+        'refund_treasury_account_id' => (int) $customerRefundTreasury['id'],
+        'supplier_refund_amount' => '30',
+        'supplier_refund_source_amount' => '30',
+        'supplier_refund_currency' => 'PKR',
+        'supplier_refund_exchange_rate' => '1',
+        'supplier_refund_payment_method' => 'cash',
+        'supplier_refund_treasury_account_id' => (int) $customerRefundTreasury['id'],
+    ], $actorUserId, $accessibleBranchIds);
+    $refundRowsAfterNoChange = $postedRefundRows();
+    $check(
+        'Saving unchanged separated refunds preserves their event and journal identities',
+        $refundRowsAfterNoChange === $refundRowsBeforeNoChange,
+        json_encode(['before' => $refundRowsBeforeNoChange, 'after' => $refundRowsAfterNoChange], JSON_UNESCAPED_SLASHES)
+    );
+
+    $settlementEditBlocked = false;
+    try {
+        $serviceWorkspace->correctPenaltyRefundWorkflow([
+            'booking_id' => $bookingId,
+            'service_id' => $serviceId,
+            'correction_reason' => 'Attempt settlement edit with posted refunds',
+            'correction_event_date' => $today,
+            'customer_penalty_amount' => '41',
+            'customer_penalty_currency' => 'PKR',
+            'customer_penalty_exchange_rate' => '1',
+            'expected_supplier_refund_amount' => '90',
+            'expected_supplier_refund_currency' => 'PKR',
+            'expected_supplier_refund_exchange_rate' => '1',
+            'agency_fee_refund_amount' => '5',
+            'supplier_penalty_amount' => '10',
+            'supplier_penalty_currency' => 'PKR',
+            'supplier_penalty_exchange_rate' => '1',
+            'settlement_currency' => 'PKR',
+            'settlement_exchange_rate' => '1',
+            'customer_refund_amount' => '30',
+            'customer_refund_source_amount' => '30',
+            'customer_refund_currency' => 'PKR',
+            'customer_refund_exchange_rate' => '1',
+            'refund_payment_method' => 'cash',
+            'refund_treasury_account_id' => (int) $customerRefundTreasury['id'],
+            'supplier_refund_amount' => '30',
+            'supplier_refund_source_amount' => '30',
+            'supplier_refund_currency' => 'PKR',
+            'supplier_refund_exchange_rate' => '1',
+            'supplier_refund_payment_method' => 'cash',
+            'supplier_refund_treasury_account_id' => (int) $customerRefundTreasury['id'],
+        ], $actorUserId, $accessibleBranchIds);
+    } catch (RuntimeException $exception) {
+        $settlementEditBlocked = str_contains($exception->getMessage(), 'Posted refunds are protected');
+    }
+    $check(
+        'Cancellation settlement edits cannot silently reverse posted refunds',
+        $settlementEditBlocked && $postedRefundRows() === $refundRowsBeforeNoChange
+    );
+
+    $serviceWorkspace->correctPenaltyRefundWorkflow([
+        'booking_id' => $bookingId,
+        'service_id' => $serviceId,
+        'correction_reason' => 'Correct only the customer refund',
+        'correction_event_date' => $today,
+        'customer_penalty_amount' => '40',
+        'customer_penalty_currency' => 'PKR',
+        'customer_penalty_exchange_rate' => '1',
+        'expected_supplier_refund_amount' => '90',
+        'expected_supplier_refund_currency' => 'PKR',
+        'expected_supplier_refund_exchange_rate' => '1',
+        'agency_fee_refund_amount' => '5',
+        'supplier_penalty_amount' => '10',
+        'supplier_penalty_currency' => 'PKR',
+        'supplier_penalty_exchange_rate' => '1',
+        'settlement_currency' => 'PKR',
+        'settlement_exchange_rate' => '1',
+        'customer_refund_amount' => '20',
+        'customer_refund_source_amount' => '20',
+        'customer_refund_currency' => 'PKR',
+        'customer_refund_exchange_rate' => '1',
+        'refund_payment_method' => 'cash',
+        'refund_treasury_account_id' => (int) $customerRefundTreasury['id'],
+        'supplier_refund_amount' => '30',
+        'supplier_refund_source_amount' => '30',
+        'supplier_refund_currency' => 'PKR',
+        'supplier_refund_exchange_rate' => '1',
+        'supplier_refund_payment_method' => 'cash',
+        'supplier_refund_treasury_account_id' => (int) $customerRefundTreasury['id'],
+    ], $actorUserId, $accessibleBranchIds);
+    $refundRowsAfterCustomerOnly = $postedRefundRows();
+    $supplierBefore = array_values(array_filter($refundRowsBeforeNoChange, static fn (array $row): bool => (float) ($row['supplier_refund_amount'] ?? 0) > 0.005))[0] ?? [];
+    $supplierAfter = array_values(array_filter($refundRowsAfterCustomerOnly, static fn (array $row): bool => (float) ($row['supplier_refund_amount'] ?? 0) > 0.005))[0] ?? [];
+    $customerBefore = array_values(array_filter($refundRowsBeforeNoChange, static fn (array $row): bool => (float) ($row['customer_refund_amount'] ?? 0) > 0.005))[0] ?? [];
+    $customerAfter = array_values(array_filter($refundRowsAfterCustomerOnly, static fn (array $row): bool => (float) ($row['customer_refund_amount'] ?? 0) > 0.005))[0] ?? [];
+    $check(
+        'Changing only the customer refund preserves the supplier refund event and journal',
+        (int) ($supplierAfter['id'] ?? 0) === (int) ($supplierBefore['id'] ?? -1)
+            && (int) ($supplierAfter['journal_entry_id'] ?? 0) === (int) ($supplierBefore['journal_entry_id'] ?? -1)
+            && (int) ($customerAfter['id'] ?? 0) !== (int) ($customerBefore['id'] ?? 0)
+            && round((float) ($customerAfter['customer_refund_amount'] ?? 0), 2) === 20.0,
+        json_encode(['before' => $refundRowsBeforeNoChange, 'after' => $refundRowsAfterCustomerOnly], JSON_UNESCAPED_SLASHES)
     );
 
     $serviceWorkspace->correctPenaltyRefundWorkflow([
@@ -446,6 +579,28 @@ try {
         json_encode([
             'customer_receipts' => $separatedReceiptTotals,
             'supplier_payment' => $separatedSupplierPayment,
+        ], JSON_UNESCAPED_SLASHES)
+    );
+
+    $refundRowsBeforeCurrencyCorrection = $postedRefundRows();
+    $serviceWorkspace->correctFinancials([
+        'booking_id' => $bookingId,
+        'service_id' => $serviceId,
+        'corrected_invoice_currency' => 'PKR',
+        'corrected_cost_currency' => 'AED',
+        'corrected_cost_basis' => '100.00',
+        'corrected_final_sale_price' => '110.00',
+        'financial_correction_date' => $today,
+        'financial_correction_reason' => 'Verify supplier cost currency edits cannot alter posted refunds',
+        'financial_correction_note' => 'Rollback-only refund protection regression.',
+    ], $actorUserId, $accessibleBranchIds);
+    $refundRowsAfterCurrencyCorrection = $postedRefundRows();
+    $check(
+        'Supplier cost currency correction preserves posted refund identities, currencies, amounts, and journals',
+        $refundRowsAfterCurrencyCorrection === $refundRowsBeforeCurrencyCorrection,
+        json_encode([
+            'before' => $refundRowsBeforeCurrencyCorrection,
+            'after' => $refundRowsAfterCurrencyCorrection,
         ], JSON_UNESCAPED_SLASHES)
     );
 } catch (Throwable $exception) {
