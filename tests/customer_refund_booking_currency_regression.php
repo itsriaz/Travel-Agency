@@ -27,7 +27,7 @@ $check(
 );
 $check(
     'Customer refund save resolves the settlement truth currency from cancellation payload',
-    str_contains($serviceSource, "\$customerRefundCurrency = \$this->resolveCustomerRefundTruthCurrency(\$cancelPayload, \$currency);")
+    str_contains($serviceSource, "\$customerRefundCurrency = \$this->resolveCustomerRefundTruthCurrency(\$cancelPayload, \$currency, (string) (\$cancelEvent['currency'] ?? ''));")
         && str_contains($serviceSource, "'currency' => \$customerRefundCurrency,")
 );
 $check(
@@ -43,16 +43,17 @@ $check(
         && str_contains($serviceSource, '$refundExchangeRateToBooking = $refundAmount > 0.005 ? 1.0 : null;')
 );
 $check(
-    'Cancellation settlement persists customer refund credit in a dedicated truth currency',
-    str_contains($serviceSource, "'available_customer_refund_credit_currency' => \$settlementCurrency")
-        && str_contains($serviceSource, "'target_customer_refund_credit_currency' => \$settlementCurrency")
-        && str_contains($serviceSource, "'customer_refund_basis_currency' => \$settlementCurrency")
+    'New cancellation settlement persists converted customer refund credit in invoice currency',
+    str_contains($serviceSource, "'available_customer_refund_credit_currency' => \$currency")
+        && str_contains($serviceSource, "'target_customer_refund_credit_currency' => \$currency")
+        && str_contains($serviceSource, "'customer_refund_basis_currency' => \$currency")
 );
 $check(
-    'Modern customer refund state no longer caps refund truth by the old booking credit header currency',
-    str_contains($serviceSource, '$remainingCustomerRefundCredit = $hasModernAvailableCredit')
-        && str_contains($serviceSource, '? $unsettledReleasedCredit')
-        && str_contains($serviceSource, "'current_booking_credit_cap_applied' => ! \$hasModernAvailableCredit")
+    'Receipt-backed refunds follow their remaining receipt credit without erasing historical entitlement',
+    str_contains($serviceSource, 'releasedReceiptUnallocatedCreditTotal($bookingReference, $currency, $releasedReceiptIds)')
+        && str_contains($serviceSource, 'bookingHasReceiptEvidence($bookingReference, $currency)')
+        && str_contains($serviceSource, '$serviceRemainingCustomerRefundCredit = $hasReceiptEvidence')
+        && str_contains($serviceSource, "'current_booking_credit_cap_applied' => \$hasReceiptEvidence || ! \$hasModernAvailableCredit")
 );
 $check(
     'Legacy mixed-currency settlements derive refund truth from source-currency amounts before raw fallbacks',
@@ -71,7 +72,7 @@ $check(
 );
 $check(
     'Customer refund truth currency resolver exists',
-    str_contains($serviceSource, 'private function resolveCustomerRefundTruthCurrency(array $cancelPayload, string $fallbackCurrency): string')
+    str_contains($serviceSource, "private function resolveCustomerRefundTruthCurrency(array \$cancelPayload, string \$fallbackCurrency, string \$eventCurrency = ''): string")
         && str_contains($serviceSource, "'available_customer_refund_credit_currency'")
         && str_contains($serviceSource, "'target_customer_refund_credit_currency'")
         && str_contains($serviceSource, "'settlement_currency'")

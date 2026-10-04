@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use App\Core\App;
 use App\Repositories\TreasuryRepository;
+use App\Repositories\ReportRepository;
 use App\Services\SupplierSettlementWorkspaceService;
 
 define('BASE_PATH', dirname(__DIR__));
@@ -17,6 +18,7 @@ $app = App::bootstrap(BASE_PATH);
 /** @var PDO $db */
 $db = $app->get('db');
 $treasury = new TreasuryRepository($app);
+$reports = new ReportRepository($app);
 $service = new SupplierSettlementWorkspaceService($app);
 $failures = [];
 
@@ -76,6 +78,17 @@ if ($failures === []) {
     $expectedAedPayment = 100.0;
     $expectedPkrOutflow = round($expectedAedPayment / $paymentRate, 2);
     $balanceBefore = $treasury->currentBalanceForAccountId($treasuryAccountId);
+    $cashOut = static function (int $branchId, string $currency) use ($reports): float {
+        $total = 0.0;
+        foreach ($reports->cashFlow([$branchId], date('Y-m-d'), date('Y-m-d'))['supplierPayments'] as $row) {
+            if ((string) ($row['currency'] ?? '') === $currency) {
+                $total += (float) ($row['cash_out_amount'] ?? 0);
+            }
+        }
+        return $total;
+    };
+    $swatPkrCashOutBefore = $cashOut($swatBranchId, 'PKR');
+    $nobleAedCashOutBefore = $cashOut($nobleBranchId, 'AED');
     $paymentId = 0;
     $obligationId = 0;
 
@@ -189,6 +202,9 @@ if ($failures === []) {
             'expected ' . number_format($expectedPkrOutflow, 2)
                 . ' PKR, actual ' . number_format($actualPkrOutflow, 2) . ' PKR'
         );
+        $check('Cash Flow shows converted PKR outflow in Swat, not AED outflow in Noble Route',
+            abs(($cashOut($swatBranchId, 'PKR') - $swatPkrCashOutBefore) - $expectedPkrOutflow) <= 0.005
+                && abs($cashOut($nobleBranchId, 'AED') - $nobleAedCashOutBefore) <= 0.005);
 
         $recorded = $journalsByType['supplier_payment_recorded'] ?? [];
         $funded = $journalsByType['supplier_payment_treasury_funded'] ?? [];

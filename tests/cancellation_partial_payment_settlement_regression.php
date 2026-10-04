@@ -85,7 +85,8 @@ try {
         string $case,
         float $receivedAmount,
         bool $mixedSupplierCurrency = false,
-        string $receiptCurrency = 'AED'
+        string $receiptCurrency = 'AED',
+        bool $editSupplierRefund = false
     ) use (
         $bookingWorkspace,
         $serviceWorkspace,
@@ -100,7 +101,9 @@ try {
         $aedTreasuryAccountId,
         $pkrTreasuryAccountId,
         $today,
-        $token
+        $token,
+        $db,
+        $check
     ): array {
         $bookingResult = $bookingWorkspace->saveBooking([
             'branch_id' => $branchId,
@@ -220,12 +223,118 @@ try {
                 'expected_supplier_refund_amount' => '300',
             ]);
         }
+        if ($mixedSupplierCurrency && $receiptCurrency === 'AED') {
+            $supplierBefore = $supplierRepository->findObligationByServiceLine($bookingReference, $lineReference) ?? [];
+            $journalCountBefore = (int) $db->query('SELECT COUNT(*) FROM journal_entries')->fetchColumn();
+            $statement = $db->prepare('UPDATE supplier_obligations SET currency = "AED" WHERE id = ?');
+            $statement->execute([(int) ($supplierBefore['id'] ?? 0)]);
+            $repositoryRejected = false;
+            try {
+                $supplierRepository->syncObligation([
+                    'supplier_id' => (int) ($supplierBefore['supplier_id'] ?? 0),
+                    'branch_id' => $branchId, 'booking_reference' => $bookingReference,
+                    'service_line_reference' => $lineReference, 'obligation_group' => 'service_cost',
+                    'currency' => 'PKR', 'gross_amount' => 22320,
+                ]);
+            } catch (RuntimeException) {
+                $repositoryRejected = true;
+            }
+            $settlementRejected = false;
+            try {
+                $serviceWorkspace->settleCancellationFinancials($settlementPayload, $actorUserId, $accessibleBranchIds);
+            } catch (RuntimeException) {
+                $settlementRejected = true;
+            }
+            $check('Mismatched supplier payable currency blocks both direct sync and cancellation without journals',
+                $repositoryRejected && $settlementRejected
+                && $journalCountBefore === (int) $db->query('SELECT COUNT(*) FROM journal_entries')->fetchColumn());
+            $statement = $db->prepare('UPDATE supplier_obligations SET currency = "PKR" WHERE id = ?');
+            $statement->execute([(int) ($supplierBefore['id'] ?? 0)]);
+            $customerBefore = $customerRepository->findReceivableByServiceLine($bookingReference, $lineReference) ?? [];
+            $statement = $db->prepare('UPDATE customer_receivable_items SET currency = "PKR" WHERE id = ?');
+            $statement->execute([(int) ($customerBefore['id'] ?? 0)]);
+            $repositoryRejected = false;
+            try {
+                $customerRepository->syncReceivableItem([
+                    'branch_id' => $branchId, 'booking_reference' => $bookingReference,
+                    'service_line_reference' => $lineReference, 'due_group' => 'service_sale',
+                    'currency' => 'AED', 'due_amount' => 620,
+                ]);
+            } catch (RuntimeException) {
+                $repositoryRejected = true;
+            }
+            $settlementRejected = false;
+            try {
+                $serviceWorkspace->settleCancellationFinancials($settlementPayload, $actorUserId, $accessibleBranchIds);
+            } catch (RuntimeException) {
+                $settlementRejected = true;
+            }
+            $check('Mismatched customer receivable currency blocks sync and cancellation without journals',
+                $repositoryRejected && $settlementRejected
+                && $journalCountBefore === (int) $db->query('SELECT COUNT(*) FROM journal_entries')->fetchColumn());
+            $statement = $db->prepare('UPDATE customer_receivable_items SET currency = "AED" WHERE id = ?');
+            $statement->execute([(int) ($customerBefore['id'] ?? 0)]);
+        }
         $serviceWorkspace->settleCancellationFinancials($settlementPayload, $actorUserId, $accessibleBranchIds);
+
+        if ($editSupplierRefund) {
+            $legacyCancelEvent = $eventRepository->latestPostedEvent($serviceId, 'cancel') ?? [];
+            $legacyPayload = json_decode((string) ($legacyCancelEvent['payload_json'] ?? ''), true);
+            $legacyPayload['expected_supplier_refund_amount'] = 24000;
+            unset($legacyPayload['expected_supplier_refund_booking_amount']);
+            $statement = $db->prepare('UPDATE booking_service_events SET payload_json = ? WHERE id = ?');
+            $statement->execute([json_encode($legacyPayload, JSON_THROW_ON_ERROR), (int) $legacyCancelEvent['id']]);
+            $correctionInput = [
+                'booking_id' => $bookingId,
+                'service_id' => $serviceId,
+                'correction_reason' => 'Rollback-only PKR supplier refund correction',
+                'correction_event_date' => $today,
+                'customer_penalty_amount' => '100',
+                'customer_penalty_currency' => 'AED',
+                'agency_fee_refund_amount' => '0',
+                'expected_supplier_refund_amount' => '24000',
+                'expected_supplier_refund_currency' => 'PKR',
+                'expected_supplier_refund_exchange_rate' => '0.01250000',
+                'expected_supplier_refund_rate_date' => $today,
+                'supplier_penalty_amount' => '22320',
+                'supplier_penalty_currency' => 'PKR',
+                'customer_refund_amount' => '0',
+                'supplier_refund_amount' => '0',
+            ];
+            $journalCountBeforeNoop = (int) $db->query('SELECT COUNT(*) FROM journal_entries')->fetchColumn();
+            $serviceWorkspace->correctPenaltyRefundWorkflow($correctionInput, $actorUserId, $accessibleBranchIds);
+            $check('Unchanged legacy PKR source amount does not rebuild cancellation journals',
+                $journalCountBeforeNoop === (int) $db->query('SELECT COUNT(*) FROM journal_entries')->fetchColumn());
+            $correctionInput['expected_supplier_refund_amount'] = '23000';
+            $correctionInput['supplier_penalty_amount'] = '23320';
+            $legacyChangeRejected = false;
+            try {
+                $serviceWorkspace->correctPenaltyRefundWorkflow($correctionInput, $actorUserId, $accessibleBranchIds);
+            } catch (RuntimeException $exception) {
+                $legacyChangeRejected = str_contains($exception->getMessage(), 'no verified invoice-currency equivalent');
+            }
+            $check('Legacy PKR amount edit without verified AED equivalent cannot repost',
+                $legacyChangeRejected
+                && $journalCountBeforeNoop === (int) $db->query('SELECT COUNT(*) FROM journal_entries')->fetchColumn());
+            $statement->execute([(string) $legacyCancelEvent['payload_json'], (int) $legacyCancelEvent['id']]);
+            $serviceWorkspace->correctPenaltyRefundWorkflow($correctionInput, $actorUserId, $accessibleBranchIds);
+        }
 
         $after = $customerRepository->findReceivableByServiceLine($bookingReference, $lineReference) ?? [];
         $supplierAfter = $supplierRepository->findObligationByServiceLine($bookingReference, $lineReference) ?? [];
         $cancelEvent = $eventRepository->latestPostedEvent($serviceId, 'cancel') ?? [];
         $payload = json_decode((string) ($cancelEvent['payload_json'] ?? ''), true);
+        $controlStatement = $db->prepare('SELECT je.currency, coa.code,
+            ROUND(SUM(jel.debit_amount - jel.credit_amount), 2) AS balance
+            FROM journal_entries je JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+            JOIN chart_of_accounts coa ON coa.id = jel.account_id
+            WHERE je.booking_reference = ? AND coa.code = "AP_CONTROL"
+            GROUP BY je.currency, coa.code');
+        $controlStatement->execute([$bookingReference]);
+        $apBalances = [];
+        foreach ($controlStatement->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $apBalances[(string) $row['currency']] = round((float) $row['balance'], 2);
+        }
 
         return [
             'booking_reference' => $bookingReference,
@@ -245,6 +354,7 @@ try {
             'supplier_refund_source' => round((float) ($payload['expected_supplier_refund_source_amount'] ?? -1), 2),
             'supplier_currency' => (string) ($supplierAfter['currency'] ?? ''),
             'supplier_penalty_due' => round((float) ($supplierAfter['gross_amount'] ?? -1), 2),
+            'supplier_ap_balances' => $apBalances,
         ];
     };
 
@@ -253,6 +363,7 @@ try {
     $full = $runCase('full', 620);
     $mixedAedPartial = $runCase('mixed-aed-partial', 100, true);
     $mixedPkrPartial = $runCase('mixed-pkr-partial', 8000, true, 'PKR');
+    $mixedEdited = $runCase('mixed-edited', 100, true, 'AED', true);
 
     $check('All three fixtures begin with the same AED 620 invoice',
         $unpaid['before_due'] === 620.0 && $partial['before_due'] === 620.0 && $full['before_due'] === 620.0,
@@ -300,6 +411,14 @@ try {
         && $mixedPkrPartial['supplier_currency'] === 'PKR'
         && $mixedPkrPartial['supplier_penalty_due'] === 22320.0,
         $mixedPkrPartial);
+    $check('Editing PKR supplier refund preserves PKR payable denomination',
+        $mixedEdited['supplier_currency'] === 'PKR'
+        && $mixedEdited['supplier_refund_currency'] === 'PKR'
+        && $mixedEdited['supplier_refund_source'] === 23000.0
+        && $mixedEdited['supplier_penalty_due'] === 23320.0
+        && ($mixedEdited['supplier_ap_balances']['PKR'] ?? null) === -23320.0
+        && abs($mixedEdited['supplier_ap_balances']['AED'] ?? 0) < .005,
+        $mixedEdited);
 } catch (Throwable $throwable) {
     $failures[] = 'Probe completed without exception';
     fwrite(STDERR, '[ERROR] ' . $throwable->getMessage() . PHP_EOL);

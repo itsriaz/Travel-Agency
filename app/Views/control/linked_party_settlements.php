@@ -146,74 +146,59 @@ $displayVoidReason = static function (mixed $reason): string {
     <div class="panel-header">
         <div>
             <h2>Manual Invoice Adjustment: <?= e($manualPosition['business_source_name']) ?> / <?= e($manualPosition['supplier_name']) ?></h2>
-            <p class="panel-meta">Choose invoice amounts from one account branch/currency and one supplier branch/currency. For different currencies, enter the supplier amount per 1 account currency. Nothing is selected automatically.</p>
+            <p class="panel-meta">Choose the two invoices and enter the amount once. Add another pair only if you need to adjust more invoices. No invoices are selected automatically.</p>
         </div>
     </div>
     <form method="post" action="<?= e(url('/linked-party-settlements/save')) ?>" class="manual-offset-form" id="manual-offset-form" data-currency="<?= e($manualPosition['currency']) ?>">
         <?= \App\Helpers\Csrf::input() ?>
         <input type="hidden" name="link_id" value="<?= e((string) $manualPosition['link_id']) ?>">
-        <div class="manual-allocation-grid">
-            <article class="manual-allocation-card">
-                <div class="manual-allocation-heading">
-                    <h3>Account-Holder Invoices</h3>
-                    <strong><span id="manual-account-currency">-</span> <span id="manual-account-total">0.00</span></strong>
-                </div>
-                <div class="dense-table-wrap manual-allocation-table-wrap">
-                    <table class="dense-table manual-allocation-table">
-                        <thead><tr><th>Branch</th><th>Curr.</th><th>Booking</th><th>Available</th><th>Adjust Amount</th></tr></thead>
-                        <tbody>
-                        <?php foreach ($manualAccounts as $item): ?>
-                            <?php $available = round((float) ($item['available_account_amount'] ?? 0), 2); ?>
-                            <tr>
-                                <td><?= e((string) ($item['branch_name'] ?? '')) ?></td>
-                                <td><?= e((string) ($item['currency'] ?? '')) ?></td>
-                                <td><?= e((string) ($item['booking_reference'] ?? '')) ?></td>
-                                <td><?= e($money($available)) ?></td>
-                                <td><input class="manual-allocation-input" data-side="account" data-branch-id="<?= e((string) ($item['branch_id'] ?? '')) ?>" data-currency="<?= e((string) ($item['currency'] ?? '')) ?>" type="number" inputmode="decimal" name="account_allocations[<?= e((string) $item['id']) ?>]" min="0" max="<?= e(number_format($available, 2, '.', '')) ?>" step="0.01" placeholder="0.00" aria-label="Account-holder adjustment for <?= e((string) ($item['booking_reference'] ?? 'invoice')) ?>"></td>
-                            </tr>
-                        <?php endforeach; ?>
-                        </tbody>
-                    </table>
-                </div>
-            </article>
-            <article class="manual-allocation-card">
-                <div class="manual-allocation-heading">
-                    <h3>Supplier Invoices</h3>
-                    <strong><span id="manual-payable-currency">-</span> <span id="manual-payable-total">0.00</span></strong>
-                </div>
-                <div class="dense-table-wrap manual-allocation-table-wrap">
-                    <table class="dense-table manual-allocation-table">
-                        <thead><tr><th>Branch</th><th>Curr.</th><th>Booking</th><th>Payable</th><th>Adjust Amount</th></tr></thead>
-                        <tbody>
-                        <?php foreach ($manualPayables as $item): ?>
-                            <?php $payable = round((float) ($item['net_payable_amount'] ?? 0), 2); ?>
-                            <tr>
-                                <td><?= e((string) ($item['branch_name'] ?? '')) ?></td>
-                                <td><?= e((string) ($item['currency'] ?? '')) ?></td>
-                                <td><?= e((string) ($item['booking_reference'] ?? '')) ?></td>
-                                <td><?= e($money($payable)) ?></td>
-                                <td><input class="manual-allocation-input" data-side="payable" data-branch-id="<?= e((string) ($item['branch_id'] ?? '')) ?>" data-currency="<?= e((string) ($item['currency'] ?? '')) ?>" type="number" inputmode="decimal" name="payable_allocations[<?= e((string) $item['id']) ?>]" min="0" max="<?= e(number_format($payable, 2, '.', '')) ?>" step="0.01" placeholder="0.00" aria-label="Supplier adjustment for <?= e((string) ($item['booking_reference'] ?? 'invoice')) ?>"></td>
-                            </tr>
-                        <?php endforeach; ?>
-                        </tbody>
-                    </table>
-                </div>
-            </article>
+        <div id="manual-pairs" class="manual-pairs"></div>
+        <button class="btn btn-sm manual-add-pair" id="manual-add-pair" type="button">Add another invoice pair</button>
+        <div class="manual-offset-summary" aria-live="polite">
+            <span>Account-holder invoices: <strong><span id="manual-account-currency">-</span> <span id="manual-account-total">0.00</span></strong></span>
+            <span>Supplier invoices: <strong><span id="manual-payable-currency">-</span> <span id="manual-payable-total">0.00</span></strong></span>
         </div>
         <div class="manual-offset-footer">
             <div class="manual-offset-fields">
                 <label>Date<input type="date" name="offset_date" value="<?= e(date('Y-m-d')) ?>" required></label>
-                <label id="manual-exchange-rate-label">Supplier amount per 1 account currency<input id="manual-exchange-rate" type="number" inputmode="decimal" name="exchange_rate" min="0.00000001" step="0.00000001" value="1" required></label>
-                <label>FX rate date<input type="date" name="exchange_rate_effective_date" value="<?= e(date('Y-m-d')) ?>" required></label>
+                <label id="manual-exchange-rate-label" hidden><span id="manual-exchange-rate-text">Supplier amount per 1 account currency</span><input id="manual-exchange-rate" type="number" inputmode="decimal" name="exchange_rate" min="0.00000001" step="0.00000001" value="1" required></label>
+                <label id="manual-exchange-date-label" hidden>FX rate date<input type="date" name="exchange_rate_effective_date" value="<?= e(date('Y-m-d')) ?>" required></label>
                 <label>Reference<input name="reference_no" maxlength="100"></label>
                 <label>Remarks<input name="remarks" maxlength="2000"></label>
             </div>
             <div class="manual-offset-confirmation">
-                <div class="manual-offset-balance" id="manual-offset-balance" aria-live="polite">Enter equal amounts on both sides.</div>
+                <div class="manual-offset-balance" id="manual-offset-balance" aria-live="polite">Choose invoices and enter an amount.</div>
                 <button class="btn btn-primary" id="manual-offset-submit" type="submit" disabled>Confirm Manual Adjustment</button>
             </div>
         </div>
     </form>
+    <template id="manual-pair-template">
+        <div class="manual-pair">
+            <label>Account-holder invoice
+                <select class="manual-account-select" required aria-label="Account-holder invoice">
+                    <option value="">Select invoice</option>
+                    <?php foreach ($manualAccounts as $item): ?>
+                        <?php $available = round((float) ($item['available_account_amount'] ?? 0), 2); ?>
+                        <option value="<?= e((string) $item['id']) ?>" data-branch-id="<?= e((string) ($item['branch_id'] ?? '')) ?>" data-currency="<?= e((string) ($item['currency'] ?? '')) ?>" data-available="<?= e(number_format($available, 2, '.', '')) ?>"><?= e((string) ($item['booking_reference'] ?? '')) ?> · <?= e((string) ($item['branch_name'] ?? '')) ?> · <?= e((string) ($item['currency'] ?? '')) ?> <?= e($money($available)) ?> available</option>
+                    <?php endforeach; ?>
+                </select>
+            </label>
+            <label>Supplier invoice
+                <select class="manual-payable-select" required aria-label="Supplier invoice">
+                    <option value="">Select invoice</option>
+                    <?php foreach ($manualPayables as $item): ?>
+                        <?php $payable = round((float) ($item['net_payable_amount'] ?? 0), 2); ?>
+                        <option value="<?= e((string) $item['id']) ?>" data-branch-id="<?= e((string) ($item['branch_id'] ?? '')) ?>" data-currency="<?= e((string) ($item['currency'] ?? '')) ?>" data-available="<?= e(number_format($payable, 2, '.', '')) ?>"><?= e((string) ($item['booking_reference'] ?? '')) ?> · <?= e((string) ($item['branch_name'] ?? '')) ?> · <?= e((string) ($item['currency'] ?? '')) ?> <?= e($money($payable)) ?> payable</option>
+                    <?php endforeach; ?>
+                </select>
+            </label>
+            <label>Amount to adjust <span class="manual-pair-currency"></span>
+                <input class="manual-pair-amount" type="number" inputmode="decimal" min="0.01" step="0.01" placeholder="0.00" required aria-label="Amount to adjust in account-holder invoice currency">
+            </label>
+            <div class="manual-pair-result"><span>Supplier amount</span><strong class="manual-pair-preview">- 0.00</strong></div>
+            <button class="btn btn-sm manual-remove-pair" type="button" aria-label="Remove invoice pair">Remove</button>
+        </div>
+    </template>
 </section>
 <?php endif; ?>
 
@@ -354,15 +339,13 @@ $displayVoidReason = static function (mixed $reason): string {
     .manual-offset-form { display: grid; gap: 14px; }
     .manual-offset-form label { display: grid; gap: 4px; min-width: 0; }
     .manual-offset-form select, .manual-offset-form input { width: 100%; min-width: 0; }
-    .manual-allocation-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
-    .manual-allocation-card { min-width: 0; overflow: hidden; border: 1px solid #cbddeb; border-radius: 14px; background: #fff; }
-    .manual-allocation-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 13px; background: #eef7fc; border-bottom: 1px solid #cbddeb; }
-    .manual-allocation-heading h3 { margin: 0; }
-    .manual-allocation-table-wrap { max-height: 360px; overflow: auto; border: 0; border-radius: 0; }
-    .manual-allocation-table { min-width: 540px; }
-    .manual-allocation-table th { position: sticky; top: 0; z-index: 1; background: #f5f9fc; }
-    .manual-allocation-table th:nth-child(4), .manual-allocation-table td:nth-child(4) { text-align: right; }
-    .manual-allocation-table input { min-width: 120px; }
+    .manual-offset-form [hidden] { display: none; }
+    .manual-pairs { display: grid; gap: 8px; }
+    .manual-pair { display: grid; grid-template-columns: minmax(190px, 2fr) minmax(190px, 2fr) minmax(115px, 1fr) minmax(105px, .8fr) auto; gap: 10px; align-items: end; padding: 12px; border: 1px solid #cbddeb; border-radius: 12px; background: #f7fbfe; }
+    .manual-pair-result { display: grid; gap: 7px; padding-bottom: 11px; white-space: nowrap; }
+    .manual-pair-result span { color: #516b80; font-size: .8rem; }
+    .manual-add-pair { justify-self: start; }
+    .manual-offset-summary { display: flex; flex-wrap: wrap; gap: 10px 28px; padding: 10px 12px; border-radius: 10px; background: #eef7fc; }
     .manual-offset-footer { display: flex; align-items: end; justify-content: space-between; gap: 16px; }
     .manual-offset-fields { flex: 1; display: grid; grid-template-columns: minmax(150px, .65fr) repeat(2, minmax(190px, 1fr)); gap: 10px; }
     .manual-offset-confirmation { display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
@@ -371,12 +354,13 @@ $displayVoidReason = static function (mixed $reason): string {
     #manual-offset-submit:disabled { cursor: not-allowed; opacity: .55; }
     @media (max-width: 850px) { .account-holder-receipt-form { grid-template-columns: 1fr 1fr; } }
     @media (max-width: 980px) {
-        .manual-allocation-grid { grid-template-columns: 1fr; }
+        .manual-pair { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .manual-offset-footer { align-items: stretch; flex-direction: column; }
         .manual-offset-confirmation { justify-content: space-between; }
     }
     @media (max-width: 650px) {
         .account-holder-receipt-form, .manual-offset-fields { grid-template-columns: 1fr; }
+        .manual-pair { grid-template-columns: 1fr; }
         .manual-offset-confirmation { align-items: stretch; flex-direction: column; }
         .manual-offset-balance { text-align: left; }
     }
@@ -493,7 +477,9 @@ $displayVoidReason = static function (mixed $reason): string {
     filterTreasuryAccounts();
 
     const manualForm = document.getElementById('manual-offset-form');
-    const manualInputs = Array.from(document.querySelectorAll('.manual-allocation-input'));
+    const manualPairs = document.getElementById('manual-pairs');
+    const pairTemplate = document.getElementById('manual-pair-template');
+    const addPairButton = document.getElementById('manual-add-pair');
     const accountTotalOutput = document.getElementById('manual-account-total');
     const payableTotalOutput = document.getElementById('manual-payable-total');
     const accountCurrencyOutput = document.getElementById('manual-account-currency');
@@ -501,49 +487,129 @@ $displayVoidReason = static function (mixed $reason): string {
     const balanceOutput = document.getElementById('manual-offset-balance');
     const manualSubmit = document.getElementById('manual-offset-submit');
     const exchangeRateInput = document.getElementById('manual-exchange-rate');
-    const sideTotal = (side) => Math.round(manualInputs
-        .filter((input) => input.dataset.side === side)
-        .reduce((total, input) => total + Math.max(0, Number(input.value) || 0), 0) * 100) / 100;
-    const selectedDimension = (side) => {
-        const selected = manualInputs.filter((input) => input.dataset.side === side && (Number(input.value) || 0) > 0);
-        const keys = [...new Set(selected.map((input) => `${input.dataset.branchId}|${input.dataset.currency}`))];
-        return { selected, keys, currency: keys.length === 1 ? keys[0].split('|')[1] : '' };
+    const rateLabel = document.getElementById('manual-exchange-rate-label');
+    const rateText = document.getElementById('manual-exchange-rate-text');
+    const rateDateLabel = document.getElementById('manual-exchange-date-label');
+    const cents = (amount) => Math.round(Number(amount) * 100);
+    let currentRatePair = '';
+    let readyAllocations = null;
+
+    const addPair = () => {
+        if (!manualPairs || !pairTemplate) return;
+        manualPairs.appendChild(pairTemplate.content.firstElementChild.cloneNode(true));
+        updateManualTotals();
     };
     const updateManualTotals = () => {
-        if (!manualForm || !accountTotalOutput || !payableTotalOutput || !accountCurrencyOutput
-            || !payableCurrencyOutput || !balanceOutput || !manualSubmit || !exchangeRateInput) {
+        if (!manualForm || !manualPairs || !accountTotalOutput || !payableTotalOutput || !accountCurrencyOutput
+            || !payableCurrencyOutput || !balanceOutput || !manualSubmit || !exchangeRateInput || !rateLabel || !rateDateLabel) {
             return;
         }
-        const accountTotal = sideTotal('account');
-        const payableTotal = sideTotal('payable');
-        const accountDimension = selectedDimension('account');
-        const payableDimension = selectedDimension('payable');
-        const dimensionsValid = accountDimension.keys.length === 1 && payableDimension.keys.length === 1;
-        const sameCurrency = dimensionsValid && accountDimension.currency === payableDimension.currency;
-        if (sameCurrency) exchangeRateInput.value = '1';
-        exchangeRateInput.readOnly = sameCurrency;
-        const exchangeRate = Number(exchangeRateInput.value) || 0;
-        const expectedPayable = Math.round(accountTotal * exchangeRate * 100) / 100;
-        const difference = Math.round(Math.abs(expectedPayable - payableTotal) * 100) / 100;
-        const validInputs = manualInputs.every((input) => input.value === '' || input.checkValidity());
-        const ready = validInputs && dimensionsValid && exchangeRate > 0 && accountTotal > 0 && payableTotal > 0 && difference < 0.005;
-        accountTotalOutput.textContent = accountTotal.toFixed(2);
-        payableTotalOutput.textContent = payableTotal.toFixed(2);
-        accountCurrencyOutput.textContent = accountDimension.currency || '-';
-        payableCurrencyOutput.textContent = payableDimension.currency || '-';
+        const rows = Array.from(manualPairs.querySelectorAll('.manual-pair')).map((pair) => {
+            const account = pair.querySelector('.manual-account-select');
+            const payable = pair.querySelector('.manual-payable-select');
+            const amount = pair.querySelector('.manual-pair-amount');
+            const accountOption = account.selectedOptions[0];
+            const payableOption = payable.selectedOptions[0];
+            pair.querySelector('.manual-pair-currency').textContent = accountOption?.dataset.currency ? `(${accountOption.dataset.currency})` : '(account currency)';
+            return { pair, account, payable, amount, accountOption, payableOption, accountCents: cents(amount.value) };
+        });
+        const selectedRows = rows.filter((row) => row.account.value && row.payable.value);
+        const accountDimensions = new Set(selectedRows.map((row) => `${row.accountOption.dataset.branchId}|${row.accountOption.dataset.currency}`));
+        const payableDimensions = new Set(selectedRows.map((row) => `${row.payableOption.dataset.branchId}|${row.payableOption.dataset.currency}`));
+        const complete = rows.length > 0 && selectedRows.length === rows.length;
+        const accountCurrency = accountDimensions.size === 1 ? selectedRows[0].accountOption.dataset.currency : '';
+        const payableCurrency = payableDimensions.size === 1 ? selectedRows[0].payableOption.dataset.currency : '';
+        const ratePair = accountCurrency && payableCurrency ? `${accountCurrency}|${payableCurrency}` : '';
+        const differentCurrency = Boolean(ratePair && accountCurrency !== payableCurrency);
+        if (ratePair !== currentRatePair) {
+            exchangeRateInput.value = differentCurrency ? '' : '1';
+            currentRatePair = ratePair;
+        }
+        rateLabel.hidden = !differentCurrency;
+        rateDateLabel.hidden = !differentCurrency;
+        if (rateText && differentCurrency) rateText.textContent = `1 ${accountCurrency} equals how many ${payableCurrency}?`;
+        const rate = Number(exchangeRateInput.value);
+        const rateValid = Number.isFinite(rate) && rate > 0 && exchangeRateInput.checkValidity();
+        const accountAllocations = new Map();
+        const payableAllocations = new Map();
+        let accountTotalCents = 0;
+        let payableTotalCents = 0;
+        let withinBalances = true;
+        let positiveAmounts = true;
+        rows.forEach((row) => {
+            const validAmount = row.amount.value !== '' && row.amount.checkValidity() && Number.isSafeInteger(row.accountCents) && row.accountCents > 0;
+            if (!validAmount) positiveAmounts = false;
+            let supplierCents = 0;
+            row.pair.querySelector('.manual-pair-preview').textContent = `${row.payableOption?.dataset.currency || '-'} 0.00`;
+            if (row.account.value && row.payable.value && validAmount && rateValid) {
+                const nextAccountTotal = accountTotalCents + row.accountCents;
+                const nextPayableTotal = Math.round(nextAccountTotal * rate);
+                if (!Number.isSafeInteger(nextAccountTotal) || !Number.isSafeInteger(nextPayableTotal)) {
+                    withinBalances = false;
+                    return;
+                }
+                supplierCents = nextPayableTotal - payableTotalCents;
+                accountTotalCents = nextAccountTotal;
+                payableTotalCents = nextPayableTotal;
+                accountAllocations.set(row.account.value, (accountAllocations.get(row.account.value) || 0) + row.accountCents);
+                payableAllocations.set(row.payable.value, (payableAllocations.get(row.payable.value) || 0) + supplierCents);
+                if (supplierCents <= 0) positiveAmounts = false;
+                if (accountAllocations.get(row.account.value) > cents(row.accountOption.dataset.available)
+                    || payableAllocations.get(row.payable.value) > cents(row.payableOption.dataset.available)) withinBalances = false;
+            }
+            row.pair.querySelector('.manual-pair-preview').textContent = `${row.payableOption?.dataset.currency || '-'} ${(supplierCents / 100).toFixed(2)}`;
+        });
+        const dimensionsValid = complete && accountDimensions.size === 1 && payableDimensions.size === 1;
+        const ready = dimensionsValid && rateValid && positiveAmounts && withinBalances
+            && accountTotalCents > 0 && payableTotalCents > 0 && manualForm.checkValidity();
+        accountTotalOutput.textContent = (accountTotalCents / 100).toFixed(2);
+        payableTotalOutput.textContent = (payableTotalCents / 100).toFixed(2);
+        accountCurrencyOutput.textContent = accountCurrency || '-';
+        payableCurrencyOutput.textContent = payableCurrency || '-';
         balanceOutput.classList.toggle('is-ready', ready);
         balanceOutput.textContent = ready
-            ? `Ready: ${accountDimension.currency} ${accountTotal.toFixed(2)} → ${payableDimension.currency} ${payableTotal.toFixed(2)}.`
-            : accountDimension.keys.length > 1 || payableDimension.keys.length > 1
-                ? 'Use one branch and currency on each side per settlement.'
-                : dimensionsValid && difference > 0
-                    ? `Supplier total differs by ${payableDimension.currency} ${difference.toFixed(2)}.`
-                    : 'Select positive invoice amounts on both sides.';
+            ? `Ready: ${accountCurrency} ${(accountTotalCents / 100).toFixed(2)} will adjust ${payableCurrency} ${(payableTotalCents / 100).toFixed(2)}.`
+            : !complete ? 'Choose an invoice on each side of every pair.'
+                : !dimensionsValid ? 'Use one branch and currency on each side per adjustment.'
+                    : !rateValid ? 'Enter a valid exchange rate.'
+                        : !positiveAmounts ? 'Enter a positive amount for every pair.'
+                            : !withinBalances ? 'An invoice amount exceeds its available balance.'
+                                : 'Check the date and required fields.';
         manualSubmit.disabled = !ready;
+        readyAllocations = ready ? { accountAllocations, payableAllocations } : null;
     };
-    manualInputs.forEach((input) => input.addEventListener('input', updateManualTotals));
-    exchangeRateInput?.addEventListener('input', updateManualTotals);
-    updateManualTotals();
+    if (manualForm && manualPairs && pairTemplate) {
+        addPairButton?.addEventListener('click', addPair);
+        manualPairs.addEventListener('input', updateManualTotals);
+        manualPairs.addEventListener('change', updateManualTotals);
+        manualPairs.addEventListener('click', (event) => {
+            if (!event.target.closest('.manual-remove-pair')) return;
+            event.target.closest('.manual-pair').remove();
+            if (!manualPairs.querySelector('.manual-pair')) addPair();
+            updateManualTotals();
+        });
+        exchangeRateInput?.addEventListener('input', updateManualTotals);
+        manualForm.querySelectorAll('input[type="date"]').forEach((input) => input.addEventListener('change', updateManualTotals));
+        manualForm.addEventListener('submit', (event) => {
+            updateManualTotals();
+            if (!readyAllocations) {
+                event.preventDefault();
+                return;
+            }
+            manualForm.querySelectorAll('[data-generated-allocation]').forEach((input) => input.remove());
+            [['account_allocations', readyAllocations.accountAllocations], ['payable_allocations', readyAllocations.payableAllocations]].forEach(([name, amounts]) => {
+                amounts.forEach((amount, invoiceId) => {
+                    const input = document.createElement('input');
+                    input.type = 'hidden';
+                    input.name = `${name}[${invoiceId}]`;
+                    input.value = (amount / 100).toFixed(2);
+                    input.dataset.generatedAllocation = '1';
+                    manualForm.appendChild(input);
+                });
+            });
+        });
+        addPair();
+    }
 
     const panel = document.querySelector('.linked-settlement-history');
     const openButton = document.getElementById('linked-settlement-expand-button');

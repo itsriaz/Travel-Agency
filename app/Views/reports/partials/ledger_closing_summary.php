@@ -16,6 +16,7 @@ $closingCards = array_values(array_filter(
         return $closingReport === 'supplier_ledger'
             && (str_starts_with($label, 'Supplier Debit / ')
                 || str_starts_with($label, 'Supplier Credit / ')
+                || str_starts_with($label, 'Gross Paid to Supplier / ')
                 || str_starts_with($label, 'Supplier Balance / '));
     }
 ));
@@ -35,8 +36,10 @@ $closingCards = array_values(array_filter(
         <h3>Ledger Totals</h3>
         <?php if ($closingReport === 'supplier_ledger' && ($isLinkedPartyLedger ?? false)): ?>
             <p>Combined totals for the linked account holder and supplier. This is a read-only net position and does not post an automatic adjustment.</p>
+        <?php elseif ($closingReport === 'supplier_ledger'): ?>
+            <p>Gross paid to supplier is historical payment activity, not the amount still owed. Use Supplier Balance for the net position.</p>
         <?php else: ?>
-            <p>Totals for the selected ledger filters and currencies. Supplier debit includes invoices and adjustments; supplier credit includes payments and credits. These are report totals, not a settlement between account holder and supplier.</p>
+            <p>Customer ledger totals for the selected filters and currencies.</p>
         <?php endif; ?>
         <div class="ledger-closing-summary-grid">
             <?php foreach ($closingCards as $closingCard): ?>

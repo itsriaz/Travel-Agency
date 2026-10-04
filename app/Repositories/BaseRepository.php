@@ -9,6 +9,17 @@ use PDO;
 
 abstract class BaseRepository
 {
+    protected function financialServiceEventStatusClause(string $alias): string
+    {
+        if (! preg_match('/^[a-z_]+$/D', $alias)) {
+            throw new \RuntimeException('Invalid financial event alias.');
+        }
+        // Operational reversal does not erase cash that actually changed hands.
+        return '(' . $alias . '.event_status = "posted" OR (' . $alias . '.event_type = "refund"'
+            . ' AND ' . $alias . '.event_status = "voided"'
+            . ' AND JSON_UNQUOTE(JSON_EXTRACT(' . $alias . '.payload_json, "$.actual_money_preserved")) = "true"))';
+    }
+
     protected PDO $db;
     /** @var array<string, bool> */
     private array $columnExistsCache = [];

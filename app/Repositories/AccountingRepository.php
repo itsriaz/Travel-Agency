@@ -11,6 +11,22 @@ final class AccountingRepository extends BaseRepository
 {
     private array $accountIdCache = [];
 
+    public function postRefundRecoveryOutstanding(array $data): int
+    {
+        $customer = $data['scope'] === 'customer';
+        $amount = round((float) $data['amount'], 2);
+        $reference = ['service_line_reference' => $data['service_line_reference'],
+            'customer_receivable_item_id' => $data['customer_receivable_item_id'] ?? null,
+            'supplier_obligation_id' => $data['supplier_obligation_id'] ?? null,
+            'line_description' => 'Actual refund retained when restoring original invoice'];
+        return $this->postJournalEntry($data, [
+            array_merge($reference, ['account_code' => $customer ? 'AR_CONTROL' : 'AP_CONTROL',
+                'debit_amount' => $customer ? $amount : 0, 'credit_amount' => $customer ? 0 : $amount]),
+            array_merge($reference, ['account_code' => $customer ? 'CUSTOMER_CREDIT' : 'SUPPLIER_ADVANCES',
+                'debit_amount' => $customer ? 0 : $amount, 'credit_amount' => $customer ? $amount : 0]),
+        ]);
+    }
+
     public function postJournalEntry(array $header, array $lines): int
     {
         return $this->transaction(function () use ($header, $lines): int {
@@ -394,6 +410,55 @@ final class AccountingRepository extends BaseRepository
                 'credit_amount' => $data['amount'],
             ],
         ]);
+    }
+
+    public function postCrossCurrencySupplierAdvanceConversion(array $data): array
+    {
+        if (! $this->db->inTransaction()) {
+            throw new RuntimeException('Supplier advance FX conversion requires an enclosing transaction.');
+        }
+        $sourceAmount = round((float) ($data['source_amount'] ?? 0), 2);
+        $destinationAmount = round((float) ($data['destination_amount'] ?? 0), 2);
+        $sourceCurrency = strtoupper((string) ($data['source_currency'] ?? ''));
+        $destinationCurrency = strtoupper((string) ($data['destination_currency'] ?? ''));
+        if ($sourceAmount <= 0 || $destinationAmount <= 0 || $sourceCurrency === $destinationCurrency
+            || $sourceCurrency === '' || $destinationCurrency === '') {
+            throw new RuntimeException('Supplier advance FX conversion requires two positive amounts in different currencies.');
+        }
+
+        $clearing = $this->ensureAccountByCode(
+            'SUPPLIER_PAYMENT_FX_CLEARING', 'Supplier Payment FX Clearing', 'asset', 'debit'
+        );
+        $reference = (string) ($data['source_reference'] ?? 'SUPPLIER-ADVANCE-FX');
+        $header = [
+            'booking_reference' => null,
+            'source_type' => 'supplier_advance_fx_conversion',
+            'entry_date' => $data['entry_date'] ?? date('Y-m-d'),
+            'actor_user_id' => $data['actor_user_id'] ?? null,
+            'narration' => 'Supplier advance converted within supplier pool; no cash movement',
+        ];
+        $sourceJournalId = $this->postJournalEntry(array_merge($header, [
+            'branch_id' => (int) $data['source_branch_id'],
+            'currency' => $sourceCurrency,
+            'source_reference' => $reference . '-SOURCE',
+        ]), [
+            ['account_id' => $clearing['account_id'], 'line_description' => 'Supplier advance FX source clearing',
+                'debit_amount' => $sourceAmount, 'credit_amount' => 0],
+            ['account_code' => 'SUPPLIER_ADVANCES', 'line_description' => 'Supplier advance consumed in source currency',
+                'debit_amount' => 0, 'credit_amount' => $sourceAmount],
+        ]);
+        $destinationJournalId = $this->postJournalEntry(array_merge($header, [
+            'branch_id' => (int) $data['destination_branch_id'],
+            'currency' => $destinationCurrency,
+            'source_reference' => $reference . '-DESTINATION',
+        ]), [
+            ['account_code' => 'SUPPLIER_ADVANCES', 'line_description' => 'Supplier advance created in payable currency',
+                'debit_amount' => $destinationAmount, 'credit_amount' => 0],
+            ['account_id' => $clearing['account_id'], 'line_description' => 'Supplier advance FX destination clearing',
+                'debit_amount' => 0, 'credit_amount' => $destinationAmount],
+        ]);
+
+        return [$sourceJournalId, $destinationJournalId];
     }
 
     public function postSupplierAdvanceApplicationAdjusted(array $data): int
@@ -808,6 +873,36 @@ final class AccountingRepository extends BaseRepository
         ], $lines);
     }
 
+    public function postCustomerReceiptAmountCorrection(array $data): int
+    {
+        $delta = round((float) $data['corrected_amount'] - (float) $data['original_amount'], 2);
+        if (abs($delta) < .005) {
+            throw new \RuntimeException('Receipt amount correction requires a nonzero difference.');
+        }
+        $asset = $this->customerReceiptAssetAccount($data);
+        $amount = abs($delta);
+        return $this->postJournalEntry([
+            'branch_id' => $data['branch_id'],
+            'booking_reference' => $data['booking_reference'],
+            'source_type' => 'customer_receipt_amount_corrected',
+            'source_reference' => $data['source_reference'],
+            'entry_date' => $data['entry_date'],
+            'currency' => $data['currency'],
+            'narration' => $data['narration'],
+            'actor_user_id' => $data['actor_user_id'],
+        ], [
+            ['account_id' => $asset['account_id'], 'account_code' => $asset['account_code'],
+                'customer_receipt_id' => $data['customer_receipt_id'],
+                'line_description' => 'Correct actual customer money received',
+                'debit_amount' => $delta > 0 ? $amount : 0,
+                'credit_amount' => $delta < 0 ? $amount : 0],
+            ['account_code' => 'CUSTOMER_CREDIT', 'customer_receipt_id' => $data['customer_receipt_id'],
+                'line_description' => 'Correct customer credit from receipt amount',
+                'debit_amount' => $delta < 0 ? $amount : 0,
+                'credit_amount' => $delta > 0 ? $amount : 0],
+        ]);
+    }
+
     public function postCustomerReceiptAllocation(array $data): int
     {
         return $this->postJournalEntry([
@@ -1182,7 +1277,7 @@ final class AccountingRepository extends BaseRepository
              INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
              INNER JOIN chart_of_accounts coa ON coa.id = jel.account_id
              WHERE jel.customer_receipt_id = :customer_receipt_id
-               AND je.source_type IN ("customer_receipt_recorded", "customer_receipt_allocated")
+               AND je.source_type IN ("customer_receipt_recorded", "customer_receipt_allocated", "customer_receipt_amount_corrected")
              ORDER BY je.id ASC, jel.id ASC'
         );
         $statement->execute([
@@ -1609,6 +1704,60 @@ final class AccountingRepository extends BaseRepository
                 'credit_amount' => $amount,
             ],
         ]);
+    }
+
+    public function postCrossDimensionTreasuryTransfer(array $data): array
+    {
+        if (! $this->db->inTransaction()) {
+            throw new RuntimeException('Cross-dimension treasury journals require an enclosing transfer transaction.');
+        }
+        $sourceAmount = round((float) ($data['source_amount'] ?? 0), 2);
+        $destinationAmount = round((float) ($data['destination_amount'] ?? 0), 2);
+        if ($sourceAmount <= 0 || $destinationAmount <= 0) {
+            throw new RuntimeException('Both treasury transfer amounts must be greater than zero.');
+        }
+
+        $fromAccount = $this->treasuryAccountLedgerReference((int) ($data['from_treasury_account_id'] ?? 0));
+        $toAccount = $this->treasuryAccountLedgerReference((int) ($data['to_treasury_account_id'] ?? 0));
+        if ($fromAccount === null || $toAccount === null) {
+            throw new RuntimeException('Treasury transfer requires valid source and destination ledger accounts.');
+        }
+
+        $crossBranch = (int) $data['source_branch_id'] !== (int) $data['destination_branch_id'];
+        $sourceClearing = $crossBranch
+            ? $this->ensureAccountByCode('INTERBRANCH_TRANSFER_RECEIVABLE', 'Interbranch Transfer Receivable', 'asset', 'debit')
+            : $this->ensureAccountByCode('TREASURY_FX_CLEARING', 'Treasury FX Clearing', 'asset', 'debit');
+        $destinationClearing = $crossBranch
+            ? $this->ensureAccountByCode('INTERBRANCH_TRANSFER_PAYABLE', 'Interbranch Transfer Payable', 'liability', 'credit')
+            : $sourceClearing;
+        $reference = 'TR-' . (int) $data['treasury_transaction_id'];
+        $header = [
+            'booking_reference' => null,
+            'source_type' => 'treasury_transfer_posted',
+            'entry_date' => $data['entry_date'],
+            'actor_user_id' => $data['actor_user_id'] ?? null,
+        ];
+
+        $sourceJournalId = $this->postJournalEntry(array_merge($header, [
+            'branch_id' => $data['source_branch_id'],
+            'currency' => $data['source_currency'],
+            'source_reference' => $reference . '-SOURCE',
+            'narration' => 'Treasury transfer out to ' . (string) $data['destination_currency'],
+        ]), [
+            ['account_id' => $sourceClearing['account_id'], 'line_description' => 'Transfer clearing receivable', 'debit_amount' => $sourceAmount, 'credit_amount' => 0],
+            ['account_id' => $fromAccount['account_id'], 'line_description' => 'Cash or bank transfer out', 'debit_amount' => 0, 'credit_amount' => $sourceAmount],
+        ]);
+        $destinationJournalId = $this->postJournalEntry(array_merge($header, [
+            'branch_id' => $data['destination_branch_id'],
+            'currency' => $data['destination_currency'],
+            'source_reference' => $reference . '-DESTINATION',
+            'narration' => 'Treasury transfer in from ' . (string) $data['source_currency'],
+        ]), [
+            ['account_id' => $toAccount['account_id'], 'line_description' => 'Cash or bank transfer in', 'debit_amount' => $destinationAmount, 'credit_amount' => 0],
+            ['account_id' => $destinationClearing['account_id'], 'line_description' => 'Transfer clearing payable', 'debit_amount' => 0, 'credit_amount' => $destinationAmount],
+        ]);
+
+        return [$sourceJournalId, $destinationJournalId];
     }
 
     public function postTreasuryTransferVoidReversal(array $data): ?int

@@ -137,6 +137,12 @@ final class CustomerPaymentFoundationService extends Service
             $repository->allocationHistory($bookingReference)
         );
         $allocations = $this->annotateInternalSettlementAllocations($allocations, $internalSettlementReceipts);
+        $outgoingBookingCredits = array_values(array_filter(
+            $allocations,
+            static fn (array $allocation): bool => (string) ($allocation['bookingReference'] ?? '') !== $bookingReference
+                && (float) ($allocation['paymentAmountConsumed'] ?? 0) > 0.005
+                && (string) ($allocation['receiptStatusRaw'] ?? '') !== 'void'
+        ));
 
         $summaryRow = $repository->bookingOutstandingSummary($bookingReference);
         $customerOutstanding = [];
@@ -365,6 +371,13 @@ final class CustomerPaymentFoundationService extends Service
             $repository->allocationHistoryForReceivableItems($currentBookingReceivableItemIds)
         );
         $invoicePaymentHistory = $this->annotateInternalSettlementAllocations($invoicePaymentHistory, $internalSettlementReceipts);
+        $incomingBookingCredits = array_values(array_filter(
+            $invoicePaymentHistory,
+            static fn (array $allocation): bool => (string) ($allocation['receiptBookingReference'] ?? '') !== ''
+                && (string) ($allocation['receiptBookingReference'] ?? '') !== $bookingReference
+                && (float) ($allocation['paymentAmountConsumed'] ?? 0) > 0.005
+                && (string) ($allocation['receiptStatusRaw'] ?? '') !== 'void'
+        ));
 
         $dailySettlementRates = [];
         $exchangeRateRepository = new ExchangeRateRepository($this->app);
@@ -466,6 +479,8 @@ final class CustomerPaymentFoundationService extends Service
             'openReceivables' => $openReceivables,
             'customerOpenReceivables' => $customerOpenReceivables,
             'invoicePaymentHistory' => $invoicePaymentHistory,
+            'incomingBookingCredits' => $incomingBookingCredits,
+            'outgoingBookingCredits' => $outgoingBookingCredits,
             'receipts' => $receipts,
             'allocatableReceipts' => $allocatableReceipts,
             'allocations' => $allocations,
@@ -671,7 +686,8 @@ final class CustomerPaymentFoundationService extends Service
 
     /**
      * Older cancellation settlements sometimes released the full paid amount as customer credit even
-     * when the true customer refund should be capped by expected supplier refund minus customer penalty.
+     * when the true customer refund was lower. Prefer the saved entitlement; older records fall back
+     * to supplier refund plus refunded agency fee minus customer penalty.
      * The accounting ledger remains auditable; this method prevents already-refunded/over-released
      * cancellation credit from appearing as reusable customer credit in the workspace payment panel.
      *
@@ -726,28 +742,36 @@ final class CustomerPaymentFoundationService extends Service
                 continue;
             }
 
-            $expectedSupplierRefund = round((float) (
-                $payload['expected_supplier_refund_amount']
-                ?? $payload['expected_supplier_refund_credit']
-                ?? $payload['supplier_expected_refund_amount']
-                ?? 0
-            ), 2);
-            if ($expectedSupplierRefund <= 0.005 && isset($payload['supplier_delta'])) {
-                $supplierDelta = round((float) $payload['supplier_delta'], 2);
-                if ($supplierDelta < -0.005) {
-                    $expectedSupplierRefund = abs($supplierDelta);
+            $targetCurrency = strtoupper(trim((string) ($payload['target_customer_refund_credit_currency'] ?? '')));
+            if (isset($payload['target_customer_refund_credit'])
+                && is_numeric($payload['target_customer_refund_credit'])
+                && $targetCurrency === strtoupper($currency)) {
+                $trueReleasedCredit = round(max((float) $payload['target_customer_refund_credit'], 0), 2);
+            } else {
+                $expectedSupplierRefund = round((float) (
+                    $payload['expected_supplier_refund_amount']
+                    ?? $payload['expected_supplier_refund_credit']
+                    ?? $payload['supplier_expected_refund_amount']
+                    ?? 0
+                ), 2);
+                if ($expectedSupplierRefund <= 0.005 && isset($payload['supplier_delta'])) {
+                    $supplierDelta = round((float) $payload['supplier_delta'], 2);
+                    if ($supplierDelta < -0.005) {
+                        $expectedSupplierRefund = abs($supplierDelta);
+                    }
                 }
-            }
-            if ($expectedSupplierRefund <= 0.005) {
-                continue;
-            }
+                if ($expectedSupplierRefund <= 0.005) {
+                    continue;
+                }
 
-            $customerPenalty = round((float) (
-                $payload['customer_penalty_amount']
-                ?? $latestCancelEvent['penalty_amount']
-                ?? 0
-            ), 2);
-            $trueReleasedCredit = round(max($expectedSupplierRefund - $customerPenalty, 0), 2);
+                $customerPenalty = round((float) (
+                    $payload['customer_penalty_amount']
+                    ?? $latestCancelEvent['penalty_amount']
+                    ?? 0
+                ), 2);
+                $refundedAgencyFee = round((float) ($payload['agency_fee_refund_amount'] ?? 0), 2);
+                $trueReleasedCredit = round(max($expectedSupplierRefund + $refundedAgencyFee - $customerPenalty, 0), 2);
+            }
             $overstatedAmount = round(max($storedReleasedCredit - $trueReleasedCredit, 0), 2);
             if ($overstatedAmount <= 0.005) {
                 continue;

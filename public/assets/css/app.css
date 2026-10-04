@@ -8793,6 +8793,10 @@ textarea {
     grid-row: 1;
 }
 
+.legacy-service-correction-bar .legacy-service-event-note--credit-transfer {
+    grid-row: 6;
+}
+
 .legacy-service-correction-bar .legacy-service-event-field--refund-date {
     grid-column: 1;
     grid-row: 2;
@@ -9786,6 +9790,103 @@ textarea {
 
 .legacy-service-event-note strong {
     color: #0a4d73;
+}
+
+/* Keep amount headings aligned when only the supplier expectation needs FX. */
+.legacy-service-event-bar--settlement,
+[data-service-edit-booking-modal] [data-service-workflow-panel].legacy-service-event-bar--settlement {
+    align-items: start;
+}
+
+.legacy-service-event-field--expected-supplier-refund .supplier-refund-fx-review:not([hidden]),
+.legacy-service-correction-bar > .supplier-refund-equivalent-card:not([hidden]) {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+    margin-top: 2px;
+}
+
+.legacy-service-correction-bar > .supplier-refund-equivalent-card {
+    grid-column: 4;
+    grid-row: 2;
+    min-height: 72px;
+    margin-top: 0;
+    align-content: start;
+}
+
+.legacy-service-correction-bar:has(> .supplier-refund-equivalent-card:not([hidden])) .legacy-service-event-field--agency-fee-refund {
+    grid-column: 5;
+}
+
+.legacy-service-correction-bar:has(> .supplier-refund-equivalent-card:not([hidden])) .legacy-service-event-field--calculated {
+    grid-column: 6;
+}
+
+.legacy-service-correction-bar:has(> .supplier-refund-equivalent-card:not([hidden])) .legacy-service-event-field--supplier-penalty {
+    grid-column: 7;
+}
+
+/* Close the reserved FX slot only when that row does not display a rate. */
+.legacy-service-correction-bar[data-service-correction-bar="settlement"]:has(> .legacy-service-event-field--customer-fx-rate[hidden]) .legacy-service-event-field--customer-method,
+.legacy-service-correction-bar[data-service-correction-bar="settlement"]:has(> .legacy-service-event-field--supplier-fx-rate[hidden]) .legacy-service-event-field--supplier-method {
+    grid-column: 3;
+}
+
+.legacy-service-correction-bar[data-service-correction-bar="settlement"]:has(> .legacy-service-event-field--customer-fx-rate[hidden]) .legacy-service-event-field--customer-account,
+.legacy-service-correction-bar[data-service-correction-bar="settlement"]:has(> .legacy-service-event-field--supplier-fx-rate[hidden]) .legacy-service-event-field--supplier-account {
+    grid-column: 4 / 8;
+}
+
+.legacy-service-correction-bar[data-service-correction-bar="settlement"]:has(> .legacy-service-event-field--customer-fx-rate[hidden]) [data-correction-customer-refund-status],
+.legacy-service-correction-bar[data-service-correction-bar="settlement"]:has(> .legacy-service-event-field--supplier-fx-rate[hidden]) [data-correction-supplier-refund-status] {
+    grid-column: 3 / 8;
+}
+
+.supplier-refund-fx-review[hidden] {
+    display: none;
+}
+
+.supplier-refund-fx-review__caption {
+    grid-column: 1 / -1;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+.supplier-refund-fx-review__unit {
+    white-space: nowrap;
+}
+
+.legacy-service-event-field--expected-supplier-refund .supplier-refund-fx-review input[type="number"],
+.legacy-service-correction-bar > .supplier-refund-equivalent-card input[type="number"] {
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
+    height: 34px;
+    min-height: 34px;
+    padding: 3px 6px;
+    border: 1px solid #a8bfd0;
+    border-radius: 6px;
+    background: #fff;
+    color: #111;
+    font: inherit;
+    font-size: 11px;
+    font-weight: 800;
+}
+
+.supplier-refund-fx-review input[type="number"]::placeholder {
+    color: #111;
+    font-weight: 800;
+    opacity: 1;
+}
+
+.supplier-refund-fx-review input[type="number"]:focus {
+    caret-color: #111;
+}
+
+.supplier-refund-fx-review input[type="number"]:focus::placeholder {
+    opacity: 0;
 }
 
 .legacy-service-event-note--settlement-overview {
@@ -12870,5 +12971,312 @@ textarea {
     .code-grid,
     .recovery-code-grid {
         grid-template-columns: 1fr;
+    }
+}
+.refund-complete-undo {
+    display: grid;
+    grid-template-columns: minmax(220px, 1.4fr) repeat(2, minmax(200px, 1fr)) auto;
+    align-items: end;
+    gap: 8px 12px;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid #b9cfe1;
+}
+.refund-complete-undo[hidden] { display: none; }
+.refund-complete-undo p { grid-column: 1 / -1; margin: 0; }
+.refund-complete-undo[data-refund-recovery-restore] { grid-template-columns: 1fr auto; }
+.refund-recovery-history-item { border-bottom: 1px solid #b9cfe1; padding: 8px 0; }
+.refund-recovery-history-item p { margin: 3px 0; font-size: 12px; }
+@media (max-width: 1000px) {
+    .refund-complete-undo { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 640px) {
+    .refund-complete-undo { grid-template-columns: 1fr; }
+    .refund-complete-undo[data-refund-recovery-restore] { grid-template-columns: 1fr; }
+}
+
+/* Receipt history keeps the ledger table compact; editing happens in one focused panel. */
+.payment-history-table th,
+.payment-history-table td {
+    padding: 6px 8px;
+}
+.payment-history-table th:last-child,
+.payment-history-table td:last-child {
+    min-width: 150px;
+    white-space: normal;
+}
+.payment-history-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 5px;
+    min-width: 140px;
+}
+.payment-history-action-button,
+.payment-history-recreate-button {
+    min-height: 27px;
+    padding: 5px 10px;
+    border-radius: 5px;
+    font-size: 11px;
+    font-weight: 800;
+    text-decoration: none;
+}
+.payment-history-action-button {
+    border-color: #176d9b;
+    background: linear-gradient(180deg, #f8fdff 0%, #dceff8 100%);
+    color: #0b486e;
+}
+.payment-history-action-button:hover,
+.payment-history-action-button:focus {
+    border-color: #0b557d;
+    background: #cce8f5;
+}
+.payment-history-recreate-button {
+    min-width: auto !important;
+    border-color: #0c6f4a !important;
+    background: linear-gradient(180deg, #159b68 0%, #0b744c 100%) !important;
+    color: #fff !important;
+}
+.payment-history-action-note {
+    color: #6b7d8d;
+    font-size: 11px;
+    font-style: italic;
+}
+.payment-history-status {
+    display: inline-flex;
+    align-items: center;
+    min-height: 21px;
+    padding: 2px 7px;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 850;
+    letter-spacing: 0.02em;
+    line-height: 1.1;
+}
+.payment-history-status--complete {
+    border-color: #a8d8c2;
+    background: #ecfaf2;
+    color: #17633f;
+}
+.payment-history-status--open {
+    border-color: #b8d5e8;
+    background: #edf7fc;
+    color: #1b587d;
+}
+.payment-history-status--void {
+    border-color: #e2a8b0;
+    background: #fff1f2;
+    color: #9d2536;
+}
+.payment-receipt-manager-modal .payment-receipt-manager-dialog {
+    width: min(820px, calc(100vw - 32px));
+    max-height: calc(100vh - 32px);
+    border-color: #b8cfdf;
+    border-radius: 12px;
+}
+.payment-receipt-manager-header {
+    background:
+        radial-gradient(circle at 90% 15%, rgba(44, 148, 193, 0.14), transparent 35%),
+        linear-gradient(135deg, #f8fcff 0%, #eaf4fa 100%);
+}
+.payment-receipt-manager-header strong {
+    font-size: 1.05rem;
+}
+.payment-receipt-manager-header span {
+    display: block;
+    margin-top: 3px;
+    color: #55718a;
+    font-size: 0.78rem;
+}
+.payment-receipt-manager-body {
+    padding: 14px 16px 18px;
+    background: #f5f9fc;
+}
+.payment-receipt-manager-summary {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 7px;
+    margin-bottom: 12px;
+    padding: 9px;
+    border: 1px solid #c7dbe8;
+    border-radius: 8px;
+    background: #fff;
+}
+.payment-receipt-manager-summary div {
+    min-width: 0;
+    padding: 3px 7px;
+    border-right: 1px solid #e0eaf1;
+}
+.payment-receipt-manager-summary div:last-child { border-right: 0; }
+.payment-receipt-manager-summary span,
+.payment-receipt-manager-summary strong {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.payment-receipt-manager-summary span {
+    color: #5f7588;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+}
+.payment-receipt-manager-summary strong {
+    margin-top: 3px;
+    color: #123f67;
+    font-size: 12px;
+}
+.payment-receipt-manager-sections {
+    display: grid;
+    gap: 10px;
+}
+.payment-receipt-manager-section {
+    padding: 12px;
+    border: 1px solid #c9dbe7;
+    border-radius: 8px;
+    background: #fff;
+    box-shadow: 0 2px 8px rgba(20, 59, 87, 0.05);
+}
+.payment-receipt-manager-section--correction {
+    border-left: 4px solid #1a7da8;
+}
+.payment-receipt-manager-section--danger {
+    border-left: 4px solid #b52c3d;
+    background: #fffafb;
+}
+.payment-receipt-manager-section__heading,
+.payment-receipt-manager-section__footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+.payment-receipt-manager-section__heading {
+    margin-bottom: 10px;
+}
+.payment-receipt-manager-section__heading h3 {
+    margin: 0;
+    color: #123f67;
+    font-size: 13px;
+}
+.payment-receipt-manager-section__heading p {
+    margin: 3px 0 0;
+    color: #61778a;
+    font-size: 11px;
+}
+.payment-receipt-manager-section__badge {
+    flex: 0 0 auto;
+    padding: 4px 7px;
+    border: 1px solid #c5d7e4;
+    border-radius: 999px;
+    color: #47708a;
+    font-size: 10px;
+    font-weight: 800;
+    white-space: nowrap;
+}
+.payment-receipt-manager-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 9px;
+}
+.payment-receipt-manager-grid label {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+}
+.payment-receipt-manager-grid label > span {
+    color: #3d5d74;
+    font-size: 11px;
+    font-weight: 800;
+}
+.payment-receipt-manager-grid input {
+    width: 100%;
+    min-height: 32px;
+    box-sizing: border-box;
+    padding: 6px 8px;
+    border: 1px solid #abc3d4;
+    border-radius: 5px;
+    background: #fff;
+    color: #182f43;
+    font-size: 12px;
+}
+.payment-receipt-manager-grid input[readonly] {
+    background: #f0f5f8;
+    color: #526d81;
+}
+.payment-receipt-manager-grid__full {
+    grid-column: 1 / -1;
+}
+.payment-receipt-manager-section__footer {
+    margin-top: 10px;
+    padding-top: 9px;
+    border-top: 1px solid #e3ebf1;
+}
+.payment-receipt-manager-section__footer > span {
+    color: #6a7c8b;
+    font-size: 10px;
+}
+.payment-receipt-manager-section--danger .payment-receipt-manager-section__footer > span {
+    color: #8d4a54;
+}
+.payment-receipt-manager-confirm {
+    display: flex !important;
+    grid-column: 1 / -1;
+    grid-template-columns: auto 1fr !important;
+    align-items: center;
+    gap: 7px !important;
+    color: #87323e;
+    font-size: 11px;
+    font-weight: 700;
+}
+.payment-receipt-manager-confirm input {
+    width: auto;
+    min-height: auto;
+}
+.payment-receipt-manager-voided {
+    display: grid;
+    gap: 8px;
+    padding: 14px;
+    border: 1px solid #e2a8b0;
+    border-left: 4px solid #b52c3d;
+    border-radius: 8px;
+    background: #fff4f5;
+    color: #7e3440;
+    font-size: 12px;
+}
+.payment-receipt-manager-voided strong {
+    color: #9d2536;
+    font-size: 13px;
+}
+.payment-receipt-manager-voided .payment-history-recreate-button {
+    justify-self: start;
+}
+
+@media (max-width: 900px) {
+    .payment-receipt-manager-summary {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+}
+@media (max-width: 640px) {
+    .payment-receipt-manager-summary {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .payment-receipt-manager-summary div:nth-child(2n) {
+        border-right: 0;
+    }
+    .payment-receipt-manager-grid {
+        grid-template-columns: 1fr;
+    }
+    .payment-receipt-manager-grid__full {
+        grid-column: auto;
+    }
+    .payment-receipt-manager-section__heading,
+    .payment-receipt-manager-section__footer {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+    .payment-receipt-manager-section__footer .btn {
+        align-self: stretch;
     }
 }

@@ -130,10 +130,11 @@ $check(
 );
 $check('Cash / Bank report exposes date ordering', str_contains($view, 'name="cash_bank_date_order"'));
 $check(
-    'Amount typing triggers the existing debounced report refresh',
+    'Amount changes refresh after the user finishes editing',
     str_contains($view, 'data-report-filter="debounced-amount"')
         && str_contains($javascript, 'amountFilters.forEach')
-        && str_contains($javascript, 'scheduleSubmit(350)')
+        && str_contains($javascript, "field.addEventListener('blur', handleAmountUpdate)")
+        && str_contains($javascript, 'scheduleSubmit(0)')
 );
 
 if ($failures !== []) {

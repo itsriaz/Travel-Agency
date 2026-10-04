@@ -663,6 +663,7 @@ $bankAccountsCount = count(array_filter($accounts, static fn (array $row): bool 
         </div>
         <div class="treasury-hero-actions">
             <a class="btn" href="<?= e(url('/reports?report=cash_bank_position')) ?>">Cash and Bank Position</a>
+            <a class="btn" href="<?= e(url('/reports?report=cash_bank_ledger')) ?>">Cash / Bank Transactions</a>
             <a class="btn btn-primary" href="<?= e(url('/treasury/accounts' . $returnToQuery)) ?>">New Account</a>
         </div>
     </div>
@@ -1613,7 +1614,12 @@ if (typeof window.__treasuryRestoreTab === 'function') {
                     <td><span class="treasury-balance"><?= e(number_format((float) ($account['opening_balance'] ?? 0), 2)) ?></span></td>
                     <td><span class="treasury-balance"><?= e(number_format((float) ($account['current_balance'] ?? 0), 2)) ?></span></td>
                     <td><span class="treasury-status-badge <?= (int) ($account['is_active'] ?? 0) === 1 ? 'treasury-status-badge--active' : 'treasury-status-badge--inactive' ?>"><?= ((int) ($account['is_active'] ?? 0) === 1) ? 'Active' : 'Inactive' ?></span></td>
-                    <td><a class="btn btn-sm" href="<?= e(url('/treasury/accounts?id=' . (int) $account['id'] . ($returnTo !== '' ? '&return_to=' . rawurlencode($returnTo) : ''))) ?>#treasury-workspace">Edit</a></td>
+                    <td>
+                        <div class="treasury-hero-actions">
+                            <a class="btn btn-sm" href="<?= e(url('/reports?report=cash_bank_ledger&treasury_account_id=' . (int) $account['id'])) ?>">History</a>
+                            <a class="btn btn-sm" href="<?= e(url('/treasury/accounts?id=' . (int) $account['id'] . ($returnTo !== '' ? '&return_to=' . rawurlencode($returnTo) : ''))) ?>#treasury-workspace">Edit</a>
+                        </div>
+                    </td>
                 </tr>
             <?php endforeach; ?>
             </tbody>

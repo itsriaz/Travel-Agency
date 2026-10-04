@@ -731,7 +731,7 @@ final class SupplierRepository extends BaseRepository
         return $balances;
     }
 
-    public function availableRefundableCreditForService(int $supplierId, string $bookingReference, string $currency): float
+    public function availableRefundableCreditForService(int $supplierId, string $bookingReference, string $currency, array $releasedPaymentIds = []): float
     {
         $supplierId = (int) $supplierId;
         $bookingReference = trim($bookingReference);
@@ -740,19 +740,33 @@ final class SupplierRepository extends BaseRepository
             return 0.0;
         }
 
+        $releasedPaymentIds = array_values(array_unique(array_filter(array_map('intval', $releasedPaymentIds), static fn (int $id): bool => $id > 0)));
+        $paymentParameters = [
+            'supplier_id' => $supplierId,
+            'booking_reference' => $bookingReference,
+            'currency' => $currency,
+        ];
+        $releasedWhere = '';
+        if ($releasedPaymentIds !== []) {
+            $placeholders = [];
+            foreach ($releasedPaymentIds as $index => $paymentId) {
+                $key = 'released_payment_' . $index;
+                $placeholders[] = ':' . $key;
+                $paymentParameters[$key] = $paymentId;
+            }
+            $releasedWhere = ' OR id IN (' . implode(', ', $placeholders) . ')';
+        }
+
         $paymentStatement = $this->db->prepare(
             'SELECT COALESCE(SUM(unallocated_amount), 0)
              FROM supplier_payments
              WHERE supplier_id = :supplier_id
-               AND booking_reference = :booking_reference
+               AND (booking_reference = :booking_reference' . $releasedWhere . ')
                AND currency = :currency
+               AND status <> "void"
                AND unallocated_amount > 0'
         );
-        $paymentStatement->execute([
-            'supplier_id' => $supplierId,
-            'booking_reference' => $bookingReference,
-            'currency' => $currency,
-        ]);
+        $paymentStatement->execute($paymentParameters);
 
         $advanceStatement = $this->db->prepare(
             'SELECT COALESCE(SUM(available_amount), 0)
@@ -2543,7 +2557,8 @@ final class SupplierRepository extends BaseRepository
         string $referenceNo,
         ?int $actorUserId = null,
         ?string $reason = null,
-        array $preferredPaymentIds = []
+        array $preferredPaymentIds = [],
+        bool $releasedPaymentsOnly = false
     ): array {
         return $this->transaction(function () use (
             $supplierId,
@@ -2555,7 +2570,8 @@ final class SupplierRepository extends BaseRepository
             $referenceNo,
             $actorUserId,
             $reason,
-            $preferredPaymentIds
+            $preferredPaymentIds,
+            $releasedPaymentsOnly
         ): array {
             $bookingReference = trim($bookingReference);
             $currency = strtoupper(trim($currency));
@@ -2568,6 +2584,9 @@ final class SupplierRepository extends BaseRepository
                 array_map('intval', $preferredPaymentIds),
                 static fn (int $id): bool => $id > 0
             )));
+            if ($releasedPaymentsOnly && $preferredPaymentIds === []) {
+                throw new RuntimeException('The supplier refund has no released payment in its actual currency. Correct the supplier settlement before retaining it as credit.');
+            }
             $preferredWhere = '';
             $preferredOrder = 'CASE WHEN booking_reference = :booking_reference_order THEN 0 ELSE 1 END';
             $parameters = [
@@ -2589,16 +2608,23 @@ final class SupplierRepository extends BaseRepository
                 $preferredOrder = 'CASE WHEN id IN (' . implode(', ', $preferredPaymentIds) . ') THEN 0 WHEN booking_reference = :booking_reference_order THEN 1 ELSE 2 END';
             }
 
+            $paymentSourceWhere = $releasedPaymentsOnly
+                ? 'id IN (' . implode(', ', $placeholders) . ')'
+                : '(booking_reference = :booking_reference' . $preferredWhere . ' OR payment_scope = "global")';
+            $paymentBranchWhere = $releasedPaymentsOnly ? '' : 'AND branch_id = :branch_id';
+            if ($releasedPaymentsOnly) {
+                unset($parameters['branch_id'], $parameters['booking_reference'], $parameters['booking_reference_order']);
+            }
             $statement = $this->db->prepare(
-                'SELECT id, payment_no, unallocated_amount
+                'SELECT id, payment_no, branch_id, unallocated_amount
                  FROM supplier_payments
                  WHERE supplier_id = :supplier_id
-                   AND branch_id = :branch_id
-                   AND (booking_reference = :booking_reference' . $preferredWhere . ' OR payment_scope = "global")
+                   ' . $paymentBranchWhere . '
+                   AND ' . $paymentSourceWhere . '
                    AND currency = :currency
                    AND status <> "void"
                    AND unallocated_amount > 0.005
-                 ORDER BY ' . $preferredOrder . ', payment_date ASC, id ASC
+                 ORDER BY ' . ($releasedPaymentsOnly ? 'payment_date ASC, id ASC' : $preferredOrder . ', payment_date ASC, id ASC') . '
                  FOR UPDATE'
             );
             $statement->execute($parameters);
@@ -2621,7 +2647,7 @@ final class SupplierRepository extends BaseRepository
 
                 $advanceId = $this->registerAdvance([
                     'supplier_id' => $supplierId,
-                    'branch_id' => $branchId,
+                    'branch_id' => $releasedPaymentsOnly ? (int) $payment['branch_id'] : $branchId,
                     'currency' => $currency,
                     'deposit_amount' => $convertAmount,
                     'available_amount' => $convertAmount,
@@ -3500,13 +3526,24 @@ final class SupplierRepository extends BaseRepository
             return [];
         }
 
+        $preferredPaymentIds = array_values(array_unique(array_filter(array_map('intval', $preferredPaymentIds), static fn (int $id): bool => $id > 0)));
+        $parameters = [
+            'supplier_id' => $supplierId,
+            'booking_reference' => $bookingReference,
+            'currency' => strtoupper(trim($currency)),
+        ];
+        $preferredWhere = '';
         $orderClause = 'ORDER BY payment_date DESC, id DESC';
         if ($preferredPaymentIds !== []) {
-            $preferredPaymentIds = array_values(array_filter(array_map('intval', $preferredPaymentIds), static fn (int $id): bool => $id > 0));
-            if ($preferredPaymentIds !== []) {
-                $preferredList = implode(', ', $preferredPaymentIds);
-                $orderClause = "ORDER BY CASE WHEN id IN ({$preferredList}) THEN 0 ELSE 1 END, payment_date DESC, id DESC";
+            $placeholders = [];
+            foreach ($preferredPaymentIds as $index => $paymentId) {
+                $key = 'preferred_payment_' . $index;
+                $placeholders[] = ':' . $key;
+                $parameters[$key] = $paymentId;
             }
+            $preferredWhere = ' OR id IN (' . implode(', ', $placeholders) . ')';
+            $preferredList = implode(', ', $preferredPaymentIds);
+            $orderClause = "ORDER BY CASE WHEN id IN ({$preferredList}) THEN 0 ELSE 1 END, payment_date DESC, id DESC";
         }
 
         $paymentScopeSelect = $this->columnExists('supplier_payments', 'payment_scope')
@@ -3517,17 +3554,13 @@ final class SupplierRepository extends BaseRepository
             'SELECT id, payment_no, payment_date, currency, paid_amount, allocated_amount, unallocated_amount, exchange_rate_to_booking, booking_reference, branch_id, ' . $paymentScopeSelect . '
              FROM supplier_payments
              WHERE supplier_id = :supplier_id
-               AND booking_reference = :booking_reference
+               AND (booking_reference = :booking_reference' . $preferredWhere . ')
                AND currency = :currency
                AND status <> "void"
                AND unallocated_amount > 0.005
              ' . $orderClause
         );
-        $statement->execute([
-            'supplier_id' => $supplierId,
-            'booking_reference' => $bookingReference,
-            'currency' => strtoupper(trim($currency)),
-        ]);
+        $statement->execute($parameters);
 
         return $statement->fetchAll() ?: [];
     }
@@ -3933,6 +3966,23 @@ final class SupplierRepository extends BaseRepository
 
             $advanceAppliedAmount = round((float) ($existing['advance_applied_amount'] ?? 0), 2);
             $linkedPartyOffsetAmount = $this->linkedPartyOffsetAmountForObligation((int) $existing['id']);
+            $existingCurrency = strtoupper(trim((string) ($existing['currency'] ?? '')));
+            $requestedCurrency = strtoupper(trim((string) ($data['currency'] ?? '')));
+            if ($existingCurrency !== $requestedCurrency) {
+                if (($data['allow_currency_change'] ?? false) !== true
+                    || strtoupper(trim((string) ($data['prior_currency'] ?? ''))) !== $existingCurrency) {
+                    throw new \RuntimeException(
+                        'Supplier payable currency differs from the service cost currency. Use the financial currency correction workflow before saving a cancellation or refund.'
+                    );
+                }
+                if ($advanceAppliedAmount > 0.005
+                    || $this->paymentAllocatedAmountForObligation((int) $existing['id']) > 0.005
+                    || $linkedPartyOffsetAmount > 0.005) {
+                    throw new \RuntimeException(
+                        'Release supplier payments, advances and linked offsets before changing a payable currency.'
+                    );
+                }
+            }
 
             if ($linkedPartyOffsetAmount > 0.005) {
                 $partyChanged = (int) ($data['supplier_id'] ?? 0) !== (int) ($existing['supplier_id'] ?? 0);

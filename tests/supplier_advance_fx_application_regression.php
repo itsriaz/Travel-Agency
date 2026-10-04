@@ -102,6 +102,19 @@ try {
         'auto=' . number_format((float) ($sameCurrencyAutoResult['applied_amount'] ?? 0), 2)
     );
 
+    $insertSameCurrencyObligation->execute([
+        'supplier_id' => $bookingSupplierId,
+        'branch_id' => $branchId,
+        'booking_reference' => 'BK-FX-AUTO-REST-' . random_int(10000, 99999),
+    ]);
+    $remainingSameCurrencyObligationId = (int) $db->lastInsertId();
+    $repository->autoApplyAvailableAdvanceToObligation($remainingSameCurrencyObligationId, 1);
+    $check(
+        'Remaining same-currency credit is exhausted before the cross-currency fixture',
+        abs((float) ($repository->findAdvanceById($sameCurrencyAdvanceId)['available_amount'] ?? -1)) < 0.005,
+        'remaining=' . number_format((float) ($repository->findAdvanceById($sameCurrencyAdvanceId)['available_amount'] ?? -1), 2)
+    );
+
     $insertObligation = $db->prepare(
         'INSERT INTO supplier_obligations (supplier_id, branch_id, booking_reference, service_line_reference, currency, gross_amount, advance_applied_amount, net_payable_amount, status, created_by_user_id)
          VALUES (:supplier_id, :branch_id, :booking_reference, "SV-FX", "PKR", 150.00, 0.00, 150.00, "open", 1)'
@@ -164,7 +177,7 @@ if ($failures !== []) {
         echo ' - ' . $failure . PHP_EOL;
     }
 
-    return 1;
+    exit(1);
 }
 
 echo PHP_EOL . 'Supplier advance FX application regression passed.' . PHP_EOL;

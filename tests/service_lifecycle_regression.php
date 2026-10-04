@@ -424,6 +424,35 @@ try {
         json_encode($cancelObligationAfterSettlement, JSON_UNESCAPED_SLASHES)
     );
 
+    // The remaining assertions exercise historical manual supplier-credit posting.
+    // Restore the rollback-only fixture to that pre-automatic-conversion state.
+    $legacyCancelEvent = $eventRepository->latestPostedEvent($cancelServiceId, 'cancel');
+    $legacyCancelPayload = json_decode((string) ($legacyCancelEvent['payload_json'] ?? '{}'), true) ?: [];
+    $supplierRepository->reverseRetainedRefundAdvanceConversion(
+        (array) ($legacyCancelPayload['supplier_credit_converted_advance_ids'] ?? []),
+        $actorUserId,
+        'Lifecycle regression legacy supplier-credit fixture'
+    );
+    foreach ([
+        'supplier_credit_recording_version',
+        'supplier_credit_recorded_source_amount',
+        'supplier_credit_recorded_booking_amount',
+        'supplier_credit_recorded_currency',
+        'supplier_credit_converted_payment_amount',
+        'supplier_credit_converted_advance_ids',
+    ] as $legacyField) {
+        unset($legacyCancelPayload[$legacyField]);
+    }
+    $eventRepository->updateCancellationFinancials((int) $legacyCancelEvent['id'], [
+        'penalty_amount' => $legacyCancelEvent['penalty_amount'],
+        'customer_credit_amount' => $legacyCancelEvent['customer_credit_amount'],
+        'supplier_credit_amount' => $legacyCancelEvent['supplier_credit_amount'],
+        'journal_entry_id' => $legacyCancelEvent['journal_entry_id'],
+        'reason' => $legacyCancelEvent['reason'],
+        'notes' => $legacyCancelEvent['notes'],
+        'payload_json' => $legacyCancelPayload,
+    ]);
+
     $supplierReceivableBeforeRefundRows = $reportRepository->supplierReceivable([1], $today, $today, '', $cancelSupplierId);
     $matchingSupplierReceivableBeforeRefund = null;
     foreach ($supplierReceivableBeforeRefundRows as $row) {
@@ -682,7 +711,7 @@ try {
         'Supplier ledger summary excludes lifecycle duplication without adding a total row',
         ! $hasSyntheticSupplierTotal
             && ($supplierLedgerCardValues['Supplier Debit / PKR'] ?? '') === 'PKR 10.00'
-            && ($supplierLedgerCardValues['Supplier Credit / PKR'] ?? '') === 'PKR 100.00'
+            && ($supplierLedgerCardValues['Gross Paid to Supplier / PKR'] ?? '') === 'PKR 100.00'
             && ($supplierLedgerCardValues['Supplier Balance / PKR'] ?? '') === 'PKR 60.00 Advance',
         json_encode([
             'has_synthetic_total' => $hasSyntheticSupplierTotal,
@@ -979,6 +1008,35 @@ try {
         'expected_supplier_refund_amount' => '653.00',
         'settlement_notes' => 'Regression should release 592 customer credit',
     ], $actorUserId, $accessibleBranchIds);
+
+    // Exercise the historical cash-refund path without changing the new
+    // credit-by-default behavior of cancellation settlements.
+    $legacyLossCancelEvent = $eventRepository->latestPostedEvent($lossServiceId, 'cancel');
+    $legacyLossPayload = json_decode((string) ($legacyLossCancelEvent['payload_json'] ?? '{}'), true) ?: [];
+    $supplierRepository->reverseRetainedRefundAdvanceConversion(
+        (array) ($legacyLossPayload['supplier_credit_converted_advance_ids'] ?? []),
+        $actorUserId,
+        'Lifecycle regression historical cash-refund fixture'
+    );
+    foreach ([
+        'supplier_credit_recording_version',
+        'supplier_credit_recorded_source_amount',
+        'supplier_credit_recorded_booking_amount',
+        'supplier_credit_recorded_currency',
+        'supplier_credit_converted_payment_amount',
+        'supplier_credit_converted_advance_ids',
+    ] as $legacyField) {
+        unset($legacyLossPayload[$legacyField]);
+    }
+    $eventRepository->updateCancellationFinancials((int) $legacyLossCancelEvent['id'], [
+        'penalty_amount' => $legacyLossCancelEvent['penalty_amount'],
+        'customer_credit_amount' => $legacyLossCancelEvent['customer_credit_amount'],
+        'supplier_credit_amount' => $legacyLossCancelEvent['supplier_credit_amount'],
+        'journal_entry_id' => $legacyLossCancelEvent['journal_entry_id'],
+        'reason' => $legacyLossCancelEvent['reason'],
+        'notes' => $legacyLossCancelEvent['notes'],
+        'payload_json' => $legacyLossPayload,
+    ]);
 
     $lossSettledReceivable = $receivableRepository->findReceivableByServiceLine($lossBookingReference, $lossLineReference);
     $lossLatestCancelEvent = $eventRepository->latestPostedEvent($lossServiceId, 'cancel');

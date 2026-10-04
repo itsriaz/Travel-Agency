@@ -6,6 +6,66 @@ namespace App\Repositories;
 
 final class BookingServiceEventRepository extends BaseRepository
 {
+    public function hasPostedCancellationSettlement(int $bookingServiceId): bool
+    {
+        $event = $this->latestPostedEvent($bookingServiceId, 'cancel');
+        if ($event === null) {
+            return false;
+        }
+
+        $payload = json_decode((string) ($event['payload_json'] ?? ''), true);
+        if (! is_array($payload)) {
+            throw new \RuntimeException('Cancellation history could not be verified. No commercial balances were changed.');
+        }
+
+        return (string) ($payload['mode'] ?? '') === 'cancellation_financial_adjustment'
+            || array_key_exists('customer_final_charge_amount', $payload)
+            || array_key_exists('expected_supplier_refund_amount', $payload)
+            || array_key_exists('supplier_penalty_amount', $payload);
+    }
+
+    public function updateSupplierRefundExpectation(int $eventId, string $priorPayloadJson, array $expectation): void
+    {
+        $this->transaction(function () use ($eventId, $priorPayloadJson, $expectation): void {
+            $statement = $this->db->prepare('SELECT payload_json, currency FROM booking_service_events WHERE id = :id AND event_type = "cancel" AND event_status = "posted" FOR UPDATE');
+            $statement->execute(['id' => $eventId]);
+            $row = $statement->fetch();
+            if (! $row || (string) $row['payload_json'] !== $priorPayloadJson) {
+                throw new \RuntimeException('Cancellation history changed. Reload before correcting the supplier expectation.');
+            }
+            $payload = json_decode($priorPayloadJson, true, 512, JSON_THROW_ON_ERROR);
+            if (! is_array($payload)) {
+                throw new \RuntimeException('Cancellation history cannot be verified.');
+            }
+            $bookingAmount = (float) ($expectation['expected_supplier_refund_booking_amount'] ?? -1);
+            $storedAmount = (float) ($expectation['expected_supplier_refund_amount'] ?? -1);
+            $sourceAmount = (float) ($expectation['expected_supplier_refund_source_amount'] ?? -1);
+            $rate = (float) ($expectation['expected_supplier_refund_exchange_rate'] ?? 0);
+            $sourceCurrency = (string) ($expectation['expected_supplier_refund_currency'] ?? '');
+            $oldBookingAmount = $payload['expected_supplier_refund_booking_amount'] ?? $payload['expected_supplier_refund_amount'] ?? null;
+            if (! is_finite($bookingAmount) || ! is_finite($storedAmount) || ! is_finite($sourceAmount) || ! is_finite($rate)
+                || $bookingAmount < 0 || $sourceAmount < 0 || $rate < 0
+                || abs($storedAmount - $bookingAmount) > 0.005
+                || ! in_array($sourceCurrency, ['PKR', 'AED', 'USD'], true)
+                || ($sourceAmount > 0 && $rate <= 0)
+                || abs(round($sourceAmount * ($sourceCurrency === $row['currency'] ? 1 : $rate), 0) - $bookingAmount) > 0.005
+                || ($oldBookingAmount !== null && abs((float) $oldBookingAmount - $bookingAmount) > 0.005)) {
+                throw new \RuntimeException('Expectation-only correction cannot change the converted settlement total.');
+            }
+            foreach (['expected_supplier_refund_amount', 'expected_supplier_refund_booking_amount',
+                'expected_supplier_refund_source_amount', 'expected_supplier_refund_currency',
+                'expected_supplier_refund_exchange_rate', 'expected_supplier_refund_rate_date',
+                'expected_supplier_refund_equivalent_amount', 'expected_supplier_refund_equivalent_currency',
+                'expected_supplier_refund_conversion_basis'] as $key) {
+                if (array_key_exists($key, $expectation)) {
+                    $payload[$key] = $expectation[$key];
+                }
+            }
+            $update = $this->db->prepare('UPDATE booking_service_events SET payload_json = :payload WHERE id = :id');
+            $update->execute(['payload' => json_encode($payload, JSON_THROW_ON_ERROR), 'id' => $eventId]);
+        });
+    }
+
     private function reversalMetadataSelect(string $alias = ''): string
     {
         $prefix = $alias !== '' ? $alias . '.' : '';
@@ -298,6 +358,13 @@ final class BookingServiceEventRepository extends BaseRepository
         );
         $statement->execute(['booking_service_id' => $bookingServiceId]);
 
+        return $statement->fetchAll() ?: [];
+    }
+
+    public function lockEventsForService(int $serviceId): array
+    {
+        $statement = $this->db->prepare('SELECT * FROM booking_service_events WHERE booking_service_id = :id ORDER BY id FOR UPDATE');
+        $statement->execute(['id' => $serviceId]);
         return $statement->fetchAll() ?: [];
     }
 

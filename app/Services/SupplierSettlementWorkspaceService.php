@@ -1754,17 +1754,6 @@ final class SupplierSettlementWorkspaceService extends Service
             $currency,
             $paymentMethod
         );
-        $availableBalance = $treasuryRepository->currentBalanceForAccountId($treasuryAccountId);
-        if ($treasuryAccountId === (int) ($old['treasury_account_id'] ?? 0)) {
-            $availableBalance += (float) ($old['deposit_amount'] ?? 0);
-        }
-        if (round($availableBalance + 0.005, 2) < $newAmount) {
-            throw new RuntimeException(
-                'Selected source account does not have enough balance after reversing the old entry. Available: '
-                . number_format($availableBalance, 2) . ' ' . $currency . '.'
-            );
-        }
-
         /** @var PDO $db */
         $db = $this->app->get('db');
         $accounting = new AccountingRepository($this->app);
@@ -1987,6 +1976,18 @@ final class SupplierSettlementWorkspaceService extends Service
                 throw new RuntimeException('No supplier advance amount could be applied to the selected payable.');
             }
 
+            $accounting->postCrossCurrencySupplierAdvanceConversion([
+                'source_branch_id' => (int) $advance['branch_id'],
+                'destination_branch_id' => (int) $obligation['branch_id'],
+                'source_currency' => $advanceCurrency,
+                'destination_currency' => $obligationCurrency,
+                'source_amount' => (float) $application['advance_amount_consumed'],
+                'destination_amount' => (float) $application['applied_amount'],
+                'source_reference' => 'SADV-FX-' . $advanceId . '-' . $obligationId,
+                'entry_date' => date('Y-m-d'),
+                'actor_user_id' => $actorUserId,
+            ]);
+
             $accounting->postSupplierAdvanceApplication([
                 'branch_id' => (int) $booking['branch_id'],
                 'booking_reference' => (string) $booking['booking_reference'],
@@ -2198,7 +2199,6 @@ final class SupplierSettlementWorkspaceService extends Service
         }
 
         $currency = (string) ($payload['currency'] ?? 'PKR');
-        $amount = round((float) ($payload['paid_amount'] ?? 0) + (float) ($payload['charges_amount'] ?? 0), 2);
         $treasuryRepository = new TreasuryRepository($this->app);
         $account = $treasuryRepository->validatePaymentTreasuryAccount(
             $selectedTreasuryAccountId,
@@ -2209,15 +2209,6 @@ final class SupplierSettlementWorkspaceService extends Service
             true,
             true
         );
-
-        $availableBalance = $treasuryRepository->currentBalanceForAccountId((int) $account['id']);
-        if (round($availableBalance + 0.005, 2) < $amount) {
-            throw new RuntimeException(
-                'Selected supplier payment source account does not have enough balance. Available: '
-                . number_format($availableBalance, 2)
-                . ' ' . $currency . '.'
-            );
-        }
 
         return (int) $account['id'];
     }
@@ -2268,15 +2259,6 @@ final class SupplierSettlementWorkspaceService extends Service
             $treasuryCurrency,
             $exchangeRate
         );
-        $availableBalance = $treasuryRepository->currentBalanceForAccountId((int) $account['id']);
-        if (round($availableBalance + 0.005, 2) < $treasuryAmount) {
-            throw new RuntimeException(
-                'Selected supplier payment source account does not have enough balance. Available: '
-                . number_format($availableBalance, 2)
-                . ' ' . $treasuryCurrency . '.'
-            );
-        }
-
         return [
             'treasury_account_id' => (int) $account['id'],
             'treasury_currency' => $treasuryCurrency,

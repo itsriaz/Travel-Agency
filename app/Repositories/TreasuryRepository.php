@@ -1063,6 +1063,7 @@ final class TreasuryRepository extends BaseRepository
             $hasExchangeRateColumn = $this->columnExists('treasury_transactions', 'exchange_rate');
             $hasExchangeRateDateColumn = $this->columnExists('treasury_transactions', 'exchange_rate_effective_date');
             $hasDestinationJournalColumn = $this->columnExists('treasury_transactions', 'destination_journal_entry_id');
+            $hasDestinationReversalJournalColumn = $this->columnExists('treasury_transactions', 'destination_reversal_journal_entry_id');
 
             $exchangeRate = round((float) ($data['exchange_rate'] ?? 0), 8);
             if ($sourceCurrency === $destinationCurrency) {
@@ -1077,6 +1078,8 @@ final class TreasuryRepository extends BaseRepository
                 || ! $hasDestinationAmountColumn
                 || ! $hasExchangeRateColumn
                 || ! $hasExchangeRateDateColumn
+                || ! $hasDestinationJournalColumn
+                || ! $hasDestinationReversalJournalColumn
             ) {
                 throw new RuntimeException(
                     'Cross-currency treasury transfer is not available until the treasury migration is applied. '
@@ -1084,6 +1087,14 @@ final class TreasuryRepository extends BaseRepository
                 );
             } elseif ($exchangeRate <= 0) {
                 throw new RuntimeException('Please enter the transfer exchange rate for cross-currency treasury movement.');
+            }
+
+            if (($branchId !== $destinationBranchId || $sourceCurrency !== $destinationCurrency)
+                && (! $hasSourceBranchColumn || ! $hasDestinationBranchColumn
+                    || ! $hasSourceCurrencyColumn || ! $hasDestinationCurrencyColumn
+                    || ! $hasSourceAmountColumn || ! $hasDestinationAmountColumn
+                    || ! $hasDestinationJournalColumn || ! $hasDestinationReversalJournalColumn)) {
+                throw new RuntimeException('Cross-branch/currency treasury transfers require migration 20260825_000076.');
             }
 
             $availableSourceBalance = $this->currentBalanceForAccountId($fromAccountId);
@@ -1237,10 +1248,43 @@ final class TreasuryRepository extends BaseRepository
 
             $transferId = (int) $this->db->lastInsertId();
 
+            $destinationJournalEntryId = null;
+            if (! $isSingleCurrencySameBranch) {
+                [$journalEntryId, $destinationJournalEntryId] = (new AccountingRepository($this->app))
+                    ->postCrossDimensionTreasuryTransfer([
+                        'treasury_transaction_id' => $transferId,
+                        'source_branch_id' => $branchId,
+                        'destination_branch_id' => $destinationBranchId,
+                        'source_currency' => $sourceCurrency,
+                        'destination_currency' => $destinationCurrency,
+                        'source_amount' => $sourceAmount,
+                        'destination_amount' => $destinationAmount,
+                        'from_treasury_account_id' => $fromAccountId,
+                        'to_treasury_account_id' => $toAccountId,
+                        'entry_date' => $transactionDate,
+                        'actor_user_id' => $data['created_by_user_id'] ?? null,
+                    ]);
+                $link = $this->db->prepare(
+                    'UPDATE treasury_transactions
+                     SET journal_entry_id = :source_journal_id,
+                         destination_journal_entry_id = :destination_journal_id
+                     WHERE id = :id AND journal_entry_id IS NULL AND destination_journal_entry_id IS NULL'
+                );
+                $link->execute([
+                    'source_journal_id' => $journalEntryId,
+                    'destination_journal_id' => $destinationJournalEntryId,
+                    'id' => $transferId,
+                ]);
+                if ($link->rowCount() !== 1) {
+                    throw new RuntimeException('Both treasury transfer journals must be linked before posting.');
+                }
+            }
+
             AuditLog::record($this->app, 'treasury.transfer.posted', [
                 'user_id' => $data['created_by_user_id'] ?? null,
                 'treasury_transaction_id' => $transferId,
                 'journal_entry_id' => $journalEntryId,
+                'destination_journal_entry_id' => $destinationJournalEntryId,
                 'branch_id' => $branchId,
                 'transaction_type' => $transactionType,
                 'transaction_date' => $transactionDate,
@@ -1322,6 +1366,11 @@ final class TreasuryRepository extends BaseRepository
         $branchIds = array_values(array_map('intval', $branchIds));
 
         return $this->transaction(function () use ($transferId, $voidReason, $actorUserId, $branchIds): array {
+            $hasDestinationJournal = $this->columnExists('treasury_transactions', 'destination_journal_entry_id');
+            $hasDestinationReversal = $this->columnExists('treasury_transactions', 'destination_reversal_journal_entry_id');
+            $optionalColumn = fn (string $name): string => $this->columnExists('treasury_transactions', $name)
+                ? $name
+                : 'NULL AS ' . $name;
             $statement = $this->db->prepare(
                 'SELECT
                     id,
@@ -1335,8 +1384,14 @@ final class TreasuryRepository extends BaseRepository
                     reference_no,
                     narration,
                     journal_entry_id,
+                    ' . $optionalColumn('destination_journal_entry_id') . ',
+                    ' . $optionalColumn('source_branch_id') . ',
+                    ' . $optionalColumn('destination_branch_id') . ',
+                    ' . $optionalColumn('source_currency') . ',
+                    ' . $optionalColumn('destination_currency') . ',
                     status,
-                    reversal_journal_entry_id
+                    reversal_journal_entry_id,
+                    ' . $optionalColumn('destination_reversal_journal_entry_id') . '
                  FROM treasury_transactions
                  WHERE id = :id
                  FOR UPDATE'
@@ -1349,7 +1404,8 @@ final class TreasuryRepository extends BaseRepository
             }
 
             $branchId = (int) ($transfer['branch_id'] ?? 0);
-            if (! in_array($branchId, $branchIds, true)) {
+            $destinationBranchId = (int) ($transfer['destination_branch_id'] ?? $branchId);
+            if (! in_array($branchId, $branchIds, true) || ! in_array($destinationBranchId, $branchIds, true)) {
                 throw new RuntimeException('You do not have access to reverse this treasury transaction.');
             }
 
@@ -1358,13 +1414,43 @@ final class TreasuryRepository extends BaseRepository
                 throw new RuntimeException('This treasury transaction is already void.');
             }
 
-            if ((int) ($transfer['reversal_journal_entry_id'] ?? 0) > 0) {
+            if ((int) ($transfer['reversal_journal_entry_id'] ?? 0) > 0
+                || (int) ($transfer['destination_reversal_journal_entry_id'] ?? 0) > 0) {
                 throw new RuntimeException('This treasury transaction already has a reversal journal recorded.');
             }
 
             $accounting = new AccountingRepository($this->app);
             $transactionType = (string) ($transfer['transaction_type'] ?? '');
-            $reversalJournalEntryId = in_array($transactionType, ['adjustment_increase', 'adjustment_decrease'], true)
+            $crossDimension = $branchId !== $destinationBranchId
+                || strtoupper((string) ($transfer['source_currency'] ?? $transfer['currency']))
+                    !== strtoupper((string) ($transfer['destination_currency'] ?? $transfer['currency']));
+            $destinationReversalJournalEntryId = null;
+            if ($crossDimension) {
+                if (! $hasDestinationJournal || ! $hasDestinationReversal) {
+                    throw new RuntimeException('Cross-branch/currency reversal requires the treasury transfer migration.');
+                }
+                $sourceJournalId = (int) ($transfer['journal_entry_id'] ?? 0);
+                $destinationJournalId = (int) ($transfer['destination_journal_entry_id'] ?? 0);
+                if ($sourceJournalId <= 0 || $destinationJournalId <= 0 || $sourceJournalId === $destinationJournalId) {
+                    throw new RuntimeException('This older cross-branch/currency transfer lacks a verified journal pair. Review it before reversal.');
+                }
+                $reversalJournalEntryId = $accounting->reverseJournalEntry($sourceJournalId, [
+                    'source_type' => 'treasury_transfer_void_reversed',
+                    'source_reference' => 'VOID-TR-' . $transferId . '-SOURCE',
+                    'entry_date' => date('Y-m-d'),
+                    'actor_user_id' => $actorUserId,
+                ]);
+                $destinationReversalJournalEntryId = $accounting->reverseJournalEntry($destinationJournalId, [
+                    'source_type' => 'treasury_transfer_void_reversed',
+                    'source_reference' => 'VOID-TR-' . $transferId . '-DESTINATION',
+                    'entry_date' => date('Y-m-d'),
+                    'actor_user_id' => $actorUserId,
+                ]);
+                if ($reversalJournalEntryId === null || $destinationReversalJournalEntryId === null) {
+                    throw new RuntimeException('Both treasury transfer journal legs must be reversed together.');
+                }
+            } else {
+                $reversalJournalEntryId = in_array($transactionType, ['adjustment_increase', 'adjustment_decrease'], true)
                 ? $accounting->postDirectTreasuryEntryVoidReversal([
                     'journal_entry_id' => (int) ($transfer['journal_entry_id'] ?? 0),
                     'branch_id' => $branchId,
@@ -1383,6 +1469,7 @@ final class TreasuryRepository extends BaseRepository
                     'narration' => 'Treasury transfer void reversal for transfer #' . $transferId,
                     'actor_user_id' => $actorUserId,
                 ]);
+            }
 
             $update = $this->db->prepare(
                 'UPDATE treasury_transactions
@@ -1390,15 +1477,20 @@ final class TreasuryRepository extends BaseRepository
                      voided_at = NOW(),
                      voided_by_user_id = :voided_by_user_id,
                      void_reason = :void_reason,
-                     reversal_journal_entry_id = :reversal_journal_entry_id
+                     reversal_journal_entry_id = :reversal_journal_entry_id'
+                     . ($hasDestinationReversal ? ', destination_reversal_journal_entry_id = :destination_reversal_journal_entry_id' : '') . '
                  WHERE id = :id'
             );
-            $update->execute([
+            $updatePayload = [
                 'voided_by_user_id' => $actorUserId,
                 'void_reason' => $voidReason,
                 'reversal_journal_entry_id' => $reversalJournalEntryId,
                 'id' => $transferId,
-            ]);
+            ];
+            if ($hasDestinationReversal) {
+                $updatePayload['destination_reversal_journal_entry_id'] = $destinationReversalJournalEntryId;
+            }
+            $update->execute($updatePayload);
 
             AuditLog::record($this->app, in_array($transactionType, ['adjustment_increase', 'adjustment_decrease'], true) ? 'treasury.direct_entry.voided' : 'treasury.transfer.voided', [
                 'user_id' => $actorUserId,
@@ -1411,6 +1503,7 @@ final class TreasuryRepository extends BaseRepository
                 'void_reason' => $voidReason,
                 'original_journal_entry_id' => (int) ($transfer['journal_entry_id'] ?? 0),
                 'reversal_journal_entry_id' => $reversalJournalEntryId,
+                'destination_reversal_journal_entry_id' => $destinationReversalJournalEntryId,
             ]);
 
             return [
@@ -1421,6 +1514,7 @@ final class TreasuryRepository extends BaseRepository
                 'amount' => round((float) ($transfer['amount'] ?? 0), 2),
                 'void_reason' => $voidReason,
                 'reversal_journal_entry_id' => (int) $reversalJournalEntryId,
+                'destination_reversal_journal_entry_id' => (int) $destinationReversalJournalEntryId,
             ];
         });
     }

@@ -257,11 +257,9 @@ final class WorkspaceController extends BaseController
             $this->redirect($workspaceLoadFallbackUrl);
         } catch (Throwable $exception) {
             app_log_exception($exception, 'workspace.index.service_state_failed');
-            app_write_log('workspace.index.service_state_context', 'Service workspace state was skipped for this workspace load.', $this->workspaceLoadFailureContext($currentBookingRecord));
-            $serviceState = [
-                'services' => [],
-                'supplierOptions' => [],
-            ];
+            app_write_log('workspace.index.service_state_context', 'Booking service state could not load; financial workspace was not rendered.', $this->workspaceLoadFailureContext($currentBookingRecord));
+            Flash::error('Booking service amounts could not load. No financial action was taken; please retry or contact an administrator.');
+            $this->redirect($workspaceLoadFallbackUrl);
         }
 
         $bookingReference = (string) ($currentBookingRecord['booking_reference'] ?? 'Draft');
@@ -1285,7 +1283,8 @@ final class WorkspaceController extends BaseController
             $result = (new ServiceWorkspaceService($this->app))->saveService(
                 $_POST,
                 (int) Auth::id(),
-                $accessibleBranchIds
+                $accessibleBranchIds,
+                true
             );
             $this->applyServiceSupplierAdvanceFxIfRequested($_POST, $result, (int) Auth::id(), $accessibleBranchIds);
             $savedServiceId = (int) (($result['service']['id'] ?? 0));
@@ -1471,7 +1470,8 @@ final class WorkspaceController extends BaseController
             $result = $serviceWorkspaceService->saveService(
                 $_POST,
                 (int) Auth::id(),
-                $accessibleBranchIds
+                $accessibleBranchIds,
+                true
             );
             $this->applyServiceSupplierAdvanceFxIfRequested($_POST, $result, (int) Auth::id(), $accessibleBranchIds);
             $savedServiceId = (int) (($result['service']['id'] ?? 0));
@@ -1653,6 +1653,38 @@ final class WorkspaceController extends BaseController
         }
     }
 
+    public function undoMistakenRefund(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+        $serviceId = (int) ($_POST['service_id'] ?? 0);
+        try {
+            $bookingId = (new ServiceWorkspaceService($this->app))->undoMistakenRefund(
+                $_POST, (int) Auth::id(), Authorization::accessibleBranchIds()
+            );
+            Flash::success('Refund reversed. Original invoice and service restored. Any actual money remains recorded; see Refund History / Restore for details.');
+            $this->redirect($this->buildServiceWorkflowRedirect($bookingId, $serviceId, 'cancel_reopened'));
+        } catch (RuntimeException $exception) {
+            Flash::error($exception->getMessage());
+            $this->redirect($this->buildServiceWorkflowRedirect((int) ($_POST['booking_id'] ?? 0), $serviceId));
+        }
+    }
+
+    public function restoreReversedRefund(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+        $serviceId = (int) ($_POST['service_id'] ?? 0);
+        try {
+            $bookingId = (new ServiceWorkspaceService($this->app))->restoreReversedRefund(
+                $_POST, (int) Auth::id(), Authorization::accessibleBranchIds()
+            );
+            Flash::success('Refund restored. The reversal and restoration remain in the audit history.');
+            $this->redirect($this->buildServiceWorkflowRedirect($bookingId, $serviceId));
+        } catch (RuntimeException $exception) {
+            Flash::error($exception->getMessage());
+            $this->redirect($this->buildServiceWorkflowRedirect((int) ($_POST['booking_id'] ?? 0), $serviceId));
+        }
+    }
+
     public function reverseRefundService(): never
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);
@@ -1680,7 +1712,7 @@ final class WorkspaceController extends BaseController
 
         try {
             $bookingId = (new ServiceWorkspaceService($this->app))->correctPenaltyRefundWorkflow(
-                $_POST,
+                array_merge($_POST, ['supplier_refund_conversion_mode' => 'manual_equivalent']),
                 (int) Auth::id(),
                 Authorization::accessibleBranchIds()
             );
@@ -1713,7 +1745,7 @@ final class WorkspaceController extends BaseController
 
         try {
             $bookingId = (new ServiceWorkspaceService($this->app))->settleCancellationFinancials(
-                $_POST,
+                array_merge($_POST, ['supplier_refund_conversion_mode' => 'manual_equivalent']),
                 (int) Auth::id(),
                 Authorization::accessibleBranchIds()
             );
@@ -1935,6 +1967,21 @@ final class WorkspaceController extends BaseController
                 Authorization::accessibleBranchIds()
             );
             Flash::success('Customer receipt voided successfully.');
+            $this->redirect('/workspace?booking_id=' . (int) $result['booking_id'] . '#dock-panel-payments');
+        } catch (RuntimeException $exception) {
+            Flash::error($exception->getMessage());
+            $this->redirect('/workspace?booking_id=' . (int) ($_POST['booking_id'] ?? 0) . '#dock-panel-payments');
+        }
+    }
+
+    public function correctReceiptAmount(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+        try {
+            $result = (new CustomerReceiptWorkspaceService($this->app))->correctReceiptAmount(
+                $_POST, (int) Auth::id(), Authorization::accessibleBranchIds()
+            );
+            Flash::success('Customer receipt amount corrected; allocations and audit history were preserved.');
             $this->redirect('/workspace?booking_id=' . (int) $result['booking_id'] . '#dock-panel-payments');
         } catch (RuntimeException $exception) {
             Flash::error($exception->getMessage());
@@ -2732,13 +2779,10 @@ final class WorkspaceController extends BaseController
                 $normalized['rowReceivable'] = round((float) ($receivableRow['dueAmount'] ?? $normalized['rowReceivable'] ?? 0), 2);
                 $normalized['rowSpTotal'] = $normalized['rowReceivable'];
                 $normalized['allocatedAmount'] = round(min(
-                    max((float) ($allocatedByLine[$receivableKey] ?? 0), 0),
+                    max((float) ($receivableRow['allocatedAmount'] ?? 0), 0),
                     max((float) $normalized['rowReceivable'], 0)
                 ), 2);
-                $normalized['outstandingAmount'] = round(max(
-                    (float) $normalized['rowReceivable'] - (float) $normalized['allocatedAmount'],
-                    0
-                ), 2);
+                $normalized['outstandingAmount'] = round(max((float) ($receivableRow['outstandingAmount'] ?? 0), 0), 2);
             } else {
                 $cancelSettled = (bool) ($normalized['latestCancelFinanciallySettled'] ?? false);
                 if ($cancelSettled) {
@@ -2853,7 +2897,7 @@ final class WorkspaceController extends BaseController
                 : ($storedPurchaseCost > 0.005 ? $storedPurchaseCost : (float) ($serviceRow['sale_price'] ?? 0));
             $fallbackConvertedPayableAmount = round(
                 $payableAmount * ($invoiceCurrency === $costCurrency ? 1 : max($pricingExchangeRate, 0)),
-                2
+                $invoiceCurrency === $costCurrency ? 2 : 0
             );
             $lineReference = trim((string) ($serviceRow['line_reference'] ?? ''));
             $convertedPayableAmount = $lineReference !== '' && array_key_exists($lineReference . '|' . $invoiceCurrency, $payableByLine)
@@ -2985,7 +3029,7 @@ final class WorkspaceController extends BaseController
             : ((float) ($serviceRow['purchase_cost'] ?? 0) > 0.005 ? (float) ($serviceRow['purchase_cost'] ?? 0) : (float) ($serviceRow['sale_price'] ?? 0));
         $convertedPurchaseCost = round(
             $payableAmount * ($invoiceCurrency === $costCurrency ? 1 : max($pricingExchangeRate, 0)),
-            2
+            $invoiceCurrency === $costCurrency ? 2 : 0
         );
         $convertedAgencyAmount = round(
             (
@@ -2996,7 +3040,7 @@ final class WorkspaceController extends BaseController
             2
         );
         $convertedReceivableAmount = round($convertedPurchaseCost + $convertedAgencyAmount, 2);
-        $derivedFinalSalePrice = $convertedReceivableAmount;
+        $derivedFinalSalePrice = round($convertedReceivableAmount, 0);
         $finalSalePrice = array_key_exists('final_sale_price', $serviceRow) && $serviceRow['final_sale_price'] !== null
             ? (float) $serviceRow['final_sale_price']
             : $derivedFinalSalePrice;
@@ -3125,6 +3169,8 @@ final class WorkspaceController extends BaseController
             'rowProfit' => $profit,
             'paymentEligible' => (int) ($serviceRow['id'] ?? 0) > 0 && $finalSalePrice > 0.005,
             'latestCancelEventId' => (int) ($serviceRow['latest_cancel_event_id'] ?? 0),
+            'refundRecoveryAuditId' => (int) ($serviceRow['refund_recovery_audit_id'] ?? 0),
+            'refundRecoveryHistory' => $serviceRow['refund_recovery_history'] ?? [],
             'hasCancellationEvent' => $hasCancellationEvent,
             'latestCancelFinanciallySettled' => (bool) ($serviceRow['latest_cancel_financially_settled'] ?? false),
             'latestCancelCustomerPenaltyAmount' => (float) ($serviceRow['latest_cancel_customer_penalty_amount'] ?? 0),
@@ -3147,6 +3193,10 @@ final class WorkspaceController extends BaseController
             'latestCancelReason' => (string) ($serviceRow['latest_cancel_reason'] ?? ''),
             'latestCancelNotes' => (string) ($serviceRow['latest_cancel_notes'] ?? ''),
             'latestCancelEventDate' => (string) ($serviceRow['latest_cancel_event_date'] ?? ''),
+            'latestCancelExpectedSupplierRefundRateDate' => (string) ($serviceRow['latest_cancel_expected_supplier_refund_rate_date'] ?? ''),
+            'latestCancelExpectedSupplierRefundEquivalentAmount' => $serviceRow['latest_cancel_expected_supplier_refund_equivalent_amount'] ?? null,
+            'latestCancelExpectedSupplierRefundEquivalentCurrency' => (string) ($serviceRow['latest_cancel_expected_supplier_refund_equivalent_currency'] ?? ''),
+            'latestCancelExpectedSupplierRefundConversionUnverified' => (bool) ($serviceRow['latest_cancel_expected_supplier_refund_conversion_unverified'] ?? false),
             'latestRefundEventId' => (int) ($serviceRow['latest_refund_event_id'] ?? 0),
             'latestCustomerRefundEventId' => (int) ($serviceRow['latest_customer_refund_event_id'] ?? 0),
             'latestCustomerRefundAmountOnly' => (float) ($serviceRow['latest_customer_refund_amount_only'] ?? 0),
@@ -3155,6 +3205,11 @@ final class WorkspaceController extends BaseController
             'latestSupplierRefundAmountOnly' => (float) ($serviceRow['latest_supplier_refund_amount_only'] ?? 0),
             'customerRefundableCreditAmount' => round((float) ($serviceRow['customer_refundable_credit_amount'] ?? 0), 2),
             'customerRefundReceivedAmount' => round((float) ($serviceRow['customer_refund_received_amount'] ?? 0), 2),
+            'customerRefundSummary' => (array) ($serviceRow['customer_refund_summary'] ?? []),
+            'currentCustomerInvoiceAmount' => (float) ($serviceRow['current_customer_invoice_amount'] ?? 0),
+            'currentCustomerReceivedAmount' => (float) ($serviceRow['current_customer_received_amount'] ?? 0),
+            'latestCancelCustomerRefundBasisAmount' => (float) ($serviceRow['latest_cancel_customer_refund_basis_amount'] ?? 0),
+            'latestCancelPriorCustomerDueAmount' => (float) ($serviceRow['latest_cancel_prior_customer_due_amount'] ?? 0),
             'supplierRefundableCreditAmount' => $supplierRefundableCreditAmount,
         ];
     }

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use App\Core\App;
 use App\Repositories\TreasuryRepository;
+use App\Repositories\ReportRepository;
 use App\Services\SupplierSettlementWorkspaceService;
 
 define('BASE_PATH', dirname(__DIR__));
@@ -17,6 +18,7 @@ $app = App::bootstrap(BASE_PATH);
 /** @var PDO $db */
 $db = $app->get('db');
 $treasury = new TreasuryRepository($app);
+$reports = new ReportRepository($app);
 $service = new SupplierSettlementWorkspaceService($app);
 $failures = [];
 
@@ -57,6 +59,17 @@ $accountStatement = $db->prepare(
 );
 $accountStatement->execute(['branch_id' => $sourceBranchId]);
 $treasuryAccountId = (int) ($accountStatement->fetchColumn() ?: 0);
+$bankStatement = $db->prepare(
+    'SELECT id FROM treasury_accounts
+     WHERE branch_id = :branch_id
+       AND currency = "PKR"
+       AND account_type = "bank"
+       AND is_active = 1
+     ORDER BY is_default DESC, id
+     LIMIT 1'
+);
+$bankStatement->execute(['branch_id' => $sourceBranchId]);
+$bankAccountId = (int) ($bankStatement->fetchColumn() ?: 0);
 $actorId = (int) ($db->query(
     'SELECT u.id
      FROM users u
@@ -68,19 +81,39 @@ $actorId = (int) ($db->query(
 
 $check('Source and payment branches are available', $sourceBranchId > 0 && $paymentBranchId > 0);
 $check('A Swat PKR cash account is available', $treasuryAccountId > 0);
+$check('A Swat PKR bank account is available', $bankAccountId > 0);
 $check('An actor user is available', $actorId > 0);
 
 $paymentId = 0;
+$bankPaymentId = 0;
 $obligationId = 0;
 $supplierId = 0;
 
 if ($failures === []) {
     $token = date('His') . random_int(1000, 9999);
-    $amount = 300.00;
-    $balanceBefore = $treasury->currentBalanceForAccountId($treasuryAccountId);
+    $amount = 1000.00;
+    $originalBalance = $treasury->currentBalanceForAccountId($treasuryAccountId);
+    $originalBankBalance = $treasury->currentBalanceForAccountId($bankAccountId);
+    $balanceBefore = 200.00;
 
     $db->beginTransaction();
     try {
+        $setOpening = $db->prepare(
+            'UPDATE treasury_accounts SET opening_balance = opening_balance + :difference WHERE id = :id'
+        );
+        $setOpening->execute([
+            'difference' => $balanceBefore - $originalBalance,
+            'id' => $treasuryAccountId,
+        ]);
+        $check('Rollback-only cash fixture starts at PKR 200',
+            abs($treasury->currentBalanceForAccountId($treasuryAccountId) - $balanceBefore) <= 0.005);
+        $cashOut = static function (int $branchId) use ($reports): float {
+            return array_reduce($reports->cashFlow([$branchId], date('Y-m-d'), date('Y-m-d'))['supplierPayments'],
+                static fn (float $total, array $row): float => $total + (float) ($row['cash_out_amount'] ?? 0), 0.0);
+        };
+        $swatCashOutBefore = $cashOut($sourceBranchId);
+        $nobleCashOutBefore = $cashOut($paymentBranchId);
+
         $supplierStatement = $db->prepare(
             'INSERT INTO suppliers (branch_id, code, name, supplier_mode, default_currency, is_active)
              VALUES (:branch_id, :code, :name, "normal_payable", "PKR", 1)'
@@ -204,9 +237,26 @@ if ($failures === []) {
         );
         $check(
             'Swat PKR cash balance is reduced by the funded amount',
-            abs($actualOutflow - $amount) <= 0.005,
+            abs($actualOutflow - $amount) <= 0.005 && abs($balanceAfter + 800.00) <= 0.005,
             'expected ' . number_format($amount, 2) . ', actual ' . number_format($actualOutflow, 2)
         );
+        $check('Cash Flow assigns the PKR supplier outflow to Swat, not Noble Route',
+            abs(($cashOut($sourceBranchId) - $swatCashOutBefore) - $amount) <= 0.005
+                && abs($cashOut($paymentBranchId) - $nobleCashOutBefore) <= 0.005);
+
+        $treasury->saveDirectEntry([
+            'branch_id' => $sourceBranchId,
+            'transaction_type' => 'adjustment_increase',
+            'transaction_date' => date('Y-m-d'),
+            'currency' => 'PKR',
+            'amount' => 2000.00,
+            'treasury_account_id' => $treasuryAccountId,
+            'reference_no' => 'XSCB-DEPOSIT-' . $token,
+            'narration' => 'Rollback-only negative cash recovery fixture',
+            'created_by_user_id' => $actorId,
+        ], [$sourceBranchId, $paymentBranchId]);
+        $check('Later PKR 2,000 money-in brings negative cash to PKR 1,200',
+            abs($treasury->currentBalanceForAccountId($treasuryAccountId) - 1200.00) <= 0.005);
 
         $service->voidGlobalSupplierPayment([
             'supplier_payment_id' => $paymentId,
@@ -227,7 +277,7 @@ if ($failures === []) {
         $voidRestoredBothSides = (string) ($voidedPayment['status'] ?? '') === 'void'
             && abs((float) ($restoredObligation['net_payable_amount'] ?? 0) - $amount) <= 0.005
             && (string) ($restoredObligation['status'] ?? '') === 'open'
-            && abs($balanceAfterVoid - $balanceBefore) <= 0.005;
+            && abs($balanceAfterVoid - ($balanceBefore + 2000.00)) <= 0.005;
 
         $check(
             'Voiding restores both the supplier payable and Swat PKR cash',
@@ -239,6 +289,40 @@ if ($failures === []) {
                 'balance_after_void' => $balanceAfterVoid,
             ], JSON_UNESCAPED_SLASHES)
         );
+
+        $setOpening->execute([
+            'difference' => -$originalBankBalance,
+            'id' => $bankAccountId,
+        ]);
+        $check('Rollback-only bank fixture starts at PKR 0',
+            abs($treasury->currentBalanceForAccountId($bankAccountId)) <= 0.005);
+        $bankResult = $service->recordSupplierAccountPayment([
+            'branch_id' => $paymentBranchId,
+            'supplier_id' => $supplierId,
+            'supplier_payment_currency' => 'PKR',
+            'supplier_paid_amount' => $amount,
+            'supplier_payment_date' => date('Y-m-d'),
+            'supplier_payment_method' => 'bank_transfer',
+            'supplier_treasury_account_id' => $bankAccountId,
+            'supplier_payment_remarks' => 'Rollback-only bank payment from zero balance',
+        ], $actorId, [$sourceBranchId, $paymentBranchId]);
+        $bankPaymentId = (int) ($bankResult['payment']['id'] ?? 0);
+        $check('Bank payment from zero balance records PKR -1,000',
+            $bankPaymentId > 0
+                && abs($treasury->currentBalanceForAccountId($bankAccountId) + 1000.00) <= 0.005);
+        $treasury->saveDirectEntry([
+            'branch_id' => $sourceBranchId,
+            'transaction_type' => 'adjustment_increase',
+            'transaction_date' => date('Y-m-d'),
+            'currency' => 'PKR',
+            'amount' => 2000.00,
+            'treasury_account_id' => $bankAccountId,
+            'reference_no' => 'XSCB-BANK-DEPOSIT-' . $token,
+            'narration' => 'Rollback-only bank recovery fixture',
+            'created_by_user_id' => $actorId,
+        ], [$sourceBranchId, $paymentBranchId]);
+        $check('Later bank deposit nets against the negative balance',
+            abs($treasury->currentBalanceForAccountId($bankAccountId) - 1000.00) <= 0.005);
     } catch (Throwable $exception) {
         $check('Same-currency/cross-branch payment probe completed', false, $exception->getMessage());
     } finally {
@@ -250,6 +334,7 @@ if ($failures === []) {
     $retainedRows = 0;
     foreach ([
         ['supplier_payments', $paymentId],
+        ['supplier_payments', $bankPaymentId],
         ['supplier_obligations', $obligationId],
         ['suppliers', $supplierId],
     ] as [$table, $id]) {
@@ -261,6 +346,10 @@ if ($failures === []) {
         $retainedRows += (int) $statement->fetchColumn();
     }
     $check('Rollback removed all regression records', $retainedRows === 0);
+    $check('Rollback restored the original cash balance',
+        abs($treasury->currentBalanceForAccountId($treasuryAccountId) - $originalBalance) <= 0.005);
+    $check('Rollback restored the original bank balance',
+        abs($treasury->currentBalanceForAccountId($bankAccountId) - $originalBankBalance) <= 0.005);
 }
 
 if ($failures !== []) {

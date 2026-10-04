@@ -37,7 +37,16 @@ final class CommercialObligationSyncService extends Service
             throw new RuntimeException('The booking linked to this service line could not be loaded.');
         }
 
-        $reissueMirrors = (new BookingServiceEventRepository($this->app))->separateReissueMirrorAdjustments($serviceId);
+        $eventRepository = new BookingServiceEventRepository($this->app);
+        // Cancellation positions belong to the settlement workflow, not the original invoice.
+        if ($eventRepository->hasPostedCancellationSettlement($serviceId)) {
+            if ($startedTransaction) {
+                $db->commit();
+            }
+            return;
+        }
+
+        $reissueMirrors = $eventRepository->separateReissueMirrorAdjustments($serviceId);
         $receivableAmount = round(max($this->receivableAmount($service) - (float) ($reissueMirrors['customer_mirror_amount'] ?? 0), 0), 2);
         $payableAmount = round(max($this->payableAmount($service) - (float) ($reissueMirrors['supplier_mirror_amount'] ?? 0), 0), 2);
         $invoiceCurrency = (string) ($service['currency'] ?? 'PKR');
@@ -66,6 +75,10 @@ final class CommercialObligationSyncService extends Service
             'service_line_reference' => (string) $service['line_reference'],
             'due_group' => 'service_sale',
             'currency' => $invoiceCurrency,
+            'allow_currency_change' => (bool) ($postingContext['financial_correction'] ?? false)
+                && strtoupper(trim((string) ($postingContext['prior_invoice_currency'] ?? $invoiceCurrency)))
+                    !== strtoupper(trim($invoiceCurrency)),
+            'prior_currency' => (string) ($postingContext['prior_invoice_currency'] ?? $invoiceCurrency),
             'due_amount' => (int) ($service['is_active'] ?? 1) === 1 ? $receivableAmount : 0,
             'due_date' => $service['due_date'] ?? null,
             'status' => 'open',
@@ -95,6 +108,10 @@ final class CommercialObligationSyncService extends Service
             'service_line_reference' => (string) $service['line_reference'],
             'obligation_group' => 'service_cost',
             'currency' => $costCurrency,
+            'allow_currency_change' => (bool) ($postingContext['financial_correction'] ?? false)
+                && strtoupper(trim((string) ($postingContext['prior_cost_currency'] ?? $costCurrency)))
+                    !== strtoupper(trim($costCurrency)),
+            'prior_currency' => (string) ($postingContext['prior_cost_currency'] ?? $costCurrency),
             'gross_amount' => (int) ($service['is_active'] ?? 1) === 1 ? $payableAmount : 0,
             'due_date' => $service['due_date'] ?? null,
             'remarks' => $this->financialRemarks('Supplier payable synced from service line', $service),

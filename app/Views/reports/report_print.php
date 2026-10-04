@@ -9,6 +9,7 @@ $branchOptions = is_array($branchOptions ?? null) ? $branchOptions : [];
 $expenseCategoryOptions = is_array($expenseCategoryOptions ?? null) ? $expenseCategoryOptions : [];
 $supplierOptions = is_array($supplierOptions ?? null) ? $supplierOptions : [];
 $treasurySourceTypeOptions = is_array($treasurySourceTypeOptions ?? null) ? $treasurySourceTypeOptions : [];
+$treasuryAccountOptions = is_array($treasuryAccountOptions ?? null) ? $treasuryAccountOptions : [];
 
 $selectedReport = (string) ($selectedReport ?? ($filters['report'] ?? ''));
 $isLinkedPartyLedger = (bool) ($isLinkedPartyLedger ?? false);
@@ -98,6 +99,15 @@ if ($selectedReport === 'customer_advance_ledger') {
 
 if ($selectedReport === 'cash_bank_ledger') {
     $metaCards[] = ['label' => 'Source', 'value' => $selectedSourceLabel];
+    $selectedTreasuryAccountId = (int) ($filters['treasuryAccountId'] ?? 0);
+    $selectedTreasuryAccountLabel = 'All Treasury Accounts';
+    foreach ($treasuryAccountOptions as $treasuryAccountOption) {
+        if ((int) ($treasuryAccountOption['id'] ?? 0) === $selectedTreasuryAccountId && $selectedTreasuryAccountId > 0) {
+            $selectedTreasuryAccountLabel = (string) ($treasuryAccountOption['account_name'] ?? 'Treasury Account');
+            break;
+        }
+    }
+    $metaCards[] = ['label' => 'Cash / Bank Account', 'value' => $selectedTreasuryAccountLabel];
 }
 
 $hasBookingColumn = static function (string $columnKey): bool {
@@ -445,6 +455,9 @@ $displayValue = static function (array $row, array $column) use ($formatDate, $f
                 </div>
             <?php endforeach; ?>
         </section>
+        <?php if ($selectedReport === 'cash_bank_ledger' && (int) ($unjournaledTreasuryTransferCount ?? 0) > 0): ?>
+            <p>Attention: <?= e((string) $unjournaledTreasuryTransferCount) ?> historical transfer(s) without cash journals are excluded pending verification.</p>
+        <?php endif; ?>
 
         <section class="report-print-summary<?= in_array($selectedReport, ['actual_money_voucher_ledger', 'booking_voucher_ledger'], true) ? ' report-print-summary--journal-voucher' : '' ?>">
             <?php if (! in_array($selectedReport, ['actual_money_voucher_ledger', 'booking_voucher_ledger'], true)): ?>
@@ -453,7 +466,7 @@ $displayValue = static function (array $row, array $column) use ($formatDate, $f
                     <strong><?= e((string) count($rows)) ?></strong>
                 </div>
             <?php endif; ?>
-            <?php foreach (array_slice($summaryCards, 0, 7) as $summaryCard): ?>
+            <?php foreach ($selectedReport === 'cash_bank_ledger' ? $summaryCards : array_slice($summaryCards, 0, 7) as $summaryCard): ?>
                 <div class="report-print-summary-card">
                     <span><?= e((string) ($summaryCard['label'] ?? 'Summary')) ?></span>
                     <strong><?= e((string) ($summaryCard['value'] ?? '-')) ?></strong>

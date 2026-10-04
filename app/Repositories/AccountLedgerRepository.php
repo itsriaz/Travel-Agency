@@ -705,7 +705,7 @@ final class AccountLedgerRepository extends BaseRepository
              LEFT JOIN treasury_accounts ta ON ta.id = refund_detail.treasury_account_id
              WHERE ' . $whereSql . '
                AND bse.event_type = "refund"
-               AND bse.event_status = "posted"
+               AND ' . $this->financialServiceEventStatusClause('bse') . '
                AND (bse.customer_refund_amount > 0.005 OR bse.supplier_refund_amount > 0.005)
              ORDER BY bse.event_date ASC, bse.id ASC',
             $params

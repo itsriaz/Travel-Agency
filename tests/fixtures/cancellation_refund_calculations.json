@@ -1,0 +1,13 @@
+[
+  {"name":"Fully paid AED invoice, PKR refund converted to AED 653", "input":{"invoice":1188,"settled":1188,"expected":653,"penalty":53,"paid":600}, "result":{"final_charge":588,"entitlement":600,"paid":600,"remaining":0,"overpaid":0}},
+  {"name":"Short payment is not silently forgiven", "input":{"invoice":1188,"settled":1180,"expected":653,"penalty":53,"paid":600}, "result":{"final_charge":588,"entitlement":592,"paid":600,"remaining":0,"overpaid":8}},
+  {"name":"Unpaid invoice cannot create customer refund", "input":{"invoice":620,"settled":0,"expected":579}, "result":{"final_charge":41,"entitlement":0,"paid":0,"remaining":0,"overpaid":0}},
+  {"name":"Partial payment uses funds actually settled", "input":{"invoice":620,"settled":100,"expected":579}, "result":{"final_charge":41,"entitlement":59,"paid":0,"remaining":59,"overpaid":0}},
+  {"name":"Full refund includes service fee only once", "input":{"invoice":1280,"settled":1280,"expected":1180,"fee_refund":100,"paid":1280}, "result":{"final_charge":0,"entitlement":1280,"paid":1280,"remaining":0,"overpaid":0}},
+  {"name":"Retained service fee is not refunded", "input":{"invoice":1280,"settled":1280,"expected":1180,"fee_refund":0,"paid":0}, "result":{"final_charge":100,"entitlement":1180,"paid":0,"remaining":1180,"overpaid":0}},
+  {"name":"Partially refunded service fee adds only the entered amount", "input":{"invoice":1280,"settled":1280,"expected":1180,"fee_refund":50,"paid":0}, "result":{"final_charge":50,"entitlement":1230,"paid":0,"remaining":1230,"overpaid":0}},
+  {"name":"Customer AED and supplier PKR penalties remain converted", "input":{"invoice":1660,"settled":1660,"expected":1318,"penalty":18}, "result":{"final_charge":360,"entitlement":1300,"paid":0,"remaining":1300,"overpaid":0}},
+  {"name":"Invoice markup is retained unless explicitly refunded", "input":{"invoice":2000,"settled":2000,"expected":1000,"penalty":50}, "result":{"final_charge":1050,"entitlement":950,"paid":0,"remaining":950,"overpaid":0}},
+  {"name":"All posted partial refunds count", "input":{"invoice":1188,"settled":1188,"expected":653,"penalty":53,"paid":550}, "result":{"final_charge":588,"entitlement":600,"paid":550,"remaining":50,"overpaid":0}},
+  {"name":"Excess historical refund is flagged not paid again", "input":{"invoice":1188,"settled":1188,"expected":653,"penalty":53,"paid":650}, "result":{"final_charge":588,"entitlement":600,"paid":650,"remaining":0,"overpaid":50}}
+]

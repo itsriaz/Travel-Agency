@@ -343,7 +343,7 @@ final class AccountLedgerService extends Service
                 $supplierMovement = $movement;
                 $supplierMovement['currency'] = strtoupper(trim((string) ($movement['supplier_currency'] ?? $movement['currency'] ?? 'PKR'))) ?: 'PKR';
                 $supplierRefundRetainedAsCredit = (string) ($movement['payment_method'] ?? '') === 'supplier_credit';
-                $rows[] = $this->movementRow(
+                $supplierRefundRow = $this->movementRow(
                     $supplierMovement,
                     (string) ($movement['movement_date'] ?? ''),
                     (string) ($movement['movement_reference'] ?? ''),
@@ -359,11 +359,13 @@ final class AccountLedgerService extends Service
                         ? $this->currency($supplierMovement) . ' ' . $this->money($supplierRefund) . ' available with supplier'
                         : $this->movementDetail($movement)
                 );
+                $supplierRefundRow['exclude_from_running_balance'] = true;
+                $rows[] = $supplierRefundRow;
             }
 
             $customerRefund = $this->amount($movement['customer_refund_amount'] ?? 0);
             if ($customerRefund > 0.005) {
-                $rows[] = $this->movementRow(
+                $customerRefundRow = $this->movementRow(
                     $movement,
                     (string) ($movement['movement_date'] ?? ''),
                     (string) ($movement['movement_reference'] ?? ''),
@@ -375,6 +377,9 @@ final class AccountLedgerService extends Service
                     'Paid',
                     $this->movementDetail($movement)
                 );
+                // Money out consumes the customer's cancellation credit; it does not create another credit.
+                $customerRefundRow['running_balance_delta'] = $customerRefund;
+                $rows[] = $customerRefundRow;
             }
         }
 

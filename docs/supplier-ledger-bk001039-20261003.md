@@ -1,0 +1,11 @@
+# BK-001039 supplier ledger handoff (2026-10-03)
+
+Local verified facts: `dummy1 supplier1` (supplier 506), branch 1, PKR. Supplier advance 53 was deposited for PKR 1,000. BK-001039 used PKR 200 of that advance. Cancellation retained PKR 50 and restored PKR 150 to the same shared advance. The current obligation is PKR 50 gross, PKR 50 covered by advance, PKR 0 net payable. The supplier advance is PKR 950 available. No separate supplier-refund event or cash receipt was posted for this test.
+
+Root cause: `SupplierLedgerService::buildReport()` hid every `Advance Applied` row. That is appropriate in the full supplier account, where the original advance payment is already shown, but wrong with a booking filter that excludes the global advance payment. The booking view therefore showed false interim and closing payables. The full supplier view also sorted a same-day global advance after the booking, causing misleading intermediate running balances.
+
+Local code fix: The booking-filtered supplier ledger now shows the original advance application and a PKR 150 transfer out of the booking into the shared advance, backed by the posted `SUPPLIER_ADVANCES` debit in journal 7779. The transfer row is omitted if a posted supplier-refund event already provides that booking's refund line. The full supplier account continues to omit these internal rows and sorts same-day global advances ahead of booking entries.
+
+Expected BK-001039 booking rows: invoice PKR 200; advance applied PKR 200; invoice reversal PKR 200; penalty PKR 50; refund moved to advance PKR 150; booking closing balance PKR 0. Booking summary separately shows Advance Used PKR 200 and Returned to Advance PKR 150. Supplier-wide closing balance: PKR 950 Advance. A short-lived payable on the invoice row is followed immediately by its advance-application row.
+
+Changed files: `app/Repositories/ReportRepository.php`, `app/Services/SupplierLedgerService.php`, `tests/supplier_booking_advance_cancellation_ledger_regression.php`. No SQL migration or data write. Production still needs these files uploaded and `php tests/supplier_booking_advance_cancellation_ledger_regression.php` run after upload. Do not run financial repair scripts for this issue.

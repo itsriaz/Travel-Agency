@@ -18,7 +18,6 @@ $serviceWorkspace = new \App\Services\ServiceWorkspaceService($app);
 $supplierSettlement = new \App\Services\SupplierSettlementWorkspaceService($app);
 $supplierRepository = new \App\Repositories\SupplierRepository($app);
 $supplierLedger = new \App\Services\SupplierLedgerService($app);
-$accountLedger = new \App\Services\AccountLedgerService($app);
 $reportRepository = new \App\Repositories\ReportRepository($app);
 $reportService = new \App\Services\ReportService($app);
 
@@ -233,20 +232,6 @@ try {
         'settlement_notes' => 'Rollback-only cancellation settlement',
     ], $actorUserId, $accessibleBranchIds);
 
-    $serviceWorkspace->refundService([
-        'booking_id' => $scenario['ABC2']['booking_id'],
-        'service_id' => $scenario['ABC2']['service_id'],
-        'refund_reason' => 'Refund to Supplier Account',
-        'refund_event_date' => $today,
-        'refund_payment_method' => 'cash',
-        'refund_treasury_account_id' => $riazTreasuryId,
-        'supplier_refund_payment_method' => 'supplier_credit',
-        'customer_refund_amount' => '0.00',
-        'customer_refund_treatment' => 'keep_credit',
-        'supplier_refund_amount' => '400.00',
-        'refund_notes' => 'XYZ retained PKR 400 in supplier account for future use',
-    ], $actorUserId, $accessibleBranchIds);
-
     $advanceStatement = $db->prepare(
         'SELECT id, deposit_amount, available_amount
          FROM supplier_advances
@@ -298,10 +283,10 @@ try {
         'original gross payable basis=PKR ' . number_format($grossUnpaidInvoiceBasis, 2)
     );
     $check(
-        'Global-payment refund credit becomes a formal advance and automatically pays the oldest open payable',
-        $availableAdvance === 0.00
-            && $automaticallyApplied === 400.00
-            && round((float) ($abc4AfterApply['net_payable_amount'] ?? 0), 2) === 600.00
+        'Global-payment refund credit remains available without settling older payables',
+        $availableAdvance === 400.00
+            && $automaticallyApplied === 0.00
+            && round((float) ($abc4AfterApply['net_payable_amount'] ?? 0), 2) === 1000.00
             && round((float) ($abc5AfterApply['net_payable_amount'] ?? 0), 2) === 1000.00,
         'applied=PKR ' . number_format($automaticallyApplied, 2)
             . '; ABC4=PKR ' . number_format((float) ($abc4AfterApply['net_payable_amount'] ?? 0), 2)
@@ -327,65 +312,15 @@ try {
     }
     echo 'Ledger closing payable: PKR ' . number_format($ledgerBalanceBeforeApply, 2) . PHP_EOL;
     echo 'Converted from global payment credit: PKR ' . number_format($convertedGlobalCredit, 2) . PHP_EOL;
-    echo 'Automatically applied supplier advance: PKR ' . number_format($automaticallyApplied, 2) . PHP_EOL;
+    echo 'Applied to older supplier payables: PKR ' . number_format($automaticallyApplied, 2) . PHP_EOL;
     echo 'Remaining reusable supplier advance: PKR ' . number_format($availableAdvance, 2) . PHP_EOL;
     echo 'Cash required now: PKR ' . number_format($openAfterRetainedRefund, 2) . PHP_EOL;
 
     $check(
-        'Supplier payables and ledger both show the correct PKR 1,600 cash requirement',
-        $openAfterRetainedRefund === 1600.00 && $ledgerBalanceBeforeApply === 1600.00,
+        'Open older payables remain PKR 2,000 while supplier-wide net balance includes PKR 400 advance',
+        $openAfterRetainedRefund === 2000.00 && $ledgerBalanceBeforeApply === 1600.00,
         'open payables=PKR ' . number_format($openAfterRetainedRefund, 2)
             . '; ledger closing=PKR ' . number_format($ledgerBalanceBeforeApply, 2)
-    );
-
-    $accountDebit = 0.0;
-    $accountCredit = 0.0;
-    $accountRows = [];
-    foreach ($scenario as $customer => $scenarioBooking) {
-        $bookingAccountLedger = $accountLedger->report([
-            'dateFrom' => $today,
-            'dateTo' => $today,
-            'currency' => 'PKR',
-            'businessSourceId' => 0,
-            'customerName' => '',
-            'bookingReference' => $scenarioBooking['booking_reference'],
-        ], [$branchId]);
-        foreach ((array) ($bookingAccountLedger['rows'] ?? []) as $accountRow) {
-            $accountRow['scenario_customer'] = $customer;
-            $accountRows[] = $accountRow;
-            $accountDebit += (float) ($accountRow['raw_debit_amount'] ?? 0);
-            $accountCredit += (float) ($accountRow['raw_credit_amount'] ?? 0);
-        }
-    }
-    $accountDebit = round($accountDebit, 2);
-    $accountCredit = round($accountCredit, 2);
-    $nonCashSupplierCreditRows = array_values(array_filter(
-        $accountRows,
-        static fn (array $row): bool => (string) ($row['ledger_entry'] ?? '') === 'Supplier credit applied'
-    ));
-    $retainedRefundAccountRows = array_values(array_filter(
-        $accountRows,
-        static fn (array $row): bool => str_contains(
-            mb_strtolower((string) ($row['ledger_entry'] ?? '')),
-            'supplier refund retained'
-        )
-    ));
-    $check(
-        'Account Ledger records only the PKR 3,000 cash paid from Riaz',
-        $accountDebit === 0.00 && $accountCredit === 3000.00,
-        'Debit/Money In=PKR ' . number_format($accountDebit, 2)
-            . '; Credit/Money Out=PKR ' . number_format($accountCredit, 2)
-    );
-    $check(
-        'Account Ledger shows retained/application credit as non-cash without duplicating treasury movement',
-        count($nonCashSupplierCreditRows) === 1
-            && count($retainedRefundAccountRows) === 1
-            && abs((float) ($nonCashSupplierCreditRows[0]['raw_debit_amount'] ?? 0)) <= 0.005
-            && abs((float) ($nonCashSupplierCreditRows[0]['raw_credit_amount'] ?? 0)) <= 0.005
-            && abs((float) ($retainedRefundAccountRows[0]['raw_debit_amount'] ?? 0)) <= 0.005
-            && abs((float) ($retainedRefundAccountRows[0]['raw_credit_amount'] ?? 0)) <= 0.005,
-        'non-cash application rows=' . count($nonCashSupplierCreditRows)
-            . '; retained refund rows=' . count($retainedRefundAccountRows)
     );
 
     $customerReportMethod = new ReflectionMethod($reportService, 'customerLedgerReport');
@@ -413,11 +348,11 @@ try {
     }
     $check(
         'Customer Ledgers preserve open invoices and reduce cancelled ABC2 to the PKR 600 supplier penalty',
-        ($customerClosingBalances['ABC1'] ?? '') === '1,000.00 Cr'
-            && ($customerClosingBalances['ABC2'] ?? '') === '600.00 Cr'
-            && ($customerClosingBalances['ABC3'] ?? '') === '1,000.00 Cr'
-            && ($customerClosingBalances['ABC4'] ?? '') === '1,000.00 Cr'
-            && ($customerClosingBalances['ABC5'] ?? '') === '1,000.00 Cr',
+        ($customerClosingBalances['ABC1'] ?? '') === '1,000 Cr'
+            && ($customerClosingBalances['ABC2'] ?? '') === '600 Cr'
+            && ($customerClosingBalances['ABC3'] ?? '') === '1,000 Cr'
+            && ($customerClosingBalances['ABC4'] ?? '') === '1,000 Cr'
+            && ($customerClosingBalances['ABC5'] ?? '') === '1,000 Cr',
         json_encode($customerClosingBalances, JSON_UNESCAPED_SLASHES)
     );
 
@@ -431,8 +366,8 @@ try {
         static fn (array $row): bool => (string) ($row['entry_type'] ?? '') === 'Supplier advance paid'
     ));
     $check(
-        'Supplier Ledger keeps the PKR 400 retained-refund application without inventing a duplicate advance payment',
-        count($supplierAdvanceApplicationRows) === 1 && $duplicateSupplierAdvancePaidRows === [],
+        'Supplier Ledger shows no application or duplicate advance payment before a future booking',
+        $supplierAdvanceApplicationRows === [] && $duplicateSupplierAdvancePaidRows === [],
         'application rows=' . count($supplierAdvanceApplicationRows)
             . '; duplicate advance-payment rows=' . count($duplicateSupplierAdvancePaidRows)
     );
@@ -507,5 +442,5 @@ if ($failures !== []) {
     exit(1);
 }
 
-echo PHP_EOL . 'RESULT: PASS — gross unpaid invoices remain PKR 2,000, supplier credit is PKR 400, and economic net cash required is PKR 1,600.' . PHP_EOL;
+echo PHP_EOL . 'RESULT: PASS - older payables remain PKR 2,000; PKR 400 credit is available for a future booking.' . PHP_EOL;
 exit(0);

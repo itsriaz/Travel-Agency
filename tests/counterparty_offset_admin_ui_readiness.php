@@ -34,14 +34,15 @@ $check(
         && substr_count($controller, 'Csrf::verify') >= 2
 );
 $check(
-    'Screen offers itemized manual invoice amounts and history with audited reversal',
+    'Screen offers invoice pairs with one amount per pair and audited reversal history',
     str_contains($view, 'Manual Linked Settlements')
         && str_contains($view, 'Settlement History')
-        && str_contains(strtolower($view), 'account-holder recovery balances')
+        && str_contains(strtolower($view), 'account-holder receivables')
         && str_contains($view, 'Reverse')
-        && str_contains($view, 'name="account_allocations[')
-        && str_contains($view, 'name="payable_allocations[')
-        && str_contains($view, 'Both selected totals must be equal')
+        && str_contains($view, 'class="manual-account-select"')
+        && str_contains($view, 'class="manual-payable-select"')
+        && str_contains($view, 'class="manual-pair-amount"')
+        && str_contains($view, 'Add another invoice pair')
         && str_contains($view, 'id="manual-account-total"')
         && str_contains($view, 'id="manual-payable-total"')
         && str_contains($view, 'Confirm Manual Adjustment')
@@ -54,9 +55,12 @@ $check(
         && ! str_contains($manualForm, 'name="amount"')
 );
 $check(
-    'Browser blocks confirmation until manually entered side totals match',
-    str_contains($view, "sideTotal('account')")
-        && str_contains($view, "sideTotal('payable')")
+    'Browser builds itemized allocations and blocks confirmation when balances or dimensions fail',
+    str_contains($view, "['account_allocations', readyAllocations.accountAllocations]")
+        && str_contains($view, "['payable_allocations', readyAllocations.payableAllocations]")
+        && str_contains($view, 'accountDimensions.size === 1')
+        && str_contains($view, 'payableDimensions.size === 1')
+        && str_contains($view, 'withinBalances')
         && str_contains($view, 'manualSubmit.disabled = !ready')
 );
 $check(

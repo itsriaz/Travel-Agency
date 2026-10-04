@@ -74,6 +74,17 @@ final class BookingRepository extends BaseRepository
         });
     }
 
+    public function lockBookingForFinancialWrite(int $bookingId): bool
+    {
+        if (! $this->db->inTransaction()) {
+            throw new RuntimeException('Booking financial lock requires a database transaction.');
+        }
+        $statement = $this->db->prepare('SELECT id FROM bookings WHERE id = :id FOR UPDATE');
+        $statement->execute(['id' => $bookingId]);
+
+        return $statement->fetchColumn() !== false;
+    }
+
     public function updateBooking(int $bookingId, array $bookingData, array $partyData): void
     {
         $this->transaction(function () use ($bookingId, $bookingData, $partyData): void {

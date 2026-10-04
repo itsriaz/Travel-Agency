@@ -305,6 +305,34 @@ try {
         ]
     );
 
+    $roundedResult = $serviceWorkspace->saveService([
+        'booking_id' => $bookingId,
+        'service_type' => 'air ticket',
+        'service_status' => 'Open',
+        'currency' => 'AED',
+        'cost_currency' => 'PKR',
+        'pricing_exchange_rate' => '0.01302253',
+        'pricing_rate_effective_date' => $today,
+        'supplier_name' => 'Whole Unit Rounding Regression Supplier',
+        'service_passenger_name' => 'Whole Unit Rounding Passenger',
+        'sale_price' => '83012',
+        'purchase_cost' => '83012',
+        'service_charge' => '0',
+        'final_sale_price' => '1081.03',
+    ], $actorUserId, $accessibleBranchIds);
+    $roundedService = $serviceRepository->findServiceById((int) ($roundedResult['service']['id'] ?? 0));
+    $roundedReceivable = $customerPayments->findReceivableByServiceLine(
+        $bookingReference,
+        (string) ($roundedResult['service']['line_reference'] ?? '')
+    );
+    $check(
+        (float) ($roundedService['final_sale_price'] ?? -1) === 1081.0
+        && (float) ($roundedService['net_profit_loss'] ?? -1) === 0.0
+        && (float) ($roundedService['service_charge'] ?? -1) === 0.0
+        && (float) ($roundedReceivable['due_amount'] ?? -1) === 1081.0,
+        'Whole-unit AED invoice preserves zero service charge and zero FX rounding loss'
+    );
+
     $profitRepository = new \App\Repositories\ReportRepository($app);
     $precisionProfitRow = null;
     foreach ($profitRepository->serviceProfit([1], $today, $today) as $profitRow) {
@@ -356,6 +384,48 @@ try {
         && abs((float) ($secondReceivableAfterPayment['outstanding_amount'] ?? 0)) <= 0.005,
         'Customer payment currency remains independent and settles the USD invoice through explicit FX',
         ['receipt' => $paymentReceipt, 'receivable' => $secondReceivableAfterPayment]
+    );
+
+    $sourceBookingResult = $bookingWorkspace->saveBooking([
+        'branch_id' => 1,
+        'booking_status' => 'draft',
+        'booking_date' => $today,
+        'party_label' => 'Lead Traveler / Booking Party',
+        'selected_customer_id' => (int) $customer['id'],
+        'lead_traveler_name' => (string) ($customer['full_name'] ?? ''),
+        'remarks' => 'Rollback-only transferred receipt source',
+    ], $actorUserId, $accessibleBranchIds);
+    $sourceBooking = (array) ($sourceBookingResult['booking'] ?? []);
+    $sourceReceiptId = $customerPayments->createReceipt([
+        'branch_id' => 1,
+        'traveler_id' => (int) $customer['id'],
+        'booking_reference' => (string) ($sourceBooking['booking_reference'] ?? ''),
+        'receipt_no' => $customerPayments->nextReceiptNumber(),
+        'receipt_date' => $today,
+        'currency' => 'AED',
+        'received_amount' => 1081,
+        'payment_method' => 'cash',
+        'status' => 'received',
+        'actor_user_id' => $actorUserId,
+    ]);
+    $customerPayments->allocateReceipt($sourceReceiptId, (int) ($roundedReceivable['id'] ?? 0), 1081, null, 'Transferred receipt regression', $actorUserId);
+    $targetFoundation = (new \App\Services\CustomerPaymentFoundationService($app))->buildWorkspacePreview(
+        $bookingReference,
+        (int) $customer['id'],
+        $accessibleBranchIds
+    );
+    $targetReceivable = array_values(array_filter(
+        $targetFoundation['serviceReceivables'] ?? [],
+        static fn (array $row): bool => ($row['serviceLineReference'] ?? '') === (string) ($roundedResult['service']['line_reference'] ?? '')
+    ))[0] ?? [];
+    $viewSource = file_get_contents(BASE_PATH . '/app/Views/workspace/index.php');
+    $check(
+        (float) ($targetReceivable['allocatedAmount'] ?? 0) === 1081.0
+        && (float) ($targetReceivable['outstandingAmount'] ?? -1) === 0.0
+        && is_string($viewSource)
+        && str_contains($viewSource, "\$receivableByLine[\$lineKey]['allocatedAmount']")
+        && str_contains($viewSource, "\$receivableByLine[\$lineKey]['outstandingAmount']"),
+        'Receipt from another booking settles this invoice without relying on source-booking history'
     );
 } catch (Throwable $exception) {
     $failures[] = $exception->getMessage();

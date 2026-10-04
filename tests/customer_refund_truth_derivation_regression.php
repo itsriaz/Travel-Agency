@@ -16,6 +16,19 @@ $resolveCurrency->setAccessible(true);
 $resolveAmount = $reflection->getMethod('resolveModernCustomerRefundTruthAmount');
 $resolveAmount->setAccessible(true);
 
+if ($resolveCurrency->invoke($service, ['expected_supplier_refund_currency' => 'PKR'], 'AED') !== 'AED') {
+    throw new RuntimeException('A supplier expectation must not choose the customer refund currency.');
+}
+echo '[PASS] Supplier expectation currency cannot relabel the customer refund.' . PHP_EOL;
+if ($resolveCurrency->invoke($service, [
+    'mode' => 'cancellation_financial_adjustment', 'customer_received_amount' => 1280,
+    'prior_customer_due_amount' => 1280, 'available_customer_refund_credit_currency' => 'PKR',
+    'settlement_currency' => 'PKR',
+], 'AED', 'AED') !== 'AED') {
+    throw new RuntimeException('Legacy supplier labels must not override the confirmed customer invoice/event currency.');
+}
+echo '[PASS] BK87 legacy customer credit uses confirmed AED invoice/event accounting currency.' . PHP_EOL;
+
 $payload = [
     'available_customer_refund_credit' => 714.28,
     'customer_penalty_amount' => 10.73,

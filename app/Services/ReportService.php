@@ -98,6 +98,7 @@ final class ReportService extends Service
         $supplierAdvanceSummaryColumns = [];
         $footerRows = [];
         $isLinkedPartyLedger = false;
+        $unjournaledTreasuryTransferCount = 0;
 
         switch ($filters['report']) {
 
@@ -251,18 +252,31 @@ final class ReportService extends Service
                 break;
 
             case 'cash_bank_ledger':
-                $legacyCashBankAmount = $filters['debitAmount'] === null && $filters['creditAmount'] === null
-                    ? $filters['cashBankAmount']
-                    : null;
+                $ledgerAccounts = $repository->treasuryLedgerAccountOptions($filters['branchScopeIds']);
+                $unjournaledTreasuryTransferCount = $repository->unjournaledTreasuryTransferCount(
+                    $filters['branchScopeIds'],
+                    $filters['treasuryAccountId'] ?: null,
+                    $filters['dateTo']
+                );
                 $reportData = $repository->cashBankLedger(
                     $filters['branchScopeIds'],
-                    $filters['dateFrom'],
+                    null,
                     $filters['dateTo'],
                     $filters['currency'],
-                    $filters['treasurySourceType'],
-                    $legacyCashBankAmount
+                    'all',
+                    null,
+                    $filters['treasuryAccountId'] ?: null
                 );
-                [$rows, $summaryCards] = $this->cashBankLedgerReport($reportData, $filters['cashBankDateOrder']);
+                [$rows, $summaryCards] = $this->cashBankLedgerReport(
+                    $reportData,
+                    $filters['cashBankDateOrder'],
+                    $ledgerAccounts,
+                    $filters['dateFrom'],
+                    $filters['treasurySourceType'],
+                    $filters['cashBankAmount'],
+                    $filters['treasuryAccountId'],
+                    $filters['currency']
+                );
                 $columns = [
                     ['key' => 'entry_date', 'label' => 'Date'],
                     ['key' => 'branch_name', 'label' => 'Branch'],
@@ -272,9 +286,9 @@ final class ReportService extends Service
                     ['key' => 'party_name', 'label' => 'Party'],
                     ['key' => 'reference', 'label' => 'Reference'],
                     ['key' => 'description', 'label' => 'Description'],
-                    ['key' => 'debit_amount', 'label' => 'Debit'],
-                    ['key' => 'credit_amount', 'label' => 'Credit'],
-                    ['key' => 'balance_amount', 'label' => 'Balance'],
+                    ['key' => 'debit_amount', 'label' => 'Money In'],
+                    ['key' => 'credit_amount', 'label' => 'Money Out'],
+                    ['key' => 'balance_amount', 'label' => 'Account Balance'],
                 ];
                 break;
 
@@ -1582,6 +1596,7 @@ final class ReportService extends Service
 
         return [
             'isLinkedPartyLedger' => $isLinkedPartyLedger,
+            'unjournaledTreasuryTransferCount' => $unjournaledTreasuryTransferCount,
             'title' => 'Reports',
             'reportOptions' => $this->sortedReportOptions(),
             'selectedReport' => $filters['report'],
@@ -1610,7 +1625,9 @@ final class ReportService extends Service
             'reminderTypeFilterOptions' => $this->reminderTypeFilterOptions(),
             'reminderServiceTypeOptions' => $this->reminderServiceTypeOptions(),
             'treasurySourceTypeOptions' => $this->treasurySourceTypeOptions(),
-            'treasuryAccountOptions' => $repository->directTreasuryAccountOptions($filters['branchScopeIds']),
+            'treasuryAccountOptions' => $filters['report'] === 'cash_bank_ledger'
+                ? $repository->treasuryLedgerAccountOptions($filters['branchScopeIds'])
+                : $repository->directTreasuryAccountOptions($filters['branchScopeIds']),
             'treasuryTransferTypeOptions' => $this->treasuryTransferTypeOptions(),
             'treasuryTransferStatusOptions' => $this->treasuryTransferStatusOptions(),
             'moneyDirectionOptions' => [
@@ -2230,6 +2247,7 @@ final class ReportService extends Service
 
         $sourceTreasuryAccountId = (int) ($query['source_treasury_account_id'] ?? 0);
         $destinationTreasuryAccountId = (int) ($query['destination_treasury_account_id'] ?? 0);
+        $treasuryAccountId = (int) ($query['treasury_account_id'] ?? 0);
         $treasuryAccountOptions = (new ReportRepository($this->app))->directTreasuryAccountOptions($branchId > 0 ? [$branchId] : $accessibleBranchIds);
         $treasuryAccountIds = array_map(static fn (array $row): int => (int) ($row['id'] ?? 0), $treasuryAccountOptions);
         if ($sourceTreasuryAccountId > 0 && ! in_array($sourceTreasuryAccountId, $treasuryAccountIds, true)) {
@@ -2237,6 +2255,13 @@ final class ReportService extends Service
         }
         if ($destinationTreasuryAccountId > 0 && ! in_array($destinationTreasuryAccountId, $treasuryAccountIds, true)) {
             throw new RuntimeException('Please select a valid destination treasury account filter.');
+        }
+        if ($report === 'cash_bank_ledger' && $treasuryAccountId > 0) {
+            $ledgerAccounts = (new ReportRepository($this->app))->treasuryLedgerAccountOptions($branchId > 0 ? [$branchId] : $accessibleBranchIds);
+            $ledgerAccountIds = array_map(static fn (array $row): int => (int) ($row['id'] ?? 0), $ledgerAccounts);
+            if (! in_array($treasuryAccountId, $ledgerAccountIds, true)) {
+                throw new RuntimeException('Please select a valid accessible cash/bank account.');
+            }
         }
 
         $sourceCurrency = strtoupper(trim((string) ($query['source_currency'] ?? '')));
@@ -2303,6 +2328,7 @@ final class ReportService extends Service
             'treasuryTransferStatus' => $treasuryTransferStatus,
             'sourceTreasuryAccountId' => $sourceTreasuryAccountId,
             'destinationTreasuryAccountId' => $destinationTreasuryAccountId,
+            'treasuryAccountId' => $treasuryAccountId,
             'sourceCurrency' => $sourceCurrency,
             'destinationCurrency' => $destinationCurrency,
             'treasuryTransferSearch' => $treasuryTransferSearch,
@@ -2730,17 +2756,18 @@ final class ReportService extends Service
         foreach ($keys as $key => $meta) {
             $supplierId = (int) ($meta['supplier_id'] ?? 0);
             $currency = (string) ($meta['currency'] ?? 'PKR');
+            $ledgerCurrency = $currencyFilter !== '' ? $currencyFilter : $currency;
             $ledgerRows = $repository->supplierLedger(
                 $branchIds,
                 $dateFrom,
                 $dateTo,
-                $currencyFilter !== '' ? $currencyFilter : $currency,
+                '',
                 '',
                 $supplierFilterId > 0 ? $supplierFilterId : $supplierId,
                 0,
                 ''
             );
-            $ledgerState = $supplierLedgerService->buildReport($ledgerRows);
+            $ledgerState = $supplierLedgerService->buildReport($ledgerRows, $ledgerCurrency);
             foreach ((array) ($ledgerState['summaryCards'] ?? []) as $card) {
                 if ((string) ($card['label'] ?? '') !== 'Supplier Balance / ' . $currency) {
                     continue;
@@ -3661,13 +3688,35 @@ final class ReportService extends Service
         return [$rows, $summaryCards];
     }
 
-    private function cashBankLedgerReport(array $data, string $dateOrder = 'desc'): array
+    private function cashBankLedgerReport(
+        array $data,
+        string $dateOrder = 'desc',
+        array $ledgerAccounts = [],
+        ?string $dateFrom = null,
+        string $sourceType = 'all',
+        ?float $transactionAmount = null,
+        int $treasuryAccountId = 0,
+        string $currencyFilter = ''
+    ): array
     {
         $reportRows = [];
         $runningBalances = [];
+        $periodOpeningBalances = [];
         $debitTotals = [];
         $creditTotals = [];
-        $balanceTotals = [];
+
+        foreach ($ledgerAccounts as $account) {
+            $accountId = (int) ($account['id'] ?? 0);
+            $currency = strtoupper(trim((string) ($account['currency'] ?? '')));
+            if ($accountId <= 0 || $currency === ''
+                || ($treasuryAccountId > 0 && $accountId !== $treasuryAccountId)
+                || ($currencyFilter !== '' && $currency !== $currencyFilter)) {
+                continue;
+            }
+            $ledgerKey = $accountId . '|' . $currency;
+            $runningBalances[$ledgerKey] = round((float) ($account['opening_balance'] ?? 0), 2);
+            $periodOpeningBalances[$ledgerKey] = $runningBalances[$ledgerKey];
+        }
 
         foreach ($data as $row) {
             $currency = strtoupper(trim((string) ($row['currency'] ?? 'PKR')));
@@ -3680,6 +3729,19 @@ final class ReportService extends Service
             $debitAmount = round((float) ($row['debit_amount'] ?? 0), 2);
             $creditAmount = round((float) ($row['credit_amount'] ?? 0), 2);
             $runningBalances[$ledgerKey] = round(($runningBalances[$ledgerKey] ?? 0.0) + $debitAmount - $creditAmount, 2);
+            $entryDate = (string) ($row['entry_date'] ?? '');
+            if ($dateFrom !== null && $entryDate < $dateFrom) {
+                $periodOpeningBalances[$ledgerKey] = $runningBalances[$ledgerKey];
+                continue;
+            }
+            if (! $this->cashBankSourceMatches((string) ($row['source_type'] ?? ''), $sourceType)) {
+                continue;
+            }
+            if ($transactionAmount !== null
+                && abs($debitAmount - $transactionAmount) >= 0.005
+                && abs($creditAmount - $transactionAmount) >= 0.005) {
+                continue;
+            }
             $sourceLabel = $this->treasurySourceLabel((string) ($row['source_type'] ?? ''));
             $partyName = (string) (($row['party_name'] ?? '') !== '' ? $row['party_name'] : 'N/A');
             if ($sourceLabel === 'Direct Entry') {
@@ -3687,7 +3749,7 @@ final class ReportService extends Service
             }
 
             $reportRows[] = [
-                'entry_date' => (string) (($row['entry_date'] ?? '') !== '' ? $row['entry_date'] : 'N/A'),
+                'entry_date' => $entryDate !== '' ? $entryDate : 'N/A',
                 'branch_name' => (string) ($row['branch_name'] ?? ''),
                 'account_group' => (string) ($row['account_group'] ?? 'Cash / Bank'),
                 'account_name' => (string) ($row['account_name'] ?? ''),
@@ -3715,7 +3777,14 @@ final class ReportService extends Service
 
             $debitTotals[$currency] = ($debitTotals[$currency] ?? 0.0) + $debitAmount;
             $creditTotals[$currency] = ($creditTotals[$currency] ?? 0.0) + $creditAmount;
-            $balanceTotals[$currency] = ($balanceTotals[$currency] ?? 0.0) + $debitAmount - $creditAmount;
+        }
+
+        $openingTotals = [];
+        $closingTotals = [];
+        foreach ($runningBalances as $ledgerKey => $balance) {
+            $currency = substr($ledgerKey, strrpos($ledgerKey, '|') + 1);
+            $openingTotals[$currency] = ($openingTotals[$currency] ?? 0.0) + ($periodOpeningBalances[$ledgerKey] ?? 0.0);
+            $closingTotals[$currency] = ($closingTotals[$currency] ?? 0.0) + $balance;
         }
 
         $dateDirection = strtolower($dateOrder) === 'asc' ? 1 : -1;
@@ -3760,11 +3829,24 @@ final class ReportService extends Service
         return [
             $reportRows,
             array_merge(
-                $this->currencySummaryCards('Debit', $debitTotals),
-                $this->currencySummaryCards('Credit', $creditTotals),
-                $this->currencySummaryCards('Balance', $balanceTotals)
+                $this->currencySummaryCards('Opening', $openingTotals),
+                $this->currencySummaryCards('Money In', $debitTotals),
+                $this->currencySummaryCards('Money Out', $creditTotals),
+                $this->currencySummaryCards('Closing', $closingTotals)
             ),
         ];
+    }
+
+    private function cashBankSourceMatches(string $sourceType, string $filter): bool
+    {
+        return match ($filter) {
+            'customer' => str_starts_with($sourceType, 'customer_receipt_'),
+            'supplier' => str_starts_with($sourceType, 'supplier_payment_'),
+            'expense' => str_starts_with($sourceType, 'business_expense_'),
+            'direct' => str_starts_with($sourceType, 'direct_treasury_entry_'),
+            'transfer' => str_starts_with($sourceType, 'treasury_transfer_'),
+            default => true,
+        };
     }
 
     private function cashBankLedgerDescription(
@@ -4667,6 +4749,12 @@ final class ReportService extends Service
         foreach ($rows as $row) {
             if ($perspective === 'customer') {
                 $ledgerRows = $this->customerLedgerRowsForCustomer($row, $pkrRates);
+                $preserved = (float) ($row['preserved_customer_refund_amount'] ?? 0);
+                if ($preserved > 0.005) {
+                    $ledgerRows[] = $this->customerLedgerReportRow($row, $pkrRates,
+                        'Customer refund paid - money retained after reversal',
+                        (string) ($row['preserved_refund_event_date'] ?? $row['booking_date']), 0.0, $preserved, 40);
+                }
             } elseif ($perspective === 'account') {
                 $ledgerRows = $this->accountLedgerRows($row, $pkrRates);
             } else {
@@ -4908,9 +4996,12 @@ final class ReportService extends Service
         $invoiceAmount = (float) ($row['original_invoice_amount'] ?? $row['total_due'] ?? 0);
         $customerReceived = (float) ($row['account_customer_received_amount'] ?? 0);
         $supplierPaid = (float) ($row['account_supplier_paid_amount'] ?? 0);
-        $supplierRefundReceived = (float) ($row['refund_supplier_refund_received'] ?? 0);
-        $customerRefundPosted = (float) ($row['refund_customer_refund_posted'] ?? 0);
+        $supplierRefundReceived = (float) ($row['refund_supplier_refund_received'] ?? 0) + (float) ($row['preserved_supplier_refund_amount'] ?? 0);
+        $customerRefundPosted = (float) ($row['refund_customer_refund_posted'] ?? 0) + (float) ($row['preserved_customer_refund_amount'] ?? 0);
         $ledgerDate = (string) (($row['refund_event_date'] ?? '') !== '' ? $row['refund_event_date'] : ($row['booking_date'] ?? ''));
+        if ((int) ($row['refund_event_count'] ?? 0) === 0 && ! empty($row['preserved_refund_event_date'])) {
+            $ledgerDate = (string) $row['preserved_refund_event_date'];
+        }
         $generatedRows = [];
 
         if ($customerReceived > 0.005) {
@@ -4975,9 +5066,12 @@ final class ReportService extends Service
         $invoiceAmount = (float) ($row['original_invoice_amount'] ?? $row['total_due'] ?? 0);
         $customerReceived = (float) ($row['account_customer_received_amount'] ?? 0);
         $supplierPaid = (float) ($row['account_supplier_paid_amount'] ?? 0);
-        $supplierRefundReceived = (float) ($row['refund_supplier_refund_received'] ?? 0);
-        $customerRefundPosted = (float) ($row['refund_customer_refund_posted'] ?? 0);
+        $supplierRefundReceived = (float) ($row['refund_supplier_refund_received'] ?? 0) + (float) ($row['preserved_supplier_refund_amount'] ?? 0);
+        $customerRefundPosted = (float) ($row['refund_customer_refund_posted'] ?? 0) + (float) ($row['preserved_customer_refund_amount'] ?? 0);
         $ledgerDate = (string) (($row['refund_event_date'] ?? '') !== '' ? $row['refund_event_date'] : ($row['booking_date'] ?? ''));
+        if ((int) ($row['refund_event_count'] ?? 0) === 0 && ! empty($row['preserved_refund_event_date'])) {
+            $ledgerDate = (string) $row['preserved_refund_event_date'];
+        }
         $generatedRows = [];
 
         if ($customerReceived > 0.005) {
@@ -5184,7 +5278,6 @@ final class ReportService extends Service
         $serviceLedgerLabel = $serviceLabel !== '' ? ucwords(str_replace('_', ' ', $serviceLabel)) : 'Service';
         $invoiceChargeBase = $grossInvoiceAmount;
         $customerPenaltyAmount = max((float) ($row['refund_customer_penalty_amount'] ?? 0), 0.0);
-        $supplierPenaltyAmount = max((float) ($row['refund_supplier_penalty_amount'] ?? 0), 0.0);
         $explicitCancellationCharge = max((float) ($row['refund_customer_final_charge_amount'] ?? 0), 0.0);
         $customerRefundBasis = max((float) ($row['refund_customer_paid_amount'] ?? 0), 0.0);
         $derivedCancellationCharge = round(max(
@@ -5195,7 +5288,7 @@ final class ReportService extends Service
             ? $explicitCancellationCharge
             : ($derivedCancellationCharge > 0.005
                 ? $derivedCancellationCharge
-                : round($customerPenaltyAmount + $supplierPenaltyAmount, 2));
+                : round($customerPenaltyAmount, 2));
 
         if ($invoiceChargeBase > 0.005) {
             $generatedRows[] = $this->customerLedgerReportRow(

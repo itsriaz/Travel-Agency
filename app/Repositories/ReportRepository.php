@@ -6,6 +6,17 @@ namespace App\Repositories;
 
 final class ReportRepository extends BaseRepository
 {
+    private function preservedRefundValue(string $field): string
+    {
+        if (! in_array($field, ['event_date', 'customer_refund_amount', 'supplier_refund_amount'], true)) {
+            throw new \RuntimeException('Invalid preserved refund field.');
+        }
+        $value = $field === 'event_date' ? 'MAX(kept.event_date)' : 'COALESCE(SUM(kept.' . $field . '), 0)';
+        return '(SELECT ' . $value . ' FROM booking_service_events kept WHERE kept.booking_id = b.id'
+            . ' AND kept.booking_service_id = bs.id AND kept.event_type = "refund" AND kept.event_status = "voided"'
+            . ' AND JSON_UNQUOTE(JSON_EXTRACT(kept.payload_json, "$.actual_money_preserved")) = "true")';
+    }
+
     private function salaryExpenseTablesExist(): bool
     {
         return $this->tableExists('employee_salary_records');
@@ -251,6 +262,63 @@ final class ReportRepository extends BaseRepository
         $statement->execute();
 
         return $statement->fetchAll(\PDO::FETCH_ASSOC);
+    }
+
+    public function treasuryLedgerAccountOptions(array $branchIds): array
+    {
+        if ($branchIds === []) {
+            return [];
+        }
+
+        [$branchClause, $params] = $this->branchScope($branchIds, 'ledger_account_branch_');
+
+        return $this->fetchRows(
+            'SELECT ta.id, ta.branch_id, ta.account_code, ta.account_name, ta.account_type, ta.currency,
+                    ta.opening_balance, ta.is_active, b.name AS branch_name
+             FROM treasury_accounts ta
+             INNER JOIN branches b ON b.id = ta.branch_id
+             WHERE ta.branch_id ' . $branchClause . '
+             ORDER BY b.name, ta.currency, ta.account_name',
+            $params
+        );
+    }
+
+    public function unjournaledTreasuryTransferCount(array $branchIds, ?int $accountId = null, ?string $dateTo = null): int
+    {
+        if ($branchIds === []) {
+            return 0;
+        }
+
+        [$sourceClause, $sourceParams] = $this->branchScope($branchIds, 'legacy_source_branch_');
+        [$destinationClause, $destinationParams] = $this->branchScope($branchIds, 'legacy_destination_branch_');
+        $params = array_merge($sourceParams, $destinationParams);
+        $accountSql = '';
+        if ($accountId !== null && $accountId > 0) {
+            $accountSql = ' AND (tt.from_treasury_account_id = :legacy_from_account_id'
+                . ' OR tt.to_treasury_account_id = :legacy_to_account_id)';
+            $params['legacy_from_account_id'] = $accountId;
+            $params['legacy_to_account_id'] = $accountId;
+        }
+        $dateSql = '';
+        if ($dateTo !== null) {
+            $dateSql = ' AND tt.transaction_date <= :legacy_date_to';
+            $params['legacy_date_to'] = $dateTo;
+        }
+
+        $rows = $this->fetchRows(
+            'SELECT COUNT(DISTINCT tt.id) AS transfer_count
+             FROM treasury_transactions tt
+             LEFT JOIN treasury_accounts source_ta ON source_ta.id = tt.from_treasury_account_id
+             LEFT JOIN treasury_accounts destination_ta ON destination_ta.id = tt.to_treasury_account_id
+             WHERE tt.status = "posted"
+               AND tt.journal_entry_id IS NULL
+               AND tt.transaction_type IN ("cash_deposit_to_bank", "bank_withdrawal_to_cash", "bank_to_bank_transfer", "cash_to_cash_transfer")
+               AND (source_ta.branch_id ' . $sourceClause . ' OR destination_ta.branch_id ' . $destinationClause . ')'
+               . $accountSql . $dateSql,
+            $params
+        );
+
+        return (int) ($rows[0]['transfer_count'] ?? 0);
     }
 
     public function directMoneyInOutLedger(
@@ -586,7 +654,8 @@ final class ReportRepository extends BaseRepository
         ?string $dateTo,
         string $currency = '',
         string $sourceType = 'all',
-        ?float $transactionAmount = null
+        ?float $transactionAmount = null,
+        ?int $treasuryAccountId = null
     ): array
     {
         [$branchClause, $params] = $this->branchScope($branchIds);
@@ -596,6 +665,12 @@ final class ReportRepository extends BaseRepository
         if (trim($currency) !== '') {
             $currencySql = ' AND ledger_rows.currency = :cash_bank_currency';
             $params['cash_bank_currency'] = strtoupper(trim($currency));
+        }
+
+        $accountSql = '';
+        if ($treasuryAccountId !== null && $treasuryAccountId > 0) {
+            $accountSql = ' AND ledger_rows.treasury_account_id = :cash_bank_account_id';
+            $params['cash_bank_account_id'] = $treasuryAccountId;
         }
 
         $sourceSql = '';
@@ -677,6 +752,8 @@ final class ReportRepository extends BaseRepository
                  LEFT JOIN booking_parties bp ON bp.booking_id = b.id
                  LEFT JOIN travelers t ON t.id = b.lead_traveler_id
                  WHERE cr.treasury_account_id IS NOT NULL
+                   AND je.branch_id = ta.branch_id
+                   AND je.currency = ta.currency
                    AND jel.account_id = ta.linked_account_id
 
                  UNION ALL
@@ -713,6 +790,8 @@ final class ReportRepository extends BaseRepository
                  LEFT JOIN bookings b ON b.booking_reference = sp.booking_reference
                  LEFT JOIN suppliers s ON s.id = sp.supplier_id
                  WHERE sp.treasury_account_id IS NOT NULL
+                   AND je.branch_id = ta.branch_id
+                   AND je.currency = ta.currency
                    AND jel.account_id = ta.linked_account_id
 
                  UNION ALL
@@ -748,6 +827,8 @@ final class ReportRepository extends BaseRepository
                  INNER JOIN expense_categories ec ON ec.id = be.expense_category_id
                  INNER JOIN treasury_accounts ta ON ta.id = be.treasury_account_id
                  WHERE be.treasury_account_id IS NOT NULL
+                   AND je.branch_id = ta.branch_id
+                   AND je.currency = ta.currency
                    AND jel.account_id = ta.linked_account_id
 
                  UNION ALL
@@ -783,7 +864,6 @@ final class ReportRepository extends BaseRepository
                     ON ta.linked_account_id = jel.account_id
                    AND ta.branch_id = je.branch_id
                    AND ta.currency = je.currency
-                   AND ta.is_active = 1
                  LEFT JOIN treasury_transactions tt ON tt.journal_entry_id = je.id
                  LEFT JOIN customer_receipts cr ON cr.id = jel.customer_receipt_id
                  LEFT JOIN supplier_payments sp ON sp.id = jel.supplier_payment_id
@@ -792,7 +872,7 @@ final class ReportRepository extends BaseRepository
                    AND sp.id IS NULL
                    AND be.id IS NULL
              ) AS ledger_rows
-             WHERE ledger_rows.branch_id ' . $branchClause . $dateSql . $currencySql . $sourceSql . $amountSql . '
+             WHERE ledger_rows.branch_id ' . $branchClause . $dateSql . $currencySql . $accountSql . $sourceSql . $amountSql . '
              ORDER BY
                 ledger_rows.branch_name ASC,
                 ledger_rows.account_group ASC,
@@ -844,7 +924,7 @@ final class ReportRepository extends BaseRepository
                  FROM booking_service_events bse
                  WHERE bse.branch_id ' . $customerRefundClause . '
                    AND bse.event_type = "refund"
-                   AND bse.event_status = "posted"' . $customerRefundWindow . '
+                   AND ' . $this->financialServiceEventStatusClause('bse') . $customerRefundWindow . '
                  GROUP BY bse.branch_id, bse.event_date, bse.currency
              ) AS refund_rows
                 ON refund_rows.branch_id = receipt_rows.branch_id
@@ -863,16 +943,35 @@ final class ReportRepository extends BaseRepository
                 GREATEST(payment_rows.cash_out_amount - COALESCE(refund_rows.refund_amount, 0), 0) AS cash_out_amount
              FROM (
                 SELECT
-                    sp.branch_id,
+                    COALESCE(ta.branch_id, sp.branch_id) AS branch_id,
                     br.name AS branch_name,
                     sp.payment_date AS movement_date,
-                    sp.currency,
-                    SUM(sp.paid_amount + COALESCE(sp.charges_amount, 0)) AS cash_out_amount
+                    COALESCE(ta.currency, sp.currency) AS currency,
+                    SUM(CASE
+                        WHEN ta.id IS NULL THEN sp.paid_amount + COALESCE(sp.charges_amount, 0)
+                        ELSE COALESCE((
+                            SELECT ROUND(SUM(funding_line.credit_amount - funding_line.debit_amount), 2)
+                            FROM journal_entry_lines funding_line
+                            INNER JOIN journal_entries funding_entry
+                                ON funding_entry.id = funding_line.journal_entry_id
+                            INNER JOIN chart_of_accounts funding_account
+                                ON funding_account.id = funding_line.account_id
+                            WHERE funding_line.supplier_payment_id = sp.id
+                              AND funding_account.code = ta.account_code
+                              AND funding_entry.branch_id = ta.branch_id
+                              AND funding_entry.currency = ta.currency
+                              AND funding_entry.source_type IN (
+                                  "supplier_payment_recorded", "supplier_payment_treasury_funded"
+                              )
+                        ), 0)
+                    END) AS cash_out_amount
                  FROM supplier_payments sp
-                 INNER JOIN branches br ON br.id = sp.branch_id
-                 WHERE sp.branch_id ' . $clause . '
+                  LEFT JOIN treasury_accounts ta ON ta.id = sp.treasury_account_id
+                  INNER JOIN branches br ON br.id = COALESCE(ta.branch_id, sp.branch_id)
+                  WHERE COALESCE(ta.branch_id, sp.branch_id) ' . $clause . '
                    AND sp.status <> "void"' . $supplierWindow . '
-                 GROUP BY sp.branch_id, br.name, sp.payment_date, sp.currency
+                  GROUP BY COALESCE(ta.branch_id, sp.branch_id), br.name,
+                           sp.payment_date, COALESCE(ta.currency, sp.currency)
              ) AS payment_rows
              LEFT JOIN (
                 SELECT
@@ -883,7 +982,7 @@ final class ReportRepository extends BaseRepository
                  FROM booking_service_events bse
                  WHERE bse.branch_id ' . $supplierRefundClause . '
                    AND bse.event_type = "refund"
-                   AND bse.event_status = "posted"' . $supplierRefundWindow . '
+                   AND ' . $this->financialServiceEventStatusClause('bse') . $supplierRefundWindow . '
                  GROUP BY bse.branch_id, bse.event_date, bse.currency
              ) AS refund_rows
                 ON refund_rows.branch_id = payment_rows.branch_id
@@ -1027,7 +1126,7 @@ final class ReportRepository extends BaseRepository
                  FROM booking_service_events bse
                   WHERE bse.branch_id ' . $customerRefundClause . '
                    AND bse.event_type = "refund"
-                   AND bse.event_status = "posted"' . $customerRefundWindow . '
+                   AND ' . $this->financialServiceEventStatusClause('bse') . $customerRefundWindow . '
                  GROUP BY bse.branch_id, bse.currency
              ) AS refund_rows
                 ON refund_rows.branch_id = receipt_rows.branch_id
@@ -1063,7 +1162,7 @@ final class ReportRepository extends BaseRepository
                  FROM booking_service_events bse
                   WHERE bse.branch_id ' . $supplierRefundClause . '
                    AND bse.event_type = "refund"
-                   AND bse.event_status = "posted"' . $supplierRefundWindow . '
+                   AND ' . $this->financialServiceEventStatusClause('bse') . $supplierRefundWindow . '
                  GROUP BY bse.branch_id, bse.currency
              ) AS refund_rows
                 ON refund_rows.branch_id = payment_rows.branch_id
@@ -3028,7 +3127,7 @@ final class ReportRepository extends BaseRepository
                  FROM booking_service_events bse
                   WHERE bse.branch_id ' . $customerRefundClause . '
                    AND bse.event_type = "refund"
-                   AND bse.event_status = "posted"' . $customerRefundWindow . '
+                   AND ' . $this->financialServiceEventStatusClause('bse') . $customerRefundWindow . '
                  GROUP BY bse.branch_id, bse.currency
              ) AS refund_rows
                 ON refund_rows.branch_id = receipt_rows.branch_id
@@ -3062,7 +3161,7 @@ final class ReportRepository extends BaseRepository
                  FROM booking_service_events bse
                   WHERE bse.branch_id ' . $supplierRefundClause . '
                    AND bse.event_type = "refund"
-                   AND bse.event_status = "posted"' . $supplierRefundWindow . '
+                   AND ' . $this->financialServiceEventStatusClause('bse') . $supplierRefundWindow . '
                  GROUP BY bse.branch_id, bse.currency
              ) AS refund_rows
                 ON refund_rows.branch_id = payment_rows.branch_id
@@ -3193,6 +3292,7 @@ final class ReportRepository extends BaseRepository
                     COALESCE(supplier_payment_summary.supplier_paid_date, b.booking_date) AS account_supplier_paid_date,
                     COALESCE(refund_summary.customer_paid_amount, 0) AS refund_customer_paid_amount,
                     COALESCE(refund_summary.customer_penalty_amount, 0) AS refund_customer_penalty_amount,
+                    COALESCE(refund_summary.customer_final_charge_amount, 0) AS refund_customer_final_charge_amount,
                     COALESCE(refund_summary.customer_refund_expected, 0) AS refund_customer_refund_expected,
                     COALESCE(NULLIF(refund_summary.customer_refund_currency, ""), cri.currency) AS refund_customer_refund_currency,
                     COALESCE(refund_summary.customer_refund_posted, 0) AS refund_customer_refund_posted,
@@ -3200,7 +3300,10 @@ final class ReportRepository extends BaseRepository
                     COALESCE(refund_summary.supplier_refund_expected, 0) AS refund_supplier_refund_expected,
                     COALESCE(refund_summary.supplier_refund_received, 0) AS refund_supplier_refund_received,
                     COALESCE(refund_summary.refund_event_date, b.booking_date) AS refund_event_date,
-                    COALESCE(refund_summary.refund_event_count, 0) AS refund_event_count
+                    COALESCE(refund_summary.refund_event_count, 0) AS refund_event_count,
+                    ' . $this->preservedRefundValue('customer_refund_amount') . ' AS preserved_customer_refund_amount,
+                    ' . $this->preservedRefundValue('supplier_refund_amount') . ' AS preserved_supplier_refund_amount,
+                    ' . $this->preservedRefundValue('event_date') . ' AS preserved_refund_event_date
                 FROM customer_receivable_items cri
                 INNER JOIN bookings b ON b.booking_reference = cri.booking_reference
                 INNER JOIN branches br ON br.id = b.branch_id
@@ -3277,45 +3380,52 @@ final class ReportRepository extends BaseRepository
                             )
                             ELSE 0
                         END) AS customer_penalty_amount,
-                        MAX(CASE
+                        SUM(CASE
+                            WHEN bse.event_type = "cancel"
+                             AND COALESCE(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.settlement_currency")), ""), bse.currency) = bse.currency
+                                THEN COALESCE(CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.customer_final_charge_amount")), "") AS DECIMAL(18,2)), 0)
+                            ELSE 0
+                        END) AS customer_final_charge_amount,
+                        COALESCE(MAX(CASE
+                            WHEN bse.event_type = "refund" AND bse.customer_refund_amount > 0.005 THEN COALESCE(
+                                NULLIF(refund_detail.refund_currency, ""),
+                                NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.refund_detail.refund_currency")), ""),
+                                bse.currency
+                            )
+                            ELSE NULL
+                        END), MAX(CASE
                             WHEN bse.event_type = "cancel" THEN COALESCE(
                                 NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.available_customer_refund_credit_currency")), ""),
                                 NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.target_customer_refund_credit_currency")), ""),
                                 NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.customer_refund_basis_currency")), ""),
                                 NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.settlement_currency")), ""),
                                 NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.customer_penalty_currency")), ""),
-                                NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_currency")), ""),
-                                bse.currency
-                            )
-                            WHEN bse.event_type = "refund" THEN COALESCE(
-                                NULLIF(refund_detail.refund_currency, ""),
-                                NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.refund_detail.refund_currency")), ""),
                                 bse.currency
                             )
                             ELSE NULL
-                        END) AS customer_refund_currency,
+                        END)) AS customer_refund_currency,
                         SUM(CASE
-                            WHEN bse.event_type = "cancel" THEN GREATEST(
-                                COALESCE(
-                                    CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_source_amount")), "") AS DECIMAL(18,2)),
-                                    CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_amount")), "") AS DECIMAL(18,2)),
-                                    CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_credit")), "") AS DECIMAL(18,2)),
-                                    0
-                                ) - COALESCE(
-                                    CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.customer_penalty_source_amount")), "") AS DECIMAL(18,2)),
-                                    CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.customer_penalty_amount")), "") AS DECIMAL(18,2)),
-                                    bse.penalty_amount,
-                                    0
-                                ) + COALESCE(
-                                    CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.agency_fee_refund_amount")), "") AS DECIMAL(18,2)),
-                                    0
-                                ),
-                                0
-                            )
+                            WHEN bse.event_type = "cancel" THEN CASE
+                                WHEN JSON_EXTRACT(bse.payload_json, "$.target_customer_refund_credit") IS NOT NULL
+                                 AND COALESCE(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.target_customer_refund_credit_currency")), ""), bse.currency) = bse.currency
+                                    THEN CAST(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.target_customer_refund_credit")) AS DECIMAL(18,2))
+                                WHEN JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_equivalent_amount") IS NOT NULL
+                                 AND JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_equivalent_currency")) = bse.currency
+                                    THEN GREATEST(
+                                        CAST(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_equivalent_amount")) AS DECIMAL(18,2))
+                                        - COALESCE(CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.customer_penalty_amount")), "") AS DECIMAL(18,2)), bse.penalty_amount, 0)
+                                        + COALESCE(CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.agency_fee_refund_amount")), "") AS DECIMAL(18,2)), 0), 0)
+                                WHEN JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_currency")) = bse.currency
+                                    THEN GREATEST(
+                                        COALESCE(CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_source_amount")), "") AS DECIMAL(18,2)), 0)
+                                        - COALESCE(CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.customer_penalty_amount")), "") AS DECIMAL(18,2)), bse.penalty_amount, 0)
+                                        + COALESCE(CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.agency_fee_refund_amount")), "") AS DECIMAL(18,2)), 0), 0)
+                                ELSE 0
+                            END
                             ELSE 0
                         END) AS customer_refund_expected,
                         SUM(CASE
-                            WHEN bse.event_type = "refund" THEN COALESCE(
+                            WHEN bse.event_type = "refund" AND bse.customer_refund_amount > 0.005 THEN COALESCE(
                                 refund_detail.refund_source_amount,
                                 COALESCE(bse.customer_refund_amount, 0)
                             )
@@ -3587,6 +3697,7 @@ final class ReportRepository extends BaseRepository
                     COALESCE(supplier_payment_summary.supplier_paid_date, b.booking_date) AS account_supplier_paid_date,
                     COALESCE(refund_summary.customer_paid_amount, 0) AS refund_customer_paid_amount,
                     COALESCE(refund_summary.customer_penalty_amount, 0) AS refund_customer_penalty_amount,
+                    COALESCE(refund_summary.customer_final_charge_amount, 0) AS refund_customer_final_charge_amount,
                     COALESCE(refund_summary.customer_refund_expected, 0) AS refund_customer_refund_expected,
                     COALESCE(NULLIF(refund_summary.customer_refund_currency, ""), cri.currency) AS refund_customer_refund_currency,
                     COALESCE(refund_summary.customer_refund_posted, 0) AS refund_customer_refund_posted,
@@ -3594,7 +3705,10 @@ final class ReportRepository extends BaseRepository
                     COALESCE(refund_summary.supplier_refund_expected, 0) AS refund_supplier_refund_expected,
                     COALESCE(refund_summary.supplier_refund_received, 0) AS refund_supplier_refund_received,
                     COALESCE(refund_summary.refund_event_date, b.booking_date) AS refund_event_date,
-                    COALESCE(refund_summary.refund_event_count, 0) AS refund_event_count
+                    COALESCE(refund_summary.refund_event_count, 0) AS refund_event_count,
+                    ' . $this->preservedRefundValue('customer_refund_amount') . ' AS preserved_customer_refund_amount,
+                    ' . $this->preservedRefundValue('supplier_refund_amount') . ' AS preserved_supplier_refund_amount,
+                    ' . $this->preservedRefundValue('event_date') . ' AS preserved_refund_event_date
                 FROM customer_receivable_items cri
                 INNER JOIN bookings b ON b.booking_reference = cri.booking_reference
                 INNER JOIN branches br ON br.id = b.branch_id
@@ -3688,45 +3802,52 @@ final class ReportRepository extends BaseRepository
                             )
                             ELSE 0
                         END) AS customer_penalty_amount,
-                        MAX(CASE
+                        SUM(CASE
+                            WHEN bse.event_type = "cancel"
+                             AND COALESCE(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.settlement_currency")), ""), bse.currency) = bse.currency
+                                THEN COALESCE(CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.customer_final_charge_amount")), "") AS DECIMAL(18,2)), 0)
+                            ELSE 0
+                        END) AS customer_final_charge_amount,
+                        COALESCE(MAX(CASE
+                            WHEN bse.event_type = "refund" AND bse.customer_refund_amount > 0.005 THEN COALESCE(
+                                NULLIF(refund_detail.refund_currency, ""),
+                                NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.refund_detail.refund_currency")), ""),
+                                bse.currency
+                            )
+                            ELSE NULL
+                        END), MAX(CASE
                             WHEN bse.event_type = "cancel" THEN COALESCE(
                                 NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.available_customer_refund_credit_currency")), ""),
                                 NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.target_customer_refund_credit_currency")), ""),
                                 NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.customer_refund_basis_currency")), ""),
                                 NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.settlement_currency")), ""),
                                 NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.customer_penalty_currency")), ""),
-                                NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_currency")), ""),
-                                bse.currency
-                            )
-                            WHEN bse.event_type = "refund" THEN COALESCE(
-                                NULLIF(refund_detail.refund_currency, ""),
-                                NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.refund_detail.refund_currency")), ""),
                                 bse.currency
                             )
                             ELSE NULL
-                        END) AS customer_refund_currency,
+                        END)) AS customer_refund_currency,
                         SUM(CASE
-                            WHEN bse.event_type = "cancel" THEN GREATEST(
-                                COALESCE(
-                                    CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_source_amount")), "") AS DECIMAL(18,2)),
-                                    CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_amount")), "") AS DECIMAL(18,2)),
-                                    CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_credit")), "") AS DECIMAL(18,2)),
-                                    0
-                                ) - COALESCE(
-                                    CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.customer_penalty_source_amount")), "") AS DECIMAL(18,2)),
-                                    CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.customer_penalty_amount")), "") AS DECIMAL(18,2)),
-                                    bse.penalty_amount,
-                                    0
-                                ) + COALESCE(
-                                    CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.agency_fee_refund_amount")), "") AS DECIMAL(18,2)),
-                                    0
-                                ),
-                                0
-                            )
+                            WHEN bse.event_type = "cancel" THEN CASE
+                                WHEN JSON_EXTRACT(bse.payload_json, "$.target_customer_refund_credit") IS NOT NULL
+                                 AND COALESCE(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.target_customer_refund_credit_currency")), ""), bse.currency) = bse.currency
+                                    THEN CAST(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.target_customer_refund_credit")) AS DECIMAL(18,2))
+                                WHEN JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_equivalent_amount") IS NOT NULL
+                                 AND JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_equivalent_currency")) = bse.currency
+                                    THEN GREATEST(
+                                        CAST(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_equivalent_amount")) AS DECIMAL(18,2))
+                                        - COALESCE(CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.customer_penalty_amount")), "") AS DECIMAL(18,2)), bse.penalty_amount, 0)
+                                        + COALESCE(CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.agency_fee_refund_amount")), "") AS DECIMAL(18,2)), 0), 0)
+                                WHEN JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_currency")) = bse.currency
+                                    THEN GREATEST(
+                                        COALESCE(CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_source_amount")), "") AS DECIMAL(18,2)), 0)
+                                        - COALESCE(CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.customer_penalty_amount")), "") AS DECIMAL(18,2)), bse.penalty_amount, 0)
+                                        + COALESCE(CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.agency_fee_refund_amount")), "") AS DECIMAL(18,2)), 0), 0)
+                                ELSE 0
+                            END
                             ELSE 0
                         END) AS customer_refund_expected,
                         SUM(CASE
-                            WHEN bse.event_type = "refund" THEN COALESCE(
+                            WHEN bse.event_type = "refund" AND bse.customer_refund_amount > 0.005 THEN COALESCE(
                                 refund_detail.refund_source_amount,
                                 COALESCE(bse.customer_refund_amount, 0)
                             )
@@ -4385,6 +4506,8 @@ final class ReportRepository extends BaseRepository
             $params['supplier_receivable_business_source_id'] = $businessSourceId;
         }
 
+        $recordedSupplierCredit = $this->recordedSupplierCreditBookingExpression('bse');
+
         $sql = 'SELECT
                     b.branch_id,
                     br.name AS branch_name,
@@ -4410,9 +4533,15 @@ final class ReportRepository extends BaseRepository
                         bse.currency,
                         MAX(bse.event_date) AS event_date,
                         SUM(CASE WHEN bse.event_type = "cancel" THEN COALESCE(bse.supplier_credit_amount, 0) ELSE 0 END) AS supplier_credit_amount,
-                        SUM(CASE WHEN bse.event_type = "refund" THEN COALESCE(bse.supplier_refund_amount, 0) ELSE 0 END) AS supplier_refund_received,
+                        GREATEST(
+                            SUM(CASE WHEN bse.event_type = "refund" THEN COALESCE(bse.supplier_refund_amount, 0) ELSE 0 END),
+                            SUM(CASE WHEN bse.event_type = "cancel" THEN ' . $recordedSupplierCredit . ' ELSE 0 END)
+                        ) AS supplier_refund_received,
                         SUM(CASE WHEN bse.event_type = "cancel" THEN COALESCE(bse.supplier_credit_amount, 0) ELSE 0 END)
-                            - SUM(CASE WHEN bse.event_type = "refund" THEN COALESCE(bse.supplier_refund_amount, 0) ELSE 0 END) AS supplier_receivable_balance,
+                            - GREATEST(
+                                SUM(CASE WHEN bse.event_type = "refund" THEN COALESCE(bse.supplier_refund_amount, 0) ELSE 0 END),
+                                SUM(CASE WHEN bse.event_type = "cancel" THEN ' . $recordedSupplierCredit . ' ELSE 0 END)
+                            ) AS supplier_receivable_balance,
                         MAX(COALESCE(NULLIF(bse.reason, ""), NULLIF(bse.notes, ""))) AS reason
                     FROM booking_service_events bse
                     WHERE bse.event_status = "posted"
@@ -4460,6 +4589,8 @@ final class ReportRepository extends BaseRepository
             $params['payable_refund_business_source_id'] = $businessSourceId;
         }
 
+        $recordedSupplierCredit = $this->recordedSupplierCreditBookingExpression('bse');
+
         $sql = 'SELECT *
                 FROM (
                     SELECT
@@ -4488,7 +4619,7 @@ final class ReportRepository extends BaseRepository
                         refund_totals.supplier_penalty_amount,
                         refund_totals.supplier_refund_expected,
                         refund_totals.supplier_refund_received,
-                        ROUND(GREATEST(
+                        CASE WHEN refund_totals.supplier_credit_auto_recorded = 1 THEN 0.00 ELSE ROUND(GREATEST(
                             (
                                 CASE
                                     WHEN refund_totals.supplier_refund_expected > 0.005 THEN refund_totals.supplier_refund_expected
@@ -4496,7 +4627,7 @@ final class ReportRepository extends BaseRepository
                                 END
                             ) - refund_totals.supplier_refund_received,
                             0
-                        ), 2) AS supplier_refund_receivable,
+                        ), 2) END AS supplier_refund_receivable,
                         refund_totals.reason,
                         COALESCE(NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Customer") AS customer_name,
                         COALESCE(NULLIF(t_service.full_name, ""), NULLIF(bs.passenger_name_snapshot, ""), NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Passenger") AS passenger_name,
@@ -4508,6 +4639,9 @@ final class ReportRepository extends BaseRepository
                             bse.service_line_reference,
                             bse.currency,
                             MAX(bse.event_date) AS event_date,
+                            MAX(CASE WHEN bse.event_type = "cancel"
+                                AND JSON_EXTRACT(bse.payload_json, "$.supplier_credit_recording_version") IS NOT NULL
+                                THEN 1 ELSE 0 END) AS supplier_credit_auto_recorded,
                             SUM(CASE
                                 WHEN bse.event_type = "cancel" THEN COALESCE(
                                     CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.customer_refund_basis")), "") AS DECIMAL(18,2)),
@@ -4524,17 +4658,23 @@ final class ReportRepository extends BaseRepository
                                 ELSE 0
                             END) AS customer_penalty_amount,
                             SUM(CASE
-                                WHEN bse.event_type = "cancel" THEN GREATEST(
-                                    COALESCE(
-                                        CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_amount")), "") AS DECIMAL(18,2)),
-                                        CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_credit")), "") AS DECIMAL(18,2)),
+                                WHEN bse.event_type = "cancel" THEN COALESCE(
+                                    CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.available_customer_refund_credit_currency")) = bse.currency
+                                        THEN CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.available_customer_refund_credit")), "") AS DECIMAL(18,2)) END,
+                                    CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.target_customer_refund_credit_currency")) = bse.currency
+                                        THEN CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.target_customer_refund_credit")), "") AS DECIMAL(18,2)) END,
+                                    GREATEST(
+                                        COALESCE(
+                                            CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_amount")), "") AS DECIMAL(18,2)),
+                                            CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.expected_supplier_refund_credit")), "") AS DECIMAL(18,2)),
+                                            0
+                                        ) - COALESCE(
+                                            CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.customer_penalty_amount")), "") AS DECIMAL(18,2)),
+                                            bse.penalty_amount,
+                                            0
+                                        ),
                                         0
-                                    ) - COALESCE(
-                                        CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.customer_penalty_amount")), "") AS DECIMAL(18,2)),
-                                        bse.penalty_amount,
-                                        0
-                                    ),
-                                    0
+                                    )
                                 )
                                 ELSE 0
                             END) AS customer_refund_expected,
@@ -4561,7 +4701,11 @@ final class ReportRepository extends BaseRepository
                             SUM(CASE
                                 WHEN bse.event_type = "refund" THEN COALESCE(bse.supplier_refund_amount, 0)
                                 ELSE 0
-                            END) AS supplier_refund_received,
+                            END) AS supplier_refund_posted,
+                            GREATEST(
+                                SUM(CASE WHEN bse.event_type = "refund" THEN COALESCE(bse.supplier_refund_amount, 0) ELSE 0 END),
+                                SUM(CASE WHEN bse.event_type = "cancel" THEN ' . $recordedSupplierCredit . ' ELSE 0 END)
+                            ) AS supplier_refund_received,
                             MAX(COALESCE(NULLIF(bse.reason, ""), NULLIF(bse.notes, ""))) AS reason
                         FROM booking_service_events bse
                         WHERE bse.event_status = "posted"
@@ -4701,7 +4845,8 @@ final class ReportRepository extends BaseRepository
                     SELECT SUM(sa_refund.deposit_amount)
                     FROM supplier_advances sa_refund
                     WHERE sa_refund.source_supplier_payment_id = sp.id
-                      AND sa_refund.reference_no LIKE "REFUND-EVT-%"
+                      AND (sa_refund.reference_no LIKE "REFUND-EVT-%"
+                           OR sa_refund.reference_no LIKE "CANCEL-CREDIT-%")
                 ), 0.00),
                 0.00
             )';
@@ -4837,6 +4982,22 @@ final class ReportRepository extends BaseRepository
                       AND oa.allocated_amount > 0.005';
         }
 
+        $supplierRefundRetainedCondition = 'COALESCE(
+            NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.supplier_refund_payment_method")), ""),
+            NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.refund_detail.refund_payment_method")), "")
+        ) = "supplier_credit"';
+        $supplierRefundSourceCurrencyExpression = 'COALESCE(
+            NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.supplier_source_correction.source_currency")), ""),
+            NULLIF(refund_detail.refund_currency, ""),
+            bse.currency
+        )';
+        $supplierRefundSourceAmountExpression = 'COALESCE(
+            CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.supplier_source_correction.source_amount")), "") AS DECIMAL(18,2)),
+            refund_detail.refund_source_amount,
+            bse.supplier_refund_amount
+        )';
+        $crossCurrencyRetainedCondition = $supplierRefundRetainedCondition
+            . ' AND ' . $supplierRefundSourceCurrencyExpression . ' <> bse.currency';
         $supplierPenaltyExpression = 'COALESCE(CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.supplier_penalty_amount")), "") AS DECIMAL(18,2)), 0.00)';
         $supplierPenaltySourceExpression = 'COALESCE(
             CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.supplier_penalty_source_amount")), "") AS DECIMAL(18,2)),
@@ -4857,9 +5018,9 @@ final class ReportRepository extends BaseRepository
             bse.currency
         )';
         $supplierCostBasisExpression = 'COALESCE(
-            NULLIF((' . $supplierPenaltySourceExpression . ' + ' . $expectedSupplierRefundSourceExpression . '), 0.00),
             CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.supplier_cost_basis")), "") AS DECIMAL(18,2)),
             CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.prior_supplier_obligation_gross_amount")), "") AS DECIMAL(18,2)),
+            NULLIF((' . $supplierPenaltySourceExpression . ' + ' . $expectedSupplierRefundSourceExpression . '), 0.00),
             ' . $supplierPenaltyExpression . ' + ' . $expectedSupplierRefundExpression . ',
             0.00
         )';
@@ -4872,6 +5033,71 @@ final class ReportRepository extends BaseRepository
               AND bse_latest.event_type = "cancel"
               AND bse_latest.event_status = "posted"
         )';
+
+        $bookingAdvanceTransferSql = '';
+        if ($bookingReference !== '') {
+            // In a booking-only view the source advance is outside the filter.
+            // Close the booking when its posted cancellation returns value to
+            // the shared supplier advance. The full supplier ledger must not
+            // repeat this internal transfer.
+            $bookingAdvanceTransferSql = '
+
+                    UNION ALL
+
+                    SELECT
+                        b.branch_id,
+                        br.name AS branch_name,
+                        b.id AS booking_id,
+                        b.booking_reference,
+                        COALESCE(NULLIF(jel.service_line_reference, ""), so.service_line_reference) AS service_line_reference,
+                        je.currency,
+                        COALESCE(b.business_source_id, 0) AS business_source_id,
+                        COALESCE(bs_src.name, "Unassigned Account") AS business_source_name,
+                        s.id AS supplier_id,
+                        s.name AS supplier_name,
+                        COALESCE(NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Customer") AS customer_name,
+                        COALESCE(NULLIF(t.full_name, ""), NULLIF(bs.passenger_name_snapshot, ""), "Passenger") AS passenger_name,
+                        COALESCE(NULLIF(CONCAT_WS("/", NULLIF(sat.sector_from, ""), NULLIF(sat.sector_to, "")), ""), "N/A") AS route,
+                        COALESCE(NULLIF(sat.airline, ""), "N/A") AS airline,
+                        NULL AS supplier_payment_id,
+                        je.id AS journal_entry_id,
+                        je.source_reference,
+                        COALESCE(NULLIF(posted_by.name, ""), NULLIF(posted_by.username, ""), NULLIF(posted_by.email, ""), "System") AS posted_by_name,
+                        CONCAT("Returned to shared supplier advance; journal #", je.id) AS narration,
+                        je.entry_date AS ledger_date,
+                        0.00 AS debit_amount,
+                        jel.debit_amount AS credit_amount,
+                        "Supplier Credit Moved to Advance" AS entry_type,
+                        55 AS sort_order,
+                        CONCAT(LPAD(je.id, 12, "0"), "-", LPAD(jel.id, 12, "0")) AS sort_reference
+                    FROM journal_entries je
+                    INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+                    INNER JOIN chart_of_accounts coa ON coa.id = jel.account_id AND coa.code = "SUPPLIER_ADVANCES"
+                    INNER JOIN supplier_obligations so ON so.id = jel.supplier_obligation_id
+                    ' . $serviceContextSql . '
+                    LEFT JOIN users posted_by ON posted_by.id = je.posted_by_user_id
+                    WHERE je.source_type = "supplier_settlement_released"
+                      AND je.currency = so.currency
+                      AND je.currency = COALESCE(NULLIF(bs.cost_currency, ""), so.currency)
+                      AND je.booking_reference = so.booking_reference
+                      AND jel.debit_amount > 0.005
+                      AND EXISTS (
+                          SELECT 1
+                          FROM booking_service_events cancel_event
+                          WHERE cancel_event.booking_service_id = bs.id
+                            AND cancel_event.event_type = "cancel"
+                            AND cancel_event.event_status = "posted"
+                            AND JSON_CONTAINS(cancel_event.payload_json, CAST(je.id AS CHAR), "$.journal_entry_ids")
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM booking_service_events refund_event
+                          WHERE refund_event.booking_service_id = bs.id
+                            AND refund_event.event_type = "refund"
+                            AND refund_event.event_status = "posted"
+                            AND refund_event.supplier_refund_amount > 0.005
+                      )';
+        }
 
         $sql = 'SELECT
                     ledger_rows.branch_id,
@@ -5004,6 +5230,8 @@ final class ReportRepository extends BaseRepository
 
                     ' . $linkedPartyOffsetSql . '
 
+                    ' . $bookingAdvanceTransferSql . '
+
                     UNION ALL
 
                     SELECT
@@ -5098,7 +5326,7 @@ final class ReportRepository extends BaseRepository
                         b.id AS booking_id,
                         b.booking_reference,
                         bse.service_line_reference,
-                        COALESCE(NULLIF(refund_detail.refund_currency, ""), ' . $supplierLedgerCurrencyExpression . ') AS currency,
+                        ' . $supplierRefundSourceCurrencyExpression . ' AS currency,
                         COALESCE(b.business_source_id, 0) AS business_source_id,
                         COALESCE(bs_src.name, "Unassigned Account") AS business_source_name,
                         COALESCE(s.id, 0) AS supplier_id,
@@ -5111,15 +5339,22 @@ final class ReportRepository extends BaseRepository
                         NULL AS journal_entry_id,
                         NULL AS source_reference,
                         NULL AS posted_by_name,
-                        NULL AS narration,
+                        CASE WHEN ' . $crossCurrencyRetainedCondition . '
+                            THEN CONCAT(
+                                "Supplier credit ", ' . $supplierRefundSourceCurrencyExpression . ', " ",
+                                FORMAT(' . $supplierRefundSourceAmountExpression . ', 2),
+                                " is already reflected in the cancellation balance; no second credit was posted"
+                            )
+                            ELSE NULL
+                        END AS narration,
                         bse.event_date AS ledger_date,
                         0.00 AS debit_amount,
-                        COALESCE(refund_detail.refund_source_amount, bse.supplier_refund_amount) AS credit_amount,
+                        CASE WHEN ' . $crossCurrencyRetainedCondition . '
+                            THEN 0.00
+                            ELSE ' . $supplierRefundSourceAmountExpression . '
+                        END AS credit_amount,
                         CASE
-                            WHEN COALESCE(
-                                NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.supplier_refund_payment_method")), ""),
-                                NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.refund_detail.refund_payment_method")), "")
-                            ) = "supplier_credit"
+                            WHEN ' . $supplierRefundRetainedCondition . '
                                 THEN "Supplier Refund Retained as Credit"
                             ELSE "Supplier Refund Received"
                         END AS entry_type,
@@ -5137,7 +5372,7 @@ final class ReportRepository extends BaseRepository
                     LEFT JOIN travelers t ON t.id = bs.traveler_id
                     LEFT JOIN booking_service_refund_details refund_detail
                         ON refund_detail.service_event_id = bse.id
-                    WHERE bse.event_status = "posted"
+                    WHERE ' . $this->financialServiceEventStatusClause('bse') . '
                       AND bse.event_type = "refund"
                       AND bse.supplier_refund_amount > 0.005
                 ) AS ledger_rows
@@ -5145,6 +5380,11 @@ final class ReportRepository extends BaseRepository
                 ORDER BY ledger_rows.supplier_name ASC,
                          ledger_rows.currency ASC,
                          ledger_rows.ledger_date ASC,
+                         CASE
+                             WHEN ledger_rows.entry_type = "Supplier Advance / Overpayment"
+                              AND ledger_rows.booking_id = 0 THEN 0
+                             ELSE 1
+                         END ASC,
                          ledger_rows.booking_reference ASC,
                          ledger_rows.service_line_reference ASC,
                          ledger_rows.sort_order ASC,
@@ -5686,7 +5926,7 @@ final class ReportRepository extends BaseRepository
                 LEFT JOIN treasury_accounts refund_ta
                     ON refund_ta.id = refund_detail.treasury_account_id
                 WHERE b.branch_id IN (' . implode(', ', $eventBranchPlaceholders) . ')
-                  AND bse.event_status = "posted"'
+                  AND ' . $this->financialServiceEventStatusClause('bse')
                 . $eventDateSql . $eventBookingSql . '
                 UNION ALL
                 SELECT
@@ -6154,6 +6394,18 @@ final class ReportRepository extends BaseRepository
                         ), 0)
                     ELSE 0
                 END';
+    }
+
+    private function recordedSupplierCreditBookingExpression(string $eventAlias): string
+    {
+        $payload = $eventAlias . '.payload_json';
+        $recorded = 'CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(' . $payload . ', "$.supplier_credit_recorded_booking_amount")), "") AS DECIMAL(18,2))';
+        $releasedAdvance = 'CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(' . $payload . ', "$.released_supplier_advance_credit")), "") AS DECIMAL(18,2))';
+        $releasedSource = 'CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(' . $payload . ', "$.released_supplier_credit_source_amount")), "") AS DECIMAL(18,2))';
+        $releasedBooking = 'CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(' . $payload . ', "$.released_supplier_credit")), "") AS DECIMAL(18,2))';
+
+        return 'COALESCE(' . $recorded . ', ROUND(COALESCE(' . $releasedAdvance . ', 0)
+            * COALESCE(' . $releasedBooking . ', 0) / NULLIF(' . $releasedSource . ', 0), 2), 0)';
     }
 
     private function fetchRows(string $sql, array $params): array

@@ -25,18 +25,25 @@ $check(
 );
 $check(
     'Unposted customer refund is disabled and routed to Pay Refund',
-    str_contains($view, 'Customer refund has not been paid yet.')
+    str_contains($view, 'No cash refund has been paid to the customer.')
         && str_contains($view, 'data-open-refund-workflow="customer"')
         && str_contains($view, 'Pay Customer Refund')
         && str_contains($javascript, "preferredTab: 'refund'")
         && str_contains($javascript, 'customerRefundAmountField.disabled = !customerRefundPosted')
 );
 $check(
-    'Unposted supplier refund is disabled and routed to Pay Refund',
-    str_contains($view, 'Supplier refund has not been received yet.')
+    'Legacy unposted supplier credit is routed to the credit workflow',
+    str_contains($view, 'Supplier credit has not been recorded yet.')
         && str_contains($view, 'data-open-refund-workflow="supplier"')
-        && str_contains($view, 'Record Supplier Refund')
+        && str_contains($view, 'Record Supplier Credit')
+        && str_contains($view, 'data-service-supplier-credit-recorded-note')
         && str_contains($javascript, 'supplierRefundAmountField.disabled = !supplierRefundPosted')
+);
+$check(
+    'New supplier refund workflow offers supplier credit only',
+    str_contains($view, '$newSupplierRefundMethodOptions = [\'supplier_credit\' => \'Supplier Credit\'];')
+        && str_contains($view, 'foreach ($newSupplierRefundMethodOptions as $refundMethodValue => $refundMethodLabel)')
+        && str_contains($view, 'foreach ($supplierRefundMethodOptions as $refundMethodValue => $refundMethodLabel)')
 );
 $check(
     'Existing refund correction restores its saved method and treasury account',

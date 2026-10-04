@@ -213,6 +213,7 @@ $selectedTreasuryTransferType = (string) ($filters['treasuryTransferType'] ?? 'a
 $selectedTreasuryTransferStatus = (string) ($filters['treasuryTransferStatus'] ?? 'all');
 $selectedSourceTreasuryAccountId = (int) ($filters['sourceTreasuryAccountId'] ?? 0);
 $selectedDestinationTreasuryAccountId = (int) ($filters['destinationTreasuryAccountId'] ?? 0);
+$selectedTreasuryAccountId = (int) ($filters['treasuryAccountId'] ?? 0);
 $selectedSourceCurrency = (string) ($filters['sourceCurrency'] ?? '');
 $selectedDestinationCurrency = (string) ($filters['destinationCurrency'] ?? '');
 $selectedTreasuryTransferSearch = (string) ($filters['treasuryTransferSearch'] ?? '');
@@ -225,6 +226,13 @@ $selectedBusinessSourceLabel = 'All Accounts';
 $selectedExpenseCategoryLabel = 'All Categories';
 $selectedCustomerLabel = 'All Customers';
 $selectedSupplierLabel = 'All Suppliers';
+$selectedTreasuryAccountLabel = 'All Treasury Accounts';
+foreach ($treasuryAccountOptions as $treasuryAccountOption) {
+    if ((int) ($treasuryAccountOption['id'] ?? 0) === $selectedTreasuryAccountId && $selectedTreasuryAccountId > 0) {
+        $selectedTreasuryAccountLabel = (string) ($treasuryAccountOption['account_name'] ?? 'Treasury Account');
+        break;
+    }
+}
 
 if ($selectedBranchId > 0) {
     foreach ($branchOptions as $branchOption) {
@@ -394,6 +402,7 @@ if ($selectedReport === 'receivable_aging') {
     $reportContextLine = 'Period: ' . $reportPeriodLabel
         . ' | Branch: ' . $selectedBranchLabel
         . ' | Currency: ' . $currencyLabel
+        . ($selectedReport === 'cash_bank_ledger' ? ' | Treasury account: ' . $selectedTreasuryAccountLabel : '')
         . ($selectedReport === 'cash_bank_ledger' ? ' | Source: ' . $sourceLabel : '')
         . ($selectedReport !== 'cash_bank_ledger'
             ? ' | Account: ' . $selectedBusinessSourceLabel . ' | Supplier: ' . $selectedSupplierLabel
@@ -2305,6 +2314,18 @@ if ($selectedReport === 'receivable_aging') {
 
 <?php if ($selectedReport === 'cash_bank_ledger'): ?>
             <label class="station-field span-2">
+                <span>Cash / Bank Account</span>
+                <select name="treasury_account_id" data-report-filter="immediate">
+                    <option value="0" <?= $selectedTreasuryAccountId <= 0 ? 'selected' : '' ?>>All Treasury Accounts</option>
+                    <?php foreach ($treasuryAccountOptions as $accountOption): ?>
+                        <?php $accountId = (int) ($accountOption['id'] ?? 0); ?>
+                        <option value="<?= $accountId ?>" <?= $selectedTreasuryAccountId === $accountId ? 'selected' : '' ?>>
+                            <?= e((string) ($accountOption['account_name'] ?? 'Account') . ' / ' . (string) ($accountOption['currency'] ?? '') . ' / ' . (string) ($accountOption['branch_name'] ?? '')) ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+            </label>
+            <label class="station-field span-2">
                 <span>Source</span>
                 <select name="treasury_source_type" data-report-filter="immediate">
                     <?php foreach ($treasurySourceTypeOptions as $sourceKey => $sourceLabel): ?>
@@ -2511,6 +2532,12 @@ if ($selectedReport === 'receivable_aging') {
     <?php endif; ?>
     <?php if ($selectedReport === 'reversed_linked_adjustments'): ?>
         <p class="report-context-line"><?= e($reportContextLine) ?> Amounts are full adjustment totals, not individual invoice shares.</p>
+    <?php endif; ?>
+    <?php if ($selectedReport === 'cash_bank_ledger'): ?>
+        <p class="report-context-line">Money In and Money Out are posted journal movements. Account Balance includes the opening balance and earlier posted entries, even when filters hide them.</p>
+        <?php if ((int) ($unjournaledTreasuryTransferCount ?? 0) > 0): ?>
+            <p class="report-context-line">Attention: <?= e((string) $unjournaledTreasuryTransferCount) ?> historical transfer(s) without cash journals are excluded pending verification.</p>
+        <?php endif; ?>
     <?php endif; ?>
     <?php if ($selectedReport === 'receivable_aging' && $receivableAgingSummaryRows !== []): ?>
         <div class="dense-table-wrap customer-ledger-summary-wrap">

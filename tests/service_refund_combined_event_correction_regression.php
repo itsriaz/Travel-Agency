@@ -583,7 +583,9 @@ try {
     );
 
     $refundRowsBeforeCurrencyCorrection = $postedRefundRows();
-    $serviceWorkspace->correctFinancials([
+    $currencyCorrectionBlocked = false;
+    try {
+        $serviceWorkspace->correctFinancials([
         'booking_id' => $bookingId,
         'service_id' => $serviceId,
         'corrected_invoice_currency' => 'PKR',
@@ -593,11 +595,14 @@ try {
         'financial_correction_date' => $today,
         'financial_correction_reason' => 'Verify supplier cost currency edits cannot alter posted refunds',
         'financial_correction_note' => 'Rollback-only refund protection regression.',
-    ], $actorUserId, $accessibleBranchIds);
+        ], $actorUserId, $accessibleBranchIds);
+    } catch (RuntimeException $exception) {
+        $currencyCorrectionBlocked = str_contains($exception->getMessage(), 'posted cancellation settlement');
+    }
     $refundRowsAfterCurrencyCorrection = $postedRefundRows();
     $check(
-        'Supplier cost currency correction preserves posted refund identities, currencies, amounts, and journals',
-        $refundRowsAfterCurrencyCorrection === $refundRowsBeforeCurrencyCorrection,
+        'Supplier cost currency correction is blocked after settlement and preserves posted refunds',
+        $currencyCorrectionBlocked && $refundRowsAfterCurrencyCorrection === $refundRowsBeforeCurrencyCorrection,
         json_encode([
             'before' => $refundRowsBeforeCurrencyCorrection,
             'after' => $refundRowsAfterCurrencyCorrection,

@@ -6,6 +6,13 @@ namespace App\Repositories;
 
 final class BookingServiceRepository extends BaseRepository
 {
+    public function lockForWorkflow(int $serviceId): ?array
+    {
+        $statement = $this->db->prepare('SELECT * FROM booking_services WHERE id = :id FOR UPDATE');
+        $statement->execute(['id' => $serviceId]);
+        return $statement->fetch() ?: null;
+    }
+
     private const SUBTYPE_TABLES = [
         'air ticket' => 'service_air_ticket',
         'visa' => 'service_visa',

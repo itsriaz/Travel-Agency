@@ -11,18 +11,19 @@ final class SupplierLedgerService extends Service
 {
     public function report(array $filters, array $branchIds): array
     {
+        $currency = strtoupper(trim((string) ($filters['currency'] ?? '')));
         $rows = (new ReportRepository($this->app))->supplierLedger(
             $branchIds,
             $filters['dateFrom'] ?? null,
             $filters['dateTo'] ?? null,
-            (string) ($filters['currency'] ?? ''),
+            '',
             (string) ($filters['airline'] ?? ''),
             (int) ($filters['supplierId'] ?? 0),
             (int) ($filters['businessSourceId'] ?? 0),
             (string) ($filters['bookingReference'] ?? '')
         );
 
-        return $this->buildReport($rows);
+        return $this->buildReport($rows, $currency, trim((string) ($filters['bookingReference'] ?? '')) !== '');
     }
 
     /**
@@ -33,20 +34,16 @@ final class SupplierLedgerService extends Service
      * - Debit: supplier invoice, adjustment, or refund/value received.
      * - Credit: payment/value given to the supplier.
      */
-    public function buildReport(array $rows): array
+    public function buildReport(array $rows, string $currencyFilter = '', bool $bookingScoped = false): array
     {
-        // Applying an existing supplier advance is an allocation between the
-        // supplier-advance asset and AP control; it is not a second payment to
-        // the supplier. The original supplier payment already appears once in
-        // this ledger, while each later invoice consumes that balance. Keeping
-        // the AP application row here would therefore restore the amount just
-        // consumed by the invoice and overstate the remaining advance.
-        // Allocation detail remains available in the Supplier Advance Ledger.
+        // The full supplier account already includes the original advance payment.
+        // A booking-only view excludes that payment, so it needs the application
+        // row to show how its invoice was settled.
         $rows = array_values(array_filter(
             $rows,
             static fn (mixed $row): bool => ! is_array($row)
                 || (
-                    (string) ($row['entry_type'] ?? '') !== 'Advance Applied'
+                    ($bookingScoped || (string) ($row['entry_type'] ?? '') !== 'Advance Applied')
                     && ! (
                         (string) ($row['entry_type'] ?? '') === 'Payable Adjustment'
                         && (
@@ -60,10 +57,19 @@ final class SupplierLedgerService extends Service
         $rows = $this->consolidateSupplierPayableState($rows);
         $rows = $this->dropStaleAdvanceAdjustmentsAfterCurrencyCorrection($rows);
         $rows = $this->reconcileHistoricalCancellationGross($rows);
+        $currencyFilter = strtoupper(trim($currencyFilter));
+        if ($currencyFilter !== '') {
+            $rows = array_values(array_filter(
+                $rows,
+                fn (mixed $row): bool => is_array($row) && $this->currency($row) === $currencyFilter
+            ));
+        }
         $paymentRepository = new SupplierRepository($this->app);
         $paymentCache = [];
         $debitSummary = [];
         $creditSummary = [];
+        $advanceUsedSummary = [];
+        $advanceReturnedSummary = [];
         $runningBalances = [];
         $reportRows = [];
 
@@ -125,6 +131,10 @@ final class SupplierLedgerService extends Service
                 && $paymentStatus === 'void'
                 && $sourceEntryType === 'Supplier Payment Reversed';
             if ($isVoidedPaymentReversal) {
+                continue;
+            }
+            if ($bookingScoped && $isVoidedPayment) {
+                // Keep voided payment history in the full account, not a booking's financial movements.
                 continue;
             }
             $entryType = $this->particular($row, $sourceEntryType);
@@ -231,6 +241,16 @@ final class SupplierLedgerService extends Service
                 case 'Customer Paid Supplier':
                     $creditSummary[$currency] = round(($creditSummary[$currency] ?? 0.0) + $effectiveCreditAmount, 2);
                     break;
+                case 'Advance Applied':
+                    if ($bookingScoped) {
+                        $advanceUsedSummary[$currency] = round(($advanceUsedSummary[$currency] ?? 0.0) + $effectiveCreditAmount, 2);
+                    }
+                    break;
+                case 'Supplier Credit Moved to Advance':
+                    if ($bookingScoped) {
+                        $advanceReturnedSummary[$currency] = round(($advanceReturnedSummary[$currency] ?? 0.0) + $effectiveDebitAmount, 2);
+                    }
+                    break;
             }
         }
 
@@ -247,9 +267,11 @@ final class SupplierLedgerService extends Service
         return [
             'rows' => $reportRows,
             'summaryCards' => array_merge(
-                $this->summaryCards('Supplier Debit', $debitSummary),
-                $this->summaryCards('Supplier Credit', $creditSummary),
-                $this->balanceSummaryCards($balanceSummary)
+                $this->summaryCards('Supplier Debit', $debitSummary, $currencyFilter),
+                $this->summaryCards('Gross Paid to Supplier', $creditSummary, $currencyFilter),
+                $advanceUsedSummary !== [] ? $this->summaryCards('Advance Used', $advanceUsedSummary, $currencyFilter) : [],
+                $advanceReturnedSummary !== [] ? $this->summaryCards('Returned to Advance', $advanceReturnedSummary, $currencyFilter) : [],
+                $this->balanceSummaryCards($balanceSummary, $currencyFilter)
             ),
         ];
     }
@@ -270,6 +292,7 @@ final class SupplierLedgerService extends Service
             'Supplier Penalty Retained' => 'Supplier cancellation charge',
             'Supplier Refund Received' => 'Supplier refund received',
             'Supplier Refund Retained as Credit' => 'Supplier refund retained as supplier credit',
+            'Supplier Credit Moved to Advance' => 'Supplier refund moved to advance',
             'Advance Applied' => 'Supplier advance applied',
             'Refund Advance Applied' => 'Supplier refund credit applied',
             'Advance Adjustment' => 'Supplier advance adjustment',
@@ -325,6 +348,18 @@ final class SupplierLedgerService extends Service
             ));
             if ($allocationDerivedIndexes !== []) {
                 if ($liveAllocationIds === []) {
+                    if (! array_key_exists($paymentId, $paymentCache)) {
+                        $paymentCache[$paymentId] = $paymentRepository->findSupplierPaymentById($paymentId);
+                    }
+                    $convertedToAdvance = round((float) ($paymentCache[$paymentId]['converted_advance_amount'] ?? 0), 2);
+                    // Cancellation can remove the live allocation while moving
+                    // that same paid money to reusable supplier credit. Its
+                    // historical payment row must remain in the ledger.
+                    if ($convertedToAdvance > 0.005) {
+                        $preferredAllocationKeeperIndex = $allocationDerivedIndexes[0];
+                    }
+                }
+                if ($liveAllocationIds === [] && $preferredAllocationKeeperIndex === null) {
                     foreach ($allocationDerivedIndexes as $index) {
                         unset($rows[$index]);
                     }
@@ -335,7 +370,7 @@ final class SupplierLedgerService extends Service
                     if ($indexes === []) {
                         continue;
                     }
-                } else {
+                } elseif ($liveAllocationIds !== []) {
                     $matchedAllocationIndexes = [];
                     foreach ($allocationDerivedIndexes as $index) {
                         $allocationId = $this->allocationIdFromPaymentRow($rows[$index] ?? []);
@@ -716,10 +751,11 @@ final class SupplierLedgerService extends Service
         ]);
     }
 
-    private function summaryCards(string $labelPrefix, array $totals): array
+    private function summaryCards(string $labelPrefix, array $totals, string $fallbackCurrency = ''): array
     {
         if ($totals === []) {
-            return [['label' => $labelPrefix, 'value' => 'PKR 0.00']];
+            $currency = $fallbackCurrency !== '' ? $fallbackCurrency : 'PKR';
+            return [['label' => $labelPrefix . ' / ' . $currency, 'value' => $currency . ' 0.00']];
         }
 
         $cards = [];
@@ -733,10 +769,11 @@ final class SupplierLedgerService extends Service
         return $cards;
     }
 
-    private function balanceSummaryCards(array $totals): array
+    private function balanceSummaryCards(array $totals, string $fallbackCurrency = ''): array
     {
         if ($totals === []) {
-            return [['label' => 'Supplier Balance', 'value' => 'PKR 0.00']];
+            $currency = $fallbackCurrency !== '' ? $fallbackCurrency : 'PKR';
+            return [['label' => 'Supplier Balance / ' . $currency, 'value' => $currency . ' 0.00']];
         }
 
         $cards = [];

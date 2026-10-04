@@ -55,6 +55,10 @@ try {
                 sp.currency,
                 sp.paid_amount,
                 sp.allocated_amount,
+                sp.unallocated_amount,
+                sp.returned_amount,
+                sp.converted_advance_amount,
+                sp.converted_advance_id,
                 sp.charges_amount,
                 sp.status,
                 sp.treasury_account_id,
@@ -116,7 +120,7 @@ try {
         return $statement->fetchAll(PDO::FETCH_ASSOC) ?: [];
     };
 
-    $buildPlan = static function (array $candidates) use ($journalEvidence, $expectedIds, $expectedTotal, $treasury): array {
+    $buildPlan = static function (array $candidates) use ($db, $journalEvidence, $expectedIds, $expectedTotal, $treasury): array {
         if ($candidates === []) {
             return [];
         }
@@ -131,6 +135,24 @@ try {
             $amount = round((float) ($row['paid_amount'] ?? 0) + (float) ($row['charges_amount'] ?? 0), 2);
             $evidence = $journalEvidence($id, (int) ($row['source_ledger_account_id'] ?? 0));
             $expectedPaymentNo = sprintf('SPAY-%06d', $id - 12);
+            $allocationVerified = abs((float) ($row['paid_amount'] ?? 0) - (float) ($row['allocated_amount'] ?? 0)) <= 0.005;
+            if ($id === 180) {
+                $advanceStatement = $db->prepare('SELECT id, supplier_id, branch_id, currency, deposit_amount
+                    FROM supplier_advances WHERE source_supplier_payment_id = ? ORDER BY id');
+                $advanceStatement->execute([$id]);
+                $advances = $advanceStatement->fetchAll(PDO::FETCH_ASSOC) ?: [];
+                $allocationVerified = abs((float) ($row['paid_amount'] ?? 0) - 500000.0) <= 0.005
+                    && abs((float) ($row['allocated_amount'] ?? 0) - 449758.0) <= 0.005
+                    && abs((float) ($row['converted_advance_amount'] ?? 0) - 50242.0) <= 0.005
+                    && abs((float) ($row['unallocated_amount'] ?? 0)) <= 0.005
+                    && abs((float) ($row['returned_amount'] ?? 0)) <= 0.005
+                    && count($advances) === 1
+                    && (int) ($advances[0]['id'] ?? 0) === (int) ($row['converted_advance_id'] ?? 0)
+                    && (int) ($advances[0]['supplier_id'] ?? 0) === 413
+                    && (int) ($advances[0]['branch_id'] ?? 0) === 2
+                    && (string) ($advances[0]['currency'] ?? '') === 'PKR'
+                    && abs((float) ($advances[0]['deposit_amount'] ?? 0) - 50242.0) <= 0.005;
+            }
             if ((int) ($row['supplier_id'] ?? 0) !== 413
                 || (string) ($row['supplier_code'] ?? '') !== 'SUP-00012'
                 || (string) ($row['supplier_name'] ?? '') !== 'AL SAUDIA AED'
@@ -145,9 +167,9 @@ try {
                 || (string) ($row['booking_reference'] ?? '') !== 'GLOBAL'
                 || (string) ($row['payment_no'] ?? '') !== $expectedPaymentNo
                 || abs((float) ($row['charges_amount'] ?? 0)) > 0.005
-                || abs((float) ($row['paid_amount'] ?? 0) - (float) ($row['allocated_amount'] ?? 0)) > 0.005
+                || ! $allocationVerified
                 || count($evidence) !== 1) {
-                throw new RuntimeException('Payment ' . $id . ' differs from the reviewed AL SAUDIA repair scope.');
+                throw new RuntimeException('Payment ' . $id . ' differs from the reviewed AL SAUDIA AED repair scope.');
             }
 
             $journal = $evidence[0];
@@ -179,7 +201,7 @@ try {
         $balanceBefore = $treasury->currentBalanceForAccountId(33);
 
         return [
-            'repair' => 'AL SAUDIA cross-branch Swat PKR treasury funding',
+            'repair' => 'AL SAUDIA AED cross-branch Swat PKR treasury funding',
             'payment_count' => count($rows),
             'payment_ids' => array_column($rows, 'payment_id'),
             'total_PKR' => $total,

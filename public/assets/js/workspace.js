@@ -143,6 +143,19 @@ document.addEventListener('DOMContentLoaded', () => {
     const paymentHistorySummary = station.querySelector('[data-payment-history-summary]');
     const paymentHistoryReceiptsBody = station.querySelector('[data-payment-history-receipts-body]');
     const paymentHistoryAllocationsBody = station.querySelector('[data-payment-history-allocations-body]');
+    const paymentReceiptManagerModal = station.querySelector('[data-payment-receipt-manager-modal]');
+    const paymentReceiptManagerCloseButtons = Array.from(station.querySelectorAll('[data-payment-receipt-manager-close]'));
+    const paymentReceiptManagerSubtitle = station.querySelector('[data-payment-receipt-manager-subtitle]');
+    const paymentReceiptManagerSummary = station.querySelector('[data-payment-receipt-manager-summary]');
+    const paymentReceiptManagerFeedback = station.querySelector('[data-payment-receipt-manager-feedback]');
+    const paymentReceiptManagerNotesSection = station.querySelector('[data-payment-receipt-notes-section]');
+    const paymentReceiptManagerCorrectionSection = station.querySelector('[data-payment-receipt-correction-section]');
+    const paymentReceiptManagerVoidSection = station.querySelector('[data-payment-receipt-void-section]');
+    const paymentReceiptManagerVoided = station.querySelector('[data-payment-receipt-manager-voided]');
+    const paymentReceiptManagerRecreate = station.querySelector('[data-payment-receipt-manager-recreate]');
+    const paymentReceiptManagerNotesForm = station.querySelector('[data-payment-receipt-notes-form]');
+    const paymentReceiptManagerCorrectionForm = station.querySelector('[data-payment-receipt-correction-form]');
+    const paymentReceiptManagerVoidForm = station.querySelector('[data-payment-receipt-void-form]');
     const customerDuesModal = station.querySelector('[data-customer-dues-modal]');
     const customerDuesCloseButtons = Array.from(station.querySelectorAll('[data-customer-dues-close]'));
     const customerDuesSearchInput = station.querySelector('[data-customer-dues-search]');
@@ -290,6 +303,49 @@ document.addEventListener('DOMContentLoaded', () => {
     const serviceWorkflowPanels = Array.from(station.querySelectorAll('[data-service-workflow-panel]'));
     const serviceWorkflowTabHelp = station.querySelector('[data-service-workflow-tab-help]');
     const servicePenaltyRefundModal = station.querySelector('[data-service-penalty-refund-modal]');
+    const refundRecoveryModal = station.querySelector('[data-refund-recovery-modal]');
+    const refundRecoveryOpen = station.querySelector('[data-refund-recovery-open]');
+    const refundRecoveryRestore = station.querySelector('form[data-refund-recovery-restore]');
+    const refundRecoveryHistory = station.querySelector('[data-refund-recovery-history]');
+
+    const syncRefundRecovery = (serviceLine, canManage) => {
+        const history = Array.isArray(serviceLine.refundRecoveryHistory) ? serviceLine.refundRecoveryHistory : [];
+        if ((!canManage || history.length === 0) && refundRecoveryModal instanceof HTMLElement) {
+            refundRecoveryModal.hidden = true;
+            refundRecoveryModal.setAttribute('aria-hidden', 'true');
+        }
+        if (refundRecoveryOpen instanceof HTMLButtonElement) { refundRecoveryOpen.disabled = !canManage || history.length === 0; }
+        if (refundRecoveryRestore instanceof HTMLFormElement) {
+            refundRecoveryRestore.hidden = !canManage || !serviceLine.refundRecoveryAuditId;
+            refundRecoveryRestore.elements.namedItem('service_id').value = String(serviceLine.serviceId || 0);
+            refundRecoveryRestore.elements.namedItem('reversal_audit_id').value = String(serviceLine.refundRecoveryAuditId || 0);
+            refundRecoveryRestore.elements.namedItem('restore_confirmed').value = '0';
+            refundRecoveryRestore.elements.namedItem('restore_reason').value = '';
+            refundRecoveryRestore.querySelector('button[type="submit"]').disabled = false;
+        }
+        if (!(refundRecoveryHistory instanceof HTMLElement)) { return; }
+        refundRecoveryHistory.replaceChildren();
+        for (const row of history) {
+            const item = document.createElement('article');
+            item.className = 'refund-recovery-history-item';
+            const heading = document.createElement('strong');
+            heading.textContent = `Audit #${row.id}: ${row.event_name === 'service.refund.complete_restored' ? 'Refund Restored' : 'Complete Reversal'}${row.reversal_audit_id ? ` (reversal #${row.reversal_audit_id})` : ''}`;
+            const detail = document.createElement('p');
+            detail.textContent = `${row.created_at} | ${row.actor_name || 'Recorded user'} | ${row.reason || ''}`;
+            item.append(heading, detail);
+            if (row.event_name === 'service.refund.complete_undo') {
+                const money = document.createElement('p');
+                money.textContent = `Actual customer money: ${row.customer_money === 'moved' ? 'preserved' : 'entry reversed'}. Actual supplier money: ${row.supplier_money === 'moved' ? 'preserved' : 'entry reversed'}.`;
+                item.append(money);
+            }
+            for (const change of (Array.isArray(row.summary) ? row.summary : [])) {
+                const line = document.createElement('p');
+                line.textContent = `${change.label} (${change.currency}): ${change.before} -> ${change.after}`;
+                item.append(line);
+            }
+            refundRecoveryHistory.append(item);
+        }
+    };
     const servicePenaltyRefundCloseButtons = Array.from(station.querySelectorAll('[data-service-penalty-refund-close]'));
     const servicePenaltyRefundOpenButtons = Array.from(station.querySelectorAll('[data-workspace-action="service-penalty-refund"]'));
     const supplierSettlementModal = station.querySelector('[data-supplier-settlement-modal]');
@@ -438,6 +494,18 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             if (field.type === 'hidden') {
+                return;
+            }
+
+            // Section A's unused fields stay read-only even when starting a new invoice.
+            if (field.closest('.legacy-fin-block--segregation')
+                && field.name !== 'sale_price' && field.name !== 'cost_currency') {
+                if (field instanceof HTMLSelectElement) {
+                    field.disabled = true;
+                } else {
+                    field.readOnly = true;
+                    field.classList.add('is-readonly');
+                }
                 return;
             }
 
@@ -5096,6 +5164,136 @@ document.addEventListener('DOMContentLoaded', () => {
         field.addEventListener('change', markDirty);
     };
 
+    // Keep this pure calculation aligned with CancellationRefundCalculator::customerSummary.
+    const calculateCancellationCustomerRefund = (input) => {
+        const amounts = {};
+        for (const key of ['invoice', 'settled', 'expected', 'penalty', 'fee_refund', 'paid']) {
+            const value = Number(input[key] ?? 0);
+            if (!Number.isFinite(value) || value < 0) {
+                throw new Error('Cancellation amounts must be valid non-negative values in one currency.');
+            }
+            amounts[key] = Math.round((value + Number.EPSILON) * 100) / 100;
+        }
+        const money = (value) => Math.round((value + Number.EPSILON) * 100) / 100;
+        const charge = money(Math.max(amounts.invoice - amounts.expected + amounts.penalty - amounts.fee_refund, 0));
+        const entitlement = money(Math.max(amounts.settled - charge, 0));
+        return {
+            final_charge: charge, entitlement, paid: amounts.paid,
+            remaining: money(Math.max(entitlement - amounts.paid, 0)),
+            overpaid: money(Math.max(amounts.paid - entitlement, 0)),
+        };
+    };
+
+    const settlementCustomerSummary = (serviceLine, expected, penalty, feeRefund) => {
+        // A draft edit is not a posted settlement. Do not advertise a second cash refund.
+        if (serviceLine?.latestCancelFinanciallySettled) {
+            const saved = serviceLine.customerRefundSummary || {};
+            const feeDelta = Math.round(feeRefund) - toNumber(serviceLine.latestCancelAgencyFeeRefundAmount || 0);
+            const canPreviewFee = saved.basis_verified === true && toNumber(saved.paid || 0) === 0
+                && !serviceLine.latestCustomerRefundEventId && !serviceLine.latestSupplierRefundEventId
+                && (saved.currency || serviceLine.currency) === serviceLine.currency;
+            const entitlement = canPreviewFee ? Math.max(Math.min(
+                toNumber(saved.entitlement || 0) + feeDelta,
+                toNumber(serviceLine.latestCancelCustomerRefundBasisAmount || 0)
+            ), 0) : toNumber(saved.entitlement || 0);
+            return {
+                ...saved,
+                entitlement,
+                currency: saved.currency || serviceLine.customerRefundTruthCurrency || serviceLine.currency,
+                paid: Math.max(toNumber(saved.paid ?? serviceLine.customerRefundReceivedAmount ?? 0), 0),
+                remaining: canPreviewFee && feeDelta !== 0 ? entitlement
+                    : Math.max(toNumber(saved.remaining ?? serviceLine.customerRefundableCreditAmount ?? 0), 0),
+                draft: canPreviewFee && feeDelta !== 0,
+                saved: true,
+            };
+        }
+        return {
+            ...calculateCancellationCustomerRefund({
+                invoice: toNumber(serviceLine?.currentCustomerInvoiceAmount ?? serviceLine?.finalSalePrice ?? 0),
+                settled: toNumber(serviceLine?.currentCustomerReceivedAmount ?? 0),
+                expected: Math.round(expected), penalty: Math.round(penalty), fee_refund: Math.round(feeRefund), paid: 0,
+            }),
+            currency: serviceLine?.currency || 'PKR', saved: false,
+        };
+    };
+
+    const renderSettlementCustomerSummary = (form, summary) => {
+        const field = form.querySelector('[data-settlement-customer-refund-due]');
+        const label = form.querySelector('[data-settlement-money-label="customer_refund_due"]');
+        if (field instanceof HTMLInputElement) {
+            field.value = formatNumberInputValue(Math.round(summary.remaining), 0);
+            field.dataset.refundCurrency = summary.currency;
+        }
+        if (label instanceof HTMLElement) {
+            label.textContent = `Remaining Customer Refund Due (${summary.currency})`;
+        }
+        return `Customer refund entitlement: ${formatCurrencyAmount(summary.currency, summary.entitlement || 0)}. Cash refunded: ${formatCurrencyAmount(summary.currency, summary.paid)}. Credit still available: ${formatCurrencyAmount(summary.currency, summary.remaining)}.${summary.draft ? ' Service-charge refund preview: save the correction before paying. No money has been posted.' : summary.saved ? ' These are saved balances; editing settlement fields does not post or reverse money.' : ''}${summary.saved && summary.basis_verified === false ? ' Historical settlement basis needs reconciliation; the posted refund is preserved.' : ''}`;
+    };
+
+    const settlementCustomerRefundStatusText = (serviceLine, summary) => {
+        if (summary.saved && toNumber(summary.entitlement || 0) <= 0 && toNumber(summary.paid || 0) <= 0) {
+            if (summary.basis_verified && toNumber(serviceLine?.latestCancelCustomerRefundBasisAmount || 0) <= 0
+                && toNumber(serviceLine?.currentCustomerReceivedAmount || 0) <= 0) {
+                return 'No customer payment is linked to this invoice. Confirm and link the payment before paying a refund.';
+            }
+            return 'No refundable customer balance is recorded. Review the payment and cancellation before paying a refund.';
+        }
+        return 'No cash refund has been paid to the customer.';
+    };
+
+    const settlementSupplierPenaltySource = (serviceLine, invoiceCurrency, refundCurrency, refundAmount, refundRate) => {
+        const currency = String(serviceLine?.costCurrency || serviceLine?.supplierTruthCurrency || invoiceCurrency).toUpperCase();
+        const cost = toNumber(serviceLine?.purchaseCost ?? serviceLine?.supplierCost ?? 0);
+        if (!Number.isFinite(cost) || !Number.isFinite(refundAmount) || cost < 0 || refundAmount < 0) {
+            return { currency, amount: null };
+        }
+        let sourceRefund = refundAmount;
+        if (refundCurrency !== currency && refundAmount > 0) {
+            const costRate = currency === invoiceCurrency ? 1 : toNumber(serviceLine?.pricingExchangeRate || 0);
+            const sourceRate = refundCurrency === invoiceCurrency ? 1 : refundRate;
+            if (!Number.isFinite(costRate) || !Number.isFinite(sourceRate) || costRate <= 0.00000001 || sourceRate <= 0.00000001) {
+                return { currency, amount: null };
+            }
+            sourceRefund = refundAmount * sourceRate / costRate;
+        }
+        return { currency, amount: sourceRefund > cost + 0.005 ? null : Math.round(cost - sourceRefund) };
+    };
+
+    const supplierRefundEquivalentRate = (source, target, booking, amount, equivalent, penaltyRate) => {
+        if (source === booking) return 1;
+        if (amount === 0) return 0;
+        const targetRate = target === booking ? 1 : penaltyRate;
+        return Number.isFinite(targetRate) && targetRate > 0 && Number.isFinite(equivalent) && equivalent > 0
+            ? roundExchangeRate(equivalent / amount * targetRate) : 0;
+    };
+
+    const supplierRefundRecordedRate = (line, source, target, booking, penalty) => {
+        const rate = toNumber(line?.pricingExchangeRate || 0);
+        return source !== target && target === booking && line?.currency === booking && line?.costCurrency === source
+            && toNumber(penalty) === 0 && Number.isFinite(rate) && rate > 0.00000001 ? rate : 0;
+    };
+
+    const settlementExpectedRefundError = (state, supplierCurrency, supplierSourceCost) => {
+        const fieldState = state?.expectedSupplierRefundCurrencyState;
+        if (!fieldState) {
+            return '';
+        }
+        const amount = toNumber(fieldState.amountField.value || 0);
+        let message = '';
+        const equivalent = state.equivalentField;
+        if (equivalent && !equivalent.disabled && amount > 0
+            && (!equivalent.value.trim() || !Number.isFinite(Number(equivalent.value)) || Number(equivalent.value) <= 0 || !Number.isInteger(Number(equivalent.value)))) {
+            message = `Please enter the equivalent amount in ${state.customerPenaltyCurrencyState?.selectedCurrency() || state.bookingCurrency}.`;
+        } else if (amount > 0 && fieldState.selectedCurrency() !== state.bookingCurrency && fieldState.rateToBooking() <= 0.00000001) {
+            message = 'Confirm the supplier refund FX rate before calculating or saving.';
+        } else if (fieldState.selectedCurrency() === supplierCurrency && amount > supplierSourceCost + 0.005) {
+            message = 'Expected supplier refund exceeds the original supplier cost. Review the amount and currency.';
+        }
+        if (equivalent) equivalent.setCustomValidity(message);
+        fieldState.amountField.setCustomValidity(equivalent && !equivalent.disabled ? '' : message);
+        return message;
+    };
+
     const settlementSupplierCostInBookingCurrency = (serviceLine, invoiceCurrency) => {
         const normalizedInvoiceCurrency = String(invoiceCurrency || serviceLine?.currency || 'PKR').trim().toUpperCase() || 'PKR';
         const rawSupplierCost = toNumber(serviceLine?.purchaseCost || serviceLine?.supplierCost || 0);
@@ -5110,7 +5308,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (rawPricingExchangeRate > 0.00000001) {
             return roundToTwo(rawSupplierCost * rawPricingExchangeRate);
         }
-        return rawSupplierCost;
+        return 0;
     };
 
     const setupSettlementCurrencyForm = (form, options = {}) => {
@@ -5186,6 +5384,12 @@ document.addEventListener('DOMContentLoaded', () => {
                     return true;
                 }
                 const liveAmount = Math.max(toNumber(amountField.value || 0), 0);
+                if (fieldKey === 'expected_supplier_refund') {
+                    amountField.dataset.settlementDirty = '1';
+                    fieldCurrencySelect.dataset.lastCurrency = nextCurrency;
+                    fieldExchangeRateField.value = nextCurrency === bookingCurrency ? '1' : '0';
+                    return true;
+                }
                 const previousRateToBooking = previousCurrency === bookingCurrency
                     ? 1
                     : Math.max(toNumber(fieldExchangeRateField.value || 0), 0);
@@ -5293,12 +5497,19 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!expectedSupplierRefundCurrencyState || !supplierPenaltyCurrencyState) {
                 return;
             }
-            const syncedCurrency = expectedSupplierRefundCurrencyState.selectedCurrency();
+            const source = settlementSupplierPenaltySource(
+                options.serviceLine, bookingCurrency, expectedSupplierRefundCurrencyState.selectedCurrency(),
+                toNumber(expectedSupplierRefundCurrencyState.amountField.value || 0), expectedSupplierRefundCurrencyState.rateToBooking()
+            );
+            const syncedCurrency = source.currency;
             supplierPenaltyCurrencyState.currencySelect.value = syncedCurrency;
             supplierPenaltyCurrencyState.currencySelect.dataset.lastCurrency = syncedCurrency;
             supplierPenaltyCurrencyState.exchangeRateField.value = syncedCurrency === bookingCurrency
                 ? '1'
-                : String(roundExchangeRate(expectedSupplierRefundCurrencyState.rateToBooking()));
+                : String(roundExchangeRate(syncedCurrency === expectedSupplierRefundCurrencyState.selectedCurrency()
+                    ? expectedSupplierRefundCurrencyState.rateToBooking() : toNumber(options.serviceLine?.pricingExchangeRate || 0)));
+            supplierPenaltyCurrencyState.amountField.value = source.amount === null ? '' : formatNumberInputValue(source.amount, 0);
+            supplierPenaltyCurrencyState.amountField.placeholder = source.amount === null ? 'Review amount / conversion' : '';
         };
         const relabel = () => {
             const curr = selectedCurrency();
@@ -5319,7 +5530,8 @@ document.addEventListener('DOMContentLoaded', () => {
                         : curr;
                     node.textContent = `Supplier Penalty (${supplierPenaltyCurrency})`;
                 } else if (key === 'customer_refund_due') {
-                    node.textContent = `${labelMap[key]} (${curr})`;
+                    const customerCurrency = customerRefundDueField?.dataset.refundCurrency || bookingCurrency;
+                    node.textContent = `Remaining Customer Refund Due (${customerCurrency})`;
                 } else if (labelMap[key]) {
                     node.textContent = labelMap[key];
                 }
@@ -5333,8 +5545,8 @@ document.addEventListener('DOMContentLoaded', () => {
             if (nextCurrency === previousCurrency) {
                 return true;
             }
-            const amountFields = [agencyFeeRefundField]
-                .filter((field) => field instanceof HTMLInputElement);
+            // Service-charge refund stays in invoice currency when supplier/display currency changes.
+            const amountFields = [];
             const liveAmounts = amountFields.map((field) => ({
                 field,
                 label: field.name,
@@ -5385,7 +5597,7 @@ document.addEventListener('DOMContentLoaded', () => {
             relabel();
             return true;
         };
-        return {
+        const state = {
             currencySelect,
             exchangeRateField,
             customerPenaltyField,
@@ -5407,6 +5619,100 @@ document.addEventListener('DOMContentLoaded', () => {
             supplierCostAmount,
             agencyFeeChargedAmount,
         };
+        form.settlementCurrencyState = state;
+        const expectedCard = expectedSupplierRefundField?.closest('.legacy-service-event-field--expected-supplier-refund');
+        const equivalentContainer = form.classList.contains('legacy-service-correction-bar') ? form : expectedCard;
+        if (expectedCard instanceof HTMLElement && !equivalentContainer.querySelector('[data-supplier-refund-fx-review]')) {
+            const review = document.createElement('label');
+            review.dataset.supplierRefundFxReview = '1';
+            review.className = 'supplier-refund-fx-review';
+            if (equivalentContainer === form) {
+                review.classList.add('legacy-service-event-field', 'legacy-service-correction-support-field', 'supplier-refund-equivalent-card');
+            }
+            const caption = document.createElement('span');
+            caption.className = 'supplier-refund-fx-review__caption';
+            const unit = document.createElement('span');
+            unit.className = 'supplier-refund-fx-review__unit';
+            const input = document.createElement('input');
+            input.type = 'number';
+            input.min = '0';
+            input.step = '1';
+            input.name = 'expected_supplier_refund_equivalent_amount';
+            input.placeholder = '0';
+            review.append(caption, input, unit);
+            equivalentContainer.append(review);
+            const date = document.createElement('input');
+            date.type = 'hidden';
+            date.name = 'expected_supplier_refund_rate_date';
+            review.append(date);
+            input.addEventListener('input', () => {
+                const liveState = form.settlementCurrencyState;
+                const liveField = liveState?.expectedSupplierRefundCurrencyState;
+                if (!liveField) {
+                    return;
+                }
+                input.dataset.settlementDirty = '1';
+                liveState.syncFxReview();
+                liveState.syncSupplierPenaltyToExpectedRefundCurrency();
+                liveField.amountField.dispatchEvent(new Event('input', { bubbles: true }));
+            });
+        }
+        state.syncFxReview = () => {
+            const review = equivalentContainer?.querySelector('[data-supplier-refund-fx-review]');
+            if (!(review instanceof HTMLElement) || !expectedSupplierRefundCurrencyState) {
+                return;
+            }
+            const source = expectedSupplierRefundCurrencyState.selectedCurrency();
+            const target = customerPenaltyCurrencyState?.selectedCurrency() || bookingCurrency;
+            const amount = toNumber(expectedSupplierRefundCurrencyState.amountField.value || 0);
+            const recordedRate = supplierRefundRecordedRate(options.serviceLine, source, target, bookingCurrency, customerPenaltyField?.value);
+            review.hidden = source === target || recordedRate > 0;
+            const date = review.querySelector('input[name="expected_supplier_refund_rate_date"]');
+            if (date instanceof HTMLInputElement) {
+                if (String(date.dataset.boundService || '') !== String(options.serviceId || '') || date.dataset.settlementDirty !== '1') {
+                    date.value = options.expectedRefundRateDate || effectiveDate();
+                    date.dataset.boundService = String(options.serviceId || '');
+                    delete date.dataset.settlementDirty;
+                }
+            }
+            review.querySelector('.supplier-refund-fx-review__caption').textContent = `Equivalent amount in ${target}`;
+            review.querySelector('.supplier-refund-fx-review__unit').textContent = target;
+            const input = review.querySelector('input');
+            state.equivalentField = input;
+            input.disabled = source === target || recordedRate > 0;
+            input.required = !input.disabled && amount > 0;
+            input.setAttribute('aria-label', `Equivalent amount in ${target}`);
+            const signature = `${options.serviceId}:${source}:${target}:${amount}:${recordedRate}`;
+            if (input.dataset.equivalentSignature !== signature) {
+                input.value = '';
+                input.dataset.equivalentSignature = signature;
+                delete input.dataset.settlementDirty;
+                const saved = options.serviceLine;
+                const matchesSavedSource = source === saved?.latestCancelExpectedSupplierRefundCurrency
+                    && Math.abs(amount - toNumber(saved?.latestCancelExpectedSupplierRefundSourceAmount || 0)) < 0.005;
+                if (matchesSavedSource && target === saved?.latestCancelExpectedSupplierRefundEquivalentCurrency
+                    && saved.latestCancelExpectedSupplierRefundEquivalentAmount !== null) {
+                    input.value = String(Math.round(toNumber(saved.latestCancelExpectedSupplierRefundEquivalentAmount)));
+                } else if (matchesSavedSource && target === bookingCurrency
+                    && !saved?.latestCancelExpectedSupplierRefundConversionUnverified
+                    && toNumber(saved?.latestCancelExpectedSupplierRefundExchangeRate || 0) > 0) {
+                    input.value = String(Math.round(toNumber(saved.latestCancelExpectedSupplierRefundAmount || 0)));
+                }
+            }
+            if (recordedRate > 0) {
+                input.value = String(Math.round(amount * recordedRate));
+            }
+            const equivalent = source === target ? amount : toNumber(input.value || 0);
+            if (source === bookingCurrency && source !== target && equivalent > 0 && amount > 0 && customerPenaltyCurrencyState) {
+                customerPenaltyCurrencyState.exchangeRateField.value = String(roundExchangeRate(amount / equivalent));
+            }
+            const penaltyRate = customerPenaltyCurrencyState?.rateToBooking() || 0;
+            expectedSupplierRefundCurrencyState.exchangeRateField.value = String(
+                recordedRate || supplierRefundEquivalentRate(source, target, bookingCurrency, amount, equivalent, penaltyRate)
+            );
+            if (input.disabled || amount === 0) input.setCustomValidity('');
+        };
+        return state;
     };
 
     const syncSettlementFormFromServiceLine = (serviceLine) => {
@@ -5453,27 +5759,22 @@ document.addEventListener('DOMContentLoaded', () => {
         const customerPenaltyExchangeRate = Math.max(toNumber(serviceLine?.latestCancelCustomerPenaltyExchangeRate || 1), 0.00000001);
         const expectedSupplierRefundCurrency = String(serviceLine?.latestCancelExpectedSupplierRefundCurrency || supplierBaseCurrency).toUpperCase();
         const expectedSupplierRefundSourceAmount = toNumber(serviceLine?.latestCancelExpectedSupplierRefundSourceAmount || 0);
-        const expectedSupplierRefundExchangeRate = Math.max(toNumber(serviceLine?.latestCancelExpectedSupplierRefundExchangeRate || 1), 0.00000001);
+        const expectedSupplierRefundExchangeRate = expectedSupplierRefundCurrency === invoiceCurrency ? 1
+            : Math.max(toNumber(serviceLine?.latestCancelExpectedSupplierRefundExchangeRate
+                || (expectedSupplierRefundCurrency === serviceLine?.costCurrency ? serviceLine?.pricingExchangeRate : 0)), 0);
         const supplierPenaltyCurrency = String(serviceLine?.latestCancelSupplierPenaltyCurrency || supplierBaseCurrency).toUpperCase();
         const supplierPenaltySourceAmount = toNumber(serviceLine?.latestCancelSupplierPenaltySourceAmount || 0);
         const supplierPenaltyExchangeRate = Math.max(toNumber(serviceLine?.latestCancelSupplierPenaltyExchangeRate || 1), 0.00000001);
         const supplierSourceCostAmount = supplierBaseCurrency === String(serviceLine?.costCurrency || supplierBaseCurrency).toUpperCase()
             ? Math.max(toNumber(serviceLine?.purchaseCost || serviceLine?.supplierCost || 0), 0)
             : 0;
-        const supplierSourceTruthCurrency = expectedSupplierRefundCurrency === supplierPenaltyCurrency
-            ? expectedSupplierRefundCurrency
-            : '';
-        const supplierSourceTruthTotal = supplierSourceTruthCurrency !== ''
-            ? Math.max(
-                expectedSupplierRefundSourceAmount + supplierPenaltySourceAmount,
-                supplierSourceCostAmount,
-                0
-            )
-            : 0;
         const customerRefundCredit = toNumber(serviceLine?.latestCancelReleasedCustomerCreditAmount || 0);
         const supplierRefundCredit = toNumber(serviceLine?.latestCancelReleasedSupplierCreditAmount || 0);
         const settlementCurrencyState = setupSettlementCurrencyForm(serviceEventBars.settlement, {
+            serviceLine,
             bookingCurrency: invoiceCurrency,
+            serviceId: serviceLine?.serviceId || serviceLine?.id,
+            expectedRefundRateDate: serviceLine?.latestCancelExpectedSupplierRefundRateDate || serviceLine?.latestCancelEventDate,
             supplierCostAmount,
             agencyFeeChargedAmount,
         });
@@ -5562,9 +5863,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         if (agencyFeeRefundField instanceof HTMLInputElement) {
             bindSettlementFieldDraftBehavior(agencyFeeRefundField, { selectZeroOnFocus: true });
-            agencyFeeRefundField.max = formatNumberInputValue(settlementCurrencyState ? settlementCurrencyState.bookingToSelected(agencyFeeChargedAmount) : agencyFeeChargedAmount);
+            agencyFeeRefundField.max = formatNumberInputValue(agencyFeeChargedAmount);
             if (settlementControlShouldSync(agencyFeeRefundField, switchedServiceLine)) {
-                agencyFeeRefundField.value = formatNumberInputValue(settlementCurrencyState ? settlementCurrencyState.bookingToSelected(agencyFeeRefundAmount) : agencyFeeRefundAmount);
+                agencyFeeRefundField.value = formatWholeNumberInputValue(agencyFeeRefundAmount);
             }
         }
         if (supplierPenaltyField instanceof HTMLInputElement) {
@@ -5594,34 +5895,40 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
         const syncSettlementDerivedAmounts = () => {
+            settlementCurrencyState?.syncFxReview();
+            settlementCurrencyState?.syncSupplierPenaltyToExpectedRefundCurrency();
+            settlementCurrencyState?.relabel();
+            const expectedError = settlementExpectedRefundError(settlementCurrencyState, supplierBaseCurrency, supplierSourceCostAmount);
+            if (expectedError) {
+                if (customerRefundDueField instanceof HTMLInputElement) {
+                    customerRefundDueField.value = '';
+                    customerRefundDueField.placeholder = 'Review FX / amount';
+                }
+                if (settlementSummaryNote instanceof HTMLElement) {
+                    settlementSummaryNote.hidden = false;
+                    settlementSummaryNote.textContent = expectedError;
+                }
+                return;
+            }
+            if (customerRefundDueField instanceof HTMLInputElement) {
+                customerRefundDueField.placeholder = '';
+            }
             const liveCustomerPenaltyAmount = settlementCurrencyState?.customerPenaltyCurrencyState
                 ? settlementCurrencyState.customerPenaltyCurrencyState.selectedToBooking(toNumber(customerPenaltyField?.value || 0))
                 : toNumber(customerPenaltyField?.value || 0);
-            const liveExpectedSupplierRefundAmount = Math.min(
-                Math.max(settlementCurrencyState?.expectedSupplierRefundCurrencyState
+            const liveExpectedSupplierRefundAmount = Math.max(settlementCurrencyState?.expectedSupplierRefundCurrencyState
                     ? settlementCurrencyState.expectedSupplierRefundCurrencyState.selectedToBooking(toNumber(expectedSupplierRefundField?.value || 0))
-                    : toNumber(expectedSupplierRefundField?.value || 0), 0),
-                Math.max(supplierCostAmount, 0)
-            );
+                    : toNumber(expectedSupplierRefundField?.value || 0), 0);
             const liveSupplierPenaltyAmount = Math.max(supplierCostAmount - liveExpectedSupplierRefundAmount, 0);
             const liveAgencyFeeRefundAmount = Math.min(
-                Math.max(settlementCurrencyState
-                    ? settlementCurrencyState.selectedToBooking(toNumber(agencyFeeRefundField?.value || 0))
-                    : toNumber(agencyFeeRefundField?.value || 0), 0),
+                Math.max(toNumber(agencyFeeRefundField?.value || 0), 0),
                 agencyFeeChargedAmount
             );
             const liveRetainedAgencyFeeAmount = Math.max(agencyFeeChargedAmount - liveAgencyFeeRefundAmount, 0);
-            const liveCustomerFinalChargeAmount = Math.max(
-                liveCustomerPenaltyAmount + liveSupplierPenaltyAmount + liveRetainedAgencyFeeAmount,
-                0
-            );
-            const liveCustomerRefundDueBooking = Math.max(currentCustomerReceivedAmount - liveCustomerFinalChargeAmount, 0);
+            const customerSummary = settlementCustomerSummary(serviceLine, liveExpectedSupplierRefundAmount, liveCustomerPenaltyAmount, liveAgencyFeeRefundAmount);
             const customerPenaltySelectedCurrency = settlementCurrencyState?.customerPenaltyCurrencyState
                 ? settlementCurrencyState.customerPenaltyCurrencyState.selectedCurrency()
                 : customerPenaltyCurrency;
-            const supplierPenaltySelectedCurrency = settlementCurrencyState?.supplierPenaltyCurrencyState
-                ? settlementCurrencyState.supplierPenaltyCurrencyState.selectedCurrency()
-                : supplierPenaltyCurrency;
             const expectedRefundSelectedCurrency = settlementCurrencyState?.expectedSupplierRefundCurrencyState
                 ? settlementCurrencyState.expectedSupplierRefundCurrencyState.selectedCurrency()
                 : expectedSupplierRefundCurrency;
@@ -5629,12 +5936,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 ? settlementCurrencyState.selectedCurrency()
                 : invoiceCurrency;
             const liveCustomerPenaltySourceAmount = Math.max(toNumber(customerPenaltyField?.value || 0), 0);
-            const liveExpectedSupplierRefundSourceAmount = Math.max(toNumber(expectedSupplierRefundField?.value || 0), 0);
             const directCustomerSourceDerivationAllowed = customerPenaltySelectedCurrency !== ''
                 && customerPenaltySelectedCurrency === expectedRefundSelectedCurrency;
-            const directSupplierSourceDerivationAllowed = supplierSourceTruthCurrency !== ''
-                && supplierPenaltySelectedCurrency === expectedRefundSelectedCurrency
-                && expectedRefundSelectedCurrency === supplierSourceTruthCurrency;
             if (directCustomerSourceDerivationAllowed && settlementCurrencyState && settlementDisplayCurrency !== expectedRefundSelectedCurrency) {
                 const matchingDisplayRate = Math.max(
                     settlementCurrencyState.expectedSupplierRefundCurrencyState?.rateToBooking()
@@ -5645,23 +5948,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 settlementCurrencyState.applySettlementDisplayCurrency(expectedRefundSelectedCurrency, roundExchangeRate(matchingDisplayRate));
             }
             if (agencyFeeRefundField instanceof HTMLInputElement) {
-                agencyFeeRefundField.max = formatNumberInputValue(settlementCurrencyState ? settlementCurrencyState.bookingToSelected(agencyFeeChargedAmount) : agencyFeeChargedAmount);
+                agencyFeeRefundField.max = formatNumberInputValue(agencyFeeChargedAmount);
             }
-            if (customerRefundDueField instanceof HTMLInputElement) {
-                const displayedRefundDue = settlementCurrencyState
-                    ? settlementCurrencyState.bookingToSelected(liveCustomerRefundDueBooking)
-                    : liveCustomerRefundDueBooking;
-                customerRefundDueField.value = formatNumberInputValue(Math.round(displayedRefundDue), 0);
-            }
-            if (supplierPenaltyField instanceof HTMLInputElement) {
-                supplierPenaltyField.value = formatNumberInputValue(
-                    directSupplierSourceDerivationAllowed
-                        ? Math.max(Math.round(supplierSourceTruthTotal - liveExpectedSupplierRefundSourceAmount), 0)
-                        : (settlementCurrencyState?.supplierPenaltyCurrencyState
-                            ? settlementCurrencyState.supplierPenaltyCurrencyState.bookingToSelected(liveSupplierPenaltyAmount)
-                            : liveSupplierPenaltyAmount)
-                );
-            }
+            const customerSummaryText = renderSettlementCustomerSummary(serviceEventBars.settlement, customerSummary);
+            settlementCurrencyState?.syncSupplierPenaltyToExpectedRefundCurrency();
             if (!(settlementSummaryNote instanceof HTMLElement)) {
                 return;
             }
@@ -5673,10 +5963,11 @@ document.addEventListener('DOMContentLoaded', () => {
             settlementSummaryNote.hidden = !hasSummary;
             if (hasSummary) {
                 settlementSummaryNote.textContent = [
+                    customerSummaryText,
                     `Customer penalty: ${formatCurrencyAmount(settlementCurrencyState?.customerPenaltyCurrencyState ? settlementCurrencyState.customerPenaltyCurrencyState.selectedCurrency() : invoiceCurrency, settlementCurrencyState?.customerPenaltyCurrencyState ? settlementCurrencyState.customerPenaltyCurrencyState.bookingToSelected(liveCustomerPenaltyAmount) : liveCustomerPenaltyAmount)}.`,
                     `Expected supplier refund: ${formatCurrencyAmount(settlementCurrencyState?.expectedSupplierRefundCurrencyState ? settlementCurrencyState.expectedSupplierRefundCurrencyState.selectedCurrency() : invoiceCurrency, settlementCurrencyState?.expectedSupplierRefundCurrencyState ? settlementCurrencyState.expectedSupplierRefundCurrencyState.bookingToSelected(liveExpectedSupplierRefundAmount) : liveExpectedSupplierRefundAmount)}.`,
-                    `Agency fee refunded: ${formatCurrencyAmount(settlementCurrencyState ? settlementCurrencyState.selectedCurrency() : invoiceCurrency, settlementCurrencyState ? settlementCurrencyState.bookingToSelected(liveAgencyFeeRefundAmount) : liveAgencyFeeRefundAmount)}.`,
-                    `Supplier penalty: ${formatCurrencyAmount(settlementCurrencyState?.supplierPenaltyCurrencyState ? settlementCurrencyState.supplierPenaltyCurrencyState.selectedCurrency() : invoiceCurrency, settlementCurrencyState?.supplierPenaltyCurrencyState ? settlementCurrencyState.supplierPenaltyCurrencyState.bookingToSelected(liveSupplierPenaltyAmount) : liveSupplierPenaltyAmount)}.`,
+                    `Agency fee refunded: ${formatCurrencyAmount(invoiceCurrency, liveAgencyFeeRefundAmount)}.`,
+                    `Supplier penalty: ${formatCurrencyAmount(settlementCurrencyState?.supplierPenaltyCurrencyState ? settlementCurrencyState.supplierPenaltyCurrencyState.selectedCurrency() : invoiceCurrency, toNumber(supplierPenaltyField?.value || 0))}.`,
                     `Customer refund credit released: ${formatCurrencyAmount(invoiceCurrency, customerRefundCredit)}.`,
                     `Supplier refundable credit released: ${formatCurrencyAmount(invoiceCurrency, supplierRefundCredit)}.`,
                 ].join(' ');
@@ -5775,27 +6066,22 @@ document.addEventListener('DOMContentLoaded', () => {
         const customerPenaltyExchangeRate = Math.max(toNumber(serviceLine?.latestCancelCustomerPenaltyExchangeRate || 1), 0.00000001);
         const expectedSupplierRefundCurrency = String(serviceLine?.latestCancelExpectedSupplierRefundCurrency || supplierBaseCurrency).toUpperCase();
         const expectedSupplierRefundSourceAmount = toNumber(serviceLine?.latestCancelExpectedSupplierRefundSourceAmount || 0);
-        const expectedSupplierRefundExchangeRate = Math.max(toNumber(serviceLine?.latestCancelExpectedSupplierRefundExchangeRate || 1), 0.00000001);
+        const expectedSupplierRefundExchangeRate = expectedSupplierRefundCurrency === invoiceCurrency ? 1
+            : Math.max(toNumber(serviceLine?.latestCancelExpectedSupplierRefundExchangeRate
+                || (expectedSupplierRefundCurrency === serviceLine?.costCurrency ? serviceLine?.pricingExchangeRate : 0)), 0);
         const supplierPenaltyCurrency = String(serviceLine?.latestCancelSupplierPenaltyCurrency || supplierBaseCurrency).toUpperCase();
         const supplierPenaltySourceAmount = toNumber(serviceLine?.latestCancelSupplierPenaltySourceAmount || 0);
         const supplierPenaltyExchangeRate = Math.max(toNumber(serviceLine?.latestCancelSupplierPenaltyExchangeRate || 1), 0.00000001);
         const supplierSourceCostAmount = supplierBaseCurrency === String(serviceLine?.costCurrency || supplierBaseCurrency).toUpperCase()
             ? Math.max(toNumber(serviceLine?.purchaseCost || serviceLine?.supplierCost || 0), 0)
             : 0;
-        const supplierSourceTruthCurrency = expectedSupplierRefundCurrency === supplierPenaltyCurrency
-            ? expectedSupplierRefundCurrency
-            : '';
-        const supplierSourceTruthTotal = supplierSourceTruthCurrency !== ''
-            ? Math.max(
-                expectedSupplierRefundSourceAmount + supplierPenaltySourceAmount,
-                supplierSourceCostAmount,
-                0
-            )
-            : 0;
         const customerRefundCredit = toNumber(serviceLine?.latestCancelReleasedCustomerCreditAmount || 0);
         const supplierRefundCredit = toNumber(serviceLine?.latestCancelReleasedSupplierCreditAmount || 0);
         const settlementCurrencyState = setupSettlementCurrencyForm(serviceCorrectionSettlementForm, {
+            serviceLine,
             bookingCurrency: invoiceCurrency,
+            serviceId: serviceLine?.serviceId || serviceLine?.id,
+            expectedRefundRateDate: serviceLine?.latestCancelExpectedSupplierRefundRateDate || serviceLine?.latestCancelEventDate,
             supplierCostAmount,
             agencyFeeChargedAmount,
         });
@@ -5885,9 +6171,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         if (agencyFeeRefundField instanceof HTMLInputElement) {
             bindSettlementFieldDraftBehavior(agencyFeeRefundField, { selectZeroOnFocus: true });
-            agencyFeeRefundField.max = formatNumberInputValue(settlementCurrencyState ? settlementCurrencyState.bookingToSelected(agencyFeeChargedAmount) : agencyFeeChargedAmount);
+            agencyFeeRefundField.max = formatNumberInputValue(agencyFeeChargedAmount);
             if (settlementControlShouldSync(agencyFeeRefundField, switchedServiceLine)) {
-                agencyFeeRefundField.value = formatNumberInputValue(settlementCurrencyState ? settlementCurrencyState.bookingToSelected(agencyFeeRefundAmount) : agencyFeeRefundAmount);
+                agencyFeeRefundField.value = formatWholeNumberInputValue(agencyFeeRefundAmount);
             }
         }
 
@@ -5921,34 +6207,37 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         const syncSettlementCorrectionDerivedAmounts = () => {
+            settlementCurrencyState?.syncFxReview();
+            settlementCurrencyState?.syncSupplierPenaltyToExpectedRefundCurrency();
+            settlementCurrencyState?.relabel();
+            const liveAgencyFeeRefundAmount = Math.min(
+                Math.max(toNumber(agencyFeeRefundField?.value || 0), 0), agencyFeeChargedAmount
+            );
+            if (agencyFeeRefundField instanceof HTMLInputElement) {
+                agencyFeeRefundField.max = formatNumberInputValue(agencyFeeChargedAmount);
+            }
+            const expectedError = settlementExpectedRefundError(settlementCurrencyState, supplierBaseCurrency, supplierSourceCostAmount);
+            if (expectedError) {
+                // Supplier conversion is required to save, but does not change an invoice-currency fee refund.
+                const savedText = renderSettlementCustomerSummary(serviceCorrectionSettlementForm, settlementCustomerSummary(serviceLine, 0, 0, liveAgencyFeeRefundAmount));
+                if (serviceCorrectionSettlementSummaryNote instanceof HTMLElement) {
+                    serviceCorrectionSettlementSummaryNote.hidden = false;
+                    serviceCorrectionSettlementSummaryNote.textContent = `${savedText} ${expectedError}`;
+                }
+                return;
+            }
             const liveCustomerPenaltyAmount = Math.max(settlementCurrencyState?.customerPenaltyCurrencyState
                 ? settlementCurrencyState.customerPenaltyCurrencyState.selectedToBooking(toNumber(customerPenaltyField?.value || 0))
                 : toNumber(customerPenaltyField?.value || 0), 0);
-            const liveExpectedSupplierRefundAmount = Math.min(
-                Math.max(settlementCurrencyState?.expectedSupplierRefundCurrencyState
+            const liveExpectedSupplierRefundAmount = Math.max(settlementCurrencyState?.expectedSupplierRefundCurrencyState
                     ? settlementCurrencyState.expectedSupplierRefundCurrencyState.selectedToBooking(toNumber(expectedSupplierRefundField?.value || 0))
-                    : toNumber(expectedSupplierRefundField?.value || 0), 0),
-                Math.max(supplierCostAmount, 0)
-            );
+                    : toNumber(expectedSupplierRefundField?.value || 0), 0);
             const liveSupplierPenaltyAmount = Math.max(supplierCostAmount - liveExpectedSupplierRefundAmount, 0);
-            const liveAgencyFeeRefundAmount = Math.min(
-                Math.max(settlementCurrencyState
-                    ? settlementCurrencyState.selectedToBooking(toNumber(agencyFeeRefundField?.value || 0))
-                    : toNumber(agencyFeeRefundField?.value || 0), 0),
-                agencyFeeChargedAmount
-            );
             const liveRetainedAgencyFeeAmount = Math.max(agencyFeeChargedAmount - liveAgencyFeeRefundAmount, 0);
-            const liveCustomerFinalChargeAmount = Math.max(
-                liveCustomerPenaltyAmount + liveSupplierPenaltyAmount + liveRetainedAgencyFeeAmount,
-                0
-            );
-            const liveCustomerRefundDue = Math.max(currentCustomerReceivedAmount - liveCustomerFinalChargeAmount, 0);
+            const customerSummary = settlementCustomerSummary(serviceLine, liveExpectedSupplierRefundAmount, liveCustomerPenaltyAmount, liveAgencyFeeRefundAmount);
             const customerPenaltySelectedCurrency = settlementCurrencyState?.customerPenaltyCurrencyState
                 ? settlementCurrencyState.customerPenaltyCurrencyState.selectedCurrency()
                 : customerPenaltyCurrency;
-            const supplierPenaltySelectedCurrency = settlementCurrencyState?.supplierPenaltyCurrencyState
-                ? settlementCurrencyState.supplierPenaltyCurrencyState.selectedCurrency()
-                : supplierPenaltyCurrency;
             const expectedRefundSelectedCurrency = settlementCurrencyState?.expectedSupplierRefundCurrencyState
                 ? settlementCurrencyState.expectedSupplierRefundCurrencyState.selectedCurrency()
                 : expectedSupplierRefundCurrency;
@@ -5956,12 +6245,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 ? settlementCurrencyState.selectedCurrency()
                 : invoiceCurrency;
             const liveCustomerPenaltySourceAmount = Math.max(toNumber(customerPenaltyField?.value || 0), 0);
-            const liveExpectedSupplierRefundSourceAmount = Math.max(toNumber(expectedSupplierRefundField?.value || 0), 0);
             const directCustomerSourceDerivationAllowed = customerPenaltySelectedCurrency !== ''
                 && customerPenaltySelectedCurrency === expectedRefundSelectedCurrency;
-            const directSupplierSourceDerivationAllowed = supplierSourceTruthCurrency !== ''
-                && supplierPenaltySelectedCurrency === expectedRefundSelectedCurrency
-                && expectedRefundSelectedCurrency === supplierSourceTruthCurrency;
             if (directCustomerSourceDerivationAllowed && settlementCurrencyState && settlementDisplayCurrency !== expectedRefundSelectedCurrency) {
                 const matchingDisplayRate = Math.max(
                     settlementCurrencyState.expectedSupplierRefundCurrencyState?.rateToBooking()
@@ -5972,23 +6257,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 settlementCurrencyState.applySettlementDisplayCurrency(expectedRefundSelectedCurrency, roundExchangeRate(matchingDisplayRate));
             }
 
-            if (supplierPenaltyField instanceof HTMLInputElement) {
-                supplierPenaltyField.value = formatNumberInputValue(
-                    directSupplierSourceDerivationAllowed
-                        ? Math.max(Math.round(supplierSourceTruthTotal - liveExpectedSupplierRefundSourceAmount), 0)
-                        : (settlementCurrencyState?.supplierPenaltyCurrencyState
-                            ? settlementCurrencyState.supplierPenaltyCurrencyState.bookingToSelected(liveSupplierPenaltyAmount)
-                            : liveSupplierPenaltyAmount)
-                );
-            }
+            settlementCurrencyState?.syncSupplierPenaltyToExpectedRefundCurrency();
             if (agencyFeeRefundField instanceof HTMLInputElement) {
-                agencyFeeRefundField.max = formatNumberInputValue(settlementCurrencyState ? settlementCurrencyState.bookingToSelected(agencyFeeChargedAmount) : agencyFeeChargedAmount);
+                agencyFeeRefundField.max = formatNumberInputValue(agencyFeeChargedAmount);
             }
-            if (customerRefundDueField instanceof HTMLInputElement) {
-                const displayedRefundDue = settlementCurrencyState
-                    ? settlementCurrencyState.bookingToSelected(liveCustomerRefundDue)
-                    : liveCustomerRefundDue;
-                customerRefundDueField.value = formatNumberInputValue(Math.round(displayedRefundDue), 0);
+            const customerSummaryText = renderSettlementCustomerSummary(serviceCorrectionSettlementForm, customerSummary);
+            const customerStatusText = serviceCorrectionSettlementForm.querySelector('[data-correction-customer-refund-status] > span');
+            if (customerStatusText instanceof HTMLElement) {
+                customerStatusText.textContent = settlementCustomerRefundStatusText(serviceLine, customerSummary);
             }
 
             if (!(serviceCorrectionSettlementSummaryNote instanceof HTMLElement)) {
@@ -6004,10 +6280,11 @@ document.addEventListener('DOMContentLoaded', () => {
             serviceCorrectionSettlementSummaryNote.hidden = !hasSummary;
             serviceCorrectionSettlementSummaryNote.textContent = hasSummary
                 ? [
+                    customerSummaryText,
                     `Customer penalty: ${formatCurrencyAmount(settlementCurrencyState?.customerPenaltyCurrencyState ? settlementCurrencyState.customerPenaltyCurrencyState.selectedCurrency() : invoiceCurrency, settlementCurrencyState?.customerPenaltyCurrencyState ? settlementCurrencyState.customerPenaltyCurrencyState.bookingToSelected(liveCustomerPenaltyAmount) : liveCustomerPenaltyAmount)}.`,
                     `Expected supplier refund: ${formatCurrencyAmount(settlementCurrencyState?.expectedSupplierRefundCurrencyState ? settlementCurrencyState.expectedSupplierRefundCurrencyState.selectedCurrency() : invoiceCurrency, settlementCurrencyState?.expectedSupplierRefundCurrencyState ? settlementCurrencyState.expectedSupplierRefundCurrencyState.bookingToSelected(liveExpectedSupplierRefundAmount) : liveExpectedSupplierRefundAmount)}.`,
-                    `Agency fee refunded: ${formatCurrencyAmount(settlementCurrencyState ? settlementCurrencyState.selectedCurrency() : invoiceCurrency, settlementCurrencyState ? settlementCurrencyState.bookingToSelected(liveAgencyFeeRefundAmount) : liveAgencyFeeRefundAmount)}.`,
-                    `Supplier penalty: ${formatCurrencyAmount(settlementCurrencyState?.supplierPenaltyCurrencyState ? settlementCurrencyState.supplierPenaltyCurrencyState.selectedCurrency() : invoiceCurrency, settlementCurrencyState?.supplierPenaltyCurrencyState ? settlementCurrencyState.supplierPenaltyCurrencyState.bookingToSelected(liveSupplierPenaltyAmount) : liveSupplierPenaltyAmount)}.`,
+                    `Agency fee refunded: ${formatCurrencyAmount(invoiceCurrency, liveAgencyFeeRefundAmount)}.`,
+                    `Supplier penalty: ${formatCurrencyAmount(settlementCurrencyState?.supplierPenaltyCurrencyState ? settlementCurrencyState.supplierPenaltyCurrencyState.selectedCurrency() : invoiceCurrency, toNumber(supplierPenaltyField?.value || 0))}.`,
                     `Customer refund credit released: ${formatCurrencyAmount(invoiceCurrency, customerRefundCredit)}.`,
                     `Supplier refundable credit released: ${formatCurrencyAmount(invoiceCurrency, supplierRefundCredit)}.`,
                 ].join(' ')
@@ -6099,6 +6376,24 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         if (serviceCorrectionSupplierRefundStatus instanceof HTMLElement) {
             serviceCorrectionSupplierRefundStatus.hidden = supplierRefundPosted;
+            const creditAmount = Math.max(toNumber(serviceLine?.supplierCreditRecordedSourceAmount || 0), 0);
+            const payableReduction = Math.max(toNumber(serviceLine?.supplierPayableReducedSourceAmount || 0), 0);
+            const autoRecorded = serviceLine?.supplierCreditAutoRecording === true
+                || String(serviceLine?.supplierCreditAutoRecording || '') === '1';
+            const currency = String(serviceLine?.latestCancelExpectedSupplierRefundCurrency || serviceLine?.costCurrency || 'PKR').trim().toUpperCase();
+            const statusText = serviceCorrectionSupplierRefundStatus.querySelector('span');
+            if (statusText instanceof HTMLElement) {
+                const parts = [];
+                if (creditAmount > 0.005) parts.push(`${formatCurrencyAmount(currency, creditAmount)} returned to reusable supplier credit`);
+                if (payableReduction > 0.005) parts.push(`${formatCurrencyAmount(currency, payableReduction)} reduced from supplier payable`);
+                statusText.textContent = autoRecorded
+                    ? (parts.length > 0 ? `${parts.join('; ')}.` : 'No supplier credit or payable reduction was needed.')
+                    : 'Supplier credit has not been recorded yet.';
+            }
+            const recordButton = serviceCorrectionSupplierRefundStatus.querySelector('[data-open-refund-workflow="supplier"]');
+            if (recordButton instanceof HTMLElement) {
+                recordButton.hidden = autoRecorded || Math.max(toNumber(serviceLine?.supplierRefundableCreditAmount || 0), 0) <= 0.005;
+            }
         }
         serviceCorrectionCustomerRefundPostedFields.forEach((fieldRow) => {
             if (fieldRow instanceof HTMLElement) {
@@ -6129,7 +6424,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (serviceCorrectionCustomerRefundSourceAmountInput instanceof HTMLInputElement) {
             if (switchedServiceLine || String(serviceCorrectionCustomerRefundSourceAmountInput.dataset.refundBound || '') !== '1') {
-                serviceCorrectionCustomerRefundSourceAmountInput.value = formatNumberInputValue(toNumber(customerRefundDetail.refund_source_amount || customerRefundAmount));
+                serviceCorrectionCustomerRefundSourceAmountInput.value = formatWholeNumberInputValue(toNumber(customerRefundDetail.refund_source_amount || customerRefundAmount));
             }
             serviceCorrectionCustomerRefundSourceAmountInput.dataset.refundBound = '1';
             serviceCorrectionCustomerRefundSourceAmountInput.disabled = !customerRefundPosted;
@@ -6137,7 +6432,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (serviceCorrectionSupplierRefundSourceAmountInput instanceof HTMLInputElement) {
             if (switchedServiceLine || String(serviceCorrectionSupplierRefundSourceAmountInput.dataset.refundBound || '') !== '1') {
-                serviceCorrectionSupplierRefundSourceAmountInput.value = formatNumberInputValue(toNumber(supplierRefundDetail.refund_source_amount || supplierRefundAmount));
+                serviceCorrectionSupplierRefundSourceAmountInput.value = formatWholeNumberInputValue(toNumber(supplierRefundDetail.refund_source_amount || supplierRefundAmount));
             }
             serviceCorrectionSupplierRefundSourceAmountInput.dataset.refundBound = '1';
             serviceCorrectionSupplierRefundSourceAmountInput.disabled = !supplierRefundPosted;
@@ -6178,6 +6473,9 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             serviceCorrectionCustomerRefundRateInput.dataset.refundBound = '1';
             serviceCorrectionCustomerRefundRateInput.disabled = !customerRefundPosted;
+            syncRefundRateVisibility(serviceCorrectionCustomerRefundRateInput,
+                customerRefundDetail.booking_currency || serviceLine?.customerRefundTruthCurrency || serviceLine?.currency,
+                serviceCorrectionCustomerRefundCurrencySelect?.value, customerRefundPosted);
         }
 
         if (serviceCorrectionSupplierRefundRateInput instanceof HTMLInputElement) {
@@ -6189,6 +6487,17 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             serviceCorrectionSupplierRefundRateInput.dataset.refundBound = '1';
             serviceCorrectionSupplierRefundRateInput.disabled = !supplierRefundPosted;
+            syncRefundRateVisibility(serviceCorrectionSupplierRefundRateInput,
+                supplierRefundDetail.booking_currency || serviceLine?.currency,
+                serviceCorrectionSupplierRefundCurrencySelect?.value, supplierRefundPosted);
+        }
+
+        for (const [role, detail] of [['customer', customerRefundDetail], ['supplier', supplierRefundDetail]]) {
+            const date = serviceCorrectionRefundForm.elements.namedItem(`${role}_refund_rate_date`);
+            if (date instanceof HTMLInputElement && (switchedServiceLine || date.dataset.refundBound !== '1')) {
+                date.value = detail.refund_rate_date || '';
+                date.dataset.refundBound = '1';
+            }
         }
 
         if (serviceCorrectionRefundMethodSelect instanceof HTMLSelectElement) {
@@ -6347,38 +6656,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const refundWorkflowCustomerDisplayContext = (serviceLine = null, preferCorrectionLive = false) => {
         const bookingCurrency = refundFxBookingCurrencyCode();
         const line = serviceLine || currentActiveServiceLineForRefund() || {};
-        const lineExpectedCurrency = String(line?.latestCancelExpectedSupplierRefundCurrency || bookingCurrency).trim().toUpperCase() || bookingCurrency;
-        const lineExpectedRate = Math.max(toNumber(line?.latestCancelExpectedSupplierRefundExchangeRate || 1), 0.00000001);
-        const lineCustomerPenaltyCurrency = String(line?.latestCancelCustomerPenaltyCurrency || bookingCurrency).trim().toUpperCase() || bookingCurrency;
-        const lineCustomerPenaltyRate = Math.max(toNumber(line?.latestCancelCustomerPenaltyExchangeRate || 1), 0.00000001);
-
-        const currentExpectedCurrency = String(
-            serviceCorrectionSettlementForm?.elements?.namedItem('expected_supplier_refund_currency')?.value || lineExpectedCurrency
-        ).trim().toUpperCase() || lineExpectedCurrency;
-        const currentExpectedRate = Math.max(toNumber(
-            serviceCorrectionSettlementForm?.elements?.namedItem('expected_supplier_refund_exchange_rate')?.value || lineExpectedRate
-        ), 0.00000001);
-        const currentCustomerPenaltyCurrency = String(
-            serviceCorrectionSettlementForm?.elements?.namedItem('customer_penalty_currency')?.value || lineCustomerPenaltyCurrency
-        ).trim().toUpperCase() || lineCustomerPenaltyCurrency;
-        const currentCustomerPenaltyRate = Math.max(toNumber(
-            serviceCorrectionSettlementForm?.elements?.namedItem('customer_penalty_exchange_rate')?.value || lineCustomerPenaltyRate
-        ), 0.00000001);
-
-        if (preferCorrectionLive && currentCustomerPenaltyCurrency !== bookingCurrency) {
-            return { currency: currentCustomerPenaltyCurrency, rate: currentCustomerPenaltyRate };
-        }
-        if (preferCorrectionLive && currentExpectedCurrency !== bookingCurrency) {
-            return { currency: currentExpectedCurrency, rate: currentExpectedRate };
-        }
-        if (lineCustomerPenaltyCurrency !== bookingCurrency) {
-            return { currency: lineCustomerPenaltyCurrency, rate: lineCustomerPenaltyRate };
-        }
-        if (lineExpectedCurrency !== bookingCurrency) {
-            return { currency: lineExpectedCurrency, rate: lineExpectedRate };
-        }
-
-        return { currency: bookingCurrency, rate: 1 };
+        const currency = String(line.customerRefundSummary?.currency || line.customerRefundTruthCurrency || bookingCurrency).toUpperCase();
+        // Preserve explicitly saved legacy customer currencies; supplier inputs never choose them.
+        const rate = currency === bookingCurrency ? 1 : Math.max(toNumber(
+            currency === line.latestCancelCustomerPenaltyCurrency
+                ? line.latestCancelCustomerPenaltyExchangeRate
+                : line.latestCancelExpectedSupplierRefundExchangeRate
+        ), 0);
+        return { currency, rate };
     };
 
     const refundWorkflowSupplierDisplayContext = (serviceLine = null, preferCorrectionLive = false) => {
@@ -6448,7 +6733,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return {
                 currency: expectedCurrency,
                 amount: Math.max(Math.round(expectedSourceAmount), 0),
-                rate: preferredRate,
+                rate: 1 / preferredRate,
             };
         }
 
@@ -6485,6 +6770,28 @@ document.addEventListener('DOMContentLoaded', () => {
         const supplierSourceTruth = refundWorkflowSupplierSourceTruth(serviceLine, supplierPreferredDisplay);
         const customerRefundPosted = (Number.parseInt(String(serviceLine?.latestCustomerRefundEventId || 0), 10) || 0) > 0;
         const supplierRefundPosted = (Number.parseInt(String(serviceLine?.latestSupplierRefundEventId || 0), 10) || 0) > 0;
+        const supplierCreditAutoRecorded = serviceLine?.supplierCreditAutoRecording === true
+            || String(serviceLine?.supplierCreditAutoRecording || '') === '1';
+        const supplierCreditRecordedAmount = Math.max(toNumber(serviceLine?.supplierCreditRecordedSourceAmount || 0), 0);
+        const supplierPayableReduction = Math.max(toNumber(serviceLine?.supplierPayableReducedSourceAmount || 0), 0);
+        const supplierCreditRecordedNote = serviceRefundForm.querySelector('[data-service-supplier-credit-recorded-note]');
+        const supplierRefundEntryRow = serviceRefundForm.querySelector('[data-service-supplier-refund-entry-row]');
+        if (supplierCreditRecordedNote instanceof HTMLElement) {
+            const creditCurrency = String(serviceLine?.latestCancelExpectedSupplierRefundCurrency || serviceLine?.costCurrency || 'PKR').trim().toUpperCase();
+            supplierCreditRecordedNote.hidden = !supplierCreditAutoRecorded;
+            const parts = [];
+            if (supplierCreditRecordedAmount > 0.005) parts.push(`${formatCurrencyAmount(creditCurrency, supplierCreditRecordedAmount)} returned to reusable supplier credit`);
+            if (supplierPayableReduction > 0.005) parts.push(`${formatCurrencyAmount(creditCurrency, supplierPayableReduction)} reduced from supplier payable`);
+            supplierCreditRecordedNote.textContent = parts.length > 0
+                ? `${parts.join('; ')}.`
+                : 'No supplier credit or payable reduction was needed.';
+        }
+        if (supplierRefundEntryRow instanceof HTMLElement) {
+            supplierRefundEntryRow.hidden = supplierCreditAutoRecorded;
+        }
+        if (supplierCreditAutoRecorded && serviceSupplierRefundAmount instanceof HTMLInputElement) {
+            serviceSupplierRefundAmount.value = '0';
+        }
         const customerRefundDetail = serviceLine?.latestCustomerRefundDetail && typeof serviceLine.latestCustomerRefundDetail === 'object'
             ? serviceLine.latestCustomerRefundDetail
             : {};
@@ -6520,15 +6827,22 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
 
-        if (serviceSupplierRefundCurrencyInput instanceof HTMLSelectElement) {
+        if (serviceSupplierRefundCurrencyInput instanceof HTMLInputElement) {
             const selectedSupplierRefundCurrency = String(
                 supplierRefundPosted
                     ? (supplierRefundDetail.refund_currency || invoiceCurrency)
                     : supplierPreferredDisplay.currency
             ).trim().toUpperCase() || invoiceCurrency;
             serviceSupplierRefundCurrencyInput.dataset.preferredCurrency = selectedSupplierRefundCurrency;
-            if (Array.from(serviceSupplierRefundCurrencyInput.options).some((option) => option.value === selectedSupplierRefundCurrency)) {
-                serviceSupplierRefundCurrencyInput.value = selectedSupplierRefundCurrency;
+            serviceSupplierRefundCurrencyInput.value = selectedSupplierRefundCurrency;
+            if (serviceSupplierRefundLabel instanceof HTMLElement) {
+                serviceSupplierRefundLabel.textContent = `Supplier Refund / Credit (${selectedSupplierRefundCurrency})`;
+            }
+            if (serviceSupplierRefundCurrencyLabel instanceof HTMLElement) {
+                serviceSupplierRefundCurrencyLabel.textContent = selectedSupplierRefundCurrency;
+            }
+            if (switchedServiceLine && serviceSupplierRefundAmount instanceof HTMLInputElement) {
+                serviceSupplierRefundAmount.value = '0';
             }
         }
         if (serviceSupplierRefundSourceAmountInput instanceof HTMLInputElement && serviceSupplierRefundExchangeRateInput instanceof HTMLInputElement && !supplierRefundPosted) {
@@ -6643,6 +6957,8 @@ document.addEventListener('DOMContentLoaded', () => {
             : {};
         const lineExpectedSupplierRefundCurrency = String(line?.latestCancelExpectedSupplierRefundCurrency || bookingCurrency).trim().toUpperCase() || bookingCurrency;
         const lineExpectedSupplierRefundSourceAmount = Math.max(toNumber(line?.latestCancelExpectedSupplierRefundSourceAmount || 0), 0);
+        const supplierCreditRecordedSourceAmount = Math.max(toNumber(line?.supplierCreditRecordedSourceAmount || 0), 0);
+        const supplierPayableReducedSourceAmount = Math.max(toNumber(line?.supplierPayableReducedSourceAmount || 0), 0);
         const lineCustomerPenaltyCurrency = String(line?.latestCancelCustomerPenaltyCurrency || bookingCurrency).trim().toUpperCase() || bookingCurrency;
         const lineCustomerPenaltySourceAmount = Math.max(toNumber(line?.latestCancelCustomerPenaltySourceAmount || 0), 0);
         const customerPostedAmount = Math.max(toNumber(customerRefundDetail.refund_source_amount || line.latestCustomerRefundAmountOnly || 0), 0);
@@ -6707,7 +7023,13 @@ document.addEventListener('DOMContentLoaded', () => {
             && lineExpectedSupplierRefundCurrency !== bookingCurrency
             && lineExpectedSupplierRefundSourceAmount > 0.005;
         if (canUseDirectSupplierRefundSourceTruth) {
-            supplierRefundExpected = Math.max(Math.round(lineExpectedSupplierRefundSourceAmount), 0);
+            supplierRefundExpected = Math.max(
+                Math.round(lineExpectedSupplierRefundSourceAmount - Math.max(supplierCreditRecordedSourceAmount, supplierPostedAmount)),
+                0
+            );
+        }
+        if (line?.supplierCreditAutoRecording === true || String(line?.supplierCreditAutoRecording || '') === '1') {
+            supplierRefundExpected = 0;
         }
 
         const parts = [];
@@ -6722,6 +7044,12 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         if (supplierRefundExpected > 0.005) {
             parts.push(`Supplier refund still expected: ${formatCurrencyAmount(supplierDisplay.currency, supplierRefundExpected)}`);
+        }
+        if (supplierCreditRecordedSourceAmount > 0.005) {
+            parts.push(`Returned to supplier credit: ${formatCurrencyAmount(lineExpectedSupplierRefundCurrency, supplierCreditRecordedSourceAmount)}`);
+        }
+        if (supplierPayableReducedSourceAmount > 0.005) {
+            parts.push(`Reduced from supplier payable: ${formatCurrencyAmount(lineExpectedSupplierRefundCurrency, supplierPayableReducedSourceAmount)}`);
         }
         const supplierPostedDisplay = supplierPostedAmount > 0.005
             ? convertFieldAmountToDisplay(supplierPostedAmount, supplierPostedCurrency, supplierPostedRate, supplierDisplay)
@@ -6764,7 +7092,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         const customerDisplay = refundWorkflowCustomerDisplayContext(undefined, true);
-        const supplierDisplay = refundWorkflowSupplierDisplayContext(undefined, true);
+        const supplierDisplay = refundWorkflowSupplierDisplayContext(undefined, false);
         if (serviceCustomerRefundCurrencyInput instanceof HTMLSelectElement) {
             serviceCustomerRefundCurrencyInput.dataset.preferredCurrency = customerDisplay.currency;
             if (Array.from(serviceCustomerRefundCurrencyInput.options).some((option) => option.value === customerDisplay.currency)) {
@@ -6772,11 +7100,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 serviceCustomerRefundCurrencyInput.dataset.lastCurrency = customerDisplay.currency;
             }
         }
-        if (serviceSupplierRefundCurrencyInput instanceof HTMLSelectElement) {
+        if (serviceSupplierRefundCurrencyInput instanceof HTMLInputElement) {
             serviceSupplierRefundCurrencyInput.dataset.preferredCurrency = supplierDisplay.currency;
-            if (Array.from(serviceSupplierRefundCurrencyInput.options).some((option) => option.value === supplierDisplay.currency)) {
-                serviceSupplierRefundCurrencyInput.value = supplierDisplay.currency;
-                serviceSupplierRefundCurrencyInput.dataset.lastCurrency = supplierDisplay.currency;
+            serviceSupplierRefundCurrencyInput.value = supplierDisplay.currency;
+            if (serviceSupplierRefundLabel instanceof HTMLElement) {
+                serviceSupplierRefundLabel.textContent = `Supplier Refund / Credit (${supplierDisplay.currency})`;
+            }
+            if (serviceSupplierRefundCurrencyLabel instanceof HTMLElement) {
+                serviceSupplierRefundCurrencyLabel.textContent = supplierDisplay.currency;
             }
         }
 
@@ -7242,7 +7573,7 @@ document.addEventListener('DOMContentLoaded', () => {
             advanceReceiptRows.forEach((row) => displayReceipts.push(row));
 
             if (displayReceipts.length === 0) {
-                paymentHistoryReceiptsBody.innerHTML = '<tr><td colspan="12" class="empty-cell">No receipts recorded yet.</td></tr>';
+                paymentHistoryReceiptsBody.innerHTML = '<tr><td colspan="10" class="empty-cell">No receipts recorded yet.</td></tr>';
             } else {
                 const csrfField = paymentForm?.elements?.namedItem('_token');
                 const csrfToken = csrfField instanceof HTMLInputElement ? csrfField.value.trim() : '';
@@ -7257,29 +7588,36 @@ document.addEventListener('DOMContentLoaded', () => {
                     const printUrl = !isAdvanceApplication && receiptId > 0 && bookingId > 0
                         ? buildWorkspacePathUrl(`workspace/output?booking_id=${bookingId}&doc=customer_receipt&receipt_id=${receiptId}`)
                         : '';
-                    const metadataActionHtml = !isAdvanceApplication && receiptId > 0 && bookingId > 0 && csrfToken !== '' && statusRaw !== 'void'
-                        ? `<form method="post" action="${escapeHtml(buildWorkspacePathUrl('workspace/payments/receipts/metadata-save'))}" style="display:grid;gap:6px;min-width:190px;">
-                            <input type="hidden" name="_token" value="${escapeHtml(csrfToken)}">
-                            <input type="hidden" name="booking_id" value="${bookingId}">
-                            <input type="hidden" name="customer_receipt_id" value="${receiptId}">
-                            <input type="text" name="receipt_reference_number" value="${escapeHtml(String(receipt?.referenceNumber || ''))}" placeholder="Payment reference" maxlength="100">
-                            <input type="text" name="receipt_bank_card_detail" value="${escapeHtml(String(receipt?.bankCardDetail || ''))}" placeholder="Bank / Payment details" maxlength="190">
-                            <input type="text" name="receipt_remarks" value="${escapeHtml(String(receipt?.remarks || ''))}" placeholder="Remarks / note" maxlength="4000">
-                            <button class="btn btn-sm" type="submit">Save Notes</button>
-                        </form>`
-                        : '-';
-                    const voidActionHtml = !isAdvanceApplication && canVoidFinancials && statusRaw !== 'void' && receiptId > 0 && bookingId > 0 && csrfToken !== ''
-                        ? `<form method="post" action="${escapeHtml(buildWorkspacePathUrl('workspace/payments/receipts/void'))}" onsubmit="return confirm('Void this receipt and reverse its allocations?');" style="display:grid;gap:6px;min-width:150px;">
-                            <input type="hidden" name="_token" value="${escapeHtml(csrfToken)}">
-                            <input type="hidden" name="booking_id" value="${bookingId}">
-                            <input type="hidden" name="customer_receipt_id" value="${receiptId}">
-                            <input type="text" name="void_reason" value="" placeholder="Void reason" minlength="5" maxlength="1000" required>
-                            <button class="btn btn-sm" type="submit">Void</button>
-                        </form>`
-                        : '-';
-                    const recreateActionHtml = !isAdvanceApplication && statusRaw === 'void' && receiptId > 0 && bookingId > 0
-                        ? `<a class="btn btn-sm" href="${escapeHtml(buildWorkspacePathUrl(`workspace?booking_id=${bookingId}&recreate_receipt_id=${receiptId}#dock-panel-payments`))}">Recreate</a>`
-                        : '-';
+                    const canCorrectAmount = ['cash', 'bank_transfer'].includes(String(receipt?.paymentMethod || '').trim().toLowerCase().replace(/[\s-]+/g, '_'));
+                    const canEditNotes = !isAdvanceApplication && receiptId > 0 && bookingId > 0 && csrfToken !== '' && statusRaw !== 'void';
+                    const canCorrect = !isAdvanceApplication && canVoidFinancials && canCorrectAmount && statusRaw !== 'void' && receiptId > 0 && bookingId > 0 && csrfToken !== '';
+                    const canVoid = !isAdvanceApplication && canVoidFinancials && statusRaw !== 'void' && receiptId > 0 && bookingId > 0 && csrfToken !== '';
+                    const recreateUrl = !isAdvanceApplication && statusRaw === 'void' && receiptId > 0 && bookingId > 0
+                        ? buildWorkspacePathUrl(`workspace?booking_id=${bookingId}&recreate_receipt_id=${receiptId}#dock-panel-payments`)
+                        : '';
+                    const statusClass = statusRaw === 'void'
+                        ? 'payment-history-status--void'
+                        : (statusRaw === 'fully_allocated' ? 'payment-history-status--complete' : 'payment-history-status--open');
+                    const manageActionHtml = !isAdvanceApplication && receiptId > 0
+                        ? `<button class="btn btn-sm payment-history-action-button" type="button" data-payment-receipt-manage
+                            data-receipt-id="${receiptId}"
+                            data-receipt-no="${escapeHtml(String(receipt?.receiptNo || ''))}"
+                            data-receipt-date="${escapeHtml(String(receipt?.receiptDate || ''))}"
+                            data-receipt-currency="${escapeHtml(String(receipt?.currency || ''))}"
+                            data-receipt-received="${escapeHtml(String(receipt?.receivedAmount || 0))}"
+                            data-receipt-allocated="${escapeHtml(String(receipt?.allocatedAmount || 0))}"
+                            data-receipt-returned="${escapeHtml(String(receipt?.returnedAmount || 0))}"
+                            data-receipt-method="${escapeHtml(String(receipt?.paymentMethod || ''))}"
+                            data-receipt-status="${escapeHtml(statusLabel)}"
+                            data-receipt-status-raw="${escapeHtml(statusRaw)}"
+                            data-receipt-reference="${escapeHtml(String(receipt?.referenceNumber || ''))}"
+                            data-receipt-bank-detail="${escapeHtml(String(receipt?.bankCardDetail || ''))}"
+                            data-receipt-remarks="${escapeHtml(String(receipt?.remarks || ''))}"
+                            data-can-edit-notes="${canEditNotes ? '1' : '0'}"
+                            data-can-correct="${canCorrect ? '1' : '0'}"
+                            data-can-void="${canVoid ? '1' : '0'}"
+                            data-recreate-url="${escapeHtml(recreateUrl)}">${statusRaw === 'void' ? 'View' : 'Manage'}</button>`
+                        : '<span class="payment-history-action-note">Advance application</span>';
                     return `<tr>
                         <td>${escapeHtml(String(receipt?.receiptNo || ''))}</td>
                         <td>${escapeHtml(String(receipt?.receiptDate || ''))}</td>
@@ -7288,11 +7626,9 @@ document.addEventListener('DOMContentLoaded', () => {
                         <td>${escapeHtml(formatMoney(toNumber(receipt?.returnedAmount || 0)))}</td>
                         <td>${escapeHtml(formatMoney(toNumber(receipt?.allocatedAmount || 0)))}</td>
                         <td>${escapeHtml(String(receipt?.paymentMethod || ''))}</td>
-                        <td>${escapeHtml(statusLabel)}</td>
+                        <td><span class="payment-history-status ${statusClass}">${escapeHtml(statusLabel)}</span></td>
                         <td>${printUrl !== '' ? `<a href="${escapeHtml(printUrl)}" target="_blank" rel="noopener">Print</a>` : '-'}</td>
-                        <td>${metadataActionHtml}</td>
-                        <td>${voidActionHtml}</td>
-                        <td>${recreateActionHtml}</td>
+                        <td><div class="payment-history-actions">${manageActionHtml}${recreateUrl !== '' ? `<a class="btn btn-sm payment-history-recreate-button" href="${escapeHtml(recreateUrl)}">Recreate</a>` : ''}</div></td>
                     </tr>`;
                 }).join('');
             }
@@ -11913,9 +12249,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const serviceSupplierRefundAmount = serviceRefundForm?.elements?.namedItem('supplier_refund_amount') instanceof HTMLInputElement
         ? serviceRefundForm.elements.namedItem('supplier_refund_amount')
         : null;
-    const serviceSupplierRefundCurrencyInput = serviceRefundForm?.elements?.namedItem('supplier_refund_currency') instanceof HTMLSelectElement
+    const serviceSupplierRefundCurrencyInput = serviceRefundForm?.elements?.namedItem('supplier_refund_currency') instanceof HTMLInputElement
         ? serviceRefundForm.elements.namedItem('supplier_refund_currency')
         : null;
+    const serviceSupplierRefundLabel = serviceRefundForm?.querySelector('[data-service-supplier-refund-label]') || null;
+    const serviceSupplierRefundCurrencyLabel = serviceRefundForm?.querySelector('[data-service-supplier-refund-currency]') || null;
+    const serviceSupplierRefundFxConfirmed = serviceRefundForm?.elements?.namedItem('supplier_refund_fx_confirmed') || null;
+    const serviceSupplierRefundCurrencyOverride = serviceRefundForm?.elements?.namedItem('supplier_refund_currency_override_confirmed') || null;
     const serviceSupplierRefundSourceAmountInput = serviceRefundForm?.elements?.namedItem('supplier_refund_source_amount') instanceof HTMLInputElement
         ? serviceRefundForm.elements.namedItem('supplier_refund_source_amount')
         : null;
@@ -12011,6 +12351,7 @@ document.addEventListener('DOMContentLoaded', () => {
         settlementReverse: station.querySelector('form[data-service-correction-bar="settlement-reverse"]'),
         refund: station.querySelector('form[data-service-correction-bar="refund"]'),
         refundReverse: station.querySelector('form[data-service-correction-bar="refund-reverse"]'),
+        completeUndo: station.querySelector('form[data-refund-complete-undo]'),
     };
     const serviceSettlementId = station.querySelector('[data-service-settlement-id]');
     const serviceSettlementButton = station.querySelector('[data-service-settlement-button]');
@@ -13993,10 +14334,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const roundCustomerCashTotal = (amount) => {
         const normalized = roundToTwo(amount);
-        const wholeAmount = Math.round(normalized);
-        return Math.abs(normalized - wholeAmount) <= 0.005
-            ? roundToTwo(wholeAmount)
-            : roundToTwo(Math.ceil(normalized));
+        return Math.round(normalized);
     };
 
     const currentAgencyAmountInServiceCurrency = () => roundToTwo(
@@ -14047,54 +14385,6 @@ document.addEventListener('DOMContentLoaded', () => {
             : currentConvertedPayableAmount();
 
         return roundCustomerCashTotal(receivableBase + currentConvertedAgencyAmount());
-    };
-
-    const alignServiceChargeToWholeCustomerTotal = (options = {}) => {
-        if (!(serviceMetricInputs.serviceCharge instanceof HTMLInputElement)) {
-            return false;
-        }
-
-        const invoiceCurrency = options.invoiceCurrency || currentInvoiceCurrencyCode();
-        const serviceChargeCurrency = options.serviceChargeCurrency || currentServiceChargeCurrencyCode();
-        const serviceChargeRate = Number.isFinite(options.serviceChargeRate)
-            ? options.serviceChargeRate
-            : currentServiceChargeExchangeRate({ invoiceCurrency, serviceChargeCurrency });
-        const payableAmount = Number.isFinite(options.convertedPayable)
-            ? options.convertedPayable
-            : currentConvertedPayableAmount();
-
-        if (invoiceCurrency !== serviceChargeCurrency && serviceChargeRate <= 0.005) {
-            return false;
-        }
-
-        let adjusted = false;
-        for (let attempt = 0; attempt < 3; attempt += 1) {
-            const exactTotal = roundToTwo(payableAmount + currentConvertedAgencyAmount());
-            const roundedTotal = roundCustomerCashTotal(exactTotal);
-            const deltaInInvoiceCurrency = roundToTwo(roundedTotal - exactTotal);
-            if (deltaInInvoiceCurrency <= 0.005) {
-                break;
-            }
-
-            const deltaInServiceCurrency = invoiceCurrency === serviceChargeCurrency
-                ? deltaInInvoiceCurrency
-                : roundToTwo(deltaInInvoiceCurrency / serviceChargeRate);
-            if (deltaInServiceCurrency <= 0.005) {
-                break;
-            }
-
-            const nextServiceCharge = roundToTwo(
-                readCommercialMoneyValue(serviceMetricInputs.serviceCharge) + deltaInServiceCurrency
-            );
-            serviceMetricInputs.serviceCharge.value = formatNumberInputValue(
-                nextServiceCharge,
-                inputDecimalPlaces(serviceMetricInputs.serviceCharge)
-            );
-            syncCommercialPercentFromAmount('serviceCharge', { markManualAmount: true });
-            adjusted = true;
-        }
-
-        return adjusted;
     };
 
     let commercialPercentSyncing = false;
@@ -15243,7 +15533,10 @@ document.addEventListener('DOMContentLoaded', () => {
             ? Math.max(activeReceivable, 0)
             : 0;
         const provisionalTotal = roundToTwo(Math.max(persistedTotal + activeInvoiceTotal, 0));
-        const alreadyReceived = Math.max(toNumber(paymentAlreadyReceivedInput?.dataset.paymentPersistedReceived || paymentAlreadyReceivedInput?.value || 0), 0);
+        const alreadyReceived = Math.max(readDisplayBackedAmount(
+            paymentAlreadyReceivedInput,
+            paymentAlreadyReceivedInput?.dataset.paymentPersistedReceived || 0
+        ), 0);
         const provisionalBalance = roundToTwo(Math.max(provisionalTotal - alreadyReceived, 0));
         const paymentCurrency = paymentCurrencySelect?.value || invoiceCurrency;
 
@@ -15385,17 +15678,6 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
         if (!currentManualOverride && !skipAutoWholeTotalAdjustment) {
-            alignServiceChargeToWholeCustomerTotal({
-                convertedPayable,
-                invoiceCurrency,
-                serviceChargeCurrency,
-                serviceChargeRate,
-            });
-            agencyAmount = currentAgencyAmountInServiceCurrency();
-            missingServiceChargeRate = invoiceCurrency !== serviceChargeCurrency
-                && Math.abs(agencyAmount) > 0.005
-                && serviceChargeRate <= 0.005;
-            missingRequiredPricingRate = missingPricingRate || missingServiceChargeRate;
             suggestedFinalSalePrice = defaultFinalSalePrice(totalPayable);
         }
         delete finalSalePriceInput.dataset.pricingRateMissing;
@@ -15676,6 +15958,29 @@ document.addEventListener('DOMContentLoaded', () => {
         if (serviceCorrectionBars.refundReverse instanceof HTMLElement) {
             serviceCorrectionBars.refundReverse.hidden = !(canShowServiceEventActions && hasRefundReverseOptions);
         }
+        if (serviceCorrectionBars.completeUndo instanceof HTMLFormElement) {
+            const undoForm = serviceCorrectionBars.completeUndo;
+            undoForm.hidden = !(canShowServiceEventActions && isCancelled && hasCancellationEvent);
+            const serviceId = String(serviceLine.serviceId || 0);
+            const serviceChanged = undoForm.dataset.activeServiceId !== serviceId;
+            undoForm.dataset.activeServiceId = serviceId;
+            const fields = {
+                service_id: serviceId,
+                cancel_event_id: serviceLine.latestCancelEventId || 0,
+                undo_last_refund_event_id: serviceLine.latestRefundEventId || 0,
+                undo_mistake_confirmed: 0,
+            };
+            for (const [name, value] of Object.entries(fields)) {
+                undoForm.elements.namedItem(name).value = String(value);
+            }
+            if (serviceChanged) {
+                for (const name of ['undo_customer_money', 'undo_supplier_money', 'undo_reason']) {
+                    undoForm.elements.namedItem(name).value = '';
+                }
+            }
+            undoForm.querySelector('button[type="submit"]').disabled = false;
+        }
+        syncRefundRecovery(serviceLine, canShowServiceEventActions);
 
         syncFinancialCorrectionEditor(serviceLine, canShowServiceEventActions);
         syncServiceWorkflowTabs();
@@ -15895,6 +16200,50 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
+    const syncRefundRateVisibility = (field, accountingCurrency, actualCurrency, active = true) => {
+        if (!(field instanceof HTMLInputElement)) return;
+        const sameCurrency = String(accountingCurrency || '').toUpperCase() === String(actualCurrency || '').toUpperCase();
+        const row = field.closest('.legacy-service-event-field');
+        if (row instanceof HTMLElement) row.hidden = !active || sameCurrency;
+        if (sameCurrency) field.value = '1';
+        if (!(row instanceof HTMLElement) || !active || sameCurrency) return;
+        field.hidden = true;
+        field.dataset.rateBookingCurrency = accountingCurrency;
+        field.dataset.rateActualCurrency = actualCurrency;
+        let quoted = row.querySelector('[data-refund-rate-quote]');
+        if (!(quoted instanceof HTMLInputElement)) {
+            quoted = document.createElement('input');
+            quoted.type = 'number';
+            quoted.min = '0.00000001';
+            quoted.step = '0.01';
+            quoted.dataset.refundRateQuote = '1';
+            row.append(quoted);
+            quoted.addEventListener('input', () => {
+                field.value = String(refundRateFromQuote(field.dataset.rateBookingCurrency, field.dataset.rateActualCurrency, quoted.value));
+                field.dispatchEvent(new Event('input', { bubbles: true }));
+            });
+        }
+        const quote = refundRateQuote(accountingCurrency, actualCurrency, field.value);
+        const caption = row.querySelector('span');
+        if (caption instanceof HTMLElement) caption.textContent = `1 ${quote.from} equals (${quote.to})`;
+        quoted.setAttribute('aria-label', `Refund rate: 1 ${quote.from} equals how many ${quote.to}`);
+        quoted.readOnly = field.readOnly;
+        quoted.disabled = field.disabled;
+        if (document.activeElement !== quoted) quoted.value = quote.rate > 0 ? String(roundToTwo(quote.rate)) : '';
+    };
+
+    // Posted refund details store booking-to-actual; quote direction is presentation only.
+    const refundRateQuote = (bookingCurrency, actualCurrency, storedRate) => {
+        const pair = pricingPromptPair(bookingCurrency, actualCurrency);
+        const rate = Math.max(toNumber(storedRate), 0);
+        return { ...pair, rate: rate > 0 ? (pair.from === bookingCurrency ? rate : 1 / rate) : 0 };
+    };
+    const refundRateFromQuote = (bookingCurrency, actualCurrency, enteredRate) => {
+        const pair = pricingPromptPair(bookingCurrency, actualCurrency);
+        const rate = Math.max(toNumber(enteredRate), 0);
+        return rate > 0 ? roundExchangeRate(pair.from === bookingCurrency ? rate : 1 / rate) : 0;
+    };
+
     const refundFxConfigFor = (role) => role === 'customer'
         ? {
             role,
@@ -15905,6 +16254,7 @@ document.addEventListener('DOMContentLoaded', () => {
             currencyField: serviceCustomerRefundCurrencyInput,
             sourceAmountField: serviceCustomerRefundSourceAmountInput,
             rateField: serviceCustomerRefundExchangeRateInput,
+            dateField: serviceRefundForm?.elements?.namedItem('customer_refund_rate_date'),
             summaryNode: customerRefundFxSummary,
             postSave: () => syncRefundTreasurySelector(),
         }
@@ -15917,6 +16267,7 @@ document.addEventListener('DOMContentLoaded', () => {
             currencyField: serviceSupplierRefundCurrencyInput,
             sourceAmountField: serviceSupplierRefundSourceAmountInput,
             rateField: serviceSupplierRefundExchangeRateInput,
+            dateField: serviceRefundForm?.elements?.namedItem('supplier_refund_rate_date'),
             summaryNode: supplierRefundFxSummary,
             postSave: () => syncSupplierRefundTreasurySelector(),
         };
@@ -15961,7 +16312,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (sourceAmount > 0.005 && fxRate > 0.00000001) {
             const bookingEquivalent = roundToTwo(sourceAmount / fxRate);
-            config.summaryNode.textContent = `${formatCurrencyAmount(actualCurrency, sourceAmount)} -> ${formatCurrencyAmount(bookingCurrency, bookingEquivalent)} @ ${roundExchangeRate(fxRate)}.`;
+            const quote = refundRateQuote(bookingCurrency, actualCurrency, fxRate);
+            config.summaryNode.textContent = `${formatCurrencyAmount(actualCurrency, sourceAmount)} = ${formatCurrencyAmount(bookingCurrency, bookingEquivalent)}. 1 ${quote.from} = ${roundToTwo(quote.rate)} ${quote.to}.`;
             return;
         }
 
@@ -15990,7 +16342,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (actualCurrency === bookingCurrency) {
-            config.sourceAmountField.value = formatNumberInputValue(refundAmount);
+            config.sourceAmountField.value = formatWholeNumberInputValue(refundAmount);
             config.rateField.value = '1';
             syncRefundFxSummary(role);
             return;
@@ -16002,7 +16354,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (currentSourceAmount <= 0.005) {
-            config.sourceAmountField.value = formatNumberInputValue(refundAmount);
+            config.sourceAmountField.value = formatWholeNumberInputValue(refundAmount);
         }
 
         if (currentRate > 0.00000001 && refundAmount > 0.005 && currentSourceAmount <= 0.005) {
@@ -16014,6 +16366,13 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     let refundFxModalRequest = null;
+    const refundFxSelectedRate = () => {
+        const snapshot = refundFxModalRequest?.rateSnapshot;
+        const actualCurrency = refundFxCurrencySelect.value;
+        // Display rounding must not replace a saved or amount-derived precise rate.
+        if (snapshot && snapshot.currency === actualCurrency && snapshot.display === refundFxRateInput.value) return snapshot.rate;
+        return refundRateFromQuote(refundFxModalRequest.bookingCurrency, actualCurrency, refundFxRateInput.value);
+    };
     const closeRefundFxModal = () => {
         if (refundFxModal instanceof HTMLElement) {
             refundFxModal.hidden = true;
@@ -16031,13 +16390,13 @@ document.addEventListener('DOMContentLoaded', () => {
         const bookingCurrency = refundFxModalRequest.bookingCurrency;
         const refundAmount = refundFxModalRequest.refundAmount;
         const selectedCurrency = String(refundFxCurrencySelect.value || bookingCurrency).trim().toUpperCase() || bookingCurrency;
-        if (refundFxDateField instanceof HTMLInputElement) {
-            refundFxDateField.value = refundFxModalRequest.effectiveDate;
-        }
+        const sameCurrency = selectedCurrency === bookingCurrency;
+        refundFxModal.querySelector('[data-refund-fx-rate-row]').hidden = sameCurrency;
+        refundFxModal.querySelector('[data-refund-fx-date-row]').hidden = sameCurrency;
 
         if (selectedCurrency === bookingCurrency) {
             refundFxRateInput.value = '1';
-            refundFxSourceAmountInput.value = formatNumberInputValue(refundAmount);
+            refundFxSourceAmountInput.value = formatWholeNumberInputValue(refundAmount);
             refundFxRateInput.readOnly = true;
             refundFxSourceAmountInput.readOnly = true;
             refundFxPreview.textContent = 'Same currency. No conversion needed.';
@@ -16046,16 +16405,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
         refundFxRateInput.readOnly = false;
         refundFxSourceAmountInput.readOnly = false;
+        const pair = pricingPromptPair(bookingCurrency, selectedCurrency);
+        refundFxModal.querySelector('[data-refund-fx-rate-label]').textContent = `1 ${pair.from} equals (${pair.to})`;
         const enteredSourceAmount = Math.max(toNumber(refundFxSourceAmountInput.value || 0), 0);
         if (enteredSourceAmount <= 0.005 && refundAmount > 0.005) {
-            refundFxSourceAmountInput.value = formatNumberInputValue(refundAmount);
+            refundFxSourceAmountInput.value = formatWholeNumberInputValue(refundAmount);
         }
 
-        const effectiveRate = Math.max(toNumber(refundFxRateInput.value || 0), 0);
+        const effectiveRate = refundFxSelectedRate();
         if (effectiveRate > 0.00000001) {
             const actualAmount = Math.max(toNumber(refundFxSourceAmountInput.value || refundAmount), 0);
             const bookingEquivalent = roundToTwo(actualAmount / effectiveRate);
-            refundFxPreview.textContent = `${formatCurrencyAmount(selectedCurrency, actualAmount)} equals ${formatCurrencyAmount(bookingCurrency, bookingEquivalent)} @ ${roundExchangeRate(effectiveRate)}.`;
+            refundFxPreview.textContent = `${formatCurrencyAmount(selectedCurrency, actualAmount)} equals ${formatCurrencyAmount(bookingCurrency, bookingEquivalent)}.`;
             return;
         }
 
@@ -16095,8 +16456,25 @@ document.addEventListener('DOMContentLoaded', () => {
             refundFxBookingAmount.textContent = formatCurrencyAmount(bookingCurrency, refundAmount);
         }
         refundFxCurrencySelect.value = String(config.currencyField?.value || bookingCurrency).trim().toUpperCase() || bookingCurrency;
-        refundFxSourceAmountInput.value = String(config.sourceAmountField?.value || '');
-        refundFxRateInput.value = String(config.rateField?.value || '');
+        refundFxSourceAmountInput.value = config.sourceAmountField?.value
+            ? formatWholeNumberInputValue(toNumber(config.sourceAmountField.value)) : '';
+        let storedRate = Math.max(toNumber(config.rateField?.value), 0);
+        if (role === 'supplier' && refundFxCurrencySelect.value !== bookingCurrency && storedRate <= 0.00000001) {
+            const suggestion = refundWorkflowSupplierSourceTruth();
+            if (suggestion.currency === refundFxCurrencySelect.value && suggestion.rate > 0.00000001) {
+                storedRate = suggestion.rate;
+                refundFxSourceAmountInput.value = formatWholeNumberInputValue(Math.round(refundAmount * storedRate));
+            }
+        }
+        const quote = refundRateQuote(bookingCurrency, refundFxCurrencySelect.value, storedRate);
+        refundFxRateInput.value = quote.rate > 0 ? String(roundToTwo(quote.rate)) : '';
+        refundFxModalRequest.rateSnapshot = {
+            currency: refundFxCurrencySelect.value, display: refundFxRateInput.value,
+            rate: storedRate,
+        };
+        if (refundFxDateField instanceof HTMLInputElement) {
+            refundFxDateField.value = config.dateField?.value || refundFxModalRequest.effectiveDate;
+        }
         showRefundFxFeedback('');
         refreshRefundFxModal();
         refundFxModal.hidden = false;
@@ -16142,11 +16520,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const currentSourceAmount = Math.max(toNumber(config.sourceAmountField.value || 0), 0);
         const currentRate = Math.max(toNumber(config.rateField.value || 0), 0);
         if (currentSourceAmount <= 0.005) {
-            config.sourceAmountField.value = formatNumberInputValue(refundAmount);
+            config.sourceAmountField.value = formatWholeNumberInputValue(refundAmount);
         }
-        if (currentRate <= 0.00000001) {
-            config.rateField.value = '';
-        }
+        if (nextCurrency !== previousCurrency || currentRate <= 0.00000001) config.rateField.value = '';
         syncRefundFxSummary(role);
         if (typeof config.postSave === 'function') {
             config.postSave();
@@ -16174,8 +16550,15 @@ document.addEventListener('DOMContentLoaded', () => {
     refundFxCancelButtons.forEach((button) => {
         button.addEventListener('click', closeRefundFxModal);
     });
-    refundFxCurrencySelect?.addEventListener('change', refreshRefundFxModal);
-    refundFxRateInput?.addEventListener('input', refreshRefundFxModal);
+    refundFxCurrencySelect?.addEventListener('change', () => {
+        refundFxRateInput.value = '';
+        if (refundFxModalRequest) refundFxModalRequest.rateSnapshot = null;
+        refreshRefundFxModal();
+    });
+    refundFxRateInput?.addEventListener('input', () => {
+        if (refundFxModalRequest) refundFxModalRequest.rateSnapshot = null;
+        refreshRefundFxModal();
+    });
     refundFxSourceAmountInput?.addEventListener('input', () => {
         if (!(refundFxModalRequest && refundFxRateInput instanceof HTMLInputElement && refundFxSourceAmountInput instanceof HTMLInputElement)) {
             return;
@@ -16183,7 +16566,12 @@ document.addEventListener('DOMContentLoaded', () => {
         const refundAmount = refundFxModalRequest.refundAmount;
         const sourceAmount = Math.max(toNumber(refundFxSourceAmountInput.value || 0), 0);
         if (sourceAmount > 0.005 && refundAmount > 0.005) {
-            refundFxRateInput.value = String(roundExchangeRate(sourceAmount / refundAmount));
+            const quote = refundRateQuote(refundFxModalRequest.bookingCurrency, refundFxCurrencySelect.value, sourceAmount / refundAmount);
+            refundFxRateInput.value = String(roundToTwo(quote.rate));
+            refundFxModalRequest.rateSnapshot = {
+                currency: refundFxCurrencySelect.value, display: refundFxRateInput.value,
+                rate: roundExchangeRate(sourceAmount / refundAmount),
+            };
         }
         refreshRefundFxModal();
     });
@@ -16201,7 +16589,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const actualCurrency = String(refundFxCurrencySelect.value || bookingCurrency).trim().toUpperCase() || bookingCurrency;
         const refundAmount = refundFxModalRequest.refundAmount;
         const sourceAmount = Math.max(toNumber(refundFxSourceAmountInput.value || 0), 0);
-        const fxRate = Math.max(toNumber(refundFxRateInput.value || 0), 0);
+        const fxRate = refundFxSelectedRate();
 
         if (actualCurrency !== bookingCurrency) {
             if (sourceAmount <= 0.005) {
@@ -16221,26 +16609,31 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
-            try {
-                await saveDailyPricingExchangeRate(
-                    bookingCurrency,
-                    actualCurrency,
-                    fxRate,
-                    refundFxModalRequest.effectiveDate
-                );
-            } catch (error) {
-                showRefundFxFeedback(error instanceof Error ? error.message : 'The refund exchange rate could not be saved.');
+            if (!normalizeLooseDate(refundFxDateField?.value || '')) {
+                showRefundFxFeedback('Select the refund FX rate date.');
                 return;
             }
         }
 
         config.currencyField.value = actualCurrency;
         config.sourceAmountField.value = actualCurrency === bookingCurrency
-            ? formatNumberInputValue(refundAmount)
-            : formatNumberInputValue(sourceAmount);
+            ? formatWholeNumberInputValue(refundAmount)
+            : formatWholeNumberInputValue(sourceAmount);
         config.rateField.value = actualCurrency === bookingCurrency
             ? '1'
             : String(roundExchangeRate(fxRate));
+        if (config.dateField instanceof HTMLInputElement) {
+            config.dateField.value = actualCurrency === bookingCurrency ? '' : normalizeLooseDate(refundFxDateField.value);
+        }
+        if (refundFxModalRequest.role === 'supplier') {
+            const expectedCurrency = refundWorkflowSupplierDisplayContext(undefined, true).currency;
+            if (serviceSupplierRefundFxConfirmed instanceof HTMLInputElement) {
+                serviceSupplierRefundFxConfirmed.value = '1';
+            }
+            if (serviceSupplierRefundCurrencyOverride instanceof HTMLInputElement) {
+                serviceSupplierRefundCurrencyOverride.value = actualCurrency === expectedCurrency ? '0' : '1';
+            }
+        }
         syncRefundFxSummary(refundFxModalRequest.role);
         if (typeof config.postSave === 'function') {
             config.postSave();
@@ -16344,7 +16737,6 @@ document.addEventListener('DOMContentLoaded', () => {
         syncCustomerRefundTreatment();
     });
     serviceSupplierRefundAmount?.addEventListener('input', () => {
-        syncRefundFxDefaults('supplier');
         syncCustomerRefundTreatment();
     });
     if (serviceRefundForm) {
@@ -16356,6 +16748,12 @@ document.addEventListener('DOMContentLoaded', () => {
             const bookingCurrency = refundFxBookingCurrencyCode();
             const customerRefundCurrency = String(serviceCustomerRefundCurrencyInput?.value || bookingCurrency).trim().toUpperCase() || bookingCurrency;
             const supplierRefundCurrency = String(serviceSupplierRefundCurrencyInput?.value || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+            if (supplierRefundAmount > 0.005 && supplierRefundCurrency !== bookingCurrency
+                && serviceSupplierRefundMethodSelect?.value !== 'supplier_credit') {
+                event.preventDefault();
+                showFeedback('Different-currency supplier money refunds need a treasury FX journal. Use supplier credit only if the supplier kept the value as credit.');
+                return;
+            }
             if (serviceCustomerRefundSourceAmountInput instanceof HTMLInputElement) {
                 serviceCustomerRefundSourceAmountInput.value = customerRefundCurrency === bookingCurrency
                     ? formatNumberInputValue(customerRefundAmount)
@@ -16390,15 +16788,6 @@ document.addEventListener('DOMContentLoaded', () => {
                     event.preventDefault();
                     showFeedback('Enter and confirm the customer refund FX rate before saving.');
                     openRefundFxModal('customer');
-                    return;
-                }
-            }
-            if (supplierRefundAmount > 0.005 && supplierRefundCurrency !== bookingCurrency) {
-                const supplierRate = Math.max(toNumber(serviceSupplierRefundExchangeRateInput?.value || 0), 0);
-                if (supplierRate <= 0.00000001) {
-                    event.preventDefault();
-                    showFeedback('Enter and confirm the supplier refund FX rate before saving.');
-                    openRefundFxModal('supplier');
                     return;
                 }
             }
@@ -20003,6 +20392,12 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
+        if (serviceCorrectionBars.completeUndo instanceof HTMLFormElement) {
+            for (const name of ['undo_customer_money', 'undo_supplier_money', 'undo_reason']) {
+                serviceCorrectionBars.completeUndo.elements.namedItem(name).value = '';
+            }
+        }
+
         try {
             window.sessionStorage.removeItem(pendingServiceEditBookingModalKey);
             window.sessionStorage.setItem(pendingPenaltyRefundModalKey, '1');
@@ -20120,6 +20515,114 @@ document.addEventListener('DOMContentLoaded', () => {
         paymentHistoryModal.hidden = true;
         paymentHistoryModal.setAttribute('aria-hidden', 'true');
     }
+
+    let paymentReceiptManagerTrigger = null;
+
+    const setPaymentReceiptManagerFormValue = (form, name, value) => {
+        const field = form?.elements?.namedItem(name);
+        if (field && 'value' in field) {
+            field.value = String(value ?? '');
+        }
+    };
+
+    const setPaymentReceiptManagerFeedback = (message = '') => {
+        if (!(paymentReceiptManagerFeedback instanceof HTMLElement)) {
+            return;
+        }
+        paymentReceiptManagerFeedback.textContent = String(message || '');
+        paymentReceiptManagerFeedback.hidden = String(message || '').trim() === '';
+    };
+
+    const openPaymentReceiptManager = (trigger) => {
+        if (!(paymentReceiptManagerModal instanceof HTMLElement) || !(trigger instanceof HTMLElement)) {
+            return;
+        }
+
+        paymentReceiptManagerTrigger = trigger;
+        const data = trigger.dataset;
+        const receiptId = Number.parseInt(String(data.receiptId || 0), 10) || 0;
+        const receiptNo = String(data.receiptNo || 'Receipt');
+        const statusRaw = String(data.receiptStatusRaw || '').trim().toLowerCase();
+        const isVoided = statusRaw === 'void';
+        const canEditNotes = data.canEditNotes === '1';
+        const canCorrect = data.canCorrect === '1';
+        const canVoid = data.canVoid === '1';
+
+        if (paymentReceiptManagerSubtitle instanceof HTMLElement) {
+            paymentReceiptManagerSubtitle.textContent = `${receiptNo} · ${String(data.receiptDate || '')} · ${String(data.receiptCurrency || '')}`;
+        }
+        if (paymentReceiptManagerSummary instanceof HTMLElement) {
+            paymentReceiptManagerSummary.innerHTML = `
+                <div><span>Receipt</span><strong>${escapeHtml(receiptNo)}</strong></div>
+                <div><span>Received</span><strong>${escapeHtml(formatMoney(toNumber(data.receiptReceived || 0)))} ${escapeHtml(String(data.receiptCurrency || ''))}</strong></div>
+                <div><span>Applied</span><strong>${escapeHtml(formatMoney(toNumber(data.receiptAllocated || 0)))}</strong></div>
+                <div><span>Returned / refunded</span><strong>${escapeHtml(formatMoney(toNumber(data.receiptReturned || 0)))}</strong></div>
+                <div><span>Method</span><strong>${escapeHtml(String(data.receiptMethod || ''))}</strong></div>
+                <div><span>Status</span><strong>${escapeHtml(String(data.receiptStatus || ''))}</strong></div>`;
+        }
+
+        setPaymentReceiptManagerFeedback('');
+        if (paymentReceiptManagerNotesForm instanceof HTMLFormElement) {
+            setPaymentReceiptManagerFormValue(paymentReceiptManagerNotesForm, 'customer_receipt_id', receiptId);
+            setPaymentReceiptManagerFormValue(paymentReceiptManagerNotesForm, 'receipt_reference_number', data.receiptReference || '');
+            setPaymentReceiptManagerFormValue(paymentReceiptManagerNotesForm, 'receipt_bank_card_detail', data.receiptBankDetail || '');
+            setPaymentReceiptManagerFormValue(paymentReceiptManagerNotesForm, 'receipt_remarks', data.receiptRemarks || '');
+        }
+        if (paymentReceiptManagerCorrectionForm instanceof HTMLFormElement) {
+            setPaymentReceiptManagerFormValue(paymentReceiptManagerCorrectionForm, 'customer_receipt_id', receiptId);
+            setPaymentReceiptManagerFormValue(paymentReceiptManagerCorrectionForm, 'expected_received_amount', data.receiptReceived || 0);
+            setPaymentReceiptManagerFormValue(paymentReceiptManagerCorrectionForm, 'corrected_received_amount', data.receiptReceived || 0);
+            const recordedAmount = paymentReceiptManagerCorrectionForm.querySelector('[data-payment-receipt-recorded-amount]');
+            if (recordedAmount && 'value' in recordedAmount) {
+                recordedAmount.value = `${data.receiptReceived || 0} ${data.receiptCurrency || ''}`.trim();
+            }
+        }
+        if (paymentReceiptManagerVoidForm instanceof HTMLFormElement) {
+            setPaymentReceiptManagerFormValue(paymentReceiptManagerVoidForm, 'customer_receipt_id', receiptId);
+            setPaymentReceiptManagerFormValue(paymentReceiptManagerVoidForm, 'void_reason', '');
+            const confirmation = paymentReceiptManagerVoidForm.elements.namedItem('no_money_received_confirmed');
+            if (confirmation instanceof HTMLInputElement) {
+                confirmation.checked = false;
+            }
+        }
+
+        if (paymentReceiptManagerNotesSection instanceof HTMLElement) {
+            paymentReceiptManagerNotesSection.hidden = isVoided || !canEditNotes;
+        }
+        if (paymentReceiptManagerCorrectionSection instanceof HTMLElement) {
+            paymentReceiptManagerCorrectionSection.hidden = isVoided || !canCorrect;
+        }
+        if (paymentReceiptManagerVoidSection instanceof HTMLElement) {
+            paymentReceiptManagerVoidSection.hidden = isVoided || !canVoid;
+        }
+        if (paymentReceiptManagerVoided instanceof HTMLElement) {
+            paymentReceiptManagerVoided.hidden = !isVoided;
+        }
+        if (paymentReceiptManagerRecreate instanceof HTMLAnchorElement) {
+            const recreateUrl = String(data.recreateUrl || '#');
+            paymentReceiptManagerRecreate.href = recreateUrl;
+            paymentReceiptManagerRecreate.hidden = !isVoided || recreateUrl === '#';
+        }
+
+        paymentReceiptManagerModal.hidden = false;
+        paymentReceiptManagerModal.setAttribute('aria-hidden', 'false');
+        const firstVisibleField = paymentReceiptManagerModal.querySelector('section:not([hidden]) input:not([type="hidden"]):not([readonly]), section:not([hidden]) button[type="submit"]');
+        if (firstVisibleField instanceof HTMLElement) {
+            window.setTimeout(() => firstVisibleField.focus(), 0);
+        }
+    };
+
+    const closePaymentReceiptManager = () => {
+        if (!(paymentReceiptManagerModal instanceof HTMLElement)) {
+            return;
+        }
+        paymentReceiptManagerModal.hidden = true;
+        paymentReceiptManagerModal.setAttribute('aria-hidden', 'true');
+        if (paymentReceiptManagerTrigger instanceof HTMLElement) {
+            paymentReceiptManagerTrigger.focus();
+        }
+        paymentReceiptManagerTrigger = null;
+    };
 
     const setCustomerDuesFeedback = (message, visible = true) => {
         if (!(customerDuesFeedback instanceof HTMLElement)) {
@@ -22472,6 +22975,26 @@ document.addEventListener('DOMContentLoaded', () => {
         button.addEventListener('click', closePaymentHistoryModal);
     });
 
+    paymentReceiptManagerCloseButtons.forEach((button) => {
+        button.addEventListener('click', closePaymentReceiptManager);
+    });
+
+    paymentHistoryReceiptsBody?.addEventListener('click', (event) => {
+        if (!(event.target instanceof Element)) {
+            return;
+        }
+        const manageButton = event.target.closest('[data-payment-receipt-manage]');
+        if (manageButton instanceof HTMLElement) {
+            openPaymentReceiptManager(manageButton);
+        }
+    });
+
+    paymentReceiptManagerModal?.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+            closePaymentReceiptManager();
+        }
+    });
+
     serviceEditBookingOpenButtons.forEach((button) => {
         button.addEventListener('click', () => openServiceEditBookingModal());
     });
@@ -22541,17 +23064,64 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     if (servicePenaltyRefundModal instanceof HTMLElement) {
+        const undoForm = serviceCorrectionBars.completeUndo;
+        if (undoForm instanceof HTMLFormElement) {
+            undoForm.addEventListener('submit', (event) => {
+                const confirmation = undoForm.elements.namedItem('undo_mistake_confirmed');
+                confirmation.value = '0';
+                const reference = String(invoiceNumberDisplay?.value || 'this booking');
+                const customer = undoForm.elements.namedItem('undo_customer_money').value;
+                const supplier = undoForm.elements.namedItem('undo_supplier_money').value;
+                if (!['moved', 'not_moved'].includes(customer) || !['moved', 'not_moved'].includes(supplier)) {
+                    event.preventDefault();
+                    window.alert('Please select whether customer and supplier refund money actually changed hands.');
+                    return;
+                }
+                const moneyMessage = `Customer money: ${customer === 'moved' ? 'actually paid - preserve' : 'not paid - reverse entry'}.\nSupplier money: ${supplier === 'moved' ? 'actually received - preserve' : 'not received - reverse entry'}.`;
+                if (!window.confirm(`Reverse the entire refund/cancellation for ${reference}?\n\n${moneyMessage}\n\nThe original invoice/service will be restored. Actual money may leave a receivable/payable. No money is assigned to another booking automatically. Audit history will be kept.`)) {
+                    event.preventDefault();
+                    return;
+                }
+                confirmation.value = '1';
+                undoForm.querySelector('button[type="submit"]').disabled = true;
+            });
+        }
         servicePenaltyRefundModal.querySelectorAll('form').forEach((form) => {
-            form.addEventListener('submit', () => {
+            form.addEventListener('submit', (event) => {
+                if (event.defaultPrevented) { return; }
                 try {
                     window.sessionStorage.removeItem(pendingServiceEditBookingModalKey);
-                    window.sessionStorage.setItem(pendingPenaltyRefundModalKey, '1');
+                    if (form === undoForm) {
+                        window.sessionStorage.removeItem(pendingPenaltyRefundModalKey);
+                    } else {
+                        window.sessionStorage.setItem(pendingPenaltyRefundModalKey, '1');
+                    }
                 } catch (error) {
                     // ignore storage failures
                 }
             });
         });
     }
+
+    refundRecoveryOpen?.addEventListener('click', () => {
+        if (!(refundRecoveryModal instanceof HTMLElement)) { return; }
+        refundRecoveryModal.hidden = false;
+        refundRecoveryModal.setAttribute('aria-hidden', 'false');
+        refundRecoveryRestore?.elements.namedItem('restore_reason')?.focus();
+    });
+    station.querySelectorAll('[data-refund-recovery-close]').forEach((button) => button.addEventListener('click', () => {
+        refundRecoveryModal.hidden = true;
+        refundRecoveryModal.setAttribute('aria-hidden', 'true');
+    }));
+    refundRecoveryRestore?.addEventListener('submit', (event) => {
+        const confirmed = refundRecoveryRestore.elements.namedItem('restore_confirmed');
+        confirmed.value = '0';
+        if (!window.confirm('Restore this reversed refund? The saved cancellation/refund state will be restored only if later transactions do not conflict. Both audit records will remain.')) {
+            event.preventDefault(); return;
+        }
+        confirmed.value = '1';
+        refundRecoveryRestore.querySelector('button[type="submit"]').disabled = true;
+    });
 
     supplierSettlementCloseButtons.forEach((button) => {
         button.addEventListener('click', closeSupplierSettlementModal);

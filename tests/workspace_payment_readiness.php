@@ -544,8 +544,8 @@ if ($failures !== []) {
     foreach ($failures as $failure) {
         echo ' - ' . $failure . PHP_EOL;
     }
-    return 1;
+    exit(1);
 }
 
 echo PHP_EOL . 'Workspace/payment readiness checks passed.' . PHP_EOL;
-return 0;
+exit(0);

@@ -10,6 +10,29 @@ use Throwable;
 
 final class AuditLog
 {
+    public static function recordRequired(App $app, string $event, array $payload): int
+    {
+        $db = $app->get('db');
+        if (! $db instanceof PDO || ! $db->inTransaction()) {
+            throw new \RuntimeException('Financial recovery requires a transaction and a saved audit record.');
+        }
+        $statement = $db->prepare(
+            'INSERT INTO audit_logs (event_name, actor_user_id, ip_address, user_agent, payload_json, created_at)
+             VALUES (:event, :actor, :ip, :agent, :payload, NOW())'
+        );
+        $statement->execute([
+            'event' => $event, 'actor' => $payload['user_id'] ?? null,
+            'ip' => $_SERVER['REMOTE_ADDR'] ?? null,
+            'agent' => substr((string) ($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 500),
+            'payload' => json_encode($payload, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+        ]);
+        $id = (int) $db->lastInsertId();
+        if ($id <= 0) {
+            throw new \RuntimeException('The financial recovery audit could not be saved. Nothing was changed.');
+        }
+        return $id;
+    }
+
     public static function record(App $app, string $event, array $payload = []): void
     {
         /** @var PDO|null $db */

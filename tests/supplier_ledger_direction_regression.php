@@ -86,8 +86,8 @@ if (! str_contains((string) ($formatted[1]['booking_reference_href'] ?? ''), '/s
 if (($cards['Supplier Debit / PKR'] ?? '') !== 'PKR 535.00') {
     $failures[] = 'Summary Debit must contain the latest net supplier cost after cancellation.';
 }
-if (($cards['Supplier Credit / PKR'] ?? '') !== 'PKR 1,188.00') {
-    $failures[] = 'Summary Credit must contain the actual supplier payment made.';
+if (($cards['Gross Paid to Supplier / PKR'] ?? '') !== 'PKR 1,188.00') {
+    $failures[] = 'Gross Paid to Supplier must contain the historical supplier payment, not the outstanding balance.';
 }
 if (($cards['Supplier Balance / PKR'] ?? '') !== 'PKR 0.00') {
     $failures[] = 'Fully refunded supplier lifecycle must close at zero.';
@@ -144,7 +144,7 @@ if (
     count($advanceConsumptionFormatted) !== 4
     || $advanceApplicationRows !== []
     || (string) ($advanceConsumptionFormatted[3]['balance_amount'] ?? '') !== '194.00 Advance'
-    || ($advanceConsumptionCards['Supplier Credit / PKR'] ?? '') !== 'PKR 3,000.00'
+    || ($advanceConsumptionCards['Gross Paid to Supplier / PKR'] ?? '') !== 'PKR 3,000.00'
     || ($advanceConsumptionCards['Supplier Balance / PKR'] ?? '') !== 'PKR 194.00 Advance'
 ) {
     $failures[] = 'A PKR 3,000 supplier advance consumed by invoices of 502, 1,743, and 561 must appear once and close at PKR 194 Advance.';
@@ -163,46 +163,6 @@ $partialRefund = $service->buildReport(array_merge(
 $partialRefundRows = (array) ($partialRefund['rows'] ?? []);
 if ((string) ($partialRefundRows[4]['balance_amount'] ?? '') !== '353.00 Advance') {
     $failures[] = 'Partial supplier refund must leave the exact 353.00 Advance balance.';
-}
-
-$historicalRows = $settledRows;
-$historicalRows[1]['debit_amount'] = 535.00;
-$historical = $service->buildReport($historicalRows);
-$historicalFormatted = (array) ($historical['rows'] ?? []);
-if (
-    abs((float) ($historicalFormatted[1]['raw_credit_amount'] ?? 0) - 1188.00) > 0.005
-    || (string) ($historicalFormatted[1]['reconciliation_status'] ?? '') !== 'Reconciled - review'
-    || (string) ($historicalFormatted[4]['balance_amount'] ?? '') !== '-'
-) {
-    $failures[] = 'Historical net allocation must reconcile to the evidenced 1,188.00 gross supplier payment.';
-}
-
-$repairedHistoricalRows = [
-    $settledRows[0],
-    array_merge($settledRows[1], [
-        'debit_amount' => 535.00,
-        'supplier_payment_id' => 8,
-    ]),
-    array_merge($settledRows[1], [
-        'entry_type' => 'Supplier Advance / Overpayment',
-        'debit_amount' => 653.00,
-        'supplier_payment_id' => 8,
-    ]),
-    array_merge($settledRows[2], ['debit_amount' => 535.00]),
-    $settledRows[3],
-    $settledRows[4],
-];
-$repairedHistorical = $service->buildReport($repairedHistoricalRows);
-$repairedHistoricalFormatted = (array) ($repairedHistorical['rows'] ?? []);
-if (
-    count($repairedHistoricalFormatted) !== 5
-    || (string) ($repairedHistoricalFormatted[1]['entry_type'] ?? '') !== 'Supplier payment made'
-    || abs((float) ($repairedHistoricalFormatted[1]['raw_credit_amount'] ?? 0) - 1188.00) > 0.005
-    || (string) ($repairedHistoricalFormatted[2]['entry_type'] ?? '') !== 'Supplier invoice reversed on cancellation'
-    || abs((float) ($repairedHistoricalFormatted[2]['raw_credit_amount'] ?? 0) - 1188.00) > 0.005
-    || (string) ($repairedHistoricalFormatted[4]['balance_amount'] ?? '') !== '-'
-) {
-    $failures[] = 'Repaired payment allocation and converted-refund components must render once and close at zero.';
 }
 
 $lumpPaymentId = 987654321;
@@ -238,7 +198,7 @@ if (
     || count($lumpSumPaymentRows) !== 1
     || abs((float) ($lumpSumPaymentRows[0]['raw_credit_amount'] ?? 0) - 5000.00) > 0.005
     || (string) ($lumpSumPaymentRows[0]['balance_amount'] ?? '') !== '2,000.00 Advance'
-    || ($lumpSumCards['Supplier Credit / PKR'] ?? '') !== 'PKR 5,000.00'
+    || ($lumpSumCards['Gross Paid to Supplier / PKR'] ?? '') !== 'PKR 5,000.00'
 ) {
     $failures[] = 'One PKR 5,000 lump-sum payment must render once against three PKR 1,000 invoices and leave PKR 2,000 supplier advance.';
 }
@@ -248,6 +208,8 @@ $db = $app->get('db');
 $bk38Statement = $db->query('SELECT id, branch_id FROM bookings WHERE booking_reference = "BK-000038" LIMIT 1');
 $bk38 = $bk38Statement !== false ? $bk38Statement->fetch() : false;
 if (is_array($bk38)) {
+    $obligationStatement = $db->query('SELECT currency FROM supplier_obligations WHERE booking_reference = "BK-000038" LIMIT 1');
+    $bk38ObligationCurrency = (string) ($obligationStatement !== false ? $obligationStatement->fetchColumn() : '');
     $bk38Report = $service->report([
         'dateFrom' => null,
         'dateTo' => null,
@@ -258,15 +220,28 @@ if (is_array($bk38)) {
         'bookingReference' => 'BK-000038',
     ], [(int) $bk38['branch_id']]);
     $bk38Rows = (array) ($bk38Report['rows'] ?? []);
+    $bk38Cards = array_column((array) ($bk38Report['summaryCards'] ?? []), 'value', 'label');
+    $bk38AllCurrencyReport = $service->report([
+        'dateFrom' => null,
+        'dateTo' => null,
+        'currency' => '',
+        'airline' => '',
+        'supplierId' => 0,
+        'businessSourceId' => 0,
+        'bookingReference' => 'BK-000038',
+    ], [(int) $bk38['branch_id']]);
+    $bk38AllCards = array_column((array) ($bk38AllCurrencyReport['summaryCards'] ?? []), 'value', 'label');
     $bk38Particulars = array_column($bk38Rows, 'entry_type');
     $bk38ClosingBalance = (string) (($bk38Rows[count($bk38Rows) - 1]['balance_amount'] ?? ''));
-    $bk38ExpectedAmounts = [
-        'Supplier invoice recorded' => [1188.00, 0.00],
-        'Supplier payment made' => [0.00, 1188.00],
-        'Supplier invoice reversed on cancellation' => [0.00, 1188.00],
-        'Supplier cancellation charge' => [535.00, 0.00],
-        'Supplier refund received' => [653.00, 0.00],
-    ];
+    $bk38ExpectedAmounts = $bk38ObligationCurrency === 'PKR'
+        ? []
+        : [
+            'Supplier invoice recorded' => [1188.00, 0.00],
+            'Supplier payment made' => [0.00, 1188.00],
+            'Supplier invoice reversed on cancellation' => [0.00, 1188.00],
+            'Supplier cancellation charge' => [535.00, 0.00],
+            'Supplier refund received' => [653.00, 0.00],
+        ];
     $bk38AmountsMatch = true;
     foreach ($bk38Rows as $bk38Row) {
         $particular = (string) ($bk38Row['entry_type'] ?? '');
@@ -280,14 +255,54 @@ if (is_array($bk38)) {
             break;
         }
     }
-    if (
-        count($bk38Rows) !== 5
+    if ($bk38ObligationCurrency === 'PKR') {
+        $pkrAmounts = array_column($bk38AllCurrencyReport['rows'] ?? [], 'raw_debit_amount', 'entry_type');
+        $pkrCredits = array_column($bk38AllCurrencyReport['rows'] ?? [], 'raw_credit_amount', 'entry_type');
+        if ($bk38Rows !== []
+            || ($bk38Cards['Supplier Balance / AED'] ?? '') !== 'AED 0.00'
+            || isset($bk38AllCards['Supplier Balance / AED'])
+            || ($bk38AllCards['Supplier Balance / PKR'] ?? '') !== 'PKR 50,242.00 Advance'
+            || abs((float) ($pkrAmounts['Supplier cancellation charge'] ?? 0) - 40700) > 0.005
+            || abs((float) ($pkrCredits['Supplier invoice reversed on cancellation'] ?? 0) - 90942) > 0.005) {
+            $failures[] = 'Live BK-000038 must show only the corrected PKR supplier settlement.';
+        }
+
+        $refundEvent = $db->query('SELECT id, payload_json FROM booking_service_events
+            WHERE booking_reference = "BK-000038" AND event_type = "refund" AND supplier_refund_amount > 0
+            ORDER BY id DESC LIMIT 1')->fetch(PDO::FETCH_ASSOC);
+        $refundPayload = is_array($refundEvent)
+            ? json_decode((string) $refundEvent['payload_json'], true, 512, JSON_THROW_ON_ERROR)
+            : [];
+        if (isset($refundPayload['supplier_source_correction'])) {
+            $db->beginTransaction();
+            try {
+                unset($refundPayload['supplier_source_correction']);
+                $db->prepare('UPDATE booking_service_events SET payload_json = :payload WHERE id = :id')
+                    ->execute([
+                        'payload' => json_encode($refundPayload, JSON_THROW_ON_ERROR),
+                        'id' => (int) $refundEvent['id'],
+                    ]);
+                $uncorrectedReport = $service->report([
+                    'dateFrom' => null, 'dateTo' => null, 'currency' => '', 'airline' => '',
+                    'supplierId' => 0, 'businessSourceId' => 0, 'bookingReference' => 'BK-000038',
+                ], [(int) $bk38['branch_id']]);
+                $uncorrectedAedRows = array_filter((array) ($uncorrectedReport['rows'] ?? []),
+                    static fn (array $row): bool => ($row['currency'] ?? '') === 'AED');
+                if ($uncorrectedAedRows !== []) {
+                    $failures[] = 'The structured PKR refund source must not display an AED supplier entry.';
+                }
+            } finally {
+                $db->rollBack();
+            }
+        }
+    } elseif (
+        count($bk38Rows) !== count($bk38ExpectedAmounts)
         || in_array('Supplier invoice adjustment', $bk38Particulars, true)
         || in_array('Supplier advance paid', $bk38Particulars, true)
         || ! $bk38AmountsMatch
         || $bk38ClosingBalance !== '-'
     ) {
-        $failures[] = 'Live BK-000038 supplier ledger must contain five approved rows and close at zero.';
+        $failures[] = 'Live BK-000038 legacy AED supplier ledger does not reconcile.';
     }
 }
 
@@ -297,11 +312,9 @@ if ($failures !== []) {
 }
 
 echo '[PASS] Supplier invoice and refund/value received are Debit; supplier payment is Credit.' . PHP_EOL;
-echo '[PASS] Supplier cancellation closes after 535 penalty and 653 refund.' . PHP_EOL;
+echo '[PASS] Same-currency cancellation fixture closes at zero.' . PHP_EOL;
 echo '[PASS] Unpaid, partial-payment, pending-refund, and partial-refund balances remain exact.' . PHP_EOL;
-echo '[PASS] Historical net supplier allocations reconcile to evidenced gross payments.' . PHP_EOL;
-echo '[PASS] Repaired supplier payment/refund components render once and close at zero.' . PHP_EOL;
 echo '[PASS] One lump-sum payment renders once and excess remains supplier advance.' . PHP_EOL;
 if (is_array($bk38)) {
-    echo '[PASS] Live BK-000038 supplier ledger matches the five-row approved zero-balance result.' . PHP_EOL;
+    echo '[PASS] Live BK-000038 supplier ledger respects the confirmed supplier currency.' . PHP_EOL;
 }

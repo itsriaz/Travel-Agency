@@ -60,8 +60,8 @@ $fail = static function (string $message): never {
     exit(1);
 };
 
-if (($cards['Supplier Credit / PKR'] ?? '') !== 'PKR 0.00') {
-    $fail('Voided supplier payment must reduce Supplier Credit to PKR 0.00.');
+if (($cards['Gross Paid to Supplier / PKR'] ?? '') !== 'PKR 0.00') {
+    $fail('Voided supplier payment must reduce Gross Paid to Supplier to PKR 0.00.');
 }
 
 if (($cards['Supplier Balance / PKR'] ?? '') !== 'PKR 1,188.00 Payable') {
@@ -86,6 +86,16 @@ if ((string) ($rows[1]['balance_amount'] ?? '') !== '1,188.00 Payable') {
 
 if (count($rows) !== 2) {
     $fail('Supplier ledger must suppress the extra reversal row once the payment is shown as voided.');
+}
+
+$bookingReport = $service->buildReport([
+    $row('2026-07-15', 'Payable Created', 0.00, 1188.00),
+    $row('2026-07-16', 'Supplier Payment', 1188.00, 0.00, 77),
+    $row('2026-07-17', 'Supplier Payment Reversed', 0.00, 1188.00, 77),
+], '', true);
+$bookingRows = (array) ($bookingReport['rows'] ?? []);
+if (count($bookingRows) !== 1 || ($bookingRows[0]['entry_type'] ?? '') !== 'Supplier invoice recorded') {
+    $fail('A booking-filtered supplier ledger must omit voided payments without hiding the invoice.');
 }
 
 echo "Supplier void payment summary regression passed.\n";

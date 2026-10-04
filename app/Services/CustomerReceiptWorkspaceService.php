@@ -8,6 +8,8 @@ use App\Helpers\AuditLog;
 use App\Repositories\AccountHolderBalanceRepository;
 use App\Repositories\AccountingRepository;
 use App\Repositories\BookingRepository;
+use App\Repositories\BookingServiceEventRepository;
+use App\Repositories\BookingServiceRepository;
 use App\Repositories\CustomerPaymentRepository;
 use App\Repositories\ExchangeRateRepository;
 use App\Repositories\MasterDataRepository;
@@ -89,6 +91,13 @@ final class CustomerReceiptWorkspaceService extends Service
         $this->assertNoPostedReceiptEditAttempt($input);
 
         if (($input['settlement_mode'] ?? 'normal') === 'exchange') {
+            $exchangeBookingId = (int) ($input['booking_id'] ?? 0);
+            if (! (new BookingRepository($this->app))->bookingExistsInBranches($exchangeBookingId, $accessibleBranchIds)) {
+                throw new RuntimeException('You cannot record receipts for a booking outside your accessible branches.');
+            }
+            if ($this->hasSettledCancellation($exchangeBookingId)) {
+                throw new RuntimeException('A cross-currency receipt after cancellation needs financial review before it can be posted. No money was recorded.');
+            }
             return $this->saveExchangeSettlement($input, $actorUserId, $accessibleBranchIds);
         }
 
@@ -108,7 +117,16 @@ final class CustomerReceiptWorkspaceService extends Service
 
         $payload = $this->validatedReceiptPayload($input);
         if ($this->isDirectSupplierPaymentMethod((string) $payload['payment_method'])) {
+            if ($this->hasSettledCancellation($bookingId)) {
+                throw new RuntimeException('Direct supplier payment after cancellation needs financial review before it can be posted. No money was recorded.');
+            }
             return $this->saveDirectSupplierReceipt($input, $booking, $payload, $actorUserId, $accessibleBranchIds);
+        }
+        if (! $skipReceiptCreation && (float) ($payload['received_amount'] ?? 0) > 0.005 && $payload['status'] !== 'void') {
+            $lateCancellation = $this->lateCancellationForReceipt($booking, $payload, $input, $actorUserId);
+            if ($lateCancellation !== null) {
+                return $this->saveReceiptAfterCancellation($input, $booking, $payload, $lateCancellation, $actorUserId, $accessibleBranchIds);
+            }
         }
         $accountHolderFunding = $this->resolveAccountHolderBalanceFunding(
             $input,
@@ -347,6 +365,212 @@ final class CustomerReceiptWorkspaceService extends Service
             }
 
             throw new RuntimeException('Customer receipt could not be saved.', 0, $exception);
+        }
+    }
+
+    private function hasSettledCancellation(int $bookingId): bool
+    {
+        if ($bookingId <= 0) {
+            return false;
+        }
+        $events = new BookingServiceEventRepository($this->app);
+        foreach ((new BookingServiceRepository($this->app))->servicesForBooking($bookingId) as $service) {
+            if ((int) ($service['is_active'] ?? 0) !== 1) {
+                continue;
+            }
+            if ($events->hasPostedCancellationSettlement((int) $service['id'])) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private function lateCancellationForReceipt(array $booking, array $payload, array $input, int $actorUserId): ?array
+    {
+        $services = array_values(array_filter(
+            (new BookingServiceRepository($this->app))->servicesForBooking((int) $booking['id']),
+            static fn (array $service): bool => (int) ($service['is_active'] ?? 0) === 1
+        ));
+        $events = new BookingServiceEventRepository($this->app);
+        $settled = [];
+        foreach ($services as $service) {
+            $event = $events->latestPostedEvent((int) $service['id'], 'cancel');
+            if ($event !== null && $events->hasPostedCancellationSettlement((int) $service['id'])) {
+                $details = json_decode((string) $event['payload_json'], true);
+                $settled[] = ['service' => $service, 'event' => $event, 'details' => $details];
+            }
+        }
+        if ($settled === []) {
+            return null;
+        }
+
+        if (count($services) !== 1 || count($settled) !== 1) {
+            if (($input['receipt_scope'] ?? '') === 'passenger_specific') {
+                $targetId = (int) ($input['target_receivable_item_id'] ?? 0);
+                $payments = new CustomerPaymentRepository($this->app);
+                foreach ($services as $service) {
+                    if (in_array((int) $service['id'], array_map(
+                        static fn (array $row): int => (int) $row['service']['id'], $settled
+                    ), true)) {
+                        continue;
+                    }
+                    $item = $payments->findReceivableByServiceLine(
+                        (string) $booking['booking_reference'], (string) $service['line_reference']
+                    );
+                    if (strtolower((string) ($service['service_status'] ?? '')) !== 'cancelled'
+                        && $item !== null && (int) $item['id'] === $targetId
+                        && (string) $item['currency'] === (string) $payload['currency']) {
+                        return null;
+                    }
+                }
+            }
+            throw new RuntimeException('This booking has a settled cancellation and multiple services. Select an ordinary service due, or ask a financial admin to review the cancelled ticket before recording its payment. No money was posted.');
+        }
+
+        $context = $settled[0];
+        $service = $context['service'];
+        $details = $context['details'];
+        $payments = new CustomerPaymentRepository($this->app);
+        $reference = (string) $booking['booking_reference'];
+        $item = $payments->findReceivableByServiceLine($reference, (string) $service['line_reference']);
+        $supplier = (new SupplierRepository($this->app))->findObligationByServiceLine($reference, (string) $service['line_reference']);
+        $watermark = $details['customer_receipt_id_watermark'] ?? null;
+        $releasedCredit = round((float) ($details['released_customer_credit'] ?? 0), 2);
+        $targetCredit = round((float) ($details['target_customer_refund_credit'] ?? 0), 2);
+        if (strtolower(trim((string) ($service['service_status'] ?? ''))) !== 'cancelled'
+            || (string) ($payload['receipt_date'] ?? '') < (string) ($context['event']['event_date'] ?? '')
+            || (string) ($payload['currency'] ?? '') !== (string) ($service['currency'] ?? '')
+            || ! in_array((string) ($payload['payment_method'] ?? ''), ['cash', 'bank_transfer', 'debit_card', 'credit_card'], true)
+            || abs((float) ($payload['charges_amount'] ?? 0)) > 0.005
+            || str_replace(' ', '_', mb_strtolower(trim((string) ($input['account_balance_mode'] ?? '')))) === 'account_holder_balance'
+            || (float) ($input['advance_apply_amount'] ?? 0) > 0.005
+            || (float) ($input['customer_credit_apply_amount'] ?? 0) > 0.005
+            || ! is_numeric($watermark)
+            || $payments->activeReceiptCountAfterId($reference, (int) $watermark) > 0
+            || $events->latestPostedEvent((int) $service['id'], 'refund') !== null
+            || abs($targetCredit - $releasedCredit) > 0.005
+            || abs($payments->bookingUnallocatedCreditTotal($reference, (string) $payload['currency']) - $releasedCredit) > 0.005
+            || $item === null
+            || abs((float) $item['due_amount'] - (float) ($details['customer_final_charge_amount'] ?? -1)) > 0.005
+            || abs((float) $item['allocated_amount'] - min(
+                (float) ($details['customer_received_amount'] ?? 0), (float) $item['due_amount']
+            )) > 0.005
+            || $supplier === null
+            || abs((float) $supplier['gross_amount'] - (float) $supplier['net_payable_amount']) > 0.005
+            || abs((float) ($details['released_supplier_credit_source_amount'] ?? 0)) > 0.005
+            || ! isset($details['expected_supplier_refund_source_amount'], $details['prior_customer_due_amount'])) {
+            throw new RuntimeException('This cancelled booking has existing payments, refunds, mixed currency, or incomplete settlement history. A financial admin must reconcile it before another receipt is recorded; no money was posted.');
+        }
+
+        $this->assertFinancialAdminActor($actorUserId, 'Only a financial admin can record a late receipt against a cancelled ticket. No money was posted.');
+        $context['supplier'] = $supplier;
+        return $context;
+    }
+
+    private function saveReceiptAfterCancellation(
+        array $input,
+        array $booking,
+        array $payload,
+        array $context,
+        int $actorUserId,
+        array $accessibleBranchIds
+    ): array {
+        /** @var PDO $db */
+        $db = $this->app->get('db');
+        $startedTransaction = ! $db->inTransaction();
+        if ($startedTransaction) {
+            $db->beginTransaction();
+        } else {
+            $db->exec('SAVEPOINT late_cancellation_receipt');
+        }
+        try {
+            if (! (new BookingRepository($this->app))->lockBookingForFinancialWrite((int) $booking['id'])) {
+                throw new RuntimeException('The booking changed before its late receipt could be recorded.');
+            }
+            $freshContext = $this->lateCancellationForReceipt($booking, $payload, $input, $actorUserId);
+            if ($freshContext === null || (int) $freshContext['event']['id'] !== (int) $context['event']['id']) {
+                throw new RuntimeException('The cancellation changed before its late receipt could be recorded. Reload and review it.');
+            }
+            $context = $freshContext;
+            $service = $context['service'];
+            $before = $context['details'];
+            $serviceId = (int) $service['id'];
+            $workspace = new ServiceWorkspaceService($this->app);
+            $events = new BookingServiceEventRepository($this->app);
+            $workspace->reverseCancellationSettlement([
+                'booking_id' => (int) $booking['id'],
+                'service_id' => $serviceId,
+                'settlement_reverse_reason' => 'Reconcile a later customer receipt before refreshing the cancellation refund basis.',
+            ], $actorUserId, $accessibleBranchIds);
+
+            $result = $this->saveReceipt($input, $actorUserId, $accessibleBranchIds);
+            $receipt = $result['receipt'] ?? null;
+            if (! is_array($receipt) || (int) ($receipt['id'] ?? 0) <= 0) {
+                throw new RuntimeException('The late customer receipt was not created; cancellation reconciliation was rolled back.');
+            }
+
+            $settlement = [
+                'booking_id' => (int) $booking['id'],
+                'service_id' => $serviceId,
+                'settlement_reason' => 'Refresh cancellation after later receipt ' . $receipt['receipt_no'],
+                'settlement_event_date' => date('Y-m-d'),
+                'customer_penalty_amount' => (float) ($before['customer_penalty_source_amount'] ?? $before['customer_penalty_amount'] ?? 0),
+                'customer_penalty_currency' => (string) ($before['customer_penalty_currency'] ?? $service['currency']),
+                'customer_penalty_exchange_rate' => (float) ($before['customer_penalty_exchange_rate'] ?? 1),
+                'agency_fee_refund_amount' => (float) ($before['agency_fee_refund_amount'] ?? 0),
+                'agency_fee_refund_currency' => (string) $service['currency'],
+                'expected_supplier_refund_amount' => (float) $before['expected_supplier_refund_source_amount'],
+                'expected_supplier_refund_currency' => (string) ($before['expected_supplier_refund_currency'] ?? $service['cost_currency']),
+                'expected_supplier_refund_exchange_rate' => (float) ($before['expected_supplier_refund_exchange_rate'] ?? 1),
+                'expected_supplier_refund_rate_date' => (string) ($before['expected_supplier_refund_rate_date'] ?? $context['event']['event_date']),
+                'settlement_currency' => (string) ($before['settlement_currency'] ?? $service['currency']),
+                'settlement_exchange_rate' => (float) ($before['expected_supplier_refund_exchange_rate'] ?? 1),
+            ];
+            if (isset($before['expected_supplier_refund_equivalent_amount'])) {
+                $settlement['supplier_refund_conversion_mode'] = 'manual_equivalent';
+                $settlement['expected_supplier_refund_equivalent_amount'] = (float) $before['expected_supplier_refund_equivalent_amount'];
+            }
+            $workspace->settleCancellationFinancials($settlement, $actorUserId, $accessibleBranchIds);
+
+            $after = json_decode((string) ($events->latestPostedEvent($serviceId, 'cancel')['payload_json'] ?? ''), true);
+            $supplierAfter = (new SupplierRepository($this->app))->findObligationByServiceLine(
+                (string) $booking['booking_reference'], (string) $service['line_reference']
+            );
+            if (! is_array($after)
+                || abs((float) ($after['customer_final_charge_amount'] ?? -1) - (float) $before['customer_final_charge_amount']) > 0.005
+                || abs((float) ($after['expected_supplier_refund_booking_amount'] ?? -1) - (float) ($before['expected_supplier_refund_booking_amount'] ?? -1)) > 0.005
+                || abs((float) ($after['supplier_penalty_source_amount'] ?? -1) - (float) ($before['supplier_penalty_source_amount'] ?? -1)) > 0.005
+                || $supplierAfter === null
+                || (string) $supplierAfter['currency'] !== (string) $context['supplier']['currency']
+                || abs((float) $supplierAfter['gross_amount'] - (float) $context['supplier']['gross_amount']) > 0.005
+                || abs((float) $supplierAfter['net_payable_amount'] - (float) $context['supplier']['net_payable_amount']) > 0.005) {
+                throw new RuntimeException('Cancellation terms changed during the late receipt. All changes were rolled back for financial review.');
+            }
+            AuditLog::recordRequired($this->app, 'customer.receipt.late_cancellation_reconciled', [
+                'user_id' => $actorUserId,
+                'booking_id' => (int) $booking['id'],
+                'booking_reference' => (string) $booking['booking_reference'],
+                'service_id' => $serviceId,
+                'customer_receipt_id' => (int) $receipt['id'],
+                'receipt_no' => (string) $receipt['receipt_no'],
+                'currency' => (string) $payload['currency'],
+                'received_amount' => (float) $receipt['received_amount'],
+                'refund_entitlement_before' => (float) ($before['target_customer_refund_credit'] ?? 0),
+                'refund_entitlement_after' => (float) ($after['target_customer_refund_credit'] ?? 0),
+            ]);
+            $result['receipt'] = (new CustomerPaymentRepository($this->app))->findReceiptById((int) $receipt['id']);
+            if ($startedTransaction) { $db->commit(); }
+            else { $db->exec('RELEASE SAVEPOINT late_cancellation_receipt'); }
+            return $result;
+        } catch (\Throwable $exception) {
+            if ($db->inTransaction()) {
+                if ($startedTransaction) { $db->rollBack(); }
+                else {
+                    $db->exec('ROLLBACK TO SAVEPOINT late_cancellation_receipt');
+                    $db->exec('RELEASE SAVEPOINT late_cancellation_receipt');
+                }
+            }
+            throw $exception;
         }
     }
 
@@ -1858,6 +2082,12 @@ final class CustomerReceiptWorkspaceService extends Service
         $bookingId = (int) ($input['booking_id'] ?? 0);
         $receiptId = (int) ($input['customer_receipt_id'] ?? 0);
         $voidReason = $this->requiredVoidReason($input['void_reason'] ?? null);
+        if ((string) ($input['no_money_received_confirmed'] ?? '') !== '1') {
+            throw new RuntimeException(
+                'Void reverses the recorded cash/bank receipt. Confirm that no money was actually received for this entry. '
+                . 'If money was received, correct the receipt instead of voiding it.'
+            );
+        }
 
         $bookingRepository = new BookingRepository($this->app);
         if (! $bookingRepository->bookingExistsInBranches($bookingId, $accessibleBranchIds)) {
@@ -1933,6 +2163,7 @@ final class CustomerReceiptWorkspaceService extends Service
                 'receipt_no' => (string) ($voidResult['receipt_no'] ?? ''),
                 'booking_reference' => (string) ($voidResult['booking_reference'] ?? ''),
                 'void_reason' => $voidReason,
+                'no_money_received_confirmed' => true,
                 'reversal_reference' => $reversalReference,
                 'reversal_journal_entry_id' => $reversalJournalEntryId,
                 'allocation_count_reversed' => (int) ($voidResult['allocation_count_reversed'] ?? 0),
@@ -1960,6 +2191,78 @@ final class CustomerReceiptWorkspaceService extends Service
             }
 
             throw new RuntimeException('Customer receipt could not be voided.', 0, $exception);
+        }
+    }
+
+    public function correctReceiptAmount(array $input, int $actorUserId, array $accessibleBranchIds): array
+    {
+        $this->assertFinancialAdminActor($actorUserId, 'Only super admin or branch admin can correct customer receipts.');
+        $bookingId = (int) ($input['booking_id'] ?? 0);
+        $receiptId = (int) ($input['customer_receipt_id'] ?? 0);
+        $reason = $this->requiredVoidReason($input['correction_reason'] ?? null);
+        $expectedAmount = $this->nonNegativeMoneyValue($input['expected_received_amount'] ?? '', 'Original amount');
+        $correctedAmount = $this->nonNegativeMoneyValue($input['corrected_received_amount'] ?? '', 'Corrected amount');
+        $bookings = new BookingRepository($this->app);
+        if ($bookingId <= 0 || ! $bookings->bookingExistsInBranches($bookingId, $accessibleBranchIds)) {
+            throw new RuntimeException('Booking is outside your accessible branches.');
+        }
+        $booking = $bookings->findBookingById($bookingId);
+        $payments = new CustomerPaymentRepository($this->app);
+        $receipt = $payments->findReceiptById($receiptId);
+        if ($booking === null || $receipt === null
+            || (string) $receipt['booking_reference'] !== (string) $booking['booking_reference']
+            || (int) $receipt['branch_id'] !== (int) $booking['branch_id']) {
+            throw new RuntimeException('Receipt does not belong to this booking and branch.');
+        }
+        if ((int) ($receipt['treasury_account_id'] ?? 0) <= 0) {
+            throw new RuntimeException('Original cash/bank account is missing. Review this receipt before correcting its amount.');
+        }
+        $method = (string) ($receipt['payment_method'] ?? '');
+        if (! in_array($method, ['cash', 'bank_transfer'], true)) {
+            throw new RuntimeException('This amount correction supports cash and bank receipts only. Review other payment methods separately.');
+        }
+        $treasury = (new TreasuryRepository($this->app))->findAccount(
+            (int) $receipt['treasury_account_id'], [(int) $booking['branch_id']]
+        );
+        if ($treasury === null || (int) ($treasury['is_active'] ?? 0) !== 1
+            || strtoupper((string) ($treasury['currency'] ?? '')) !== strtoupper((string) $receipt['currency'])
+            || (string) ($treasury['account_type'] ?? '') !== ($method === 'cash' ? 'cash' : 'bank')) {
+            throw new RuntimeException('Original cash/bank account no longer matches this receipt. Review it before correcting the amount.');
+        }
+        $db = $this->app->get('db');
+        $started = ! $db->inTransaction();
+        if ($started) { $db->beginTransaction(); }
+        try {
+            $amounts = $payments->correctReceiptAmount($receiptId, $expectedAmount, $correctedAmount);
+            $reference = 'AMEND-' . (string) $receipt['receipt_no'] . '-' . strtoupper(bin2hex(random_bytes(4)));
+            $journalId = (new AccountingRepository($this->app))->postCustomerReceiptAmountCorrection([
+                'branch_id' => (int) $receipt['branch_id'],
+                'booking_reference' => (string) $receipt['booking_reference'],
+                'customer_receipt_id' => $receiptId,
+                'source_reference' => $reference,
+                'entry_date' => date('Y-m-d'),
+                'currency' => (string) $receipt['currency'],
+                'payment_method' => (string) $receipt['payment_method'],
+                'treasury_account_id' => (int) ($receipt['treasury_account_id'] ?? 0),
+                'original_amount' => $amounts['before'],
+                'corrected_amount' => $amounts['after'],
+                'narration' => 'Customer receipt amount corrected: ' . $reason,
+                'actor_user_id' => $actorUserId,
+            ]);
+            AuditLog::recordRequired($this->app, 'customer.receipt.amount_corrected', [
+                'user_id' => $actorUserId, 'booking_id' => $bookingId,
+                'booking_reference' => (string) $receipt['booking_reference'],
+                'customer_receipt_id' => $receiptId, 'receipt_no' => (string) $receipt['receipt_no'],
+                'currency' => (string) $receipt['currency'], 'original_amount' => $amounts['before'],
+                'corrected_amount' => $amounts['after'], 'allocated_unchanged' => $amounts['allocated'],
+                'unallocated_after' => $amounts['unallocated'], 'journal_entry_id' => $journalId,
+                'reason' => $reason,
+            ]);
+            if ($started) { $db->commit(); }
+            return ['booking_id' => $bookingId, 'receipt_id' => $receiptId, 'journal_entry_id' => $journalId];
+        } catch (\Throwable $exception) {
+            if ($started && $db->inTransaction()) { $db->rollBack(); }
+            throw $exception;
         }
     }
 
@@ -2098,8 +2401,16 @@ final class CustomerReceiptWorkspaceService extends Service
         if ($receiptStatus === 'void') {
             throw new RuntimeException('The selected customer credit receipt is void.');
         }
-        if ((int) ($creditReceipt['branch_id'] ?? 0) !== $branchId
-            || (int) ($creditReceipt['traveler_id'] ?? 0) !== $travelerId
+        $sourceBooking = (new BookingRepository($this->app))->findBookingByReference($sourceBookingReference, [$branchId]);
+        $sourceTravelerId = (int) ($creditReceipt['traveler_id'] ?? 0);
+        if ($sourceTravelerId <= 0) {
+            $sourceTravelerId = (int) ($sourceBooking['lead_traveler_id'] ?? 0);
+        }
+        if ($sourceBooking === null
+            || (int) ($sourceBooking['branch_id'] ?? 0) !== (int) ($creditReceipt['branch_id'] ?? 0)
+            || (int) ($creditReceipt['branch_id'] ?? 0) !== $branchId
+            || $sourceTravelerId <= 0
+            || $sourceTravelerId !== $travelerId
             || strtoupper((string) ($creditReceipt['currency'] ?? '')) !== $normalizedCurrency
         ) {
             throw new RuntimeException('The selected credit does not match this booking customer, branch, and currency.');
