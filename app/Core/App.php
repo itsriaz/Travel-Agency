@@ -25,6 +25,9 @@ final class App
         $app->validateProductionConfiguration();
         date_default_timezone_set($app->config('app.timezone', 'UTC'));
         $app->registerCoreServices();
+        if (class_exists(\App\Services\InvoiceSaveHttpTrace::class)) {
+            \App\Services\InvoiceSaveHttpTrace::checkpointActive('app_bootstrapped');
+        }
 
         return $app;
     }

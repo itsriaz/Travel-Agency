@@ -505,14 +505,13 @@ if (
            AND (
                 ta.id IS NULL
                 OR ta.is_active <> 1
-                OR ta.branch_id <> cr.branch_id
                 OR ta.currency <> cr.currency
            )
          LIMIT 10'
     )->fetchAll(PDO::FETCH_ASSOC) ?: [];
 
     $check(
-        'Treasury-linked customer receipts point to valid active branch/currency-matching accounts',
+        'Treasury-linked customer receipts point to valid active currency-matching accounts (cross-branch allowed)',
         $brokenTreasuryLinks === [],
         $brokenTreasuryLinks !== [] ? json_encode($brokenTreasuryLinks, JSON_UNESCAPED_SLASHES) : ''
     );

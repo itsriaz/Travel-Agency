@@ -125,15 +125,15 @@ try {
     ];
     $workspace->undoMistakenRefund($undo, 1, [1, 2]);
     $restored = $suppliers->findObligationByServiceLine($reference, (string) $service['line_reference']);
-    $assert((float) $restored['net_payable_amount'] === 800.0,
-        'Preserved supplier cash return must leave the original payable open');
+    $assert((float) $restored['net_payable_amount'] === 0.0,
+        'Complete undo restores the original global payment allocation despite obsolete money fields');
 
     $db->exec('ROLLBACK TO SAVEPOINT before_global_refund_undo');
     $workspace->undoMistakenRefund(array_replace($undo, ['undo_supplier_money' => 'not_moved']), 1, [1, 2]);
     $restored = $suppliers->findObligationByServiceLine($reference, (string) $service['line_reference']);
     $assert((float) $restored['net_payable_amount'] === 0.0,
-        'Entry-only reversal must reallocate the released global payment');
-    echo '[PASS] Global supplier payment refund linkage and both complete-undo money choices', PHP_EOL;
+        'Complete undo reallocates the released global payment without money-status input');
+    echo '[PASS] Global supplier payment refund linkage and automatic complete undo', PHP_EOL;
 } finally {
     if ($db->inTransaction()) { $db->rollBack(); }
 }

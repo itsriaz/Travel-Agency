@@ -191,6 +191,16 @@ try {
             && abs((float) $item['due_amount'] - $case['final_charge']) < .005
             && abs((float) $item['outstanding_amount']) < .005,
             $case['name'] . ': cash installments settle final charge and leave exact customer credit');
+        $receiptDocument = (new \App\Services\OperationalOutputService($app))->buildOutputDocument(
+            $bookingId, 'customer_receipt', [2], (int) $receipt['id'], null, null, 1
+        );
+        $receiptHtml = (string) $app->get('view')->render('workspace/output', $receiptDocument, 'layouts/print');
+        $receiptText = preg_replace('/\s+/', ' ', html_entity_decode(strip_tags($receiptHtml)));
+        $check(str_contains($receiptText, 'Air Ticket (Cancelled)')
+            && str_contains($receiptText, 'Current Invoice Amount AED ' . number_format($case['final_charge']))
+            && str_contains($receiptText, 'Invoice Outstanding Balance AED 0')
+            && ! str_contains($receiptText, 'Current Invoice Amount AED ' . number_format($case['invoice'])),
+            $case['name'] . ': receipt prints settled cancellation charge and zero outstanding');
         $check(abs((float) $after['target_customer_refund_credit'] - $case['refund']) < .005
             && abs((float) $summary['entitlement'] - $case['refund']) < .005
             && abs((float) $summary['remaining'] - $case['refund']) < .005

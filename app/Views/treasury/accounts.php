@@ -8,7 +8,8 @@ $editAccount = $editAccount ?? null;
 $editTransaction = $editTransaction ?? null;
 $accountTypes = $accountTypes ?? [];
 $transferAccounts = $transferAccounts ?? [];
-$recentTransfers = $recentTransfers ?? [];
+$recentDirectEntries = $recentDirectEntries ?? [];
+$recentInternalTransfers = $recentInternalTransfers ?? [];
 $returnTo = trim((string) ($returnTo ?? ''));
 $returnToQuery = $returnTo !== '' ? '?return_to=' . rawurlencode($returnTo) : '';
 $formAccount = is_array($editAccount) ? $editAccount : [
@@ -101,7 +102,7 @@ $directEntryDraft = [
         ? (string) ($editTransaction['narration'] ?? '')
         : (string) ($_GET['narration'] ?? ''),
     'transaction_date' => $isEditDirectTransaction
-        ? (string) ($editTransaction['transaction_date'] ?? date('Y-m-d'))
+        ? date('Y-m-d')
         : (string) ($_GET['direct_transaction_date'] ?? date('Y-m-d')),
     'correction_reason' => (string) ($_GET['correction_reason'] ?? ''),
 ];
@@ -392,6 +393,15 @@ $bankAccountsCount = count(array_filter($accounts, static fn (array $row): bool 
 .treasury-tab-panel.is-active {
     display: block;
 }
+.treasury-page[data-treasury-active-tab="direct"] #treasury-account-register,
+.treasury-page[data-treasury-active-tab="transfer"] #treasury-account-register {
+    display: none;
+}
+.treasury-page[data-treasury-active-tab="account"] #treasury-recent-activity,
+.treasury-page[data-treasury-active-tab="direct"] #treasury-recent-activity [data-treasury-activity-kind="transfer"],
+.treasury-page[data-treasury-active-tab="transfer"] #treasury-recent-activity [data-treasury-activity-kind="direct"] {
+    display: none;
+}
 .treasury-section-kicker {
     margin-bottom: 5px;
     color: #4d7191;
@@ -654,7 +664,7 @@ $bankAccountsCount = count(array_filter($accounts, static fn (array $row): bool 
 }
 </style>
 
-<div class="treasury-page" data-treasury-client-log-url="<?= e(url('/workspace/client-log')) ?>" data-treasury-csrf-token="<?= e(\App\Helpers\Csrf::token()) ?>">
+<div class="treasury-page" data-treasury-active-tab="<?= e($activeTreasuryTab) ?>" data-treasury-client-log-url="<?= e(url('/workspace/client-log')) ?>" data-treasury-csrf-token="<?= e(\App\Helpers\Csrf::token()) ?>">
 <section class="treasury-hero">
     <div class="treasury-hero-head">
         <div>
@@ -1140,6 +1150,7 @@ window.__treasurySwitchTab = function (tabName, event) {
     const tabs = Array.from(workspace.querySelectorAll('[data-treasury-tab]'));
     const panels = Array.from(workspace.querySelectorAll('[data-treasury-tab-panel]'));
     const nextTab = tabs.some((tab) => tab.dataset.treasuryTab === tabName) ? tabName : 'account';
+    workspace.closest('.treasury-page')?.setAttribute('data-treasury-active-tab', nextTab);
 
     tabs.forEach((tab) => {
         const active = tab.dataset.treasuryTab === nextTab;
@@ -1335,12 +1346,12 @@ window.__treasuryCloseRecentWideView = function () {
         </div>
     </div>
 
-    <form method="post" action="<?= e(url('/treasury/direct/save')) ?>" class="station-form-grid station-form-grid--6 treasury-direct-grid" data-treasury-direct-form>
+    <form method="post" action="<?= e(url('/treasury/direct/save')) ?>" class="station-form-grid station-form-grid--12 treasury-direct-grid" data-treasury-direct-form>
         <?= \App\Helpers\Csrf::input() ?>
         <input type="hidden" name="return_to" value="<?= e($returnTo) ?>">
         <input type="hidden" name="correction_transaction_id" value="<?= e((string) ((int) ($directEntryDraft['transaction_id'] ?? 0))) ?>">
 
-        <label class="station-field span-2">
+        <label class="station-field span-3">
             <span>Branch</span>
             <select name="branch_id" required data-direct-branch>
                 <?php foreach ($branches as $branch): ?>
@@ -1351,7 +1362,7 @@ window.__treasuryCloseRecentWideView = function () {
             </select>
         </label>
 
-        <label class="station-field span-2">
+        <label class="station-field span-3">
             <span>Entry Type</span>
             <select name="transaction_type" required data-direct-type>
                 <option value="adjustment_increase" <?= $directEntryDraft['transaction_type'] === 'adjustment_increase' ? 'selected' : '' ?>>Money In</option>
@@ -1359,7 +1370,7 @@ window.__treasuryCloseRecentWideView = function () {
             </select>
         </label>
 
-        <label class="station-field span-2">
+        <label class="station-field span-3">
             <span>Currency</span>
             <select name="currency" required data-direct-currency>
                 <?php foreach ($currencies as $currency): ?>
@@ -1370,19 +1381,19 @@ window.__treasuryCloseRecentWideView = function () {
             </select>
         </label>
 
-        <label class="station-field span-2">
-            <span>Date</span>
-            <input type="date" name="transaction_date" value="<?= e((string) $directEntryDraft['transaction_date']) ?>" required>
+        <label class="station-field span-3">
+            <span><?= $isEditDirectTransaction ? 'Correction Date' : 'Date' ?></span>
+            <input type="date" name="transaction_date" value="<?= e((string) $directEntryDraft['transaction_date']) ?>" required <?= $isEditDirectTransaction ? 'readonly' : '' ?>>
         </label>
 
-        <label class="station-field span-2">
+        <label class="station-field span-4">
             <span>Cash / Bank Account</span>
             <select name="treasury_account_id" required data-direct-account data-initial-value="<?= e((string) ((int) ($directEntryDraft['treasury_account_id'] ?? 0))) ?>">
                 <option value="">Select treasury account</option>
             </select>
         </label>
 
-        <label class="station-field span-2">
+        <label class="station-field span-4">
             <span>Account Holder</span>
             <select name="business_source_id">
                 <option value="">No account holder</option>
@@ -1394,34 +1405,34 @@ window.__treasuryCloseRecentWideView = function () {
             </select>
         </label>
 
-        <label class="station-field span-2">
+        <label class="station-field span-4">
             <span data-direct-counterparty-label>Received From</span>
             <input type="text" name="counterparty_name" maxlength="190" value="<?= e((string) ($directEntryDraft['counterparty_name'] ?? '')) ?>" placeholder="Person / company / source">
         </label>
 
-        <label class="station-field span-2">
+        <label class="station-field span-4">
             <span>Amount</span>
             <input type="number" name="amount" min="0.01" step="0.01" value="<?= e((string) ($directEntryDraft['amount'] ?? '')) ?>" placeholder="0.00" required data-zero-clear-field>
         </label>
 
-        <label class="station-field span-2">
+        <label class="station-field span-4">
             <span>Reference No.</span>
             <input type="text" name="reference_no" maxlength="100" value="<?= e((string) ($directEntryDraft['reference_no'] ?? '')) ?>" placeholder="Voucher / slip / transfer ref.">
         </label>
 
-        <label class="station-field span-2">
+        <label class="station-field span-4">
             <span>Remarks</span>
             <input type="text" name="narration" maxlength="500" value="<?= e((string) ($directEntryDraft['narration'] ?? '')) ?>" placeholder="Short narration for this direct treasury posting">
         </label>
 
         <?php if ($isEditDirectTransaction): ?>
-            <label class="station-field span-6">
+            <label class="station-field span-12">
                 <span>Correction Reason</span>
                 <input type="text" name="correction_reason" maxlength="500" value="<?= e((string) ($directEntryDraft['correction_reason'] ?? '')) ?>" placeholder="Why this treasury entry needs correction" required>
             </label>
         <?php endif; ?>
 
-        <div class="station-command-buttons span-6">
+        <div class="station-command-buttons span-12">
             <button class="btn btn-primary btn-sm" type="submit"><?= $isEditDirectTransaction ? 'Save Direct Correction' : 'Post Direct Entry' ?></button>
         </div>
     </form>
@@ -1630,11 +1641,14 @@ if (typeof window.__treasuryRestoreTab === 'function') {
 <section class="panel compact-panel treasury-panel treasury-transfer-table" id="treasury-recent-activity">
     <div class="panel-header">
         <div>
-            <div class="treasury-section-kicker">Treasury History</div>
-            <h2>Recent Treasury Activity</h2>
+            <div class="treasury-section-kicker" data-treasury-activity-kind="direct">Money In/Out History</div>
+            <div class="treasury-section-kicker" data-treasury-activity-kind="transfer">Transfer History</div>
+            <h2 data-treasury-activity-kind="direct">Recent Money In/Out</h2>
+            <h2 data-treasury-activity-kind="transfer">Recent Internal Transfers</h2>
         </div>
         <div class="treasury-hero-actions">
-            <div class="panel-meta"><?= e((string) count($recentTransfers)) ?> recent transaction(s)</div>
+            <div class="panel-meta" data-treasury-activity-kind="direct"><?= e((string) count($recentDirectEntries)) ?> recent transaction(s)</div>
+            <div class="panel-meta" data-treasury-activity-kind="transfer"><?= e((string) count($recentInternalTransfers)) ?> recent transaction(s)</div>
             <button class="btn btn-sm" type="button" id="treasury-recent-expand-button" onclick="return window.__treasuryOpenRecentWideView();">Open Wide View</button>
             <button class="btn btn-sm treasury-wide-close" type="button" id="treasury-recent-close-button" onclick="return window.__treasuryCloseRecentWideView();">Close Wide View</button>
         </div>
@@ -1657,10 +1671,14 @@ if (typeof window.__treasuryRestoreTab === 'function') {
             </tr>
             </thead>
             <tbody>
-            <?php if ($recentTransfers === []): ?>
-                <tr><td colspan="10">No treasury activity posted yet.</td></tr>
+            <?php if ($recentDirectEntries === []): ?>
+                <tr data-treasury-activity-kind="direct"><td colspan="10">No Money In/Out entries posted yet.</td></tr>
             <?php endif; ?>
-            <?php foreach ($recentTransfers as $transfer): ?>
+            <?php if ($recentInternalTransfers === []): ?>
+                <tr data-treasury-activity-kind="transfer"><td colspan="10">No internal transfers posted yet.</td></tr>
+            <?php endif; ?>
+            <?php foreach (['direct' => $recentDirectEntries, 'transfer' => $recentInternalTransfers] as $activityKind => $activityRows): ?>
+            <?php foreach ($activityRows as $transfer): ?>
                 <?php
                 $typeLabel = match ((string) ($transfer['transaction_type'] ?? '')) {
                     'cash_deposit_to_bank' => 'Cash -> Bank',
@@ -1694,9 +1712,11 @@ if (typeof window.__treasuryRestoreTab === 'function') {
                     $toDisplayName = $counterpartyName !== '' ? $counterpartyName : 'Direct destination';
                     $toDisplayCode = 'External';
                 }
+                $transactionDate = (string) ($transfer['transaction_date'] ?? '');
+                $formattedTransactionDate = \DateTimeImmutable::createFromFormat('!Y-m-d', $transactionDate);
                 ?>
-                <tr>
-                    <td><?= e((string) ($transfer['transaction_date'] ?? '')) ?></td>
+                <tr data-treasury-activity-kind="<?= e($activityKind) ?>">
+                    <td><?= e($formattedTransactionDate !== false ? $formattedTransactionDate->format('d/m/Y') : $transactionDate) ?></td>
                     <td>
                         <div class="treasury-transfer-party">
                             <strong><?= e($sourceBranchName !== '' ? $sourceBranchName : '—') ?></strong>
@@ -1752,6 +1772,7 @@ if (typeof window.__treasuryRestoreTab === 'function') {
                         <?php endif; ?>
                     </td>
                 </tr>
+            <?php endforeach; ?>
             <?php endforeach; ?>
             </tbody>
         </table>
@@ -1895,6 +1916,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const nextTab = treasuryTabButtons.some((button) => button.dataset.treasuryTab === tabName)
             ? tabName
             : treasuryDefaultTab;
+        document.querySelector('.treasury-page')?.setAttribute('data-treasury-active-tab', nextTab);
 
         treasuryTabButtons.forEach((button) => {
             const active = button.dataset.treasuryTab === nextTab;

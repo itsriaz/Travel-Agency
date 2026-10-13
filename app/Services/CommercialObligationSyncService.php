@@ -69,6 +69,7 @@ final class CommercialObligationSyncService extends Service
         ]);
 
         $customerRepository = new CustomerPaymentRepository($this->app);
+        BookingEditTraceService::checkpoint('CustomerPaymentRepository::syncReceivableItem', 'started', ['service_id' => $serviceId]);
         $receivableSync = $customerRepository->syncReceivableItem([
             'branch_id' => (int) $service['branch_id'],
             'booking_reference' => (string) $booking['booking_reference'],
@@ -84,6 +85,13 @@ final class CommercialObligationSyncService extends Service
             'status' => 'open',
             'remarks' => $this->financialRemarks('Customer receivable synced from service line', $service),
             'actor_user_id' => $actorUserId,
+        ]);
+        BookingEditTraceService::checkpoint('CustomerPaymentRepository::syncReceivableItem', 'completed', [
+            'service_id' => $serviceId,
+            'currency' => $invoiceCurrency,
+            'amount' => $receivableAmount,
+            'action' => (string) ($receivableSync['action'] ?? ''),
+            'receivable_id' => (int) ($receivableSync['record']['id'] ?? 0),
         ]);
 
         $supplierRepository = new SupplierRepository($this->app);
@@ -101,6 +109,7 @@ final class CommercialObligationSyncService extends Service
             'service_line_reference' => (string) ($service['line_reference'] ?? ''),
             'action' => 'calling_syncObligation',
         ]);
+        BookingEditTraceService::checkpoint('SupplierRepository::syncObligation', 'started', ['service_id' => $serviceId]);
         $obligationSync = $supplierRepository->syncObligation([
             'supplier_id' => ! empty($service['supplier_id']) ? (int) $service['supplier_id'] : null,
             'branch_id' => (int) $service['branch_id'],
@@ -116,6 +125,13 @@ final class CommercialObligationSyncService extends Service
             'due_date' => $service['due_date'] ?? null,
             'remarks' => $this->financialRemarks('Supplier payable synced from service line', $service),
             'actor_user_id' => $actorUserId,
+        ]);
+        BookingEditTraceService::checkpoint('SupplierRepository::syncObligation', 'completed', [
+            'service_id' => $serviceId,
+            'currency' => $costCurrency,
+            'amount' => $payableAmount,
+            'action' => (string) ($obligationSync['action'] ?? ''),
+            'obligation_id' => (int) ($obligationSync['record']['id'] ?? 0),
         ]);
         $obligationRecord = is_array($obligationSync['record'] ?? null) ? $obligationSync['record'] : null;
         $obligationId = (int) ($obligationRecord['id'] ?? 0);
@@ -214,15 +230,6 @@ final class CommercialObligationSyncService extends Service
                 && (string) ($obligationSync['action'] ?? '') === 'updated';
 
             if ($costCurrencyChanged) {
-                $this->replaceSupplierCurrencyCorrectionJournals(
-                    $accountingRepository,
-                    (string) $booking['booking_reference'],
-                    (string) $service['line_reference'],
-                    (int) $service['branch_id'],
-                    $entryDate,
-                    $actorUserId
-                );
-
                 $priorAmount = round((float) ($obligationSync['prior_amount'] ?? 0), 2);
                 $newAmount = round((float) ($obligationSync['record']['gross_amount'] ?? 0), 2);
                 $obligationIdForPosting = $obligationSync['record']['id'] ?? null;
@@ -301,7 +308,13 @@ final class CommercialObligationSyncService extends Service
             ]);
 
             // This is supplier advance application against supplier payable, not a customer payment.
+            BookingEditTraceService::checkpoint('SupplierRepository::autoApplyAvailableAdvanceToObligation', 'started', ['obligation_id' => $obligationId]);
             $autoAdvanceApplication = $supplierRepository->autoApplyAvailableAdvanceToObligation($obligationId, $actorUserId);
+            BookingEditTraceService::checkpoint('SupplierRepository::autoApplyAvailableAdvanceToObligation', 'completed', [
+                'obligation_id' => $obligationId,
+                'currency' => $costCurrency,
+                'applied_delta' => (float) ($autoAdvanceApplication['applied_amount_delta'] ?? 0),
+            ]);
             $appliedAmountDelta = round((float) ($autoAdvanceApplication['applied_amount_delta'] ?? 0), 2);
             $supplierPaymentCreditAppliedAmount = round((float) ($autoAdvanceApplication['supplier_payment_credit_applied_amount'] ?? 0), 2);
             if ($appliedAmountDelta !== 0.0) {
@@ -530,61 +543,6 @@ final class CommercialObligationSyncService extends Service
             }
 
             throw $exception;
-        }
-    }
-
-    private function replaceSupplierCurrencyCorrectionJournals(
-        AccountingRepository $accountingRepository,
-        string $bookingReference,
-        string $serviceLineReference,
-        int $branchId,
-        string $entryDate,
-        int $actorUserId
-    ): void {
-        $bookingReference = trim($bookingReference);
-        $serviceLineReference = trim($serviceLineReference);
-        if ($bookingReference === '' || $serviceLineReference === '') {
-            return;
-        }
-
-        /** @var \PDO $db */
-        $db = $this->app->get('db');
-        $statement = $db->prepare(
-            'SELECT DISTINCT je.id
-             FROM journal_entries je
-             INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
-             WHERE je.booking_reference = :booking_reference
-               AND COALESCE(jel.service_line_reference, "") = :service_line_reference
-               AND je.source_type = "supplier_payable_adjusted"
-               AND je.source_reference LIKE :source_reference_prefix
-               AND NOT EXISTS (
-                    SELECT 1
-                    FROM journal_entries reversal
-                    WHERE reversal.source_type = "journal_reversal"
-                      AND reversal.source_reference = CONCAT("REV-JE-", je.id)
-               )
-             ORDER BY je.id ASC'
-        );
-        $statement->execute([
-            'booking_reference' => $bookingReference,
-            'service_line_reference' => $serviceLineReference,
-            'source_reference_prefix' => $serviceLineReference . '-CUR-%',
-        ]);
-
-        foreach ($statement->fetchAll(\PDO::FETCH_ASSOC) ?: [] as $row) {
-            $journalEntryId = (int) ($row['id'] ?? 0);
-            if ($journalEntryId <= 0) {
-                continue;
-            }
-
-            $accountingRepository->reverseJournalEntry($journalEntryId, [
-                'branch_id' => $branchId,
-                'booking_reference' => $bookingReference,
-                'source_reference' => $serviceLineReference . '-CUR-REV-' . $journalEntryId,
-                'entry_date' => $entryDate,
-                'actor_user_id' => $actorUserId,
-                'narration' => 'Previous supplier currency correction reversed before saving the new supplier currency',
-            ]);
         }
     }
 

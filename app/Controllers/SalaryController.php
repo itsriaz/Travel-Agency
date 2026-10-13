@@ -8,11 +8,13 @@ use App\Helpers\Auth;
 use App\Helpers\Authorization;
 use App\Helpers\Csrf;
 use App\Helpers\Flash;
+use App\Repositories\BusinessSourceRepository;
 use App\Repositories\MasterDataRepository;
 use App\Repositories\SalaryRepository;
 use App\Repositories\TreasuryRepository;
-use App\Repositories\UserRepository;
+use App\Services\SalaryAccountMatcher;
 use App\Services\SalaryAdminService;
+use App\Services\SalaryOperationTraceService;
 use RuntimeException;
 
 final class SalaryController extends BaseController
@@ -23,22 +25,23 @@ final class SalaryController extends BaseController
         $repository = new SalaryRepository($this->app);
         $masterData = new MasterDataRepository($this->app);
         $activeTab = (string) ($_GET['tab'] ?? 'record');
-        if (! in_array($activeTab, ['record', 'pay', 'link'], true)) {
+        if (! in_array($activeTab, ['record', 'pay'], true)) {
             $activeTab = 'record';
         }
 
         $recordRows = $repository->recordRows($accessibleBranchIds);
         $paymentRows = $repository->paymentRows($accessibleBranchIds);
         $openRecordRows = $repository->openRecordRows($accessibleBranchIds);
+        $accountRows = (new BusinessSourceRepository($this->app))->activeOptions();
+        $accountGroupKeys = SalaryAccountMatcher::groupKeys($accountRows);
         $employeePerformanceRows = $this->employeePerformanceRows(
             $repository->employeePerformanceRows(
                 $accessibleBranchIds,
                 date('Y-m-01'),
                 date('Y-m-t')
-            )
+            ),
+            $accountGroupKeys
         );
-        $mappingRows = $repository->employeeLinkRows();
-        $mappingTableReady = $repository->employeeLinkTableExists();
         $editingRecordId = max(0, (int) ($_GET['edit_record_id'] ?? 0));
         $editingPaymentId = max(0, (int) ($_GET['edit_payment_id'] ?? 0));
         $branchOptions = array_map(
@@ -51,42 +54,14 @@ final class SalaryController extends BaseController
                 static fn (array $row): bool => in_array((int) ($row['id'] ?? 0), $accessibleBranchIds, true)
             ))
         );
-        $userOptions = array_map(
+        $accountOptions = array_map(
             static fn (array $row): array => [
                 'value' => (string) ($row['id'] ?? ''),
-                'label' => trim((string) ($row['name'] ?? 'Employee') . ((string) ($row['username'] ?? '') !== '' ? ' (' . (string) $row['username'] . ')' : '')),
+                'label' => (string) ($row['name'] ?? 'Account'),
+                'group_key' => (string) ($accountGroupKeys[(int) ($row['id'] ?? 0)] ?? ''),
             ],
-            (new UserRepository($this->app))->listActiveUsers()
+            $accountRows
         );
-        $businessSourceOptions = array_map(
-            static fn (array $row): array => [
-                'value' => (string) ($row['id'] ?? ''),
-                'label' => trim((string) ($row['name'] ?? 'Sales Account') . ((string) ($row['code'] ?? '') !== '' ? ' / ' . (string) $row['code'] : '')),
-            ],
-            array_values(array_filter(
-                $masterData->activeRows('business_sources'),
-                static fn (array $row): bool => trim((string) ($row['name'] ?? '')) !== ''
-            ))
-        );
-        $employeeSelectionRows = $repository->employeeSelectionRows();
-        $mappedEmployeeOptions = [];
-        foreach ($employeeSelectionRows as $row) {
-            $userId = (int) ($row['user_id'] ?? 0);
-            if ($userId <= 0 || isset($mappedEmployeeOptions[$userId])) {
-                continue;
-            }
-
-            $employeeName = trim((string) ($row['user_name'] ?? 'Employee'));
-            if ($employeeName === '') {
-                $employeeName = 'Employee';
-            }
-
-            $mappedEmployeeOptions[$userId] = [
-                'value' => (string) $userId,
-                'label' => $employeeName,
-            ];
-        }
-        $employeeOptions = array_values($mappedEmployeeOptions);
         $editingRecord = null;
         foreach ($recordRows as $row) {
             if ((int) ($row['id'] ?? 0) !== $editingRecordId) {
@@ -96,7 +71,7 @@ final class SalaryController extends BaseController
             $editingRecord = [
                 'id' => (int) ($row['id'] ?? 0),
                 'branch_id' => (int) ($row['branch_id'] ?? 0),
-                'employee_user_id' => (int) ($row['user_id'] ?? 0),
+                'business_source_id' => (int) ($row['business_source_id'] ?? 0),
                 'salary_month' => date('Y-m', strtotime((string) ($row['salary_month'] ?? date('Y-m-01')))),
                 'record_date' => (string) ($row['record_date'] ?? ''),
                 'currency' => (string) ($row['currency'] ?? 'PKR'),
@@ -142,7 +117,7 @@ final class SalaryController extends BaseController
                 $editingRecord = [
                     'id' => (int) ($linkedRecord['id'] ?? 0),
                     'branch_id' => (int) ($linkedRecord['branch_id'] ?? 0),
-                    'employee_user_id' => (int) ($linkedRecord['user_id'] ?? 0),
+                    'business_source_id' => (int) ($linkedRecord['business_source_id'] ?? 0),
                     'salary_month' => date('Y-m', strtotime((string) ($linkedRecord['salary_month'] ?? date('Y-m-01')))),
                     'record_date' => (string) ($linkedRecord['record_date'] ?? ''),
                     'currency' => (string) ($linkedRecord['currency'] ?? 'PKR'),
@@ -196,12 +171,9 @@ final class SalaryController extends BaseController
             'salaryRecordRows' => $recordRows,
             'salaryPaymentRows' => $paymentRows,
             'salaryOpenRecordRows' => $openRecordRows,
-            'salaryMappingTableReady' => $mappingTableReady,
-            'salaryEmployeeMappingRows' => $mappingRows,
             'salaryBranchOptions' => $branchOptions,
-            'salaryEmployeeOptions' => $employeeOptions,
-            'salaryUserOptions' => $userOptions,
-            'salaryBusinessSourceOptions' => $businessSourceOptions,
+            'salaryAccountOptions' => $accountOptions,
+            'salaryAccountGroupKeys' => $accountGroupKeys,
             'salaryCurrencyOptions' => $currencyOptions,
             'salaryPaymentMethodOptions' => $paymentMethodOptions,
             'salaryTreasuryAccountOptions' => $treasuryAccountOptions,
@@ -217,11 +189,11 @@ final class SalaryController extends BaseController
         Csrf::verifyOrFail($_POST['_token'] ?? null);
 
         try {
-            (new SalaryAdminService($this->app))->record(
+            $this->runTraced('salary.record.create', fn (): array => (new SalaryAdminService($this->app))->record(
                 $_POST,
                 (int) Auth::id(),
                 Authorization::accessibleBranchIds()
-            );
+            ));
             Flash::success('Salary record saved successfully.');
         } catch (RuntimeException $exception) {
             Flash::error($exception->getMessage());
@@ -235,11 +207,11 @@ final class SalaryController extends BaseController
         Csrf::verifyOrFail($_POST['_token'] ?? null);
 
         try {
-            (new SalaryAdminService($this->app))->updateRecord(
+            $this->runTraced('salary.record.update', fn (): array => (new SalaryAdminService($this->app))->updateRecord(
                 $_POST,
                 (int) Auth::id(),
                 Authorization::accessibleBranchIds()
-            );
+            ));
             Flash::success('Salary record updated successfully.');
         } catch (RuntimeException $exception) {
             Flash::error($exception->getMessage());
@@ -256,11 +228,11 @@ final class SalaryController extends BaseController
         $redirect = '/salaries?tab=record';
 
         try {
-            (new SalaryAdminService($this->app))->voidRecord(
+            $this->runTraced('salary.record.void', fn (): array => (new SalaryAdminService($this->app))->voidRecord(
                 $_POST,
                 (int) Auth::id(),
                 Authorization::accessibleBranchIds()
-            );
+            ));
             Flash::success('Salary record voided successfully.');
         } catch (RuntimeException $exception) {
             Flash::error($exception->getMessage());
@@ -277,11 +249,11 @@ final class SalaryController extends BaseController
         Csrf::verifyOrFail($_POST['_token'] ?? null);
 
         try {
-            (new SalaryAdminService($this->app))->pay(
+            $this->runTraced('salary.payment.create', fn (): array => (new SalaryAdminService($this->app))->pay(
                 $_POST,
                 (int) Auth::id(),
                 Authorization::accessibleBranchIds()
-            );
+            ));
             Flash::success('Salary payment / deduction saved successfully.');
         } catch (RuntimeException $exception) {
             Flash::error($exception->getMessage());
@@ -295,11 +267,11 @@ final class SalaryController extends BaseController
         Csrf::verifyOrFail($_POST['_token'] ?? null);
 
         try {
-            (new SalaryAdminService($this->app))->updatePayment(
+            $this->runTraced('salary.payment.update', fn (): array => (new SalaryAdminService($this->app))->updatePayment(
                 $_POST,
                 (int) Auth::id(),
                 Authorization::accessibleBranchIds()
-            );
+            ));
             Flash::success('Salary credit entry updated successfully.');
         } catch (RuntimeException $exception) {
             Flash::error($exception->getMessage());
@@ -317,11 +289,11 @@ final class SalaryController extends BaseController
         $redirect = '/salaries?tab=pay';
 
         try {
-            (new SalaryAdminService($this->app))->voidPayment(
+            $this->runTraced('salary.payment.void', fn (): array => (new SalaryAdminService($this->app))->voidPayment(
                 $_POST,
                 (int) Auth::id(),
                 Authorization::accessibleBranchIds()
-            );
+            ));
             Flash::success('Salary credit entry voided successfully.');
         } catch (RuntimeException $exception) {
             Flash::error($exception->getMessage());
@@ -342,11 +314,11 @@ final class SalaryController extends BaseController
         $redirect = '/salaries?tab=pay';
 
         try {
-            (new SalaryAdminService($this->app))->voidAll(
+            $this->runTraced('salary.record.void_all', fn (): array => (new SalaryAdminService($this->app))->voidAll(
                 $_POST,
                 (int) Auth::id(),
                 Authorization::accessibleBranchIds()
-            );
+            ));
             Flash::success('Salary record and linked salary payments were voided successfully.');
         } catch (RuntimeException $exception) {
             Flash::error($exception->getMessage());
@@ -360,35 +332,16 @@ final class SalaryController extends BaseController
         $this->redirect($redirect);
     }
 
-    public function saveEmployeeLink(): never
+    private function runTraced(string $action, callable $operation): array
     {
-        Csrf::verifyOrFail($_POST['_token'] ?? null);
-
-        try {
-            (new SalaryAdminService($this->app))->saveEmployeeLink(
-                $_POST,
-                (int) Auth::id()
-            );
-            Flash::success('Employee sales-account link saved successfully.');
-        } catch (RuntimeException $exception) {
-            Flash::error($exception->getMessage());
-        }
-
-        $this->redirect('/salaries?tab=link');
-    }
-
-    public function unlinkEmployeeLink(): never
-    {
-        Csrf::verifyOrFail($_POST['_token'] ?? null);
-
-        try {
-            (new SalaryAdminService($this->app))->unlinkEmployeeLink($_POST);
-            Flash::success('Employee sales-account link removed successfully.');
-        } catch (RuntimeException $exception) {
-            Flash::error($exception->getMessage());
-        }
-
-        $this->redirect('/salaries?tab=link');
+        return SalaryOperationTraceService::run(
+            $this->app,
+            $action,
+            $_POST,
+            (int) Auth::id(),
+            Authorization::accessibleBranchIds(),
+            $operation
+        );
     }
 
     private function summaryCards(array $recordRows): array
@@ -428,9 +381,9 @@ final class SalaryController extends BaseController
         return implode(' | ', $parts);
     }
 
-    private function employeePerformanceRows(array $rows): array
+    private function employeePerformanceRows(array $rows, array $accountGroupKeys): array
     {
-        return array_map(function (array $row): array {
+        return array_map(function (array $row) use ($accountGroupKeys): array {
             $currency = strtoupper(trim((string) ($row['currency'] ?? '')));
             if ($currency === '') {
                 $currency = $this->detectBusinessSourceCurrency(
@@ -446,11 +399,10 @@ final class SalaryController extends BaseController
             $monthProfit = round((float) ($row['month_profit'] ?? 0), 2);
 
             return [
-                'user_id' => (int) ($row['user_id'] ?? 0),
-                'user_name' => (string) ($row['user_name'] ?? 'Employee'),
                 'business_source_id' => (int) ($row['business_source_id'] ?? 0),
                 'business_source_name' => (string) ($row['business_source_name'] ?? 'Sales Account'),
                 'business_source_code' => (string) ($row['business_source_code'] ?? ''),
+                'account_group_key' => (string) ($accountGroupKeys[(int) ($row['business_source_id'] ?? 0)] ?? ''),
                 'currency' => $currency,
                 'month_label' => date('M Y'),
                 'total_sale' => $totalSale,

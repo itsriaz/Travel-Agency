@@ -9,6 +9,36 @@ use RuntimeException;
 
 final class CustomerPaymentRepository extends BaseRepository
 {
+    private function recordAllocationMovement(
+        int $allocationId,
+        int $receiptId,
+        int $receivableId,
+        string $action,
+        string $receivableCurrency,
+        string $paymentCurrency,
+        float $receivableBefore,
+        float $receivableAfter,
+        float $paymentBefore,
+        float $paymentAfter,
+        ?string $reason,
+        ?int $actorUserId
+    ): void {
+        $statement = $this->db->prepare(
+            'INSERT INTO customer_receipt_allocation_movements (
+                allocation_id, customer_receipt_id, customer_receivable_item_id, action,
+                receivable_currency, payment_currency, receivable_amount_before, receivable_amount_after,
+                payment_amount_before, payment_amount_after, reason, actor_user_id
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        );
+        $statement->execute([
+            $allocationId, $receiptId, $receivableId, $action,
+            $receivableCurrency, $paymentCurrency,
+            round($receivableBefore, 2), round($receivableAfter, 2),
+            round($paymentBefore, 2), round($paymentAfter, 2),
+            $reason !== null ? substr($reason, 0, 190) : null, $actorUserId,
+        ]);
+    }
+
     private function customerReceiptVoidMetadataSelect(string $alias = ''): string
     {
         $prefix = $alias !== '' ? $alias . '.' : '';
@@ -92,9 +122,12 @@ final class CustomerPaymentRepository extends BaseRepository
         $purposeSelect = $this->columnExists('customer_receipts', 'receipt_purpose')
             ? ', customer_receipts.receipt_purpose'
             : ', "booking_payment" AS receipt_purpose';
+        $payerRoleSelect = $this->columnExists('customer_receipts', 'linked_payer_role')
+            ? ', customer_receipts.linked_payer_role'
+            : ', NULL AS linked_payer_role';
 
         $statement = $this->db->prepare(
-            'SELECT customer_receipts.id, customer_receipts.branch_id' . $ownershipSelect . $businessSourceSelect . $purposeSelect . ', customer_receipts.booking_reference, customer_receipts.receipt_no, customer_receipts.receipt_date, customer_receipts.currency, ' . $this->customerReceiptTenderedAmountSelect('customer_receipts') . ',
+            'SELECT customer_receipts.id, customer_receipts.branch_id' . $ownershipSelect . $businessSourceSelect . $purposeSelect . $payerRoleSelect . ', customer_receipts.booking_reference, customer_receipts.receipt_no, customer_receipts.receipt_date, customer_receipts.currency, ' . $this->customerReceiptTenderedAmountSelect('customer_receipts') . ',
                     customer_receipts.received_amount, customer_receipts.allocated_amount,
                     customer_receipts.unallocated_amount, ' . $this->customerReceiptReturnedAmountSelect('customer_receipts') . ', customer_receipts.payment_method, customer_receipts.reference_number, customer_receipts.bank_card_detail, customer_receipts.charges_amount, customer_receipts.status,
                     customer_receipts.exchange_rate_to_booking, customer_receipts.remarks' . $treasurySelect . ',
@@ -112,30 +145,90 @@ final class CustomerPaymentRepository extends BaseRepository
 
     public function accountHolderReceipts(int $businessSourceId, int $branchId, string $currency, int $limit = 30): array
     {
-        if ($businessSourceId <= 0 || $branchId <= 0) {
+        return $this->accountHolderReceiptsForBranches($businessSourceId, [$branchId], $currency, $limit);
+    }
+
+    public function accountHolderReceiptsForBranches(int $businessSourceId, array $branchIds, string $currency, int $limit = 30): array
+    {
+        $branchIds = array_values(array_unique(array_filter(array_map('intval', $branchIds), static fn (int $id): bool => $id > 0)));
+        if ($businessSourceId <= 0 || $branchIds === []) {
             return [];
         }
 
         $limit = max(1, min($limit, 100));
+        $branchPlaceholders = implode(', ', array_fill(0, count($branchIds), '?'));
+        $payerRoleSelect = $this->columnExists('customer_receipts', 'linked_payer_role')
+            ? 'cr.linked_payer_role'
+            : 'NULL AS linked_payer_role';
         $statement = $this->db->prepare(
             'SELECT cr.id, cr.receipt_no, cr.receipt_date, cr.currency, cr.received_amount,
                     cr.allocated_amount, cr.unallocated_amount, cr.payment_method,
                     cr.reference_number, cr.remarks, cr.status, cr.treasury_account_id,
-                    cr.void_reason, cr.voided_at, ta.account_name AS treasury_account_name
+                    cr.void_reason, cr.voided_at, cr.branch_id, ' . $payerRoleSelect . ',
+                    br.name AS branch_name, ta.account_name AS treasury_account_name
              FROM customer_receipts cr
+             INNER JOIN branches br ON br.id = cr.branch_id
              LEFT JOIN treasury_accounts ta ON ta.id = cr.treasury_account_id
-             WHERE cr.business_source_id = :business_source_id
-               AND cr.branch_id = :branch_id
-               AND cr.currency = :currency
+             WHERE cr.business_source_id = ?
+               AND cr.branch_id IN (' . $branchPlaceholders . ')
+               AND cr.currency = ?
                AND cr.receipt_purpose = "account_holder_receipt"
              ORDER BY cr.receipt_date DESC, cr.id DESC
              LIMIT ' . $limit
         );
-        $statement->execute([
-            'business_source_id' => $businessSourceId,
-            'branch_id' => $branchId,
-            'currency' => strtoupper(trim($currency)),
-        ]);
+        $statement->execute(array_merge([$businessSourceId], $branchIds, [strtoupper(trim($currency))]));
+
+        return $statement->fetchAll() ?: [];
+    }
+
+    public function linkedPartyReceiptsForBranches(int $businessSourceId, array $branchIds, array $filters = []): array
+    {
+        $branchIds = array_values(array_unique(array_filter(array_map('intval', $branchIds),
+            static fn (int $id): bool => $id > 0)));
+        if ($businessSourceId <= 0 || $branchIds === []) {
+            return [];
+        }
+
+        $branchPlaceholders = array_map(
+            static fn (int $index): string => ':branch_' . $index,
+            array_keys($branchIds)
+        );
+        $where = ['cr.business_source_id = :business_source_id', 'cr.receipt_purpose = "account_holder_receipt"',
+            'cr.status <> "void"', 'cr.branch_id IN (' . implode(', ', $branchPlaceholders) . ')'];
+        $params = ['business_source_id' => $businessSourceId];
+        foreach ($branchIds as $index => $branchId) {
+            $params['branch_' . $index] = $branchId;
+        }
+        foreach (['currency' => 'cr.currency', 'dateFrom' => 'cr.receipt_date', 'dateTo' => 'cr.receipt_date'] as $key => $column) {
+            $value = trim((string) ($filters[$key] ?? ''));
+            if ($value === '') {
+                continue;
+            }
+            $operator = $key === 'dateFrom' ? '>=' : ($key === 'dateTo' ? '<=' : '=');
+            $where[] = $column . ' ' . $operator . ' :' . $key;
+            $params[$key] = $value;
+        }
+        $reference = trim((string) ($filters['bookingReference'] ?? ''));
+        if ($reference !== '') {
+            $where[] = '(cr.receipt_no LIKE :receipt_no OR cr.reference_number LIKE :reference_number)';
+            $params['receipt_no'] = '%' . $reference . '%';
+            $params['reference_number'] = '%' . $reference . '%';
+        }
+        $payerRoleSelect = $this->columnExists('customer_receipts', 'linked_payer_role')
+            ? 'cr.linked_payer_role'
+            : 'NULL AS linked_payer_role';
+        $statement = $this->db->prepare(
+            'SELECT cr.id, cr.receipt_no, cr.receipt_date, cr.currency, cr.received_amount,
+                    cr.reference_number, cr.remarks, cr.payment_method, cr.branch_id,
+                    br.name AS branch_name, ta.account_name AS treasury_account_name,
+                    ' . $payerRoleSelect . '
+             FROM customer_receipts cr
+             INNER JOIN branches br ON br.id = cr.branch_id
+             LEFT JOIN treasury_accounts ta ON ta.id = cr.treasury_account_id
+             WHERE ' . implode(' AND ', $where) . '
+             ORDER BY cr.receipt_date ASC, cr.id ASC'
+        );
+        $statement->execute($params);
 
         return $statement->fetchAll() ?: [];
     }
@@ -381,6 +474,41 @@ final class CustomerPaymentRepository extends BaseRepository
         ]);
         return ['before' => $oldAmount, 'after' => $correctedAmount, 'allocated' => $allocated,
             'unallocated' => $unallocated, 'status' => $status];
+    }
+
+    public function correctReceiptAccount(
+        int $receiptId,
+        int $expectedAccountId,
+        int $newAccountId,
+        string $method,
+        int $expectedBranchId,
+        float $expectedAmount,
+        float $expectedCharges
+    ): void
+    {
+        if (! $this->db->inTransaction()) {
+            throw new RuntimeException('Receipt account correction requires a database transaction.');
+        }
+        $statement = $this->db->prepare(
+            'UPDATE customer_receipts
+             SET treasury_account_id = :new_account_id, payment_method = :payment_method
+             WHERE id = :receipt_id AND treasury_account_id = :expected_account_id
+               AND branch_id = :expected_branch_id
+               AND received_amount = :expected_amount AND charges_amount = :expected_charges
+               AND status <> "void"'
+        );
+        $statement->execute([
+            'new_account_id' => $newAccountId,
+            'payment_method' => $method,
+            'receipt_id' => $receiptId,
+            'expected_account_id' => $expectedAccountId,
+            'expected_branch_id' => $expectedBranchId,
+            'expected_amount' => round($expectedAmount, 2),
+            'expected_charges' => round($expectedCharges, 2),
+        ]);
+        if ($statement->rowCount() !== 1) {
+            throw new RuntimeException('Receipt account changed during correction; reload it and try again.');
+        }
     }
 
     public function updateReceiptMetadata(int $receiptId, array $data, int $actorUserId): void
@@ -1649,6 +1777,24 @@ final class CustomerPaymentRepository extends BaseRepository
         return $row !== false ? $row : null;
     }
 
+    public function lockReceivableByServiceLine(string $bookingReference, string $serviceLineReference): ?array
+    {
+        $statement = $this->db->prepare(
+            'SELECT * FROM customer_receivable_items
+             WHERE booking_reference = :booking_reference
+               AND service_line_reference = :service_line_reference
+               AND due_group = "service_sale"
+             ORDER BY id DESC LIMIT 1 FOR UPDATE'
+        );
+        $statement->execute([
+            'booking_reference' => $bookingReference,
+            'service_line_reference' => $serviceLineReference,
+        ]);
+        $row = $statement->fetch();
+
+        return $row !== false ? $row : null;
+    }
+
     public function syncReceivableItem(array $data): ?array
     {
         return $this->transaction(function () use ($data): ?array {
@@ -1818,6 +1964,20 @@ final class CustomerPaymentRepository extends BaseRepository
         ?int $actorUserId = null,
         ?string $reason = null
     ): array {
+        return $this->transaction(fn (): array => $this->releaseAllocatedCreditForReceivableWithinTransaction(
+            $receivableItemId,
+            $targetAllocatedAmount,
+            $actorUserId,
+            $reason
+        ));
+    }
+
+    private function releaseAllocatedCreditForReceivableWithinTransaction(
+        int $receivableItemId,
+        float $targetAllocatedAmount,
+        ?int $actorUserId,
+        ?string $reason
+    ): array {
         $receivableStatement = $this->db->prepare(
             'SELECT id, branch_id, booking_reference, service_line_reference, currency, due_amount, allocated_amount, outstanding_amount
              FROM customer_receivable_items
@@ -1886,6 +2046,9 @@ final class CustomerPaymentRepository extends BaseRepository
             'SELECT
                 a.id,
                 a.customer_receipt_id,
+                a.receivable_currency,
+                a.payment_currency,
+                r.currency AS receipt_currency,
                 a.allocated_amount,
                 COALESCE(a.receivable_amount_allocated, a.allocated_amount) AS receivable_amount_allocated,
                 COALESCE(a.payment_amount_consumed, a.allocated_amount) AS payment_amount_consumed,
@@ -1969,6 +2132,21 @@ final class CustomerPaymentRepository extends BaseRepository
                     'payment_amount_consumed' => $newPaymentAmountConsumed,
                 ]);
             }
+
+            $this->recordAllocationMovement(
+                $allocationId,
+                $receiptId,
+                $receivableItemId,
+                'released',
+                (string) ($allocation['receivable_currency'] ?: $receivable['currency']),
+                (string) ($allocation['payment_currency'] ?: $allocation['receipt_currency']),
+                $receivableAmountAllocated,
+                $newReceivableAmountAllocated,
+                $paymentAmountConsumed,
+                $newPaymentAmountConsumed,
+                $reason,
+                $actorUserId
+            );
 
             if (! isset($receiptStates[$receiptId])) {
                 $receiptStates[$receiptId] = [
@@ -2098,6 +2276,8 @@ final class CustomerPaymentRepository extends BaseRepository
                 'SELECT
                     a.id AS allocation_id,
                     a.customer_receivable_item_id,
+                    a.receivable_currency AS allocation_receivable_currency,
+                    a.payment_currency,
                     a.allocated_amount,
                     COALESCE(a.receivable_amount_allocated, a.allocated_amount) AS receivable_amount_allocated,
                     COALESCE(a.payment_amount_consumed, a.allocated_amount) AS payment_amount_consumed,
@@ -2195,6 +2375,21 @@ final class CustomerPaymentRepository extends BaseRepository
                 $deleteAllocationStatement->execute([
                     'allocation_id' => $allocationId,
                 ]);
+
+                $this->recordAllocationMovement(
+                    $allocationId,
+                    $receiptId,
+                    $receivableId,
+                    'released',
+                    (string) ($allocation['allocation_receivable_currency'] ?: $allocation['receivable_currency']),
+                    (string) ($allocation['payment_currency'] ?: $receipt['currency']),
+                    $releasedReceivableAmount,
+                    0,
+                    $releasedReceiptAmount,
+                    0,
+                    $reason,
+                    $actorUserId
+                );
 
                 $currentReceiptAllocated = round(max($currentReceiptAllocated - $releasedReceiptAmount, 0), 2);
                 $currentReceiptUnallocated = round(min($maxReceiptUnallocated, $currentReceiptUnallocated + $releasedReceiptAmount), 2);
@@ -2608,18 +2803,22 @@ final class CustomerPaymentRepository extends BaseRepository
             $hasTravelerId = $this->columnExists('customer_receipts', 'traveler_id');
             $hasBusinessSourceId = $this->columnExists('customer_receipts', 'business_source_id');
             $hasReceiptPurpose = $this->columnExists('customer_receipts', 'receipt_purpose');
+            $hasLinkedPayerRole = $this->columnExists('customer_receipts', 'linked_payer_role');
+            if (array_key_exists('linked_payer_role', $data) && ! $hasLinkedPayerRole) {
+                throw new \RuntimeException('The linked-party receipt migration must be applied before recording this payment.');
+            }
             $tenderedAmount = (float) ($data['tendered_amount'] ?? $receivedAmount);
             $returnedAmount = (float) ($data['returned_amount'] ?? 0);
 
             $statement = $this->db->prepare(
                 'INSERT INTO customer_receipts (
-                    branch_id' . ($hasTravelerId ? ', traveler_id' : '') . ($hasBusinessSourceId ? ', business_source_id' : '') . ($hasReceiptPurpose ? ', receipt_purpose' : '') . ', booking_reference, receipt_no, receipt_date, currency,
+                    branch_id' . ($hasTravelerId ? ', traveler_id' : '') . ($hasBusinessSourceId ? ', business_source_id' : '') . ($hasReceiptPurpose ? ', receipt_purpose' : '') . ($hasLinkedPayerRole ? ', linked_payer_role' : '') . ', booking_reference, receipt_no, receipt_date, currency,
                     ' . ($hasTenderedAmount ? 'tendered_amount, ' : '') . 'received_amount, allocated_amount, unallocated_amount, ' . ($hasReturnedAmount ? 'returned_amount, ' : '') . 'payment_method,
                     reference_number, bank_card_detail, charges_amount, status, exchange_rate_to_booking'
                     . ($hasTreasuryAccountLink ? ', treasury_account_id' : '') . ',
                     remarks, created_by_user_id
                  ) VALUES (
-                    :branch_id' . ($hasTravelerId ? ', :traveler_id' : '') . ($hasBusinessSourceId ? ', :business_source_id' : '') . ($hasReceiptPurpose ? ', :receipt_purpose' : '') . ', :booking_reference, :receipt_no, :receipt_date, :currency,
+                    :branch_id' . ($hasTravelerId ? ', :traveler_id' : '') . ($hasBusinessSourceId ? ', :business_source_id' : '') . ($hasReceiptPurpose ? ', :receipt_purpose' : '') . ($hasLinkedPayerRole ? ', :linked_payer_role' : '') . ', :booking_reference, :receipt_no, :receipt_date, :currency,
                     ' . ($hasTenderedAmount ? ':tendered_amount, ' : '') . ':received_amount, 0, :unallocated_amount, ' . ($hasReturnedAmount ? ':returned_amount, ' : '') . ':payment_method,
                     :reference_number, :bank_card_detail, :charges_amount, :status, :exchange_rate_to_booking'
                     . ($hasTreasuryAccountLink ? ', :treasury_account_id' : '') . ',
@@ -2657,6 +2856,9 @@ final class CustomerPaymentRepository extends BaseRepository
             }
             if ($hasReceiptPurpose) {
                 $params['receipt_purpose'] = (string) ($data['receipt_purpose'] ?? 'booking_payment');
+            }
+            if ($hasLinkedPayerRole) {
+                $params['linked_payer_role'] = $data['linked_payer_role'] ?? null;
             }
             if ($hasTreasuryAccountLink) {
                 $params['treasury_account_id'] = $data['treasury_account_id'] ?? null;
@@ -3297,7 +3499,7 @@ final class CustomerPaymentRepository extends BaseRepository
              LEFT JOIN booking_services bs ON bs.booking_id = b.id AND bs.line_reference = i.service_line_reference
              LEFT JOIN travelers t ON t.id = bs.traveler_id
              WHERE a.customer_receivable_item_id IN ({$placeholders})
-             ORDER BY r.receipt_date ASC, r.id ASC, a.id ASC"
+             ORDER BY a.allocated_at ASC, a.id ASC"
         );
         $statement->execute($receivableItemIds);
 
@@ -3506,6 +3708,21 @@ final class CustomerPaymentRepository extends BaseRepository
             'created_by_user_id' => $actorUserId,
         ]);
         $allocationId = (int) $this->db->lastInsertId();
+
+        $this->recordAllocationMovement(
+            $allocationId,
+            $receiptId,
+            $receivableItemId,
+            'allocated',
+            $receivableCurrency,
+            $paymentCurrency,
+            0,
+            $requestedReceivableAmount,
+            0,
+            $paymentAmountConsumed,
+            $allocationNote,
+            $actorUserId
+        );
 
         $updateReceipt = $this->db->prepare(
             'UPDATE customer_receipts

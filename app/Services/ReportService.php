@@ -76,6 +76,46 @@ final class ReportService extends Service
         'ticket_audit_control_register' => 'Ticket Audit / Control Register',
     ];
 
+    private const REPORT_DATE_KEYS = [
+        'cash_flow' => 'movement_date',
+        'cash_bank_ledger' => 'entry_date',
+        'money_in_out_ledger' => 'date',
+        'internal_treasury_transfer' => 'transaction_date',
+        'prepaid_supplier_ledger' => 'payment_date',
+        'supplier_postpaid_payments' => 'payment_date',
+        'supplier_prepaid_payments' => 'payment_date',
+        'supplier_all_payments' => 'payment_date',
+        'unallocated_money' => 'document_date',
+        'void_reversal_register' => 'voided_at',
+        'reversed_linked_adjustments' => 'date',
+        'finance_audit_trail' => 'event_time',
+        'financial_correction_register' => 'correction_date',
+        'expense_register' => 'expense_date',
+        'salary_report' => 'display_date',
+        'receivable_aging' => 'invoice_date',
+        'payable_aging' => 'booking_date',
+        'reminder_hub' => 'due_at',
+        'service_profit' => 'booking_date',
+        'loss_report' => 'booking_date',
+        'customer_detail_ledger' => 'booking_date',
+        'customer_advance_ledger' => 'raw_entry_date',
+        'customer_ledger' => 'entry_date_raw',
+        'actual_money_voucher_ledger' => 'ledger_date',
+        'booking_voucher_ledger' => 'ledger_date',
+        'customer_outstanding' => 'booking_date',
+        'customer_departure_register' => 'departure_date',
+        'supplier_ledger' => 'ledger_date',
+        'supplier_outstanding' => 'booking_date',
+        'payable_refunds' => 'event_date',
+        'supplier_receivable' => 'event_date',
+        'airline_sales_register' => 'booking_date',
+        'airline_payable_report' => 'booking_date',
+        'airline_commission_report' => 'booking_date',
+        'issue_reissue_refund_register' => 'transaction_date',
+        'ticketing_outstanding_report' => 'booking_date',
+        'ticket_audit_control_register' => 'booking_date',
+    ];
+
     public function reportState(array $query, array $accessibleBranchIds, int $actorUserId, string $mode = 'screen'): array
     {
         if ($accessibleBranchIds === []) {
@@ -187,6 +227,9 @@ final class ReportService extends Service
                     ['key' => 'money_out', 'label' => 'Money Out'],
                     ['key' => 'balance', 'label' => 'Running Balance'],
                 ];
+                if ($mode === 'screen' && \App\Helpers\Auth::isSuperAdmin()) {
+                    $columns[] = ['key' => 'action', 'label' => 'Action'];
+                }
                 break;
 
             case 'internal_treasury_transfer':
@@ -275,7 +318,9 @@ final class ReportService extends Service
                     $filters['treasurySourceType'],
                     $filters['cashBankAmount'],
                     $filters['treasuryAccountId'],
-                    $filters['currency']
+                    $filters['currency'],
+                    $filters['cashBankReference'],
+                    $accessibleBranchIds
                 );
                 $columns = [
                     ['key' => 'entry_date', 'label' => 'Date'],
@@ -718,17 +763,40 @@ final class ReportService extends Service
                     $filters['businessSourceId'],
                     $filters['customerName'],
                     $filters['bookingReference'],
-                    $filters['currency']
+                    $filters['currency'],
+                    true
                 );
-                [$rows, $summaryCards] = $this->serviceProfitReport(
+                $reportData = $this->serviceProfitTimelineRows(
+                    $reportData, $filters['dateFrom'], $filters['dateTo']
+                );
+                [$rows, $profitTotals] = $this->serviceProfitReport(
                     $reportData,
                     $this->reportingRateMapForRows($reportData, $conversionDate)
+                );
+                $expenseComparable = $filters['supplierId'] <= 0
+                    && $filters['businessSourceId'] <= 0
+                    && $filters['customerName'] === ''
+                    && $filters['bookingReference'] === '';
+                $expenseTotals = [];
+                if ($expenseComparable) {
+                    foreach ($repository->expenseSummary($filters['branchScopeIds'], $filters['dateFrom'], $filters['dateTo']) as $expenseRow) {
+                        $expenseCurrency = strtoupper(trim((string) ($expenseRow['currency'] ?? '')));
+                        if ($expenseCurrency === '' || ($filters['currency'] !== '' && $expenseCurrency !== $filters['currency'])) {
+                            continue;
+                        }
+                        $expenseTotals[$expenseCurrency] = round(
+                            ($expenseTotals[$expenseCurrency] ?? 0.0) + (float) ($expenseRow['total_expenses'] ?? 0), 2
+                        );
+                    }
+                }
+                $summaryCards = $this->serviceProfitSummaryCards(
+                    $profitTotals, $expenseTotals, $filters['currency'], $expenseComparable
                 );
                 $footerRows = $this->serviceProfitFooterRows($rows);
                 $columns = [
                     ['key' => 'branch_name', 'label' => 'Branch'],
                     ['key' => 'booking_reference', 'label' => 'Booking'],
-                    ['key' => 'booking_date', 'label' => 'Booking Date'],
+                    ['key' => 'booking_date', 'label' => 'Entry Date'],
                     ['key' => 'line_reference', 'label' => 'Svc Line'],
                     ['key' => 'service_type', 'label' => 'Service'],
                     ['key' => 'supplier_name', 'label' => 'Supplier'],
@@ -870,9 +938,7 @@ final class ReportService extends Service
                 $isLinkedPartyLedger = $link !== null;
                 $accountFilters = $filters;
                 if ($isLinkedPartyLedger) {
-                    $accountFilters['dateFrom'] = null;
-                    $accountFilters['dateTo'] = null;
-                    $accountFilters['currency'] = '';
+                    // The linked supplier is a separate role, not a second source of account movements.
                     $accountFilters['supplierId'] = 0;
                 }
                 $accountLedgerService = new AccountLedgerService($this->app);
@@ -880,32 +946,84 @@ final class ReportService extends Service
                 $rows = (array) ($accountLedgerState['rows'] ?? []);
                 $summaryCards = (array) ($accountLedgerState['summaryCards'] ?? []);
                 $customerOutstandingSummaryRows = (array) ($accountLedgerState['summaryRows'] ?? []);
-                if ($isLinkedPartyLedger) {
-                    // The combined statement needs full history for opening balances, while
-                    // the ordinary Account Ledger summaries must still respect active filters.
-                    $filteredAccountLedgerState = $accountLedgerService->report($filters, $filters['branchScopeIds']);
-                    $summaryCards = (array) ($filteredAccountLedgerState['summaryCards'] ?? []);
-                    $customerOutstandingSummaryRows = (array) ($filteredAccountLedgerState['summaryRows'] ?? []);
-                    $supplierFilters = $accountFilters;
-                    $supplierFilters['businessSourceId'] = 0;
-                    $supplierFilters['supplierId'] = (int) $link['supplier_id'];
-                    $supplierRows = (new SupplierLedgerService($this->app))->report(
-                        $supplierFilters,
+                $hasDetailFilters = $filters['dateFrom'] !== null || $filters['dateTo'] !== null
+                    || $filters['customerName'] !== '' || $filters['bookingReference'] !== ''
+                    || $filters['supplierId'] > 0 || $filters['airline'] !== ''
+                    || $filters['debitAmount'] !== null || $filters['creditAmount'] !== null
+                    || $filters['asOfDate'] !== date('Y-m-d');
+                $currentAccountRows = ! $hasDetailFilters
+                    ? $customerOutstandingSummaryRows
+                    : $accountLedgerService->report(
+                        $filters['businessSourceId'] > 0
+                            ? ['businessSourceId' => $filters['businessSourceId']]
+                            : [],
                         $filters['branchScopeIds']
-                    )['rows'];
-                    if ($filters['customerName'] !== '') {
-                        $supplierRows = array_values(array_filter($supplierRows, static fn (array $row): bool =>
-                            mb_strtolower(trim((string) ($row['customer_name'] ?? '')))
-                            === mb_strtolower(trim((string) $filters['customerName']))
-                        ));
-                    }
-                    $linkedStatement = (new LinkedPartyLedgerService($this->app))->buildReport(
-                        $rows, $supplierRows, $filters['dateFrom'], $filters['dateTo'], $filters['currency']
-                    );
-                    $rows = $linkedStatement['rows'];
-                    $footerRows = $linkedStatement['footerRows'];
+                    )['summaryRows'];
+                $summaryCards = $this->replaceAccountOutstandingCards(
+                    $summaryCards,
+                    $currentAccountRows,
+                    $filters['currency'],
+                    $hasDetailFilters
+                );
+                if ($filters['currency'] !== '') {
+                    $summaryCards = array_values(array_filter($summaryCards, static fn (array $card): bool =>
+                        str_ends_with((string) ($card['label'] ?? ''), ' / ' . $filters['currency'])
+                    ));
                 }
-                $customerOutstandingSummaryColumns = [
+                if ($isLinkedPartyLedger) {
+                    $allLinkedPositions = (new LinkedPartyPositionService($this->app))->positions(
+                        $filters['branchScopeIds'], true
+                    );
+                    $rows = $this->linkedPartyStatement($filters, $link, false)['rows'];
+                    $customerOutstandingSummaryRows = array_values(array_filter(
+                        $customerOutstandingSummaryRows,
+                        function (array $row): bool {
+                            if ((int) ($row['invoice_count'] ?? 0) > 0) {
+                                return true;
+                            }
+                            foreach (['invoice_amount', 'outstanding_amount', 'customer_paid', 'customer_refund_paid',
+                                'recognized_profit_loss', 'raw_total_debit'] as $key) {
+                                if (abs($this->reportNumericValue((string) ($row[$key] ?? '0')) ?? 0.0) > 0.005) {
+                                    return true;
+                                }
+                            }
+                            return false;
+                        }
+                    ));
+                    $summaryCards = array_map(static function (array $card): array {
+                        $card['label'] = preg_replace('/^Total (Sale|Received|Outstanding|Profit) \/ /',
+                            'Customer $1 / ', (string) ($card['label'] ?? ''));
+                        if (str_starts_with($card['label'], 'Customer Received / ')) {
+                            $card['label'] = str_replace('Customer Received / ', 'Customer Cash Received / ', $card['label']);
+                        }
+                        if (str_starts_with($card['label'], 'Customer Outstanding / ')) {
+                            $card['label'] = str_replace('Customer Outstanding / ', 'Invoice Outstanding / ', $card['label']);
+                        }
+                        return $card;
+                    }, $summaryCards);
+                    $summaryCards = array_merge($summaryCards, $this->linkedRoleSummaryCards(
+                        $allLinkedPositions,
+                        (int) $link['id'],
+                        $filters['currency']
+                    ));
+                } else {
+                    foreach ($summaryCards as &$card) {
+                        $card['label'] = preg_replace(
+                            '/^Total Outstanding \/ /',
+                            'Total Customer Invoice Outstanding / ',
+                            (string) ($card['label'] ?? '')
+                        );
+                    }
+                    unset($card);
+                }
+                $customerOutstandingSummaryColumns = $isLinkedPartyLedger ? [
+                    ['key' => 'lead_traveler_name', 'label' => 'Customer'],
+                    ['key' => 'currency', 'label' => 'Curr.'],
+                    ['key' => 'invoice_amount', 'label' => 'Invoice'],
+                    ['key' => 'customer_paid', 'label' => 'Customer Paid'],
+                    ['key' => 'outstanding_amount', 'label' => 'Invoice Outstanding'],
+                    ['key' => 'invoice_count', 'label' => 'Invoices'],
+                ] : [
                     ['key' => 'lead_traveler_name', 'label' => 'Customer'],
                     ['key' => 'contact_mobile', 'label' => 'Mobile'],
                     ['key' => 'currency', 'label' => 'Curr.'],
@@ -938,8 +1056,8 @@ final class ReportService extends Service
                     ['key' => 'passenger_name', 'label' => 'Passenger'],
                     ['key' => 'currency', 'label' => 'Curr.'],
                     ['key' => 'settlement_status', 'label' => 'Status'],
-                    ['key' => 'debit_amount', 'label' => 'Debit / Money In'],
-                    ['key' => 'credit_amount', 'label' => 'Credit / Money Out'],
+                    ['key' => 'debit_amount', 'label' => $isLinkedPartyLedger ? 'Debit' : 'Debit / Money In'],
+                    ['key' => 'credit_amount', 'label' => $isLinkedPartyLedger ? 'Credit' : 'Credit / Money Out'],
                     ['key' => 'balance_amount', 'label' => 'Balance'],
                     ['key' => 'transaction_note', 'label' => 'Transaction Detail'],
                 ]);
@@ -997,10 +1115,18 @@ final class ReportService extends Service
                     $filters['customerName'],
                     $filters['businessSourceId']
                 );
-                [$rows, $summaryCards] = $this->customerAdvanceLedgerReport($reportData);
+                $availablePositions = $repository->customerAvailableCreditPositions(
+                    $filters['branchScopeIds'],
+                    $filters['currency'],
+                    $filters['customerName'],
+                    $filters['businessSourceId']
+                );
+                [$rows, $summaryCards] = $this->customerAdvanceLedgerReport(
+                    $reportData, $availablePositions, $filters['currency']
+                );
                 $advanceBranches = array_values(array_unique(array_filter(array_map(
                     static fn (array $row): string => (string) ($row['branch_name'] ?? ''),
-                    $reportData
+                    array_merge($reportData, $availablePositions)
                 ))));
                 $columns = [];
                 if ((int) ($filters['branchId'] ?? 0) <= 0 && count($advanceBranches) > 1) {
@@ -1125,40 +1251,27 @@ final class ReportService extends Service
                 }
                 $isLinkedPartyLedger = $link !== null;
                 $supplierLedgerService = new SupplierLedgerService($this->app);
+                $supplierFilters = $filters;
                 if ($isLinkedPartyLedger) {
-                    $supplierFilters = $filters;
-                    $supplierFilters['dateFrom'] = null;
-                    $supplierFilters['dateTo'] = null;
-                    $supplierFilters['currency'] = '';
                     $supplierFilters['businessSourceId'] = 0;
-                    $supplierLedgerState = $supplierLedgerService->report(
-                        $supplierFilters,
-                        $filters['branchScopeIds']
-                    );
-                    $accountFilters = $supplierFilters;
-                    $accountFilters['supplierId'] = 0;
-                    $accountFilters['businessSourceId'] = (int) $link['business_source_id'];
-                    $accountRows = (new AccountLedgerService($this->app))->report(
-                        $accountFilters,
-                        $filters['branchScopeIds']
-                    )['rows'];
-                    $supplierLedgerState = (new LinkedPartyLedgerService($this->app))->buildSupplierReport(
-                        $accountRows,
-                        (array) ($supplierLedgerState['rows'] ?? []),
-                        $filters['dateFrom'],
-                        $filters['dateTo'],
-                        $filters['currency'],
-                        (string) ($link['supplier_name'] ?? 'Supplier')
-                    );
-                    $footerRows = (array) ($supplierLedgerState['footerRows'] ?? []);
-                } else {
-                    $supplierLedgerState = $supplierLedgerService->report(
-                        $filters,
-                        $filters['branchScopeIds']
-                    );
                 }
+                $supplierLedgerState = $supplierLedgerService->report($supplierFilters, $filters['branchScopeIds']);
                 $rows = (array) ($supplierLedgerState['rows'] ?? []);
-                $summaryCards = (array) ($supplierLedgerState['summaryCards'] ?? []);
+                $supplierCards = (array) ($supplierLedgerState['summaryCards'] ?? []);
+                if ($isLinkedPartyLedger) {
+                    $linkedStatement = $this->linkedPartyStatement($filters, $link, true);
+                    $rows = $linkedStatement['rows'];
+                    // The role cards below already show the combined closing balance.
+                    $supplierCards = [];
+                }
+                $summaryCards = $this->supplierLedgerCardsByCurrency($supplierCards);
+                if ($isLinkedPartyLedger) {
+                    $summaryCards = $this->supplierLedgerCardsByCurrency(array_merge($summaryCards, $this->linkedRoleSummaryCards(
+                        (new LinkedPartyPositionService($this->app))->positions($filters['branchScopeIds']),
+                        (int) $link['id'],
+                        $filters['currency']
+                    )));
+                }
                 $columns = [
                     ['key' => 'supplier_name', 'label' => 'Supplier'],
                     ['key' => 'ledger_date', 'label' => 'Date'],
@@ -1171,7 +1284,7 @@ final class ReportService extends Service
                     ['key' => 'credit_amount', 'label' => 'Credit'],
                     ['key' => 'balance_amount', 'label' => 'Balance'],
                 ];
-                if ($mode === 'screen') {
+                if ($mode !== 'csv') {
                     $columns[] = ['key' => 'trace', 'label' => 'Trace'];
                 }
                 break;
@@ -1290,6 +1403,7 @@ final class ReportService extends Service
                 $columns = [
                     ['key' => 'branch_name', 'label' => 'Branch'],
                     ['key' => 'booking_reference', 'label' => 'Booking'],
+                    ['key' => 'booking_date', 'label' => 'Booking Date'],
                     ['key' => 'airline', 'label' => 'Airline'],
                     ['key' => 'supplier_name', 'label' => 'Supplier'],
                     ['key' => 'passenger_name', 'label' => 'Passenger'],
@@ -1312,6 +1426,7 @@ final class ReportService extends Service
                 $columns = [
                     ['key' => 'branch_name', 'label' => 'Branch'],
                     ['key' => 'booking_reference', 'label' => 'Booking'],
+                    ['key' => 'booking_date', 'label' => 'Booking Date'],
                     ['key' => 'airline', 'label' => 'Airline'],
                     ['key' => 'ticket_number', 'label' => 'Ticket No'],
                     ['key' => 'departure_date', 'label' => 'Departure'],
@@ -1424,8 +1539,7 @@ final class ReportService extends Service
                     $filters['dateFrom'],
                     $filters['dateTo'],
                     $filters['currency'],
-                    $filters['businessSourceId'],
-                    $filters['employeeUserId']
+                    $filters['businessSourceId']
                 );
                 $columns = [
                     ['key' => 'display_date', 'label' => 'Date'],
@@ -1506,6 +1620,7 @@ final class ReportService extends Service
                 $columns = [
                     ['key' => 'branch_name', 'label' => 'Branch'],
                     ['key' => 'booking_reference', 'label' => 'Booking'],
+                    ['key' => 'booking_date', 'label' => 'Booking Date'],
                     ['key' => 'lead_traveler_name', 'label' => 'Customer'],
                     ['key' => 'airline', 'label' => 'Airline'],
                     ['key' => 'ticket_number', 'label' => 'Ticket No'],
@@ -1541,6 +1656,7 @@ final class ReportService extends Service
                 $columns = [
                     ['key' => 'branch_name', 'label' => 'Branch'],
                     ['key' => 'booking_reference', 'label' => 'Booking'],
+                    ['key' => 'booking_date', 'label' => 'Booking Date'],
                     ['key' => 'lead_traveler_name', 'label' => 'Customer'],
                     ['key' => 'airline', 'label' => 'Airline'],
                     ['key' => 'pnr', 'label' => 'PNR'],
@@ -1573,27 +1689,10 @@ final class ReportService extends Service
             $filters['debitAmount'],
             $filters['creditAmount']
         );
+        $rows = $this->sortReportRowsNewestFirst($filters['report'], $rows);
         $branchOptions = $this->normalizeReportBranchOptions((new BookingRepository($this->app))->branchOptions($accessibleBranchIds));
 
         $supplierOptions = (new SupplierRepository($this->app))->activeSuppliersForBranches($filters['branchScopeIds']);
-        $salaryEmployeeOptions = [];
-        if ($filters['report'] === 'salary_report') {
-            $salaryEmployeeRows = (new SalaryRepository($this->app))->employeeSelectionRows();
-            $seenSalaryEmployees = [];
-            foreach ($salaryEmployeeRows as $salaryEmployeeRow) {
-                $userId = (int) ($salaryEmployeeRow['user_id'] ?? 0);
-                if ($userId <= 0 || isset($seenSalaryEmployees[$userId])) {
-                    continue;
-                }
-
-                $seenSalaryEmployees[$userId] = true;
-                $salaryEmployeeOptions[] = [
-                    'user_id' => $userId,
-                    'user_name' => trim((string) ($salaryEmployeeRow['user_name'] ?? 'Employee')) ?: 'Employee',
-                ];
-            }
-        }
-
         return [
             'isLinkedPartyLedger' => $isLinkedPartyLedger,
             'unjournaledTreasuryTransferCount' => $unjournaledTreasuryTransferCount,
@@ -1612,10 +1711,9 @@ final class ReportService extends Service
             'supplierAdvanceSummaryRows' => $supplierAdvanceSummaryRows,
             'supplierAdvanceSummaryColumns' => $supplierAdvanceSummaryColumns,
             'branchOptions' => $branchOptions,
-            'showTraceColumn' => $filters['report'] === 'supplier_ledger' && $mode === 'screen',
+            'showTraceColumn' => $filters['report'] === 'supplier_ledger' && $mode !== 'csv',
             'businessSourceOptions' => (new MasterDataRepository($this->app))->activeRows('business_sources'),
             'expenseCategoryOptions' => (new MasterDataRepository($this->app))->activeRows('expense_categories'),
-            'salaryEmployeeOptions' => $salaryEmployeeOptions,
             'customerOptions' => $filters['report'] === 'customer_advance_ledger'
                 ? $repository->customerAdvanceCustomers($filters['branchScopeIds'])
                 : $repository->customerLedgerCustomers($filters['branchScopeIds'], $filters['businessSourceId']),
@@ -1848,8 +1946,7 @@ final class ReportService extends Service
         ?string $dateFrom,
         ?string $dateTo,
         string $currency = '',
-        int $businessSourceId = 0,
-        int $employeeUserId = 0
+        int $businessSourceId = 0
     ): array {
         $repository = new SalaryRepository($this->app);
         $recordRows = $repository->recordRows($accessibleBranchIds);
@@ -1880,7 +1977,6 @@ final class ReportService extends Service
                 'salary_record_id' => (int) ($row['id'] ?? 0),
                 'salary_payment_id' => 0,
                 'business_source_id' => (int) ($row['business_source_id'] ?? 0),
-                'user_id' => (int) ($row['user_id'] ?? 0),
                 'sort_date' => (string) ($row['record_date'] ?? ''),
                 'display_date' => (string) ($row['record_date'] ?? ''),
                 'employee_name' => (string) ($row['employee_name'] ?? 'Employee'),
@@ -1929,7 +2025,6 @@ final class ReportService extends Service
                 'salary_record_id' => (int) ($row['salary_record_id'] ?? 0),
                 'salary_payment_id' => (int) ($row['id'] ?? 0),
                 'business_source_id' => (int) ($row['business_source_id'] ?? 0),
-                'user_id' => (int) ($row['user_id'] ?? 0),
                 'sort_date' => (string) ($row['payment_date'] ?? ''),
                 'display_date' => (string) ($row['payment_date'] ?? ''),
                 'employee_name' => (string) ($row['employee_name'] ?? 'Employee'),
@@ -2001,7 +2096,6 @@ final class ReportService extends Service
                 'salary_record_id' => (int) ($row['salary_record_id'] ?? 0),
                 'salary_payment_id' => (int) ($matchedPaymentRow['salary_payment_id'] ?? 0),
                 'business_source_id' => (int) ($row['business_source_id'] ?? 0),
-                'user_id' => (int) ($row['user_id'] ?? 0),
                 'sort_date' => (string) ($matchedPaymentRow['sort_date'] ?? $row['sort_date'] ?? ''),
                 'display_date' => (string) ($matchedPaymentRow['display_date'] ?? $row['display_date'] ?? ''),
                 'employee_name' => (string) ($row['employee_name'] ?? 'Employee'),
@@ -2029,11 +2123,8 @@ final class ReportService extends Service
         }
 
         $currencyFilter = strtoupper(trim($currency));
-        $salaryLedgerRows = array_values(array_filter($salaryLedgerRows, static function (array $row) use ($dateFrom, $dateTo, $currencyFilter, $businessSourceId, $employeeUserId): bool {
+        $salaryLedgerRows = array_values(array_filter($salaryLedgerRows, static function (array $row) use ($dateFrom, $dateTo, $currencyFilter, $businessSourceId): bool {
             if ($businessSourceId > 0 && (int) ($row['business_source_id'] ?? 0) !== $businessSourceId) {
-                return false;
-            }
-            if ($employeeUserId > 0 && (int) ($row['user_id'] ?? 0) !== $employeeUserId) {
                 return false;
             }
             if ($currencyFilter !== '' && strtoupper((string) ($row['currency'] ?? '')) !== $currencyFilter) {
@@ -2071,9 +2162,6 @@ final class ReportService extends Service
         $outstandingByCurrency = [];
         foreach ($recordRows as $row) {
             if ($businessSourceId > 0 && (int) ($row['business_source_id'] ?? 0) !== $businessSourceId) {
-                continue;
-            }
-            if ($employeeUserId > 0 && (int) ($row['user_id'] ?? 0) !== $employeeUserId) {
                 continue;
             }
             if ($currencyFilter !== '' && strtoupper((string) ($row['currency'] ?? '')) !== $currencyFilter) {
@@ -2182,20 +2270,6 @@ final class ReportService extends Service
             throw new RuntimeException('Please select a valid account filter.');
         }
 
-        $employeeUserId = (int) ($query['employee_user_id'] ?? 0);
-        if ($employeeUserId > 0) {
-            $employeeIds = [];
-            foreach ((new SalaryRepository($this->app))->employeeSelectionRows() as $salaryEmployeeRow) {
-                $userId = (int) ($salaryEmployeeRow['user_id'] ?? 0);
-                if ($userId > 0) {
-                    $employeeIds[$userId] = true;
-                }
-            }
-            if (! isset($employeeIds[$employeeUserId])) {
-                throw new RuntimeException('Please select a valid employee filter.');
-            }
-        }
-
         $expenseCategoryId = (int) ($query['expense_category_id'] ?? 0);
         if ($expenseCategoryId > 0 && (new MasterDataRepository($this->app))->find('expense_categories', $expenseCategoryId) === null) {
             throw new RuntimeException('Please select a valid expense category filter.');
@@ -2280,6 +2354,10 @@ final class ReportService extends Service
         }
 
         $cashBankAmountInput = str_replace(',', '', trim((string) ($query['cash_bank_amount'] ?? '')));
+        $cashBankReference = trim((string) ($query['cash_bank_reference'] ?? ''));
+        if (mb_strlen($cashBankReference) > 120) {
+            throw new RuntimeException('Cash/bank reference search is too long.');
+        }
         $cashBankAmount = null;
         if ($cashBankAmountInput !== '') {
             if (! is_numeric($cashBankAmountInput)) {
@@ -2295,10 +2373,7 @@ final class ReportService extends Service
         $debitAmount = $this->normalizeOptionalReportAmount($query['debit_amount'] ?? '', 'debit');
         $creditAmount = $this->normalizeOptionalReportAmount($query['credit_amount'] ?? '', 'credit');
 
-        $cashBankDateOrder = strtolower(trim((string) ($query['cash_bank_date_order'] ?? 'desc')));
-        if (! in_array($cashBankDateOrder, ['asc', 'desc'], true)) {
-            throw new RuntimeException('Please select a valid cash/bank date order.');
-        }
+        $cashBankDateOrder = 'desc';
 
         $ticketRegisterType = strtolower(trim((string) ($query['ticket_register_type'] ?? 'all')));
         if (! in_array($ticketRegisterType, ['all', 'issue', 'reissue', 'refund'], true)) {
@@ -2316,7 +2391,6 @@ final class ReportService extends Service
             'currency' => $currency,
             'advanceBalanceView' => $advanceBalanceView,
             'businessSourceId' => $businessSourceId,
-            'employeeUserId' => $employeeUserId,
             'expenseCategoryId' => $expenseCategoryId,
             'customerName' => $customerName,
             'supplierId' => $supplierId,
@@ -2332,6 +2406,7 @@ final class ReportService extends Service
             'sourceCurrency' => $sourceCurrency,
             'destinationCurrency' => $destinationCurrency,
             'treasuryTransferSearch' => $treasuryTransferSearch,
+            'cashBankReference' => $cashBankReference,
             'cashBankAmount' => $cashBankAmount,
             'debitAmount' => $debitAmount,
             'creditAmount' => $creditAmount,
@@ -2858,6 +2933,184 @@ final class ReportService extends Service
         return round(((float) str_replace(',', '', $matches[1])) * $direction, 2);
     }
 
+    private function supplierLedgerCardsByCurrency(array $cards): array
+    {
+        $indexed = [];
+        foreach ($cards as $index => $card) {
+            $label = (string) ($card['label'] ?? '');
+            $currency = preg_match('/\/ ([A-Z]{3})$/', $label, $matches) === 1 ? $matches[1] : '';
+            $indexed[] = [
+                'card' => $card,
+                'index' => $index,
+                'currency' => $currency,
+                'rank' => ['AED' => 0, 'PKR' => 1, 'USD' => 2][$currency] ?? 3,
+            ];
+        }
+
+        usort($indexed, static fn (array $left, array $right): int =>
+            [$left['rank'], $left['currency'], $left['index']]
+            <=> [$right['rank'], $right['currency'], $right['index']]);
+
+        return array_column($indexed, 'card');
+    }
+
+    private function replaceAccountOutstandingCards(
+        array $cards,
+        array $currentRows,
+        string $currencyFilter,
+        bool $hasDetailFilters
+    ): array
+    {
+        $outstandingByCurrency = [];
+        foreach ($currentRows as $row) {
+            $currency = strtoupper(trim((string) ($row['currency'] ?? '')));
+            if ($currency === '' || ($currencyFilter !== '' && $currency !== $currencyFilter)) {
+                continue;
+            }
+            $outstanding = (float) ($row['raw_outstanding_amount'] ?? 0);
+            if ((int) ($row['invoice_count'] ?? 0) === 0
+                && abs($this->reportNumericValue($row['invoice_amount'] ?? 0) ?? 0.0) < 0.005
+                && abs($outstanding) < 0.005) {
+                continue;
+            }
+            $outstandingByCurrency[$currency] = round(
+                ($outstandingByCurrency[$currency] ?? 0.0) + $outstanding,
+                2
+            );
+        }
+        $currentCards = [];
+        foreach ($outstandingByCurrency as $currency => $outstanding) {
+            $currentCards[$currency] = [
+                'label' => 'Total Outstanding / ' . $currency,
+                'value' => $currency . ' ' . number_format($outstanding, 2),
+                'group' => 'account_summary',
+                'group_title' => 'Account Summary',
+                'note' => $hasDetailFilters
+                    ? 'Current customer invoice balance; detail filters only narrow the rows.'
+                    : '',
+            ];
+        }
+
+        $result = [];
+        foreach ($cards as $card) {
+            if (preg_match('/^Total Outstanding \/ ([A-Z]{3})$/', (string) ($card['label'] ?? ''), $matches) !== 1) {
+                $result[] = $card;
+                continue;
+            }
+            if (isset($currentCards[$matches[1]])) {
+                $result[] = $currentCards[$matches[1]];
+                unset($currentCards[$matches[1]]);
+            }
+        }
+
+        return $this->supplierLedgerCardsByCurrency(array_merge($result, array_values($currentCards)));
+    }
+
+    private function linkedPartyStatement(array $filters, array $link, bool $supplierPerspective): array
+    {
+        $sourceFilters = $filters;
+        $sourceFilters['dateFrom'] = null;
+        $sourceFilters['dateTo'] = null;
+        $sourceFilters['currency'] = '';
+
+        $accountFilters = $sourceFilters;
+        $accountFilters['businessSourceId'] = (int) $link['business_source_id'];
+        $accountFilters['supplierId'] = 0;
+        $accountRows = (new AccountLedgerService($this->app))->report(
+            $accountFilters, $filters['branchScopeIds']
+        )['rows'];
+
+        $supplierFilters = $sourceFilters;
+        $supplierFilters['businessSourceId'] = 0;
+        $supplierFilters['supplierId'] = (int) $link['supplier_id'];
+        $supplierRows = (new SupplierLedgerService($this->app))->report(
+            $supplierFilters, $filters['branchScopeIds']
+        )['rows'];
+        if ($filters['customerName'] !== '') {
+            $customerName = mb_strtolower(trim((string) $filters['customerName']));
+            $supplierRows = array_values(array_filter($supplierRows, static fn (array $row): bool =>
+                mb_strtolower(trim((string) ($row['customer_name'] ?? ''))) === $customerName
+            ));
+        }
+
+        $linked = new LinkedPartyLedgerService($this->app);
+        if ($supplierPerspective) {
+            $statement = $linked->buildSupplierReport(
+                $accountRows, $supplierRows, $filters['dateFrom'], $filters['dateTo'],
+                $filters['currency'], (string) $link['supplier_name']
+            );
+        } else {
+            $statement = $linked->buildReport(
+                $accountRows, $supplierRows, $filters['dateFrom'], $filters['dateTo'], $filters['currency']
+            );
+        }
+
+        foreach ($statement['rows'] as &$row) {
+            if ((string) ($row['ledger_entry'] ?? '') !== 'Net payment received') {
+                continue;
+            }
+            $receiptNo = (string) ($row['transaction_reference'] ?? '');
+            $receiptLink = url('/linked-party-settlements?' . http_build_query([
+                'link_id' => (int) $link['id'],
+                'currency' => (string) ($row['currency'] ?? ''),
+            ]));
+            if ($supplierPerspective) {
+                $row['booking_reference'] = $receiptNo;
+                $row['booking_reference_href'] = $receiptLink;
+            } else {
+                $row['booking_reference'] = '-';
+                $row['booking_reference_href'] = '';
+                $row['transaction_reference_href'] = $receiptLink;
+            }
+        }
+        unset($row);
+
+        return $statement;
+    }
+
+    private function linkedRoleSummaryCards(array $positions, int $linkId, string $currencyFilter): array
+    {
+        $cards = [];
+        foreach ($positions as $position) {
+            if ((int) ($position['link_id'] ?? 0) !== $linkId) {
+                continue;
+            }
+            $currency = strtoupper((string) ($position['currency'] ?? ''));
+            if ($currencyFilter !== '' && $currency !== $currencyFilter) {
+                continue;
+            }
+            $accountName = (string) ($position['business_source_name'] ?? 'Account');
+            $supplierName = (string) ($position['supplier_name'] ?? 'Supplier');
+            $group = [
+                'group' => 'linked_roles',
+                'group_title' => 'Current balances | Account: ' . $accountName . ' | Supplier: ' . $supplierName,
+                'linked_currency' => $currency,
+            ];
+            $receivable = round((float) ($position['receivable'] ?? 0)
+                - (float) ($position['account_paid_direct'] ?? 0), 2);
+            $payable = round((float) ($position['payable'] ?? 0), 2);
+            $supplierCredit = max(0.0, (float) ($position['on_account_credit'] ?? 0)
+                - (float) ($position['account_paid_direct'] ?? 0));
+            $net = $position['net_balance'] === null ? null : round((float) $position['net_balance'], 2);
+            $cards[] = $group + [
+                'label' => ($receivable < -0.005 ? 'Payable to ' : 'Receivable from ') . $accountName . ' / ' . $currency,
+                'value' => $currency . ' ' . number_format(abs($receivable), 2),
+            ];
+            $cards[] = $group + [
+                'label' => 'Payable to ' . $supplierName . ' / ' . $currency,
+                'value' => $currency . ' ' . number_format($payable, 2),
+            ];
+            $cards[] = $group + [
+                'label' => LinkedPartyLedgerService::netBalanceLabel(
+                    $net, $currency, $accountName, $supplierName, $receivable, $payable + $supplierCredit
+                ),
+                'value' => $net === null ? 'Not available' : $currency . ' ' . number_format(abs($net), 2),
+            ];
+        }
+
+        return $cards;
+    }
+
     private function applySupplierAdvanceDrilldown(array $summaryRows, array $detailRows, string $selectedKey): array
     {
         if ($selectedKey === '') {
@@ -3020,7 +3273,7 @@ final class ReportService extends Service
                 'unallocated_amount' => $this->money($unallocated),
                 'age_days' => (string) max(0, (int) ($row['age_days'] ?? 0)),
                 'status' => $sourceKey === 'account_holder_receipt'
-                    ? 'Received On Account'
+                    ? 'Included In Linked Balance'
                     : ucwords(str_replace('_', ' ', (string) ($row['status'] ?? 'open'))),
                 'reference_number' => (string) (($row['reference_number'] ?? '') !== '' ? $row['reference_number'] : 'N/A'),
                 'remarks' => (string) (($row['remarks'] ?? '') !== '' ? $row['remarks'] : ''),
@@ -3039,7 +3292,7 @@ final class ReportService extends Service
         return [$reportRows, array_merge(
             $this->currencySummaryCards('Total Open / Available', $openTotals),
             $this->currencySummaryCards('Customer Credit', $customerTotals),
-            $this->currencySummaryCards('Account-Holder On Account', $accountHolderTotals),
+            $this->currencySummaryCards('Linked Direct Payments', $accountHolderTotals),
             $this->currencySummaryCards('Supplier Open Money', $supplierTotals)
         )];
     }
@@ -3448,10 +3701,10 @@ final class ReportService extends Service
         }
 
         return [$reportRows, array_merge(
-            $this->currencySummaryCards('Cash on Hand', $cashTotals),
-            $this->currencySummaryCards('Bank Clearing', $bankTotals),
-            $this->currencySummaryCards('Card Clearing', $cardTotals),
-            $this->currencySummaryCards('Net Liquid Position', $netTotals)
+            $this->tagSummaryGroup($this->currencySummaryCards('Cash on Hand', $cashTotals), 'cash_position_cash', 'Cash on Hand'),
+            $this->tagSummaryGroup($this->currencySummaryCards('Bank and Wallet Balances', $bankTotals), 'cash_position_bank', 'Bank and Wallet Balances'),
+            $this->tagSummaryGroup($this->currencySummaryCards('Card Clearing', $cardTotals), 'cash_position_card', 'Card Clearing'),
+            $this->tagSummaryGroup($this->currencySummaryCards('Net Liquid Position', $netTotals), 'cash_position_net', 'Net Liquid Position')
         )];
     }
 
@@ -3570,6 +3823,9 @@ final class ReportService extends Service
                 'money_in' => $debit,
                 'money_out' => $credit,
                 'balance' => $balances[$balanceKey],
+                'treasury_transaction_id' => (int) ($entry['treasury_transaction_id'] ?? 0),
+                'can_correct' => ($entry['source_group'] ?? '') === 'posted'
+                    && ($entry['transaction_status'] ?? '') === 'posted',
             ];
         }
 
@@ -3696,7 +3952,9 @@ final class ReportService extends Service
         string $sourceType = 'all',
         ?float $transactionAmount = null,
         int $treasuryAccountId = 0,
-        string $currencyFilter = ''
+        string $currencyFilter = '',
+        string $referenceSearch = '',
+        array $accessibleBranchIds = []
     ): array
     {
         $reportRows = [];
@@ -3742,12 +4000,21 @@ final class ReportService extends Service
                 && abs($creditAmount - $transactionAmount) >= 0.005) {
                 continue;
             }
+            $reference = (string) ($row['reference'] ?? '');
+            $bookingReference = (string) ($row['booking_reference'] ?? '');
+            if ($referenceSearch !== ''
+                && stripos($reference, $referenceSearch) === false
+                && stripos($bookingReference, $referenceSearch) === false) {
+                continue;
+            }
             $sourceLabel = $this->treasurySourceLabel((string) ($row['source_type'] ?? ''));
             $partyName = (string) (($row['party_name'] ?? '') !== '' ? $row['party_name'] : 'N/A');
             if ($sourceLabel === 'Direct Entry') {
                 $partyName = $this->cleanDirectTreasuryPartyName($partyName);
             }
 
+            $bookingId = (int) ($row['booking_id'] ?? 0);
+            $receiptId = (int) ($row['receipt_id'] ?? 0);
             $reportRows[] = [
                 'entry_date' => $entryDate !== '' ? $entryDate : 'N/A',
                 'branch_name' => (string) ($row['branch_name'] ?? ''),
@@ -3756,7 +4023,10 @@ final class ReportService extends Service
                 'currency' => $currency,
                 'source_label' => $sourceLabel,
                 'party_name' => $partyName,
-                'reference' => (string) (($row['reference'] ?? '') !== '' ? $row['reference'] : 'N/A'),
+                'reference' => $reference !== '' ? $reference : 'N/A',
+                'reference_href' => $receiptId > 0 && $bookingId > 0 && in_array((int) ($row['booking_branch_id'] ?? 0), $accessibleBranchIds, true) ? url('/workspace/output?booking_id=' . $bookingId . '&doc=customer_receipt&receipt_id=' . $receiptId) : '',
+                'booking_reference' => $bookingReference,
+                'booking_reference_href' => $bookingId > 0 && in_array((int) ($row['booking_branch_id'] ?? 0), $accessibleBranchIds, true) ? url('/workspace?booking_id=' . $bookingId) : '',
                 'description' => $this->cashBankLedgerDescription(
                     $sourceLabel,
                     $partyName,
@@ -3789,6 +4059,11 @@ final class ReportService extends Service
 
         $dateDirection = strtolower($dateOrder) === 'asc' ? 1 : -1;
         usort($reportRows, static function (array $left, array $right) use ($dateDirection): int {
+            $dateComparison = (string) ($left['_sort_date'] ?? '') <=> (string) ($right['_sort_date'] ?? '');
+            if ($dateComparison !== 0) {
+                return $dateDirection * $dateComparison;
+            }
+
             $accountComparison = [
                 (string) ($left['_sort_branch'] ?? ''),
                 (string) ($left['_sort_account_group'] ?? ''),
@@ -3804,15 +4079,7 @@ final class ReportService extends Service
                 return $accountComparison;
             }
 
-            $dateComparison = [
-                (string) ($left['_sort_date'] ?? ''),
-                (int) ($left['_sort_line_id'] ?? 0),
-            ] <=> [
-                (string) ($right['_sort_date'] ?? ''),
-                (int) ($right['_sort_line_id'] ?? 0),
-            ];
-
-            return $dateDirection * $dateComparison;
+            return $dateDirection * ((int) ($left['_sort_line_id'] ?? 0) <=> (int) ($right['_sort_line_id'] ?? 0));
         });
 
         foreach ($reportRows as &$reportRow) {
@@ -3826,15 +4093,36 @@ final class ReportService extends Service
         }
         unset($reportRow);
 
-        return [
-            $reportRows,
-            array_merge(
-                $this->currencySummaryCards('Opening', $openingTotals),
-                $this->currencySummaryCards('Money In', $debitTotals),
-                $this->currencySummaryCards('Money Out', $creditTotals),
-                $this->currencySummaryCards('Closing', $closingTotals)
-            ),
-        ];
+        $currencies = array_values(array_unique(array_merge(
+            array_keys($openingTotals),
+            array_keys($debitTotals),
+            array_keys($creditTotals),
+            array_keys($closingTotals)
+        )));
+        if ($currencies === []) {
+            $currencies = ['PKR'];
+        }
+        $currencyOrder = ['AED' => 0, 'PKR' => 1, 'USD' => 2];
+        usort($currencies, static fn (string $left, string $right): int =>
+            ($currencyOrder[$left] ?? 3) <=> ($currencyOrder[$right] ?? 3)
+                ?: strcmp($left, $right));
+
+        $summaryCards = [];
+        foreach ($currencies as $currency) {
+            foreach ([
+                'Opening' => $openingTotals,
+                'Money In' => $debitTotals,
+                'Money Out' => $creditTotals,
+                'Closing' => $closingTotals,
+            ] as $label => $totals) {
+                $summaryCards[] = [
+                    'label' => $label . ' / ' . $currency,
+                    'value' => $currency . ' ' . $this->money((float) ($totals[$currency] ?? 0)),
+                ];
+            }
+        }
+
+        return [$reportRows, $summaryCards];
     }
 
     private function cashBankSourceMatches(string $sourceType, string $filter): bool
@@ -3955,10 +4243,95 @@ final class ReportService extends Service
         return [$reportRows, $this->currencySummaryCards('Outstanding', $summary, $pkrSummary)];
     }
 
+    private function serviceProfitTimelineRows(array $rows, ?string $dateFrom, ?string $dateTo): array
+    {
+        $timeline = [];
+        $inWindow = static fn (string $date): bool => $date !== ''
+            && ($dateFrom === null || $date >= $dateFrom)
+            && ($dateTo === null || $date <= $dateTo);
+
+        foreach ($rows as $row) {
+            $bookingDate = (string) ($row['booking_date'] ?? '');
+            $eventDate = (string) ($row['cancellation_event_date'] ?? '');
+            $payload = json_decode((string) ($row['cancellation_payload_json'] ?? ''), true);
+            $payload = is_array($payload) ? $payload : [];
+            if ((int) ($row['cancellation_event_id'] ?? 0) <= 0
+                || $eventDate === ''
+                || ($payload['financial_effect_pending'] ?? false)
+                || (($payload['mode'] ?? '') === 'operational_cancel_only')) {
+                if ($inWindow($bookingDate)) {
+                    $timeline[] = $row;
+                }
+                continue;
+            }
+
+            $finalReceivable = (float) ($row['receivable_amount'] ?? 0);
+            $finalPayable = (float) ($row['payable_amount'] ?? 0);
+            $priorReceivable = isset($payload['prior_customer_due_amount'])
+                ? max((float) $payload['prior_customer_due_amount']
+                    - (float) ($row['reissue_customer_mirror_total'] ?? 0), 0.0)
+                : (isset($payload['customer_delta'])
+                    ? $finalReceivable - (float) $payload['customer_delta'] : null);
+            $priorPayableSource = $payload['prior_supplier_obligation_gross_amount']
+                ?? $payload['supplier_cost_basis'] ?? null;
+            $invoiceCurrency = strtoupper((string) ($row['currency'] ?? 'PKR'));
+            $priorPayableCurrency = strtoupper((string) ($payload['prior_supplier_obligation_currency']
+                ?? $payload['supplier_cost_basis_currency'] ?? $row['payable_currency'] ?? $invoiceCurrency));
+            $pricingRate = (float) ($row['pricing_exchange_rate'] ?? 0);
+            if ($priorReceivable === null || $priorPayableSource === null
+                || ($priorPayableCurrency !== $invoiceCurrency && $pricingRate <= 0)) {
+                if ($inWindow($bookingDate)) {
+                    $timeline[] = $row;
+                }
+                continue;
+            }
+
+            $priorPayableSource = max((float) $priorPayableSource
+                - (float) ($row['reissue_supplier_mirror_total'] ?? 0), 0.0);
+            $priorPayable = $priorPayableCurrency === $invoiceCurrency
+                ? $priorPayableSource : round($priorPayableSource * $pricingRate, 2);
+            $bookingRow = $row;
+            $bookingRow['receivable_amount'] = round($priorReceivable, 2);
+            $bookingRow['payable_amount'] = round($priorPayable, 2);
+            $bookingRow['payable_original_amount'] = round($priorPayableSource, 2);
+            $bookingRow['payable_currency'] = $priorPayableCurrency;
+            if ($inWindow($bookingDate)) {
+                $timeline[] = $bookingRow;
+            }
+
+            $receivableChange = round($finalReceivable - $priorReceivable, 2);
+            $payableChange = round($finalPayable - $priorPayable, 2);
+            if ($inWindow($eventDate) && (abs($receivableChange) > 0.005 || abs($payableChange) > 0.005)) {
+                $cancellationRow = $row;
+                $cancellationRow['booking_date'] = $eventDate;
+                $cancellationRow['service_type'] = (string) ($row['service_type'] ?? 'Service') . ' cancellation adjustment';
+                $cancellationRow['receivable_amount'] = $receivableChange;
+                $cancellationRow['payable_amount'] = $payableChange;
+                $finalPayableCurrency = strtoupper((string) ($row['payable_currency'] ?? $invoiceCurrency));
+                $samePayableCurrency = $finalPayableCurrency === $priorPayableCurrency;
+                $cancellationRow['payable_original_amount'] = $samePayableCurrency
+                    ? round((float) ($row['payable_original_amount'] ?? 0) - $priorPayableSource, 2)
+                    : $payableChange;
+                $cancellationRow['payable_currency'] = $samePayableCurrency
+                    ? $priorPayableCurrency : $invoiceCurrency;
+                $cancellationRow['service_charge'] = 0.0;
+                $cancellationRow['discount_amount'] = 0.0;
+                $timeline[] = $cancellationRow;
+            }
+        }
+
+        usort($timeline, static fn (array $left, array $right): int =>
+            strcmp((string) ($right['booking_date'] ?? ''), (string) ($left['booking_date'] ?? ''))
+            ?: strcmp((string) ($left['booking_reference'] ?? ''), (string) ($right['booking_reference'] ?? ''))
+            ?: strcmp((string) ($left['line_reference'] ?? ''), (string) ($right['line_reference'] ?? ''))
+        );
+
+        return $timeline;
+    }
+
     private function serviceProfitReport(array $rows, array $pkrRates): array
     {
         $summary = [];
-        $pkrSummary = 0.0;
         $reportRows = [];
 
         foreach ($rows as $row) {
@@ -3994,12 +4367,45 @@ final class ReportService extends Service
             ];
 
             $summary[$currency] = ($summary[$currency] ?? 0.0) + $profit;
-            if ($pkrProfit !== null) {
-                $pkrSummary += $pkrProfit;
+        }
+
+        return [$reportRows, $summary];
+    }
+
+    private function serviceProfitSummaryCards(array $profits, array $expenses, string $currencyFilter, bool $includeExpenses): array
+    {
+        $currencies = array_values(array_unique(array_merge(
+            array_keys($profits), $includeExpenses ? array_keys($expenses) : []
+        )));
+        if ($currencyFilter !== '' && ! in_array($currencyFilter, $currencies, true)) {
+            $currencies[] = $currencyFilter;
+        }
+        if ($currencies === []) {
+            $currencies = ['PKR'];
+        }
+        $order = ['AED' => 0, 'PKR' => 1, 'USD' => 2];
+        usort($currencies, static fn (string $left, string $right): int =>
+            ($order[$left] ?? 99) <=> ($order[$right] ?? 99) ?: strcmp($left, $right)
+        );
+
+        $cards = [];
+        foreach ($currencies as $currency) {
+            $profit = round((float) ($profits[$currency] ?? 0), 2);
+            $amounts = ['Service Profit' => $profit];
+            if ($includeExpenses) {
+                $expense = round((float) ($expenses[$currency] ?? 0), 2);
+                $amounts['Recorded Expenses'] = $expense;
+                $amounts['Result After Recorded Expenses'] = round($profit - $expense, 2);
+            }
+            foreach ($amounts as $label => $amount) {
+                $cards[] = [
+                    'label' => $label . ' / ' . $currency,
+                    'value' => $currency . ' ' . number_format($amount, 2),
+                ];
             }
         }
 
-        return [$reportRows, $this->currencySummaryCards('Profit', $summary, $pkrSummary)];
+        return $cards;
     }
 
     private function lossReport(array $rows, array $pkrRates): array
@@ -5824,15 +6230,11 @@ final class ReportService extends Service
         return $summaryRows;
     }
 
-    private function customerAdvanceLedgerReport(array $rows): array
+    private function customerAdvanceLedgerReport(array $rows, array $availablePositions, string $currencyFilter): array
     {
         $runningBalances = [];
         $rowBalances = [];
         $formattedRows = [];
-        $receivedTotals = [];
-        $appliedTotals = [];
-        $returnedTotals = [];
-        $balanceTotals = [];
 
         $chronologicalIndexes = array_keys($rows);
         usort($chronologicalIndexes, static function (int $leftIndex, int $rightIndex) use ($rows): int {
@@ -5903,6 +6305,7 @@ final class ReportService extends Service
                 'raw_received_amount' => $receivedAmount,
                 'raw_returned_amount' => $returnedAmount,
                 'branch_name' => (string) ($row['branch_name'] ?? ''),
+                'business_source_name' => (string) ($row['business_source_name'] ?? 'Unassigned Account'),
                 'entry_date' => (string) (($row['entry_date'] ?? '') !== '' ? $row['entry_date'] : 'N/A'),
                 'customer_name' => $customerName,
                 'entry_type' => $entryType,
@@ -5921,22 +6324,82 @@ final class ReportService extends Service
                 'action' => $isEditableAdvance ? 'Edit' : '',
             ];
 
-            $receivedTotals[$currency] = ($receivedTotals[$currency] ?? 0.0) + $receivedAmount;
-            $appliedTotals[$currency] = ($appliedTotals[$currency] ?? 0.0) + $appliedAmount;
-            $returnedTotals[$currency] = ($returnedTotals[$currency] ?? 0.0) + $returnedAmount;
-            $balanceTotals[$currency] = ($balanceTotals[$currency] ?? 0.0) + $receivedAmount - $appliedAmount - $returnedAmount;
         }
 
-        return [
-            $formattedRows,
-            array_merge(
-                [['label' => 'Rows', 'value' => (string) count($rows)]],
-                $this->currencySummaryCards('Received', $receivedTotals),
-                $this->currencySummaryCards('Applied', $appliedTotals),
-                $this->currencySummaryCards('Returned', $returnedTotals),
-                $this->currencySummaryCards('Balance', $balanceTotals)
-            ),
-        ];
+        $available = [];
+        foreach ($availablePositions as $position) {
+            $currency = strtoupper((string) ($position['currency'] ?? 'PKR'));
+            $amount = round((float) ($position['available_amount'] ?? 0), 2);
+            if ($amount <= 0.005) {
+                continue;
+            }
+            $isAdvance = (string) ($position['receipt_purpose'] ?? '') === 'customer_advance';
+            $kind = $isAdvance ? 'advance' : 'booking_credit';
+            $available[$currency][$kind] = round(($available[$currency][$kind] ?? 0.0) + $amount, 2);
+
+            if ($isAdvance) {
+                continue;
+            }
+            $bookingId = (int) ($position['booking_id'] ?? 0);
+            $formattedRows[] = [
+                'row_id' => 0,
+                'receipt_id' => (int) ($position['receipt_id'] ?? 0),
+                'allocation_id' => 0,
+                'branch_id' => (int) ($position['branch_id'] ?? 0),
+                'traveler_id' => (int) ($position['traveler_id'] ?? 0),
+                'treasury_account_id' => (int) ($position['treasury_account_id'] ?? 0),
+                'raw_entry_date' => (string) ($position['receipt_date'] ?? ''),
+                'raw_reference_number' => '',
+                'raw_payment_method' => (string) ($position['payment_method'] ?? ''),
+                'raw_remarks' => '',
+                'raw_received_amount' => 0.0,
+                'raw_returned_amount' => 0.0,
+                'branch_name' => (string) ($position['branch_name'] ?? ''),
+                'entry_date' => (string) (($position['receipt_date'] ?? '') !== '' ? $position['receipt_date'] : 'N/A'),
+                'customer_name' => (string) ($position['customer_name'] ?? 'Customer'),
+                'business_source_name' => (string) ($position['business_source_name'] ?? 'Unassigned Account'),
+                'entry_type' => 'Booking Credit Available',
+                'reference' => (string) ($position['receipt_no'] ?? ''),
+                'booking_id' => $bookingId,
+                'booking_reference' => (string) ($position['booking_reference'] ?? ''),
+                'booking_reference_href' => $bookingId > 0 ? url('/workspace?booking_id=' . $bookingId) : '',
+                'currency' => $currency,
+                'received_amount' => $this->money(0),
+                'applied_amount' => $this->money(0),
+                'returned_amount' => $this->money(0),
+                'balance_amount' => $this->money($amount),
+                'payment_method' => $this->advancePaymentMethodLabel((string) ($position['payment_method'] ?? '')),
+                'treasury_account_name' => (string) ($position['treasury_account_name'] ?? 'N/A'),
+                'remarks' => 'Current unused receipt credit; may include invoice excess or released refund credit. No new cash.',
+                'action' => '',
+                'exclude_from_footer_totals' => 1,
+            ];
+        }
+
+        $currencies = $currencyFilter !== '' ? [$currencyFilter] : ['AED', 'PKR'];
+        foreach (array_keys($available) as $currency) {
+            if (! in_array($currency, $currencies, true)) {
+                $currencies[] = $currency;
+            }
+        }
+        $currencyRank = ['AED' => 0, 'PKR' => 1, 'USD' => 2];
+        usort($currencies, static fn (string $left, string $right): int =>
+            ($currencyRank[$left] ?? 99) <=> ($currencyRank[$right] ?? 99)
+        );
+        $summaryCards = [];
+        foreach ($currencies as $currency) {
+            $advance = (float) ($available[$currency]['advance'] ?? 0);
+            $bookingCredit = (float) ($available[$currency]['booking_credit'] ?? 0);
+            $summaryCards[] = ['label' => 'Advance Available / ' . $currency, 'value' => $currency . ' ' . $this->money($advance)];
+            $summaryCards[] = ['label' => 'Refund + Extra Credit / ' . $currency, 'value' => $currency . ' ' . $this->money($bookingCredit)];
+            $summaryCards[] = [
+                'label' => 'Total Available / ' . $currency,
+                'value' => $currency . ' ' . $this->money($advance + $bookingCredit),
+                'note' => 'Current unused funds, including older receipts outside the date range; not new cash.',
+            ];
+        }
+
+        return [$formattedRows, $summaryCards];
     }
 
     private function customerOutstandingDrilldownKey(string $accountName, string $customerName, string $currency, int $customerTravelerId = 0): string
@@ -6297,6 +6760,7 @@ final class ReportService extends Service
                 'booking_id' => (int) ($row['booking_id'] ?? 0),
                 'branch_name' => (string) ($row['branch_name'] ?? ''),
                 'booking_reference' => (string) ($row['booking_reference'] ?? ''),
+                'booking_date' => (string) ($row['booking_date'] ?? ''),
                 'airline' => (string) (($row['airline'] ?? '') !== '' ? $row['airline'] : 'Unspecified Airline'),
                 'supplier_name' => (string) ($row['supplier_name'] ?? ''),
                 'passenger_name' => (string) (($row['passenger_name'] ?? '') !== '' ? $row['passenger_name'] : 'Passenger'),
@@ -6328,6 +6792,7 @@ final class ReportService extends Service
             $reportRows[] = [
                 'branch_name' => (string) ($row['branch_name'] ?? ''),
                 'booking_reference' => (string) ($row['booking_reference'] ?? ''),
+                'booking_date' => (string) ($row['booking_date'] ?? ''),
                 'airline' => (string) (($row['airline'] ?? '') !== '' ? $row['airline'] : 'Unspecified Airline'),
                 'ticket_number' => (string) (($row['ticket_number'] ?? '') !== '' ? $row['ticket_number'] : 'N/A'),
                 'departure_date' => (string) (($row['departure_date'] ?? '') !== '' ? $row['departure_date'] : 'N/A'),
@@ -6376,6 +6841,7 @@ final class ReportService extends Service
                 'booking_id' => $bookingId,
                 'booking_reference' => (string) ($row['booking_reference'] ?? ''),
                 'booking_reference_href' => $bookingId > 0 ? url('/workspace?booking_id=' . $bookingId) : '',
+                'transaction_date' => (string) ($row['transaction_date'] ?? ''),
                 'transaction_type' => $type,
                 'supplier_name' => (string) (($row['supplier_name'] ?? '') !== '' ? $row['supplier_name'] : 'Supplier pending'),
                 'passenger_name' => (string) (($row['passenger_name'] ?? '') !== '' ? $row['passenger_name'] : 'Passenger'),
@@ -6593,6 +7059,7 @@ final class ReportService extends Service
             $reportRows[] = [
                 'branch_name' => (string) ($row['branch_name'] ?? ''),
                 'booking_reference' => (string) ($row['booking_reference'] ?? ''),
+                'booking_date' => (string) ($row['booking_date'] ?? ''),
                 'lead_traveler_name' => (string) (($row['lead_traveler_name'] ?? '') !== '' ? $row['lead_traveler_name'] : 'Booking Party'),
                 'airline' => (string) (($row['airline'] ?? '') !== '' ? $row['airline'] : 'Unspecified Airline'),
                 'ticket_number' => (string) (($row['ticket_number'] ?? '') !== '' ? $row['ticket_number'] : 'N/A'),
@@ -6652,6 +7119,7 @@ final class ReportService extends Service
             $reportRows[] = [
                 'branch_name' => (string) ($row['branch_name'] ?? ''),
                 'booking_reference' => (string) ($row['booking_reference'] ?? ''),
+                'booking_date' => (string) ($row['booking_date'] ?? ''),
                 'lead_traveler_name' => (string) (($row['lead_traveler_name'] ?? '') !== '' ? $row['lead_traveler_name'] : 'Booking Party'),
                 'airline' => (string) (($row['airline'] ?? '') !== '' ? $row['airline'] : 'Unspecified Airline'),
                 'pnr' => (string) (($row['pnr'] ?? '') !== '' ? $row['pnr'] : 'N/A'),
@@ -7456,6 +7924,38 @@ final class ReportService extends Service
                     || ($credit !== null && abs($credit - $creditAmount) < 0.005);
             }
         ));
+    }
+
+    private function sortReportRowsNewestFirst(string $report, array $rows): array
+    {
+        $dateKey = self::REPORT_DATE_KEYS[$report] ?? null;
+        if ($dateKey === null || count($rows) < 2) {
+            return $rows;
+        }
+
+        // Sort only the finished display rows; ledger running balances are calculated in their original order.
+        usort($rows, static function (array $left, array $right) use ($dateKey): int {
+            $leftDate = self::reportDateSortValue($left[$dateKey] ?? null);
+            $rightDate = self::reportDateSortValue($right[$dateKey] ?? null);
+
+            return strcmp($rightDate, $leftDate);
+        });
+
+        return $rows;
+    }
+
+    private static function reportDateSortValue(mixed $value): string
+    {
+        $date = trim((string) $value);
+        if (preg_match('/^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?/', $date, $match) === 1) {
+            return str_replace('T', ' ', $match[0]);
+        }
+
+        if (preg_match('/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}:\d{2}(?::\d{2})?))?/', $date, $match) === 1) {
+            return $match[3] . '-' . $match[2] . '-' . $match[1] . (isset($match[4]) ? ' ' . $match[4] : '');
+        }
+
+        return '';
     }
 
     private function reportNumericValue(mixed $value): ?float

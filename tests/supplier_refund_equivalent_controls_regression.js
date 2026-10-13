@@ -42,9 +42,9 @@ vm.runInContext(helper + '\nthis.validate = settlementExpectedRefundError;', con
 const controls = source.slice(source.indexOf('        const expectedCard ='), source.indexOf('        return state;', source.indexOf('        const expectedCard =')));
 vm.runInContext(controls, context);
 state.syncFxReview();
-assert.equal(caption.textContent, 'Equivalent amount in AED');
+assert.equal(caption.textContent, 'Supplier Refund in AED');
 assert.equal(input.required, true);
-assert.match(context.validate(state, 'PKR', 90942), /equivalent amount in AED/);
+assert.match(context.validate(state, 'PKR', 90942), /supplier refund in AED/i);
 input.value = '653'; state.syncFxReview();
 assert.equal(context.validate(state, 'PKR', 90942), '');
 assert.equal(Math.round(50242 * Number(expectedRate.value)), 653);
@@ -54,7 +54,7 @@ assert.equal(input.value, '', 'Changing source amount invalidates entered equiva
 penaltyCurrency = 'PKR'; penaltyRate.value = String(1 / 77); state.syncFxReview();
 assert.equal(review.hidden, true); assert.equal(input.disabled, true); assert.equal(input.required, false);
 sourceCurrency = 'AED'; amount.value = '653'; state.syncFxReview();
-assert.equal(caption.textContent, 'Equivalent amount in PKR');
+assert.equal(caption.textContent, 'Supplier Refund in PKR');
 assert.equal(review.hidden, false, 'Condition compares penalty currency, not invoice currency');
 input.value = '50242'; state.syncFxReview();
 assert.equal(Number(expectedRate.value), 1);
@@ -73,15 +73,21 @@ state.syncFxReview();
 assert.equal(input.value, '', 'BK87 legacy PKR90605 is not copied as an AED90605 equivalent');
 options.serviceLine.currency = 'AED'; options.serviceLine.costCurrency = 'PKR'; options.serviceLine.pricingExchangeRate = 0.01302083;
 customerPenaltyField.value = '0'; state.syncFxReview();
-assert.equal(review.hidden, true, 'Zero customer penalty reuses valid original booking conversion without prompting');
-assert.equal(input.required, false);
+assert.equal(review.hidden, false, 'Different currencies show supplier comparison even with zero penalty');
+assert.equal(input.required, true);
 assert.equal(input.value, '1180');
 assert.equal(Number(expectedRate.value), 0.01302083, 'Original recorded rate is preserved, not rederived from rounded equivalent');
 assert.equal(context.validate(state, 'PKR', 90605), '');
+input.value = '1190'; state.syncFxReview();
+assert.equal(input.value, '1190', 'Staff-entered supplier comparison is not overwritten by the saved booking rate');
 customerPenaltyField.value = '53'; state.syncFxReview();
 assert.equal(review.hidden, false, 'Nonzero customer penalty restores explicit equivalent requirement');
 customerPenaltyField.value = '0'; options.serviceLine.pricingExchangeRate = 0; state.syncFxReview();
 assert.equal(review.hidden, false, 'No valid recorded conversion means zero penalty cannot waive currency validation');
+options.serviceId = 64; options.serviceLine = { currency: 'AED', costCurrency: 'PKR',
+    pricingExchangeRate: 0.01308044, latestCancelCustomerSettlementPending: true };
+amount.value = '4045'; state.syncFxReview();
+assert.equal(input.value, '', 'Repaired customer settlement waits for the confirmed AED equivalent, not the saved pricing rate');
 amount.value = '0'; state.syncFxReview(); assert.equal(input.required, false);
 assert.equal(context.validate(state, 'PKR', 90942), '');
 assert.ok(controls.includes("input.name = 'expected_supplier_refund_equivalent_amount'"));
@@ -106,4 +112,4 @@ for (const role of ['customer', 'supplier']) {
 }
 const change = source.slice(source.indexOf('            const convertDisplayedValue = async'), source.indexOf('                const previousRateToBooking =', source.indexOf('            const convertDisplayedValue = async')));
 assert.ok(change.includes("fieldKey === 'expected_supplier_refund'"));
-console.log('[PASS] Penalty-currency prompt, required equivalent, hidden same-currency input, derivation, stale draft protection and reload');
+console.log('[PASS] Penalty-currency comparison, zero-penalty visibility, manual override, same-currency hiding and reload');

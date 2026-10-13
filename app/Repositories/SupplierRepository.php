@@ -1198,6 +1198,24 @@ final class SupplierRepository extends BaseRepository
         });
     }
 
+    public function lockObligationByServiceLine(string $bookingReference, string $serviceLineReference): ?array
+    {
+        $statement = $this->db->prepare(
+            'SELECT * FROM supplier_obligations
+             WHERE booking_reference = :booking_reference
+               AND service_line_reference = :service_line_reference
+               AND obligation_group = "service_cost"
+             ORDER BY id DESC LIMIT 1 FOR UPDATE'
+        );
+        $statement->execute([
+            'booking_reference' => $bookingReference,
+            'service_line_reference' => $serviceLineReference,
+        ]);
+        $row = $statement->fetch();
+
+        return $row !== false ? $row : null;
+    }
+
     public function findObligationByServiceLine(string $bookingReference, string $serviceLineReference, string $obligationGroup = 'service_cost'): ?array
     {
         $statement = $this->db->prepare(
@@ -5102,7 +5120,7 @@ final class SupplierRepository extends BaseRepository
             }
 
             $supplierPoolMatchCache = [];
-            $matchesCurrentSupplierPool = static function (int $advanceSupplierId) use (&$supplierPoolMatchCache, $supplierPoolName): bool {
+            $matchesCurrentSupplierPool = function (int $advanceSupplierId) use (&$supplierPoolMatchCache, $supplierPoolName): bool {
                 if ($advanceSupplierId <= 0 || $supplierPoolName === '') {
                     return false;
                 }
@@ -5135,8 +5153,9 @@ final class SupplierRepository extends BaseRepository
                 static fn (float $carry, array $row): float => $carry + max(0, (float) ($row['available_amount'] ?? 0)),
                 0.0
             ), 2);
+            $paymentAllocatedAmount = $this->paymentAllocatedAmountForObligation($obligationId);
             $desiredAppliedAmount = ($supplierId > 0 && $branchId > 0 && $grossAmount > 0)
-                ? round($protectedAppliedAmount + min(max(0, $grossAmount - $protectedAppliedAmount), $matchingAvailableAmount + $matchingAppliedAmount), 2)
+                ? round($protectedAppliedAmount + min(max(0, $grossAmount - $protectedAppliedAmount - $paymentAllocatedAmount), $matchingAvailableAmount + $matchingAppliedAmount), 2)
                 : 0.0;
 
             $increaseAdvance = $this->db->prepare(

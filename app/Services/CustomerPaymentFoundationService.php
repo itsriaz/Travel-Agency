@@ -459,6 +459,7 @@ final class CustomerPaymentFoundationService extends Service
                     return [
                         'id' => (int) ($row['id'] ?? 0),
                         'branchId' => (int) ($row['branch_id'] ?? 0),
+                        'branchName' => (string) ($row['branch_name'] ?? ''),
                         'accountName' => (string) ($row['account_name'] ?? ''),
                         'accountType' => (string) ($row['account_type'] ?? ''),
                         'currency' => (string) ($row['currency'] ?? 'PKR'),

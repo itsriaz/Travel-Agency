@@ -40,6 +40,23 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
     }
     const workspaceScriptInstanceId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const bookingEditTraceGroupId = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `edit-${workspaceScriptInstanceId.replace(/[^a-zA-Z0-9-]/g, '')}`;
+    station.addEventListener('submit', (event) => {
+        const form = event.target;
+        if (!(form instanceof HTMLFormElement)) {
+            return;
+        }
+        let field = form.elements.namedItem('edit_trace_group_id');
+        if (!(field instanceof HTMLInputElement)) {
+            field = document.createElement('input');
+            field.type = 'hidden';
+            field.name = 'edit_trace_group_id';
+            form.appendChild(field);
+        }
+        field.value = bookingEditTraceGroupId;
+    }, true);
     let customerOpenReceivables = [];
     let customerDuesFinderState = {
         query: '',
@@ -58,6 +75,33 @@ document.addEventListener('DOMContentLoaded', () => {
     };
     const clientErrorLogUrl = String(station.dataset.clientErrorLogUrl || '').trim();
     const csrfToken = String(station.dataset.csrfToken || '').trim();
+    let bookingUiTraceCount = 0;
+    const logBookingUiTrace = (stage, state, field = '') => {
+        if (clientErrorLogUrl === '' || bookingUiTraceCount >= 120 || currentBookingId() <= 0) {
+            return;
+        }
+        bookingUiTraceCount += 1;
+        fetch(clientErrorLogUrl, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+                'X-CSRF-Token': csrfToken,
+            },
+            body: JSON.stringify({
+                type: 'booking_ui_trace',
+                booking_id: currentBookingId(),
+                group_id: bookingEditTraceGroupId,
+                stage,
+                field,
+                state,
+            }),
+            keepalive: true,
+        }).catch(() => {
+            // Diagnostic transport must never interrupt booking work.
+        });
+    };
     sendWorkspaceClientError = (entry) => {
         if (clientErrorLogUrl === '') {
             return;
@@ -150,11 +194,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const paymentReceiptManagerFeedback = station.querySelector('[data-payment-receipt-manager-feedback]');
     const paymentReceiptManagerNotesSection = station.querySelector('[data-payment-receipt-notes-section]');
     const paymentReceiptManagerCorrectionSection = station.querySelector('[data-payment-receipt-correction-section]');
+    const paymentReceiptManagerAccountSection = station.querySelector('[data-payment-receipt-account-section]');
     const paymentReceiptManagerVoidSection = station.querySelector('[data-payment-receipt-void-section]');
     const paymentReceiptManagerVoided = station.querySelector('[data-payment-receipt-manager-voided]');
     const paymentReceiptManagerRecreate = station.querySelector('[data-payment-receipt-manager-recreate]');
     const paymentReceiptManagerNotesForm = station.querySelector('[data-payment-receipt-notes-form]');
     const paymentReceiptManagerCorrectionForm = station.querySelector('[data-payment-receipt-correction-form]');
+    const paymentReceiptManagerAccountForm = station.querySelector('[data-payment-receipt-account-form]');
     const paymentReceiptManagerVoidForm = station.querySelector('[data-payment-receipt-void-form]');
     const customerDuesModal = station.querySelector('[data-customer-dues-modal]');
     const customerDuesCloseButtons = Array.from(station.querySelectorAll('[data-customer-dues-close]'));
@@ -303,6 +349,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const serviceWorkflowPanels = Array.from(station.querySelectorAll('[data-service-workflow-panel]'));
     const serviceWorkflowTabHelp = station.querySelector('[data-service-workflow-tab-help]');
     const servicePenaltyRefundModal = station.querySelector('[data-service-penalty-refund-modal]');
+    const refundEditorTabButtons = Array.from(station.querySelectorAll('[data-refund-editor-tab]'));
+    const refundEditorPanels = Array.from(station.querySelectorAll('[data-refund-editor-panel]'));
     const refundRecoveryModal = station.querySelector('[data-refund-recovery-modal]');
     const refundRecoveryOpen = station.querySelector('[data-refund-recovery-open]');
     const refundRecoveryRestore = station.querySelector('form[data-refund-recovery-restore]');
@@ -335,7 +383,9 @@ document.addEventListener('DOMContentLoaded', () => {
             item.append(heading, detail);
             if (row.event_name === 'service.refund.complete_undo') {
                 const money = document.createElement('p');
-                money.textContent = `Actual customer money: ${row.customer_money === 'moved' ? 'preserved' : 'entry reversed'}. Actual supplier money: ${row.supplier_money === 'moved' ? 'preserved' : 'entry reversed'}.`;
+                money.textContent = row.reversal_mode === 'recorded_transactions'
+                    ? 'Recorded customer and supplier refund entries reversed with their linked balances.'
+                    : `Customer refund entry: ${row.customer_money === 'moved' ? 'money preserved' : 'reversed'}. Supplier refund entry: ${row.supplier_money === 'moved' ? 'money preserved' : 'reversed'}.`;
                 item.append(money);
             }
             for (const change of (Array.isArray(row.summary) ? row.summary : [])) {
@@ -3034,6 +3084,38 @@ document.addEventListener('DOMContentLoaded', () => {
         updateDirectSupplierSelectionSummary();
     };
 
+    const lastRecordedReceiptAccount = () => {
+        if (currentBookingId() <= 0) {
+            return null;
+        }
+        let receipts = [];
+        try {
+            receipts = JSON.parse(station.querySelector('#workspace-payment-receipts-data')?.textContent || '[]');
+        } catch (error) {
+            return null;
+        }
+        if (!Array.isArray(receipts)) {
+            return null;
+        }
+        const receipt = receipts.find((row) => (
+            String(row?.statusRaw || row?.status || '').trim().toLowerCase().replace(/\s+/g, '_') !== 'void'
+            && Number.parseInt(String(row?.treasuryAccountId || 0), 10) > 0
+            && toNumber(row?.receivedAmount || 0) > 0.005
+        ));
+        if (!receipt) {
+            return null;
+        }
+        const accountId = String(receipt.treasuryAccountId);
+        const account = findPaymentTreasuryAccountById(accountId);
+        return {
+            id: accountId,
+            receiptNo: String(receipt.receiptNo || ''),
+            name: String(receipt.treasuryAccountName || account?.accountName || 'Recorded account'),
+            branchName: String(account?.branchName || ''),
+            currency: String(receipt.currency || ''),
+        };
+    };
+
     const syncPaymentTreasurySelector = () => {
         if (!paymentTreasuryAccountSelect || !paymentTreasuryAccountRow || !paymentMethodSelect) {
             return;
@@ -3055,11 +3137,30 @@ document.addEventListener('DOMContentLoaded', () => {
         const methodRequiresTreasury = paymentMethodRequiresTreasurySelection(method);
         const usingAccountBalance = isAccountHolderBalanceMethod();
         const hasNewCashPayment = Math.max(toNumber(receivedNowInput?.value || 0), 0) > 0.005;
+        const savedAccount = lastRecordedReceiptAccount();
+        const accountLabel = paymentTreasuryAccountRow.querySelector('[data-payment-treasury-label]');
         const eligibleAccounts = methodRequiresTreasury ? eligiblePaymentTreasuryAccounts() : [];
         const selectedBefore = String(paymentTreasuryAccountSelect.value || paymentTreasuryAccountSelect.dataset.initialValue || '').trim();
         const preferredAccount = defaultPaymentTreasuryAccount(eligibleAccounts);
 
         paymentTreasuryAccountSelect.innerHTML = '';
+
+        if (!hasNewCashPayment && savedAccount) {
+            const recordedOption = document.createElement('option');
+            recordedOption.value = savedAccount.id;
+            recordedOption.textContent = `${savedAccount.receiptNo} / ${savedAccount.branchName ? `${savedAccount.branchName} / ` : ''}${savedAccount.name} (${savedAccount.currency})`;
+            paymentTreasuryAccountSelect.appendChild(recordedOption);
+            paymentTreasuryAccountSelect.value = savedAccount.id;
+            paymentTreasuryAccountSelect.disabled = true;
+            paymentTreasuryAccountRow.hidden = false;
+            if (accountLabel) {
+                accountLabel.textContent = 'Last Saved Receipt Account';
+            }
+            return;
+        }
+        if (accountLabel) {
+            accountLabel.textContent = hasNewCashPayment ? 'Receiving Account for New Payment' : 'Cash / Bank Account';
+        }
 
         if (!methodRequiresTreasury || usingAccountBalance) {
             paymentTreasuryAccountSelect.dataset.initialValue = '';
@@ -3075,6 +3176,8 @@ document.addEventListener('DOMContentLoaded', () => {
             : (eligibleAccounts.length > 0
                 ? (method === 'cash' ? 'Select cash account' : 'Select bank account')
                 : 'No eligible account configured');
+        promptOption.defaultSelected = true;
+        promptOption.selected = true;
         paymentTreasuryAccountSelect.appendChild(promptOption);
 
         eligibleAccounts.forEach((account) => {
@@ -3094,14 +3197,13 @@ document.addEventListener('DOMContentLoaded', () => {
         let nextValue = '';
         if (selectedBefore !== '' && eligibleAccounts.some((account) => String(account.id) === selectedBefore)) {
             nextValue = selectedBefore;
-        } else if (preferredAccount) {
+        } else if (hasNewCashPayment && preferredAccount) {
             nextValue = String(preferredAccount.id || '');
         }
-        paymentTreasuryAccountSelect.value = nextValue;
         paymentTreasuryAccountSelect.dataset.initialValue = '';
-
         paymentTreasuryAccountRow.hidden = false;
         paymentTreasuryAccountSelect.disabled = !hasNewCashPayment;
+        paymentTreasuryAccountSelect.value = nextValue;
     };
     const promptTreasuryAccountSetupIfMissing = (method) => {
         const normalizedMethod = String(method || '').trim();
@@ -5177,24 +5279,63 @@ document.addEventListener('DOMContentLoaded', () => {
         const money = (value) => Math.round((value + Number.EPSILON) * 100) / 100;
         const charge = money(Math.max(amounts.invoice - amounts.expected + amounts.penalty - amounts.fee_refund, 0));
         const entitlement = money(Math.max(amounts.settled - charge, 0));
+        const originalOutstanding = money(Math.max(amounts.invoice - amounts.settled, 0));
+        const outstanding = money(Math.max(charge - amounts.settled, 0));
+        const withoutSupplierOutstanding = money(Math.max(
+            amounts.invoice + amounts.penalty - amounts.fee_refund - amounts.settled, 0
+        ));
         return {
-            final_charge: charge, entitlement, paid: amounts.paid,
+            final_charge: charge, outstanding,
+            applied_to_outstanding: money(Math.max(originalOutstanding - outstanding, 0)),
+            supplier_applied_to_outstanding: money(Math.max(withoutSupplierOutstanding - outstanding, 0)),
+            entitlement, paid: amounts.paid,
             remaining: money(Math.max(entitlement - amounts.paid, 0)),
             overpaid: money(Math.max(amounts.paid - entitlement, 0)),
         };
     };
 
     const settlementCustomerSummary = (serviceLine, expected, penalty, feeRefund) => {
-        // A draft edit is not a posted settlement. Do not advertise a second cash refund.
         if (serviceLine?.latestCancelFinanciallySettled) {
             const saved = serviceLine.customerRefundSummary || {};
+            const customerOffsetPending = serviceLine.latestCancelCustomerSettlementPending === true
+                || toNumber(serviceLine.latestCancelCustomerOffsetVersion || 0) > 0;
+            if (customerOffsetPending && !serviceLine.latestCustomerRefundEventId && !serviceLine.latestSupplierRefundEventId) {
+                const invoice = toNumber(serviceLine.latestCancelPriorCustomerDueAmount || serviceLine.finalSalePrice || 0);
+                const settled = toNumber(serviceLine.latestCancelCustomerRefundBasisAmount || 0);
+                const calculated = calculateCancellationCustomerRefund({
+                    invoice, settled, expected, penalty, fee_refund: feeRefund, paid: 0,
+                });
+                const savedCharge = toNumber(serviceLine.latestCancelCustomerFinalChargeAmount || 0);
+                return {
+                    ...saved, ...calculated, currency: serviceLine.currency,
+                    draft: Math.abs(calculated.final_charge - savedCharge) > 0.005,
+                    saved: true,
+                };
+            }
             const feeDelta = Math.round(feeRefund) - toNumber(serviceLine.latestCancelAgencyFeeRefundAmount || 0);
-            const canPreviewFee = saved.basis_verified === true && toNumber(saved.paid || 0) === 0
+            const expectedChanged = serviceLine.latestCancelExpectedSupplierRefundAmount != null
+                && Math.abs(expected - toNumber(serviceLine.latestCancelExpectedSupplierRefundAmount)) > 0.005;
+            const penaltyChanged = serviceLine.latestCancelCustomerPenaltyAmount != null
+                && Math.abs(penalty - toNumber(serviceLine.latestCancelCustomerPenaltyAmount)) > 0.005;
+            const canPreview = saved.basis_verified === true && toNumber(saved.paid || 0) === 0
                 && !serviceLine.latestCustomerRefundEventId && !serviceLine.latestSupplierRefundEventId
                 && (saved.currency || serviceLine.currency) === serviceLine.currency;
+            const originalInvoice = toNumber(serviceLine.latestCancelPriorCustomerDueAmount || serviceLine.finalSalePrice || 0);
+            const received = toNumber(serviceLine.latestCancelCustomerRefundBasisAmount ?? serviceLine.currentCustomerReceivedAmount ?? 0);
+            if (canPreview && originalInvoice > 0.005 && (expectedChanged || penaltyChanged || feeDelta !== 0)) {
+                return {
+                    ...saved,
+                    ...calculateCancellationCustomerRefund({
+                        invoice: originalInvoice, settled: received, expected, penalty, fee_refund: feeRefund, paid: 0,
+                    }),
+                    currency: saved.currency || serviceLine.currency,
+                    draft: true,
+                    saved: true,
+                };
+            }
+            const canPreviewFee = canPreview && originalInvoice <= 0.005 && !expectedChanged && !penaltyChanged;
             const entitlement = canPreviewFee ? Math.max(Math.min(
-                toNumber(saved.entitlement || 0) + feeDelta,
-                toNumber(serviceLine.latestCancelCustomerRefundBasisAmount || 0)
+                toNumber(saved.entitlement || 0) + feeDelta, received
             ), 0) : toNumber(saved.entitlement || 0);
             return {
                 ...saved,
@@ -5225,9 +5366,13 @@ document.addEventListener('DOMContentLoaded', () => {
             field.dataset.refundCurrency = summary.currency;
         }
         if (label instanceof HTMLElement) {
-            label.textContent = `Remaining Customer Refund Due (${summary.currency})`;
+            label.textContent = summary.draft
+                ? `Projected Customer Refund Due (${summary.currency}, unsaved)`
+                : `Remaining Customer Refund Due (${summary.currency})`;
         }
-        return `Customer refund entitlement: ${formatCurrencyAmount(summary.currency, summary.entitlement || 0)}. Cash refunded: ${formatCurrencyAmount(summary.currency, summary.paid)}. Credit still available: ${formatCurrencyAmount(summary.currency, summary.remaining)}.${summary.draft ? ' Service-charge refund preview: save the correction before paying. No money has been posted.' : summary.saved ? ' These are saved balances; editing settlement fields does not post or reverse money.' : ''}${summary.saved && summary.basis_verified === false ? ' Historical settlement basis needs reconciliation; the posted refund is preserved.' : ''}`;
+        const outstanding = summary.outstanding ?? Math.max(toNumber(summary.final_charge || 0) - toNumber(summary.settled || 0), 0);
+        const supplierOffset = summary.supplier_applied_to_outstanding;
+        return `Customer outstanding after refund: ${formatCurrencyAmount(summary.currency, outstanding)}.${supplierOffset == null ? '' : ` Supplier refund applied to customer balance: ${formatCurrencyAmount(summary.currency, supplierOffset)}.`} Customer refund entitlement: ${formatCurrencyAmount(summary.currency, summary.entitlement || 0)}. Cash refunded: ${formatCurrencyAmount(summary.currency, summary.paid)}. ${summary.draft ? 'Projected credit after correction' : 'Credit still available'}: ${formatCurrencyAmount(summary.currency, summary.remaining)}.${summary.draft ? ' Unsaved correction preview: save the correction before paying. No money has been posted.' : summary.saved ? ' These are saved balances; editing settlement fields does not post or reverse money.' : ''}${summary.saved && summary.basis_verified === false ? ' Historical settlement basis needs reconciliation; the posted refund is preserved.' : ''}`;
     };
 
     const settlementCustomerRefundStatusText = (serviceLine, summary) => {
@@ -5269,7 +5414,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const supplierRefundRecordedRate = (line, source, target, booking, penalty) => {
         const rate = toNumber(line?.pricingExchangeRate || 0);
-        return source !== target && target === booking && line?.currency === booking && line?.costCurrency === source
+        return !line?.latestCancelCustomerSettlementPending
+            && source !== target && target === booking && line?.currency === booking && line?.costCurrency === source
             && toNumber(penalty) === 0 && Number.isFinite(rate) && rate > 0.00000001 ? rate : 0;
     };
 
@@ -5283,7 +5429,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const equivalent = state.equivalentField;
         if (equivalent && !equivalent.disabled && amount > 0
             && (!equivalent.value.trim() || !Number.isFinite(Number(equivalent.value)) || Number(equivalent.value) <= 0 || !Number.isInteger(Number(equivalent.value)))) {
-            message = `Please enter the equivalent amount in ${state.customerPenaltyCurrencyState?.selectedCurrency() || state.bookingCurrency}.`;
+            message = `Enter the supplier refund in ${state.customerPenaltyCurrencyState?.selectedCurrency() || state.bookingCurrency}.`;
         } else if (amount > 0 && fieldState.selectedCurrency() !== state.bookingCurrency && fieldState.rateToBooking() <= 0.00000001) {
             message = 'Confirm the supplier refund FX rate before calculating or saving.';
         } else if (fieldState.selectedCurrency() === supplierCurrency && amount > supplierSourceCost + 0.005) {
@@ -5666,7 +5812,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const target = customerPenaltyCurrencyState?.selectedCurrency() || bookingCurrency;
             const amount = toNumber(expectedSupplierRefundCurrencyState.amountField.value || 0);
             const recordedRate = supplierRefundRecordedRate(options.serviceLine, source, target, bookingCurrency, customerPenaltyField?.value);
-            review.hidden = source === target || recordedRate > 0;
+            review.hidden = source === target;
             const date = review.querySelector('input[name="expected_supplier_refund_rate_date"]');
             if (date instanceof HTMLInputElement) {
                 if (String(date.dataset.boundService || '') !== String(options.serviceId || '') || date.dataset.settlementDirty !== '1') {
@@ -5675,13 +5821,13 @@ document.addEventListener('DOMContentLoaded', () => {
                     delete date.dataset.settlementDirty;
                 }
             }
-            review.querySelector('.supplier-refund-fx-review__caption').textContent = `Equivalent amount in ${target}`;
+            review.querySelector('.supplier-refund-fx-review__caption').textContent = `Supplier Refund in ${target}`;
             review.querySelector('.supplier-refund-fx-review__unit').textContent = target;
             const input = review.querySelector('input');
             state.equivalentField = input;
-            input.disabled = source === target || recordedRate > 0;
+            input.disabled = source === target;
             input.required = !input.disabled && amount > 0;
-            input.setAttribute('aria-label', `Equivalent amount in ${target}`);
+            input.setAttribute('aria-label', `Supplier Refund in ${target}`);
             const signature = `${options.serviceId}:${source}:${target}:${amount}:${recordedRate}`;
             if (input.dataset.equivalentSignature !== signature) {
                 input.value = '';
@@ -5699,7 +5845,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     input.value = String(Math.round(toNumber(saved.latestCancelExpectedSupplierRefundAmount || 0)));
                 }
             }
-            if (recordedRate > 0) {
+            if (recordedRate > 0 && input.value === '') {
                 input.value = String(Math.round(amount * recordedRate));
             }
             const equivalent = source === target ? amount : toNumber(input.value || 0);
@@ -5707,8 +5853,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 customerPenaltyCurrencyState.exchangeRateField.value = String(roundExchangeRate(amount / equivalent));
             }
             const penaltyRate = customerPenaltyCurrencyState?.rateToBooking() || 0;
+            const keepRecordedRate = recordedRate > 0 && Math.round(equivalent) === Math.round(amount * recordedRate);
             expectedSupplierRefundCurrencyState.exchangeRateField.value = String(
-                recordedRate || supplierRefundEquivalentRate(source, target, bookingCurrency, amount, equivalent, penaltyRate)
+                keepRecordedRate ? recordedRate
+                    : supplierRefundEquivalentRate(source, target, bookingCurrency, amount, equivalent, penaltyRate)
             );
             if (input.disabled || amount === 0) input.setCustomValidity('');
         };
@@ -6409,6 +6557,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (customerRefundAmountField instanceof HTMLInputElement) {
             if (switchedServiceLine || String(customerRefundAmountField.dataset.refundBound || '') !== '1') {
                 customerRefundAmountField.value = formatNumberInputValue(customerRefundAmount);
+                customerRefundAmountField.dataset.bookedRefundAmount = formatNumberInputValue(customerRefundAmount);
             }
             customerRefundAmountField.dataset.refundBound = '1';
             customerRefundAmountField.disabled = !customerRefundPosted;
@@ -6473,9 +6622,8 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             serviceCorrectionCustomerRefundRateInput.dataset.refundBound = '1';
             serviceCorrectionCustomerRefundRateInput.disabled = !customerRefundPosted;
-            syncRefundRateVisibility(serviceCorrectionCustomerRefundRateInput,
-                customerRefundDetail.booking_currency || serviceLine?.customerRefundTruthCurrency || serviceLine?.currency,
-                serviceCorrectionCustomerRefundCurrencySelect?.value, customerRefundPosted);
+            const customerRateRow = serviceCorrectionCustomerRefundRateInput.closest('.legacy-service-event-field');
+            if (customerRateRow instanceof HTMLElement) customerRateRow.hidden = true;
         }
 
         if (serviceCorrectionSupplierRefundRateInput instanceof HTMLInputElement) {
@@ -6545,8 +6693,10 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     const syncCorrectionRefundBookedAmount = (role) => {
+        const activeServiceLine = currentActiveServiceLineForRefund();
         const bookingCurrency = String(
-            serviceCorrectionRefundCurrencyField?.value
+            (role === 'customer' ? activeServiceLine?.customerRefundTruthCurrency : '')
+            || serviceCorrectionRefundCurrencyField?.value
             || serviceRefundCurrencyField?.value
             || currentInvoiceSnapshot().invoiceCurrency
             || 'PKR'
@@ -6571,6 +6721,26 @@ document.addEventListener('DOMContentLoaded', () => {
         const sourceAmount = Math.max(toNumber(sourceField.value || 0), 0);
         const selectedCurrency = String(currencyField?.value || bookingCurrency).trim().toUpperCase() || bookingCurrency;
         const fxRate = Math.max(toNumber(rateField?.value || 0), 0);
+
+        if (role === 'customer') {
+            if (sourceAmount <= 0.005) {
+                amountField.value = '0';
+                if (rateField instanceof HTMLInputElement) rateField.value = '';
+                return;
+            }
+            if (selectedCurrency === bookingCurrency) {
+                amountField.value = formatWholeNumberInputValue(sourceAmount);
+                amountField.dataset.bookedRefundAmount = amountField.value;
+                if (rateField instanceof HTMLInputElement) rateField.value = '1';
+                return;
+            }
+            const bookedAmount = Math.max(toNumber(amountField.dataset.bookedRefundAmount || amountField.value || 0), 0);
+            amountField.value = bookedAmount > 0.005 ? formatWholeNumberInputValue(bookedAmount) : '0';
+            if (rateField instanceof HTMLInputElement) {
+                rateField.value = bookedAmount > 0.005 ? String(roundExchangeRate(sourceAmount / bookedAmount)) : '';
+            }
+            return;
+        }
 
         if (sourceAmount <= 0.005) {
             amountField.value = '0';
@@ -6766,7 +6936,6 @@ document.addEventListener('DOMContentLoaded', () => {
         serviceRefundForm.dataset.refundServiceKey = serviceLineKey;
         const customerPreferredDisplay = refundWorkflowCustomerDisplayContext(serviceLine, false);
         const supplierPreferredDisplay = refundWorkflowSupplierDisplayContext(serviceLine, false);
-        const customerSourceTruth = refundWorkflowCustomerSourceTruth(serviceLine, customerPreferredDisplay);
         const supplierSourceTruth = refundWorkflowSupplierSourceTruth(serviceLine, supplierPreferredDisplay);
         const customerRefundPosted = (Number.parseInt(String(serviceLine?.latestCustomerRefundEventId || 0), 10) || 0) > 0;
         const supplierRefundPosted = (Number.parseInt(String(serviceLine?.latestSupplierRefundEventId || 0), 10) || 0) > 0;
@@ -6806,25 +6975,16 @@ document.addEventListener('DOMContentLoaded', () => {
             const selectedCustomerRefundCurrency = String(
                 customerRefundPosted
                     ? (customerRefundDetail.refund_currency || invoiceCurrency)
-                    : customerPreferredDisplay.currency
+                    : (serviceLine?.latestCancelCustomerPenaltyCurrency || invoiceCurrency)
             ).trim().toUpperCase() || invoiceCurrency;
             serviceCustomerRefundCurrencyInput.dataset.preferredCurrency = selectedCustomerRefundCurrency;
             if (Array.from(serviceCustomerRefundCurrencyInput.options).some((option) => option.value === selectedCustomerRefundCurrency)) {
                 serviceCustomerRefundCurrencyInput.value = selectedCustomerRefundCurrency;
             }
         }
-        if (serviceCustomerRefundSourceAmountInput instanceof HTMLInputElement && serviceCustomerRefundExchangeRateInput instanceof HTMLInputElement && !customerRefundPosted) {
-            const preferredCurrency = String(serviceCustomerRefundCurrencyInput?.value || invoiceCurrency).trim().toUpperCase() || invoiceCurrency;
-            const sourceFieldEmpty = Math.max(toNumber(serviceCustomerRefundSourceAmountInput.value || 0), 0) <= 0.005;
-            const rateFieldEmpty = Math.max(toNumber(serviceCustomerRefundExchangeRateInput.value || 0), 0) <= 0.00000001;
-            if (preferredCurrency === customerSourceTruth.currency && customerSourceTruth.amount > 0.005 && (switchedServiceLine || sourceFieldEmpty)) {
-                serviceCustomerRefundSourceAmountInput.value = formatNumberInputValue(customerSourceTruth.amount);
-            }
-            if (preferredCurrency === customerSourceTruth.currency && customerSourceTruth.currency !== invoiceCurrency && (switchedServiceLine || rateFieldEmpty)) {
-                serviceCustomerRefundExchangeRateInput.value = String(roundExchangeRate(customerSourceTruth.rate));
-            } else if (preferredCurrency === invoiceCurrency && (switchedServiceLine || rateFieldEmpty)) {
-                serviceCustomerRefundExchangeRateInput.value = '1';
-            }
+        if (switchedServiceLine && serviceCustomerRefundSourceAmountInput instanceof HTMLInputElement) {
+            serviceCustomerRefundSourceAmountInput.value = '';
+            if (serviceCustomerRefundAmount instanceof HTMLInputElement) serviceCustomerRefundAmount.value = '0';
         }
 
         if (serviceSupplierRefundCurrencyInput instanceof HTMLInputElement) {
@@ -7094,10 +7254,12 @@ document.addEventListener('DOMContentLoaded', () => {
         const customerDisplay = refundWorkflowCustomerDisplayContext(undefined, true);
         const supplierDisplay = refundWorkflowSupplierDisplayContext(undefined, false);
         if (serviceCustomerRefundCurrencyInput instanceof HTMLSelectElement) {
-            serviceCustomerRefundCurrencyInput.dataset.preferredCurrency = customerDisplay.currency;
-            if (Array.from(serviceCustomerRefundCurrencyInput.options).some((option) => option.value === customerDisplay.currency)) {
-                serviceCustomerRefundCurrencyInput.value = customerDisplay.currency;
-                serviceCustomerRefundCurrencyInput.dataset.lastCurrency = customerDisplay.currency;
+            const payoutCurrency = String(serviceCorrectionSettlementForm?.elements?.namedItem('customer_penalty_currency')?.value
+                || customerDisplay.currency).trim().toUpperCase();
+            serviceCustomerRefundCurrencyInput.dataset.preferredCurrency = payoutCurrency;
+            if (Array.from(serviceCustomerRefundCurrencyInput.options).some((option) => option.value === payoutCurrency)) {
+                serviceCustomerRefundCurrencyInput.value = payoutCurrency;
+                serviceCustomerRefundCurrencyInput.dataset.lastCurrency = payoutCurrency;
             }
         }
         if (serviceSupplierRefundCurrencyInput instanceof HTMLInputElement) {
@@ -7608,6 +7770,8 @@ document.addEventListener('DOMContentLoaded', () => {
                             data-receipt-allocated="${escapeHtml(String(receipt?.allocatedAmount || 0))}"
                             data-receipt-returned="${escapeHtml(String(receipt?.returnedAmount || 0))}"
                             data-receipt-method="${escapeHtml(String(receipt?.paymentMethod || ''))}"
+                            data-receipt-treasury-account-id="${escapeHtml(String(receipt?.treasuryAccountId || 0))}"
+                            data-receipt-treasury-account-name="${escapeHtml(String(receipt?.treasuryAccountName || ''))}"
                             data-receipt-status="${escapeHtml(statusLabel)}"
                             data-receipt-status-raw="${escapeHtml(statusRaw)}"
                             data-receipt-reference="${escapeHtml(String(receipt?.referenceNumber || ''))}"
@@ -8656,7 +8820,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 credentials: 'same-origin',
                 signal: paymentAdvanceLoadController.signal,
             });
-            const payload = await response.json().catch(() => ({ ok: false, advances: [], credits: [] }));
+            const payload = await response.json().catch(() => null);
+            if (!response.ok || payload?.ok !== true) {
+                throw new Error('Customer credit lookup unavailable');
+            }
             paymentAdvanceOptions = uniqueCustomerAdvanceRows(payload.advances);
             paymentCustomerCreditOptions = uniqueCustomerAdvanceRows(payload.credits);
             const previousValue = paymentAdvanceSelect.value;
@@ -8706,8 +8873,14 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             paymentAdvanceOptions = [];
             paymentCustomerCreditOptions = [];
-            setPaymentAdvanceVisible(false);
-            setPaymentCustomerCreditVisible(false);
+            paymentAdvanceSelect.innerHTML = '<option value="">Advance lookup unavailable - retry</option>';
+            setPaymentAdvanceVisible(true);
+            if (paymentCustomerCreditSelect) {
+                paymentCustomerCreditSelect.innerHTML = '<option value="">Credit lookup unavailable - retry</option>';
+                setPaymentCustomerCreditVisible(true);
+            }
+            syncPaymentAdvanceAmountCap();
+            syncPaymentCustomerCreditAmountCap();
             logWorkflowTrace('customer-advance:payment-load-failed', {
                 error: error instanceof Error ? error.message : String(error),
             });
@@ -10004,12 +10177,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     throw new Error(`Enter a valid ${requirement.promptFromCurrency} to ${requirement.promptToCurrency} exchange rate.`);
                 }
                 const tentativeSourceToInvoiceRate = pricingRateForRequirement(requirement, enteredRate);
-                if (
-                    request.mode === 'branch-currency-transition'
-                    && Math.abs(tentativeSourceToInvoiceRate - 1) <= 0.02
-                ) {
+                if (Math.abs(tentativeSourceToInvoiceRate - 1) <= 0.00000001) {
                     throw new Error(
-                        `${requirement.sourceCurrency} and ${requirement.invoiceCurrency} cannot keep identical or nearly identical numerical amounts. Enter the correct exchange rate.`
+                        `A 1:1 rate cannot be used for ${requirement.sourceCurrency} and ${requirement.invoiceCurrency}. Enter the correct exchange rate.`
                     );
                 }
                 const saveResult = await saveDailyPricingExchangeRate(
@@ -11975,6 +12145,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         try {
             const formData = new FormData(form);
+            formData.set('edit_trace_group_id', bookingEditTraceGroupId);
             Object.entries(extraFields || {}).forEach(([key, value]) => {
                 formData.set(key, String(value));
             });
@@ -12423,7 +12594,8 @@ document.addEventListener('DOMContentLoaded', () => {
             url.searchParams.set('currency', currency);
             url.searchParams.set('target_booking_reference', context.targetBookingReference);
             const response = await fetch(url.toString(), { headers: { 'X-Requested-With': 'XMLHttpRequest' }, credentials: 'same-origin' });
-            const payload = await response.json().catch(() => ({ credits: [] }));
+            const payload = await response.json().catch(() => null);
+            if (!response.ok || payload?.ok !== true) throw new Error('Customer credit lookup unavailable');
             uniqueCustomerAdvanceRows(payload.credits || []).forEach((credit) => {
                 const amount = Math.max(toNumber(credit.unallocated_amount || 0), 0);
                 const option = document.createElement('option');
@@ -12435,6 +12607,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (serviceReissueCreditSelect.options.length > 1) serviceReissueCreditSelect.options[0].textContent = 'Select customer credit';
             if (previous && Array.from(serviceReissueCreditSelect.options).some((option) => option.value === previous)) serviceReissueCreditSelect.value = previous;
         } catch (error) {
+            serviceReissueCreditSelect.innerHTML = '<option value="">Credit lookup unavailable - retry</option>';
             logWorkflowTrace('reissue-credit:load-failed', { message: error instanceof Error ? error.message : String(error) });
         }
     };
@@ -12900,6 +13073,86 @@ document.addEventListener('DOMContentLoaded', () => {
         commission: station.querySelector('[data-service-metric="commission"]'),
         serviceCharge: commercialLookup('commercial-service-charge', '[data-service-metric="service_charge"]'),
     };
+    const servicePricingTraceState = () => ({
+        booking_id: String(currentBookingId()),
+        service_id: String(serviceFields.serviceId?.value || ''),
+        currency: String(serviceFields.currency?.value || ''),
+        cost_currency: String(serviceFields.costCurrency?.value || ''),
+        service_charge_currency: String(serviceFields.serviceChargeCurrency?.value || ''),
+        sale_price: String(serviceMetricInputs.sale?.value || ''),
+        purchase_cost: String(serviceMetricInputs.cost?.value || ''),
+        service_charge: String(serviceMetricInputs.serviceCharge?.value || ''),
+        final_sale_price: String(finalSalePriceInput?.value || ''),
+        pricing_exchange_rate: String(serviceFields.pricingExchangeRate?.value || ''),
+        service_charge_exchange_rate: String(serviceFields.serviceChargeExchangeRate?.value || ''),
+    });
+    const workflowTraceFieldNames = [
+        'booking_id', 'service_id', 'refund_edit_scope', 'settlement_currency',
+        'settlement_event_date', 'correction_event_date', 'refund_event_date',
+        'settlement_exchange_rate', 'customer_penalty_amount', 'customer_penalty_currency',
+        'customer_penalty_source_amount', 'customer_penalty_exchange_rate',
+        'expected_supplier_refund_amount', 'expected_supplier_refund_currency',
+        'expected_supplier_refund_source_amount', 'expected_supplier_refund_exchange_rate',
+        'expected_supplier_refund_equivalent_amount', 'expected_supplier_refund_rate_date',
+        'agency_fee_refund_amount',
+        'supplier_penalty_amount', 'supplier_penalty_currency', 'supplier_penalty_source_amount',
+        'supplier_penalty_exchange_rate', 'customer_refund_amount', 'customer_refund_currency',
+        'customer_refund_source_amount', 'customer_refund_exchange_rate',
+        'supplier_refund_amount', 'supplier_refund_currency', 'supplier_refund_source_amount',
+        'supplier_refund_exchange_rate', 'supplier_refund_amount_basis',
+        'supplier_refund_conversion_mode', 'customer_refund_treatment',
+        'refund_payment_method', 'supplier_refund_payment_method',
+        'refund_treasury_account_id', 'supplier_refund_treasury_account_id',
+        'corrected_invoice_currency', 'corrected_cost_currency', 'corrected_service_charge_currency',
+        'corrected_cost_basis', 'corrected_service_charge', 'corrected_discount_amount',
+        'corrected_final_sale_price',
+        'corrected_pricing_exchange_rate', 'corrected_aed_to_pkr_exchange_rate',
+        'corrected_service_charge_exchange_rate',
+    ];
+    const workflowTraceForm = (form, stage, field = '') => {
+        const state = {};
+        for (const name of workflowTraceFieldNames) {
+            const control = form.elements.namedItem(name);
+            if (control instanceof HTMLInputElement || control instanceof HTMLSelectElement) {
+                state[name] = control.value;
+            } else if (control instanceof RadioNodeList) {
+                state[name] = control.value;
+            }
+        }
+        logBookingUiTrace(stage, state, field);
+    };
+    const isRefundTraceForm = (form) => form instanceof HTMLFormElement
+        && /\/workspace\/services\/(?:cancel|cancellation-financials|penalty-refund\/correct|refund)(?:\/|$)/
+            .test(new URL(form.action, window.location.href).pathname);
+    const isInvoiceEditTraceForm = (form) => form instanceof HTMLFormElement
+        && /\/workspace\/services\/financial-correction(?:\/|$)/
+            .test(new URL(form.action, window.location.href).pathname);
+    station.addEventListener('change', (event) => {
+        const field = event.target;
+        if (!(field instanceof HTMLInputElement || field instanceof HTMLSelectElement)
+            || !workflowTraceFieldNames.includes(field.name)
+            || !(isRefundTraceForm(field.form) || isInvoiceEditTraceForm(field.form))) {
+            return;
+        }
+        window.setTimeout(() => workflowTraceForm(field.form,
+            isInvoiceEditTraceForm(field.form) ? 'invoice_edit_field_changed' : 'refund_field_changed', field.name), 0);
+    }, true);
+    station.addEventListener('submit', (event) => {
+        if (isRefundTraceForm(event.target)) {
+            workflowTraceForm(event.target, 'refund_submitted');
+        } else if (isInvoiceEditTraceForm(event.target)) {
+            workflowTraceForm(event.target, 'invoice_edit_submitted');
+        }
+    }, true);
+    station.addEventListener('click', (event) => {
+        const action = event.target instanceof Element
+            ? event.target.closest('[data-workspace-action]')?.getAttribute('data-workspace-action') : '';
+        if (action === 'service-penalty-refund' && serviceCorrectionSettlementForm instanceof HTMLFormElement) {
+            window.setTimeout(() => workflowTraceForm(serviceCorrectionSettlementForm, 'refund_form_opened'), 0);
+        } else if (action === 'service-edit-booking') {
+            window.setTimeout(() => logBookingUiTrace('edit_booking_opened', servicePricingTraceState()), 0);
+        }
+    }, true);
     const servicePercentInputs = {
         serviceCharge: commercialLookup('commercial-service-charge-percent', '[data-service-percent="service_charge"]'),
         discount: commercialLookup('commercial-discount-percent', '[data-service-percent="discount"]'),
@@ -14129,18 +14382,18 @@ document.addEventListener('DOMContentLoaded', () => {
         const directKey = `${normalizedFrom}->${normalizedTo}`;
         const reverseKey = `${normalizedTo}->${normalizedFrom}`;
         const directRate = toNumber(dailySettlementRates?.[directKey]?.exchangeRate || 0);
-        if (directRate > 0) {
+        if (directRate > 0 && Math.abs(directRate - 1) > 0.00000001) {
             return directRate;
         }
 
         const reverseRate = toNumber(dailySettlementRates?.[reverseKey]?.exchangeRate || 0);
-        if (reverseRate > 0) {
+        if (reverseRate > 0 && Math.abs(reverseRate - 1) > 0.00000001) {
             return roundExchangeRate(1 / reverseRate);
         }
 
         const preferredQuote = preferredSettlementQuote(normalizedTo, normalizedFrom, dailySettlementRates || {}, effectiveDate);
         const preferredRate = toNumber(preferredQuote?.exchangeRate || 0);
-        if (preferredRate <= 0) {
+        if (preferredRate <= 0 || Math.abs(preferredRate - 1) <= 0.00000001) {
             return 0;
         }
 
@@ -14170,7 +14423,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const direct = dailySettlementRates?.[`${normalizedFrom}->${normalizedTo}`];
         if (String(direct?.scope || '') === 'booking') {
             const directRate = roundExchangeRate(direct?.exchangeRate || 0);
-            if (directRate > 0.005) {
+            if (directRate > 0.005 && Math.abs(directRate - 1) > 0.00000001) {
                 return directRate;
             }
         }
@@ -14178,13 +14431,41 @@ document.addEventListener('DOMContentLoaded', () => {
         const reverse = dailySettlementRates?.[`${normalizedTo}->${normalizedFrom}`];
         if (String(reverse?.scope || '') === 'booking') {
             const reverseRate = roundExchangeRate(reverse?.exchangeRate || 0);
-            if (reverseRate > 0.005) {
+            if (reverseRate > 0.005 && Math.abs(reverseRate - 1) > 0.00000001) {
                 return roundExchangeRate(1 / reverseRate);
             }
         }
 
         return 0;
     }
+
+    const persistedServiceExchangeRate = (sourceCurrencyField, rateField, sourceCurrency, invoiceCurrency) => {
+        if (!(rateField instanceof HTMLInputElement) || rateField.dataset.currencyChanged === '1') {
+            return 0;
+        }
+
+        const serviceId = currentPersistedServiceId();
+        if (serviceId <= 0) {
+            return 0;
+        }
+        const savedLine = serviceLines.find((line) => Number.parseInt(String(line.serviceId || 0), 10) === serviceId);
+        if (!savedLine || String(savedLine.currency || '').toUpperCase() !== invoiceCurrency
+            || String(savedLine[sourceCurrencyField] || '').toUpperCase() !== sourceCurrency) {
+            return 0;
+        }
+
+        const savedRate = toNumber(savedLine[rateField === serviceFields.pricingExchangeRate
+            ? 'pricingExchangeRate' : 'serviceChargeExchangeRate'] || 0);
+        return savedRate > 0.005 && Math.abs(savedRate - 1) > 0.00000001 ? savedRate : 0;
+    };
+
+    const servicePricingRate = (sourceCurrencyField, rateField, sourceCurrency, invoiceCurrency) => {
+        const effectiveDate = currentPricingRateEffectiveDate();
+        const quoteRate = resolvePricingExchangeRateFromMap(sourceCurrency, invoiceCurrency, effectiveDate);
+        const savedRate = persistedServiceExchangeRate(sourceCurrencyField, rateField, sourceCurrency, invoiceCurrency);
+        const confirmedNow = pricingExchangeConfirmedPairs.has(`${sourceCurrency}->${invoiceCurrency}->${effectiveDate}`);
+        return savedRate > 0 && !confirmedNow ? savedRate : quoteRate > 0.005 ? quoteRate : 0;
+    };
 
     const currentPricingExchangeRate = (options = {}) => {
         const invoiceCurrency = options.invoiceCurrency || currentInvoiceCurrencyCode();
@@ -14196,10 +14477,8 @@ document.addEventListener('DOMContentLoaded', () => {
         // Prefer the rate attached to the current booking (or the reusable dated
         // quote while a new booking is still unsaved). A hidden value can still
         // contain the former 1:1 snapshot after either currency is changed.
-        const resolvedRate = resolvePricingExchangeRateFromMap(
-            costCurrency,
-            invoiceCurrency,
-            currentPricingRateEffectiveDate()
+        const resolvedRate = servicePricingRate(
+            'costCurrency', serviceFields.pricingExchangeRate, costCurrency, invoiceCurrency
         );
         if (resolvedRate > 0.005) {
             return resolvedRate;
@@ -14220,10 +14499,8 @@ document.addEventListener('DOMContentLoaded', () => {
             return 1;
         }
 
-        const resolvedRate = resolvePricingExchangeRateFromMap(
-            serviceChargeCurrency,
-            invoiceCurrency,
-            currentPricingRateEffectiveDate()
+        const resolvedRate = servicePricingRate(
+            'serviceChargeCurrency', serviceFields.serviceChargeExchangeRate, serviceChargeCurrency, invoiceCurrency
         );
         if (resolvedRate > 0.005) {
             return resolvedRate;
@@ -14249,13 +14526,11 @@ document.addEventListener('DOMContentLoaded', () => {
             return 1;
         }
 
-        const defaultRate = resolvePricingExchangeRateFromMap(
-            costCurrency,
-            invoiceCurrency,
-            currentPricingRateEffectiveDate()
+        const rate = servicePricingRate(
+            'costCurrency', serviceFields.pricingExchangeRate, costCurrency, invoiceCurrency
         );
-        serviceFields.pricingExchangeRate.value = defaultRate > 0 ? String(defaultRate) : '';
-        return defaultRate;
+        serviceFields.pricingExchangeRate.value = rate > 0 ? String(rate) : '';
+        return rate;
     };
 
     const refreshServiceChargeExchangeRateSnapshot = () => {
@@ -14270,13 +14545,11 @@ document.addEventListener('DOMContentLoaded', () => {
             return 1;
         }
 
-        const defaultRate = resolvePricingExchangeRateFromMap(
-            serviceChargeCurrency,
-            invoiceCurrency,
-            currentPricingRateEffectiveDate()
+        const rate = servicePricingRate(
+            'serviceChargeCurrency', serviceFields.serviceChargeExchangeRate, serviceChargeCurrency, invoiceCurrency
         );
-        serviceFields.serviceChargeExchangeRate.value = defaultRate > 0 ? String(defaultRate) : '';
-        return defaultRate;
+        serviceFields.serviceChargeExchangeRate.value = rate > 0 ? String(rate) : '';
+        return rate;
     };
 
     const currentConvertedPayableAmount = () => {
@@ -14622,7 +14895,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (source === 'PKR' && target === 'AED') {
             return roundExchangeRate(1 / rate);
         }
-        return 0;
+        return source === target ? 1 : roundExchangeRate(rate);
     };
 
     const syncFinancialCorrectionAedToPkrDisplay = () => {
@@ -14633,9 +14906,17 @@ document.addEventListener('DOMContentLoaded', () => {
         const costCurrency = String(financialCorrectionCostCurrencySelect?.value || invoiceCurrency).trim().toUpperCase() || invoiceCurrency;
         const directionalRate = toNumber(financialCorrectionRateInput?.value);
         const canonicalRate = financialCorrectionAedToPkrFromDirectionalRate(costCurrency, invoiceCurrency, directionalRate);
-        if (canonicalRate > 0.00000001) {
-            financialCorrectionAedToPkrRateInput.value = formatNumberInputValue(canonicalRate);
+        const rateLabel = financialCorrectionAedToPkrRateInput.closest('label')?.querySelector('span');
+        const quotedFrom = costCurrency === 'PKR' && invoiceCurrency === 'AED' ? 'AED' : costCurrency;
+        const quotedTo = costCurrency === 'PKR' && invoiceCurrency === 'AED' ? 'PKR' : invoiceCurrency;
+        if (rateLabel instanceof HTMLElement) {
+            rateLabel.textContent = `Ex.Rate 1 ${quotedFrom}->${quotedTo}`;
         }
+        financialCorrectionAedToPkrRateInput.setAttribute('aria-label', `Exchange rate: one ${quotedFrom} to ${quotedTo}`);
+        financialCorrectionAedToPkrRateInput.readOnly = costCurrency === invoiceCurrency;
+        financialCorrectionAedToPkrRateInput.value = canonicalRate > 0.00000001
+            ? formatNumberInputValue(canonicalRate)
+            : '';
     };
 
     const syncFinancialCorrectionDirectionalRateFromAedToPkr = () => {
@@ -14655,6 +14936,8 @@ document.addEventListener('DOMContentLoaded', () => {
             financialCorrectionRateInput.value = String(roundExchangeRate(aedToPkrRate));
         } else if (costCurrency === 'PKR' && invoiceCurrency === 'AED') {
             financialCorrectionRateInput.value = String(roundExchangeRate(1 / aedToPkrRate));
+        } else {
+            financialCorrectionRateInput.value = String(roundExchangeRate(aedToPkrRate));
         }
     };
 
@@ -14669,7 +14952,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         const aedToPkrRate = toNumber(financialCorrectionAedToPkrRateInput?.value || 0);
-        if (aedToPkrRate > 0.00000001) {
+        if (rateInput === financialCorrectionRateInput
+            && aedToPkrRate > 0.00000001
+            && Math.abs(aedToPkrRate - 1) > 0.00000001) {
             if (source === 'AED' && target === 'PKR') {
                 return roundExchangeRate(aedToPkrRate);
             }
@@ -14679,14 +14964,15 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         const storedRate = toNumber(rateInput instanceof HTMLInputElement ? rateInput.value : 0);
-        if (storedRate > 0.00000001) {
+        if (storedRate > 0.00000001 && Math.abs(storedRate - 1) > 0.00000001) {
             return storedRate;
         }
 
-        return roundExchangeRate(
+        const mappedRate = roundExchangeRate(
             resolvePricingExchangeRateFromMap(source, target, String(options.effectiveDate || financialCorrectionEffectiveDate()).trim())
             || 0
         );
+        return Math.abs(mappedRate - 1) > 0.00000001 ? mappedRate : 0;
     };
 
     const applyFinancialCorrectionDerivedRate = (role, selectedCurrency, previousCurrency, previousSourceToInvoiceRate, conversionRate, effectiveDate) => {
@@ -14882,9 +15168,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 : '';
             const enteredRate = toNumber(rateInput instanceof HTMLInputElement ? rateInput.value : 0);
             const conversionRate = sourceToTargetRate();
-            if (enteredRate <= 0.005 || conversionRate <= 0.005) {
+            if (enteredRate <= 0.005 || conversionRate <= 0.005
+                || Math.abs(conversionRate - 1) <= 0.00000001) {
                 if (error instanceof HTMLElement) {
-                    error.textContent = 'Enter a valid exchange rate before continuing.';
+                    error.textContent = 'Enter a valid, non-1:1 exchange rate before continuing.';
                     error.hidden = false;
                 }
                 rateInput?.focus();
@@ -14958,6 +15245,23 @@ document.addEventListener('DOMContentLoaded', () => {
         const correctedCostBasis = roundWholeMoney(financialCorrectionCostInput?.value || 0);
         const correctedServiceAmount = roundWholeMoney(financialCorrectionServiceAmountInput?.value || 0);
         const correctedDiscountAmount = roundWholeMoney(financialCorrectionDiscountInput?.value || 0);
+        const missingCostRate = correctionCostCurrency !== correctionCurrency
+            && correctedCostBasis + correctionTaxTotal > 0.005
+            && correctionRate <= 0.00000001;
+        const missingServiceRate = correctionServiceChargeCurrency !== correctionCurrency
+            && Math.abs(correctedServiceAmount + correctionVatAmount - correctedDiscountAmount) > 0.005
+            && correctionServiceChargeRate <= 0.00000001;
+        if (missingCostRate || missingServiceRate) {
+            if (financialCorrectionForm.dataset.financialInvoiceManuallyOverridden !== '1') {
+                financialCorrectionCustomerTotalInput.value = '';
+            }
+            financialCorrectionLossInput.value = '';
+            if (financialCorrectionLossNote instanceof HTMLElement) {
+                financialCorrectionLossNote.hidden = false;
+                financialCorrectionLossNote.textContent = 'Enter a valid cross-currency exchange rate before reviewing or saving this invoice.';
+            }
+            return;
+        }
         const correctedPayableInCostCurrency = serviceType === 'air ticket'
             ? roundWholeMoney(correctedCostBasis + correctionTaxTotal)
             : roundWholeMoney(correctedCostBasis);
@@ -15344,7 +15648,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             const availableRate = toNumber(rateField instanceof HTMLInputElement ? rateField.value : 0)
                 || resolvePricingExchangeRateFromMap(sourceCurrency, invoiceCurrency, effectiveDate);
-            if (availableRate > 0.005) {
+            if (availableRate > 0.00000001 && Math.abs(availableRate - 1) > 0.00000001) {
                 fillValue(rateField, String(roundExchangeRate(availableRate)));
                 fillValue(dateField, effectiveDate);
                 return;
@@ -15389,7 +15693,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (missingRateLabel !== '') {
             event.preventDefault();
-            showFeedback(`Confirm the ${missingRateLabel.toLowerCase()} currency change before saving. Change its currency again or use Exchange Settlement to record the booking rate.`);
+            showFeedback(`Enter a valid ${missingRateLabel.toLowerCase()} exchange rate for these different currencies before saving.`);
         }
     });
 
@@ -15490,6 +15794,45 @@ document.addEventListener('DOMContentLoaded', () => {
         return roundCustomerCashTotal(convertedCost + convertedAgencyAmount);
     };
 
+    const serviceLineIsCancelled = (serviceLine) => {
+        const status = String(serviceLine?.status || serviceLine?.displayStatus || '').trim().toLowerCase().replace(/\s+/g, '_');
+        return status === 'cancelled'
+            || serviceLine?.latestCancelFinanciallySettled === true
+            || String(serviceLine?.latestCancelFinanciallySettled || '') === '1';
+    };
+
+    const serviceCurrentReceivableAmount = (serviceLine) => {
+        if (Object.prototype.hasOwnProperty.call(serviceLine, 'rowReceivable')) {
+            return Math.max(toNumber(serviceLine.rowReceivable), 0);
+        }
+
+        return serviceLineIsCancelled(serviceLine)
+            ? Math.max(toNumber(serviceLine.latestCancelCustomerFinalChargeAmount || 0), 0)
+            : Math.max(serviceReceivableAmount(serviceLine), 0);
+    };
+
+    const syncPaymentBalanceLock = (serviceLine) => {
+        if (paymentCurrentBalanceInput) {
+            const cancelled = serviceLineIsCancelled(serviceLine);
+            paymentCurrentBalanceInput.dataset.paymentBalanceLocked = cancelled ? '1' : '0';
+            if (cancelled) {
+                const currency = String(serviceLine.currency || 'PKR').toUpperCase();
+                const sameCurrencyLines = serviceLines.filter((line) => (
+                    String(line.currency || 'PKR').toUpperCase() === currency
+                    && Number.parseInt(String(line.isActive ?? 1), 10) !== 0
+                ));
+                if (sameCurrencyLines.length > 0 && sameCurrencyLines.every((line) => (
+                    Object.prototype.hasOwnProperty.call(line, 'outstandingAmount')
+                ))) {
+                    const outstanding = sameCurrencyLines.reduce((total, line) => (
+                        total + Math.max(toNumber(line.outstandingAmount), 0)
+                    ), 0);
+                    paymentCurrentBalanceInput.dataset.paymentSavedInvoiceBalance = String(roundToTwo(outstanding));
+                }
+            }
+        }
+    };
+
     const hasManualFinalSaleOverride = (serviceLine) => {
         const savedFinalSale = toNumber(serviceLine.finalSalePrice);
         const suggestedFinalSale = serviceReceivableAmount({
@@ -15527,7 +15870,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 return total;
             }
 
-            return total + (serviceCurrency === invoiceCurrency ? serviceReceivableAmount(serviceLine) : 0);
+            return total + (serviceCurrency === invoiceCurrency ? serviceCurrentReceivableAmount(serviceLine) : 0);
         }, 0);
         const activeInvoiceTotal = activeCurrency === invoiceCurrency
             ? Math.max(activeReceivable, 0)
@@ -15537,7 +15880,9 @@ document.addEventListener('DOMContentLoaded', () => {
             paymentAlreadyReceivedInput,
             paymentAlreadyReceivedInput?.dataset.paymentPersistedReceived || 0
         ), 0);
-        const provisionalBalance = roundToTwo(Math.max(provisionalTotal - alreadyReceived, 0));
+        const provisionalBalance = paymentInvoiceBalanceIsLocked()
+            ? persistedInvoiceBalanceAmount()
+            : roundToTwo(Math.max(provisionalTotal - alreadyReceived, 0));
         const paymentCurrency = paymentCurrencySelect?.value || invoiceCurrency;
 
         paymentCurrentInvoiceInput.dataset.paymentCurrency = invoiceCurrency;
@@ -15974,12 +16319,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 undoForm.elements.namedItem(name).value = String(value);
             }
             if (serviceChanged) {
-                for (const name of ['undo_customer_money', 'undo_supplier_money', 'undo_reason']) {
-                    undoForm.elements.namedItem(name).value = '';
-                }
+                undoForm.elements.namedItem('undo_reason').value = '';
             }
             undoForm.querySelector('button[type="submit"]').disabled = false;
         }
+        syncRefundEditorTabs();
         syncRefundRecovery(serviceLine, canShowServiceEventActions);
 
         syncFinancialCorrectionEditor(serviceLine, canShowServiceEventActions);
@@ -16083,15 +16427,19 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     };
 
-    const eligibleRefundTreasuryAccountsFor = (method, branchField, currencyField, allowBankSourceForCash = false) => {
+    const eligibleRefundTreasuryAccountsFor = (method, branchField, currencyField, allowBankSourceForCash = false, restrictDimension = false) => {
         const normalizedMethod = String(method || '').trim();
         const compatibleTypes = paymentTreasuryTypesForMethod(normalizedMethod);
+        const branchId = Number.parseInt(String(branchField?.value || '0'), 10) || 0;
+        const currency = String(currencyField?.value || '').trim().toUpperCase();
         if (allowBankSourceForCash && normalizedMethod === 'cash' && !compatibleTypes.includes('bank')) {
             compatibleTypes.push('bank');
         }
 
         return paymentTreasuryAccounts.filter((account) => {
-            return compatibleTypes.includes(String(account?.accountType || '').trim());
+            return compatibleTypes.includes(String(account?.accountType || '').trim())
+                && (!restrictDimension || branchId <= 0 || Number.parseInt(String(account?.branchId || 0), 10) === branchId)
+                && (!restrictDimension || currency === '' || String(account?.currency || '').trim().toUpperCase() === currency);
         });
     };
 
@@ -16105,6 +16453,7 @@ document.addEventListener('DOMContentLoaded', () => {
         destinationRows,
         toggleFormClass = true,
         allowBankSourceForCash = false,
+        restrictDimension = false,
     }) => {
         if (!methodSelect || !treasurySelect || !treasuryRow) {
             return;
@@ -16113,7 +16462,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const method = String(methodSelect.value || '').trim();
         const requiresTreasury = paymentMethodRequiresTreasurySelection(method);
         const eligibleAccounts = requiresTreasury
-            ? eligibleRefundTreasuryAccountsFor(method, branchField, currencyField, allowBankSourceForCash)
+            ? eligibleRefundTreasuryAccountsFor(method, branchField, currencyField, allowBankSourceForCash, restrictDimension)
             : [];
         const selectedBefore = String(treasurySelect.value || '').trim();
         const preferredAccountId = String(treasurySelect.dataset.preferredAccountId || '').trim();
@@ -16284,6 +16633,10 @@ document.addEventListener('DOMContentLoaded', () => {
         ? (String(serviceRefundCurrencyField.value || '').trim().toUpperCase() || 'PKR')
         : 'PKR';
 
+    const refundFxAccountingCurrencyCode = (role) => role === 'customer'
+        ? String(currentActiveServiceLineForRefund()?.customerRefundTruthCurrency || refundFxBookingCurrencyCode()).trim().toUpperCase()
+        : refundFxBookingCurrencyCode();
+
     const refundFxEffectiveDate = () => normalizeLooseDate(
         serviceRefundForm?.elements?.namedItem('refund_event_date')?.value || ''
     ) || new Date().toISOString().slice(0, 10);
@@ -16294,7 +16647,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        const bookingCurrency = refundFxBookingCurrencyCode();
+        const bookingCurrency = refundFxAccountingCurrencyCode(role);
         const refundAmount = Math.max(toNumber(config.amountField?.value || 0), 0);
         const actualCurrency = String(config.currencyField?.value || bookingCurrency).trim().toUpperCase() || bookingCurrency;
         const sourceAmount = Math.max(toNumber(config.sourceAmountField?.value || 0), 0);
@@ -16302,6 +16655,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (refundAmount <= 0.005) {
             config.summaryNode.textContent = '';
+            return;
+        }
+
+        if (role === 'customer') {
+            config.summaryNode.textContent = sourceAmount > 0.005
+                ? `${formatCurrencyAmount(actualCurrency, sourceAmount)} paid; ${formatCurrencyAmount(bookingCurrency, refundAmount)} customer credit settled.`
+                : `Enter the exact amount paid in ${actualCurrency}.`;
             return;
         }
 
@@ -16326,12 +16686,22 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        const bookingCurrency = refundFxBookingCurrencyCode();
+        const bookingCurrency = refundFxAccountingCurrencyCode(role);
         const refundAmount = Math.max(toNumber(config.amountField?.value || 0), 0);
         const actualCurrency = String(config.currencyField.value || bookingCurrency).trim().toUpperCase() || bookingCurrency;
         const currentRate = Math.max(toNumber(config.rateField.value || 0), 0);
         const currentSourceAmount = Math.max(toNumber(config.sourceAmountField.value || 0), 0);
         const preferredCurrency = String(config.currencyField.dataset.preferredCurrency || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+
+        if (role === 'customer') {
+            const availableCredit = Math.max(toNumber(currentActiveServiceLineForRefund()?.customerRefundableCreditAmount || 0), 0);
+            const creditSettled = actualCurrency === bookingCurrency ? currentSourceAmount : availableCredit;
+            config.amountField.value = creditSettled > 0.005 ? formatWholeNumberInputValue(creditSettled) : '0';
+            config.rateField.value = creditSettled > 0.005 && currentSourceAmount > 0.005
+                ? String(roundExchangeRate(currentSourceAmount / creditSettled)) : '';
+            syncRefundFxSummary(role);
+            return;
+        }
 
         if (refundAmount <= 0.005) {
             config.currencyField.value = preferredCurrency;
@@ -16495,7 +16865,16 @@ document.addEventListener('DOMContentLoaded', () => {
             return false;
         }
 
-        const bookingCurrency = refundFxBookingCurrencyCode();
+        const bookingCurrency = refundFxAccountingCurrencyCode(role);
+        if (role === 'customer') {
+            config.currencyField.value = nextCurrency;
+            config.currencyField.dataset.lastCurrency = nextCurrency;
+            config.currencyField.dataset.preferredCurrency = nextCurrency;
+            if (nextCurrency !== previousCurrency) config.sourceAmountField.value = '';
+            syncRefundFxDefaults(role);
+            config.postSave?.();
+            return true;
+        }
         const refundAmount = Math.max(toNumber(config.amountField?.value || 0), 0);
         if (refundAmount <= 0.005) {
             showFeedback(`Enter the ${role === 'customer' ? 'customer' : 'supplier'} refund amount first.`);
@@ -16674,6 +17053,7 @@ document.addEventListener('DOMContentLoaded', () => {
             currencyField: serviceCustomerRefundCurrencyInput || serviceRefundCurrencyField,
             destinationRows: serviceRefundDestinationRows,
             allowBankSourceForCash: true,
+            restrictDimension: true,
         });
     };
     if (serviceRefundMethodSelect) {
@@ -16719,7 +17099,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (serviceRefundButton) {
             serviceRefundButton.textContent = !payNow && supplierRefundAmount <= 0.005
                 ? 'Save'
-                : 'Save Refund';
+                : (payNow ? 'Save Customer Refund' : 'Save Refund');
         }
         if (payNow) {
             syncRefundFxDefaults('customer');
@@ -16732,7 +17112,7 @@ document.addEventListener('DOMContentLoaded', () => {
     serviceCustomerRefundTreatmentInputs.forEach((input) => {
         input.addEventListener('change', syncCustomerRefundTreatment);
     });
-    serviceCustomerRefundAmount?.addEventListener('input', () => {
+    serviceCustomerRefundSourceAmountInput?.addEventListener('input', () => {
         syncRefundFxDefaults('customer');
         syncCustomerRefundTreatment();
     });
@@ -16741,10 +17121,10 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     if (serviceRefundForm) {
         serviceRefundForm.addEventListener('submit', (event) => {
-            const customerRefundAmount = Math.max(toNumber(serviceCustomerRefundAmount?.value || 0), 0);
-            const supplierRefundAmount = Math.max(toNumber(serviceSupplierRefundAmount?.value || 0), 0);
             syncRefundFxDefaults('customer');
             syncRefundFxDefaults('supplier');
+            const customerRefundAmount = Math.max(toNumber(serviceCustomerRefundAmount?.value || 0), 0);
+            const supplierRefundAmount = Math.max(toNumber(serviceSupplierRefundAmount?.value || 0), 0);
             const bookingCurrency = refundFxBookingCurrencyCode();
             const customerRefundCurrency = String(serviceCustomerRefundCurrencyInput?.value || bookingCurrency).trim().toUpperCase() || bookingCurrency;
             const supplierRefundCurrency = String(serviceSupplierRefundCurrencyInput?.value || bookingCurrency).trim().toUpperCase() || bookingCurrency;
@@ -16782,14 +17162,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     ? '1'
                     : String(serviceSupplierRefundExchangeRateInput.value || '');
             }
-            if (customerRefundAmount > 0.005 && customerRefundCurrency !== bookingCurrency) {
-                const customerRate = Math.max(toNumber(serviceCustomerRefundExchangeRateInput?.value || 0), 0);
-                if (customerRate <= 0.00000001) {
-                    event.preventDefault();
-                    showFeedback('Enter and confirm the customer refund FX rate before saving.');
-                    openRefundFxModal('customer');
-                    return;
-                }
+            if (customerRefundAmount > 0.005 && customerRefundCurrency !== refundFxAccountingCurrencyCode('customer')
+                && Math.max(toNumber(serviceCustomerRefundSourceAmountInput?.value || 0), 0) <= 0.005) {
+                event.preventDefault();
+                showFeedback(`Enter the actual customer payout amount in ${customerRefundCurrency}.`);
+                return;
             }
             if (!customerRefundWillBePaidNow() && supplierRefundAmount <= 0.005) {
                 event.preventDefault();
@@ -16866,12 +17243,19 @@ document.addEventListener('DOMContentLoaded', () => {
             currencyField: serviceCorrectionCustomerRefundCurrencySelect || serviceCorrectionRefundCurrencyField,
             destinationRows: serviceCorrectionRefundDestinationRows,
             allowBankSourceForCash: true,
+            restrictDimension: true,
         });
     };
     if (serviceCorrectionRefundMethodSelect) {
         serviceCorrectionRefundMethodSelect.addEventListener('change', syncCorrectionRefundTreasurySelector);
     }
     serviceCorrectionCustomerRefundCurrencySelect?.addEventListener('change', () => {
+        const selectedCurrency = serviceCorrectionCustomerRefundCurrencySelect.value;
+        if (serviceCorrectionCustomerRefundCurrencySelect.dataset.lastCurrency !== selectedCurrency
+            && serviceCorrectionCustomerRefundSourceAmountInput instanceof HTMLInputElement) {
+            serviceCorrectionCustomerRefundSourceAmountInput.value = '';
+        }
+        serviceCorrectionCustomerRefundCurrencySelect.dataset.lastCurrency = selectedCurrency;
         syncCorrectionRefundBookedAmount('customer');
         syncCorrectionRefundTreasurySelector();
     });
@@ -16887,15 +17271,14 @@ document.addEventListener('DOMContentLoaded', () => {
         };
         serviceCorrectionRefundTreasurySelect.addEventListener('focus', rememberCorrectionCustomerRefundAccount);
         serviceCorrectionRefundTreasurySelect.addEventListener('pointerdown', rememberCorrectionCustomerRefundAccount);
-        serviceCorrectionRefundTreasurySelect.addEventListener('change', async () => {
-            await alignRefundCurrencyToTreasuryAccount({
-                treasurySelect: serviceCorrectionRefundTreasurySelect,
-                currencyField: serviceCorrectionCustomerRefundCurrencySelect,
-                role: 'customer',
-                onAligned: () => {
-                    syncCorrectionRefundTreasurySelector();
-                },
-            });
+        serviceCorrectionRefundTreasurySelect.addEventListener('change', () => {
+            const account = findPaymentTreasuryAccountById(serviceCorrectionRefundTreasurySelect.value);
+            const actualCurrency = String(account?.currency || '').trim().toUpperCase();
+            if (actualCurrency && serviceCorrectionCustomerRefundCurrencySelect instanceof HTMLSelectElement
+                && serviceCorrectionCustomerRefundCurrencySelect.value !== actualCurrency) {
+                serviceCorrectionCustomerRefundCurrencySelect.value = actualCurrency;
+                serviceCorrectionCustomerRefundCurrencySelect.dispatchEvent(new Event('change', { bubbles: true }));
+            }
         });
     }
 
@@ -16962,11 +17345,12 @@ document.addEventListener('DOMContentLoaded', () => {
         autosavedPersistedServiceId = Number.parseInt(String(serviceLine.serviceId || 0), 10) || autosavedPersistedServiceId;
         autosavedHasSavedService = autosavedHasSavedService || autosavedPersistedServiceId > 0;
         autosavedReceivableAmount = Math.max(autosavedReceivableAmount, serviceReceivableAmount(serviceLine));
-        autosavedPaymentEligible = serviceLine.paymentEligible === true
-            || (
+        autosavedPaymentEligible = !serviceLineIsCancelled(serviceLine)
+            && (serviceLine.paymentEligible === true || (
                 Number.parseInt(String(serviceLine.serviceId || 0), 10) > 0
                 && serviceReceivableAmount(serviceLine) > 0.005
-            );
+            ));
+        syncPaymentBalanceLock(serviceLine);
 
         fillValue(serviceFields.serviceId, serviceLine.serviceId ?? 0);
         fillValue(serviceFields.updatedAt, serviceLine.updatedAt || '');
@@ -16976,9 +17360,15 @@ document.addEventListener('DOMContentLoaded', () => {
         fillValue(serviceFields.currency, serviceLine.currency || 'PKR');
         fillValue(serviceFields.costCurrency, serviceLine.costCurrency || serviceLine.currency || 'PKR');
         fillValue(serviceFields.pricingExchangeRate, serviceLine.pricingExchangeRate || 1);
+        if (serviceFields.pricingExchangeRate instanceof HTMLInputElement) {
+            delete serviceFields.pricingExchangeRate.dataset.currencyChanged;
+        }
         fillValue(serviceFields.pricingRateEffectiveDate, serviceLine.pricingRateEffectiveDate || '');
         fillValue(serviceFields.serviceChargeCurrency, serviceLine.serviceChargeCurrency || serviceLine.currency || 'PKR');
         fillValue(serviceFields.serviceChargeExchangeRate, serviceLine.serviceChargeExchangeRate || 1);
+        if (serviceFields.serviceChargeExchangeRate instanceof HTMLInputElement) {
+            delete serviceFields.serviceChargeExchangeRate.dataset.currencyChanged;
+        }
         fillValue(serviceFields.serviceChargeRateEffectiveDate, serviceLine.serviceChargeRateEffectiveDate || serviceLine.pricingRateEffectiveDate || '');
         fillValue(serviceFields.status, serviceLine.status || 'Open');
         fillValue(serviceFields.dueDate, serviceLine.dueDate || '');
@@ -17040,6 +17430,7 @@ document.addEventListener('DOMContentLoaded', () => {
             lastOverwriteSource: 'loadServiceLine',
         });
         refreshProfit(`loadServiceLine(${index})`);
+        logBookingUiTrace('service_loaded', servicePricingTraceState());
         syncAllCommercialPercentsFromAmounts();
         refreshSubtypeVisibility();
     };
@@ -17047,6 +17438,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const resetServiceLine = () => {
         serviceRows.forEach((item) => item.classList.remove('is-active'));
         autosavedPaymentEligible = false;
+        syncPaymentBalanceLock(null);
         autosavedPersistedServiceId = 0;
         autosavedHasSavedService = hasPersistedServices();
         autosavedReceivableAmount = 0;
@@ -17058,9 +17450,15 @@ document.addEventListener('DOMContentLoaded', () => {
         fillValue(serviceFields.currency, paymentCurrentInvoiceInput?.dataset.paymentCurrency || 'PKR');
         fillValue(serviceFields.costCurrency, paymentCurrentInvoiceInput?.dataset.paymentCurrency || 'PKR');
         fillValue(serviceFields.pricingExchangeRate, 1);
+        if (serviceFields.pricingExchangeRate instanceof HTMLInputElement) {
+            delete serviceFields.pricingExchangeRate.dataset.currencyChanged;
+        }
         fillValue(serviceFields.pricingRateEffectiveDate, '');
         fillValue(serviceFields.serviceChargeCurrency, paymentCurrentInvoiceInput?.dataset.paymentCurrency || 'PKR');
         fillValue(serviceFields.serviceChargeExchangeRate, 1);
+        if (serviceFields.serviceChargeExchangeRate instanceof HTMLInputElement) {
+            delete serviceFields.serviceChargeExchangeRate.dataset.currencyChanged;
+        }
         fillValue(serviceFields.serviceChargeRateEffectiveDate, '');
         fillValue(serviceFields.status, 'Open');
         fillValue(serviceFields.dueDate, '');
@@ -17163,12 +17561,10 @@ document.addEventListener('DOMContentLoaded', () => {
         serviceLines.forEach((serviceLine, serviceIndex) => {
             const row = document.createElement('tr');
             const lineSector = serviceLineDetailLabel(serviceLine);
-            const lineReceivable = Math.abs(toNumber(serviceLine.rowReceivable)) > 0.005
-                ? toNumber(serviceLine.rowReceivable)
-                : serviceReceivableAmount(serviceLine);
+            const lineReceivable = serviceCurrentReceivableAmount(serviceLine);
             const lineCurrency = String(serviceLine.currency || paymentCurrentInvoiceInput?.dataset.paymentCurrency || 'PKR').toUpperCase();
             const lineReference = String(serviceLine.lineNumber || '').trim();
-            const linePaid = Math.min(Math.max(paymentAllocations.reduce((total, allocation) => {
+            const historyPaid = paymentAllocations.reduce((total, allocation) => {
                 const receiptStatus = String(allocation?.receiptStatusRaw || allocation?.receiptStatus || '').trim().toLowerCase();
                 const allocationType = String(allocation?.allocationType || '').trim().toLowerCase();
                 const allocationReference = String(allocation?.serviceLineReference || '').trim();
@@ -17181,8 +17577,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
 
                 return total + Math.max(toNumber(allocation?.receivableAmountAllocated ?? allocation?.allocatedAmount ?? 0), 0);
-            }, 0), 0), lineReceivable);
-            const lineOutstanding = Math.max(lineReceivable - linePaid, 0);
+            }, 0);
+            const linePaid = Math.min(Math.max(
+                Object.prototype.hasOwnProperty.call(serviceLine, 'allocatedAmount')
+                    ? toNumber(serviceLine.allocatedAmount) : historyPaid,
+                0
+            ), lineReceivable);
+            const lineOutstanding = Object.prototype.hasOwnProperty.call(serviceLine, 'outstandingAmount')
+                ? Math.max(toNumber(serviceLine.outstandingAmount), 0)
+                : Math.max(lineReceivable - linePaid, 0);
             const linePnr = String(serviceLine.pnr || '').trim() || 'N/A';
             const linePassengerName = String(serviceLine.passengerName || '').trim() || 'Passenger';
             const lineRelation = serviceIndex === 0 ? 'Self' : 'Passenger';
@@ -17318,16 +17721,18 @@ document.addEventListener('DOMContentLoaded', () => {
         mergedLine.status = mergedLine.status || 'Open';
         mergedLine.displayStatus = mergedLine.displayStatus || mergedLine.status || 'Open';
         mergedLine.passengerName = mergedLine.passengerName || draftSnapshot.passengerName || '';
-        mergedLine.rowReceivable = Math.abs(toNumber(mergedLine.rowReceivable)) > 0.005
+        mergedLine.rowReceivable = Object.prototype.hasOwnProperty.call(mergedLine, 'rowReceivable')
             ? toNumber(mergedLine.rowReceivable)
-            : serviceReceivableAmount(mergedLine);
-        mergedLine.rowPayable = Math.abs(toNumber(mergedLine.rowPayable)) > 0.005
+            : (serviceLineIsCancelled(mergedLine)
+                ? Math.max(toNumber(mergedLine.latestCancelCustomerFinalChargeAmount || 0), 0)
+                : serviceReceivableAmount(mergedLine));
+        mergedLine.rowPayable = Object.prototype.hasOwnProperty.call(mergedLine, 'rowPayable')
             ? toNumber(mergedLine.rowPayable)
             : serviceLinePayableAmount(mergedLine);
-        mergedLine.rowSpTotal = Math.abs(toNumber(mergedLine.rowSpTotal)) > 0.005
+        mergedLine.rowSpTotal = Object.prototype.hasOwnProperty.call(mergedLine, 'rowSpTotal')
             ? toNumber(mergedLine.rowSpTotal)
             : mergedLine.rowReceivable;
-        mergedLine.rowProfit = Math.abs(toNumber(mergedLine.rowProfit)) > 0.005
+        mergedLine.rowProfit = Object.prototype.hasOwnProperty.call(mergedLine, 'rowProfit')
             ? toNumber(mergedLine.rowProfit)
             : (mergedLine.rowReceivable - mergedLine.rowPayable);
         const hasAllocatedAmount = Object.prototype.hasOwnProperty.call(mergedLine, 'allocatedAmount');
@@ -17340,10 +17745,11 @@ document.addEventListener('DOMContentLoaded', () => {
             : Math.max(mergedLine.rowReceivable - mergedLine.allocatedAmount, 0);
         mergedLine.persisted = mergedLine.serviceId > 0;
         mergedLine.saved = mergedLine.serviceId > 0;
-        mergedLine.paymentEligible = payload.payment_eligible === true
-            || mergedLine.paymentEligible === true
-            || mergedLine.rowReceivable > 0.005
-            || toNumber(mergedLine.finalSalePrice) > 0.005;
+        mergedLine.paymentEligible = !serviceLineIsCancelled(mergedLine)
+            && (payload.payment_eligible === true
+                || mergedLine.paymentEligible === true
+                || mergedLine.rowReceivable > 0.005
+                || toNumber(mergedLine.finalSalePrice) > 0.005);
 
         return mergedLine;
     };
@@ -17366,8 +17772,8 @@ document.addEventListener('DOMContentLoaded', () => {
         fillValue(serviceFields.serviceId, serviceId || 0);
         fillValue(serviceFields.updatedAt, payload.service_updated_at || normalizedServiceLine?.updatedAt || '');
         autosavedPersistedServiceId = serviceId;
-        autosavedPaymentEligible = payload.payment_eligible === true
-            || normalizedServiceLine?.paymentEligible === true;
+        autosavedPaymentEligible = !serviceLineIsCancelled(normalizedServiceLine)
+            && (payload.payment_eligible === true || normalizedServiceLine?.paymentEligible === true);
         autosavedHasSavedService = payload.totals?.has_saved_service === true
             || serviceId > 0
             || normalizedServiceLine?.persisted === true;
@@ -17383,6 +17789,7 @@ document.addEventListener('DOMContentLoaded', () => {
             upsertAutosavedServiceLine(normalizedServiceLine, {
                 reloadEditor: preserveLiveEditorState ? false : !isActivelyEditingServiceForm(),
             });
+            syncPaymentBalanceLock(normalizedServiceLine);
             updateServiceActionState(normalizedServiceLine);
         }
 
@@ -17687,11 +18094,14 @@ document.addEventListener('DOMContentLoaded', () => {
             pricingExchangeConfirmedSignature = '';
             if (serviceFields.pricingExchangeRate instanceof HTMLInputElement) {
                 serviceFields.pricingExchangeRate.value = '';
+                serviceFields.pricingExchangeRate.dataset.currencyChanged = '1';
             }
             if (serviceFields.serviceChargeExchangeRate instanceof HTMLInputElement) {
                 serviceFields.serviceChargeExchangeRate.value = '';
+                serviceFields.serviceChargeExchangeRate.dataset.currencyChanged = '1';
             }
             refreshProfit(`change:${serviceFields.currency.name || 'currency'}`);
+            logBookingUiTrace('service_currency_changed', servicePricingTraceState());
             syncTicketCommercialMirrors();
             syncServiceCurrencyMirror();
             refreshPaymentPreview();
@@ -17704,8 +18114,10 @@ document.addEventListener('DOMContentLoaded', () => {
             pricingExchangeConfirmedSignature = '';
             if (serviceFields.pricingExchangeRate instanceof HTMLInputElement) {
                 serviceFields.pricingExchangeRate.value = '';
+                serviceFields.pricingExchangeRate.dataset.currencyChanged = '1';
             }
             refreshProfit(`change:${serviceFields.costCurrency.name || 'cost_currency'}`);
+            logBookingUiTrace('service_currency_changed', servicePricingTraceState());
             scheduleSupplierAdvanceBalanceRefresh(0);
         });
     }
@@ -17716,8 +18128,10 @@ document.addEventListener('DOMContentLoaded', () => {
             pricingExchangeConfirmedSignature = '';
             if (serviceFields.serviceChargeExchangeRate instanceof HTMLInputElement) {
                 serviceFields.serviceChargeExchangeRate.value = '';
+                serviceFields.serviceChargeExchangeRate.dataset.currencyChanged = '1';
             }
             refreshProfit(`change:${serviceFields.serviceChargeCurrency.name || 'service_charge_currency'}`);
+            logBookingUiTrace('service_currency_changed', servicePricingTraceState());
         });
     }
 
@@ -17816,6 +18230,37 @@ document.addEventListener('DOMContentLoaded', () => {
         field.dataset.branchCurrencyValue = normalizeWorkspaceCurrency(field.value);
     };
 
+    const protectEnteredBranchCurrencies = () => {
+        const hasServiceAmounts = [
+            serviceMetricInputs.sale,
+            serviceMetricInputs.cost,
+            serviceMetricInputs.tax,
+            serviceMetricInputs.otherFare,
+            serviceMetricInputs.sotoFare,
+            serviceMetricInputs.spyiAmount,
+            serviceMetricInputs.aqYrPkAmount,
+            serviceMetricInputs.yqAmount,
+            serviceMetricInputs.othAmount,
+            serviceMetricInputs.vatInput,
+            serviceMetricInputs.commission,
+            serviceMetricInputs.serviceCharge,
+            serviceMetricInputs.vat,
+            serviceDiscountInput,
+            ticketMetricFields.fare,
+            ticketMetricFields.tax,
+            ticketMetricFields.vat,
+            ticketMetricFields.commission,
+            finalSalePriceInput,
+        ].some((field) => field instanceof HTMLInputElement && Math.abs(toNumber(field.value || 0)) > 0.005);
+        if (hasServiceAmounts) {
+            [serviceFields.costCurrency, serviceFields.serviceChargeCurrency, serviceFields.currency]
+                .forEach(markBranchCurrencyManual);
+        }
+        if (Math.abs(toNumber(receivedNowInput?.value || 0)) > 0.005) {
+            markBranchCurrencyManual(paymentCurrencySelect);
+        }
+    };
+
     const initializeBranchCurrencyModes = () => {
         const branchCurrency = workspaceBranchBaseCurrency(bookingBranchField?.value || '');
         const savedServiceFinancialSnapshot = currentPersistedServiceId() > 0;
@@ -17838,6 +18283,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 markBranchCurrencyManual(paymentCurrencySelect);
             }
         }
+        protectEnteredBranchCurrencies();
     };
 
     const followsBranchCurrency = (field, previousBranchCurrency) => {
@@ -18078,6 +18524,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return true;
         }
 
+        protectEnteredBranchCurrencies();
         const roles = {
             cost: followsBranchCurrency(serviceFields.costCurrency, previousCurrency),
             service: followsBranchCurrency(serviceFields.serviceChargeCurrency, previousCurrency),
@@ -18350,20 +18797,57 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
+        const branchInputSnapshot = [invoiceForm, serviceForm, paymentForm]
+            .filter((form) => form instanceof HTMLFormElement)
+            .flatMap((form) => Array.from(form.querySelectorAll('input, select, textarea'))
+                .filter((field) => field instanceof HTMLInputElement || field instanceof HTMLSelectElement || field instanceof HTMLTextAreaElement)
+                .map((field) => ({ field, value: field.value })));
+        window.workspaceDebugEnterFlow('branch-change:requested', {
+            bookingId: currentBookingId(), previousBranchId, nextBranchId,
+        });
         const transitioned = await transitionBranchCurrencies(previousBranchId, nextBranchId);
         if (!transitioned) {
             bookingBranchField.value = previousBranchId;
             syncOperatingBranchControl(previousBranchId);
+            window.workspaceDebugEnterFlow('branch-change:currency-transition-cancelled', {
+                bookingId: currentBookingId(), previousBranchId, nextBranchId,
+            });
             showFeedback('Branch change cancelled. Existing currencies and amounts were preserved.');
             return;
         }
 
-        lastWorkspaceBranchId = nextBranchId;
         syncWorkspaceBranchContext({ skipCurrencySync: true });
+        if (currentBookingId() > 0) {
+            if (invoiceAutosaveInFlight) {
+                await invoiceAutosavePromise;
+            }
+            const saved = await persistInvoiceAutosave({ force: true });
+            if (!saved || String(saved.branch_id || '') !== nextBranchId) {
+                bookingBranchField.value = previousBranchId;
+                syncWorkspaceBranchContext({ skipCurrencySync: true });
+                branchInputSnapshot.forEach(({ field, value }) => { field.value = value; });
+                bookingBranchField.value = previousBranchId;
+                syncOperatingBranchControl(previousBranchId);
+                syncServiceCurrencyMirror();
+                refreshProfit('branch-save-failed');
+                window.workspaceDebugEnterFlow('branch-change:save-failed', {
+                    bookingId: currentBookingId(), previousBranchId, nextBranchId,
+                });
+                showFeedback('Branch change was not saved. The previous branch and entered amounts were restored.');
+                return;
+            }
+            window.workspaceDebugEnterFlow('branch-change:saved', {
+                bookingId: currentBookingId(), previousBranchId, nextBranchId,
+                savedBranchId: saved.branch_id || null,
+            });
+        }
+        lastWorkspaceBranchId = nextBranchId;
         if (isCurrentInvoiceCrossCurrencySelection(paymentCurrencySelect?.value || '')) {
             await maybeOpenExchangeSettlementModal({ focusIfEmpty: true });
         }
-        showFeedback('Branch context updated. Default currencies and entered amounts were converted safely; manually selected currencies were retained.');
+        showFeedback(currentBookingId() > 0
+            ? 'Branch correction saved. Existing receipt accounts remain visible as recorded; review the receiving account before any new payment.'
+            : 'Branch selected. Save the new invoice to record it.');
     });
 
     operatingBranchRadios.forEach((radio) => {
@@ -18398,7 +18882,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     + 'When you save, the booking services, receivables, supplier obligations, and related current journals will move together. '
                     + 'Unsaved branch-default currencies will follow the new branch, while saved financial currencies and manually selected currencies will remain unchanged. '
                     + 'Entered draft amounts will require a confirmed exchange rate. '
-                    + 'A conflicting cash/bank transaction will block the save.'
+                    + 'Existing bank receipts keep their recorded accounts; complex linked transactions may still block the save.'
                 );
                 if (!confirmed) {
                     syncOperatingBranchControl(previousBranchId);
@@ -18663,6 +19147,9 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             if (!invoiceAutosaveFields.has(event.target.name)) {
+                return;
+            }
+            if (event.target.name === 'branch_id') {
                 return;
             }
 
@@ -20387,15 +20874,55 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     window.workspaceCloseServiceEditBookingModal = closeServiceEditBookingModal;
 
+    function setRefundEditorTab(requestedTab, focusField = false) {
+        if (!(servicePenaltyRefundModal instanceof HTMLElement)) {
+            return;
+        }
+        const reverseAvailable = serviceCorrectionBars.completeUndo instanceof HTMLFormElement
+            && !serviceCorrectionBars.completeUndo.hidden;
+        const activeTab = requestedTab === 'reverse' && reverseAvailable ? 'reverse' : 'edit';
+        servicePenaltyRefundModal.dataset.refundEditorActiveTab = activeTab;
+        const heading = servicePenaltyRefundModal.querySelector('#service-penalty-refund-title');
+        const subtitle = servicePenaltyRefundModal.querySelector('[data-refund-editor-subtitle]');
+        if (heading) {
+            heading.textContent = activeTab === 'reverse' ? 'Reverse Refund' : 'Edit Refund';
+        }
+        if (subtitle) {
+            subtitle.textContent = activeTab === 'reverse'
+                ? 'Undo the recorded refund and cancellation for this service.'
+                : 'Correct saved cancellation values or an existing posted refund.';
+        }
+        for (const button of refundEditorTabButtons) {
+            const isReverse = button.dataset.refundEditorTab === 'reverse';
+            button.disabled = isReverse && !reverseAvailable;
+            const isActive = button.dataset.refundEditorTab === activeTab;
+            button.classList.toggle('is-active', isActive);
+            button.setAttribute('aria-selected', isActive ? 'true' : 'false');
+            button.tabIndex = isActive ? 0 : -1;
+        }
+        for (const panel of refundEditorPanels) {
+            panel.hidden = panel.dataset.refundEditorPanel !== activeTab;
+        }
+        if (focusField) {
+            const activePanel = refundEditorPanels.find((panel) => !panel.hidden);
+            const field = activePanel?.querySelector(activeTab === 'reverse'
+                ? 'input[name="undo_reason"]'
+                : 'input[name="customer_penalty_amount"]');
+            field?.focus();
+        }
+    }
+
+    function syncRefundEditorTabs() {
+        setRefundEditorTab(servicePenaltyRefundModal?.dataset.refundEditorActiveTab || 'edit');
+    }
+
     function openServicePenaltyRefundModal(options = {}) {
         if (!(servicePenaltyRefundModal instanceof HTMLElement)) {
             return;
         }
 
         if (serviceCorrectionBars.completeUndo instanceof HTMLFormElement) {
-            for (const name of ['undo_customer_money', 'undo_supplier_money', 'undo_reason']) {
-                serviceCorrectionBars.completeUndo.elements.namedItem(name).value = '';
-            }
+            serviceCorrectionBars.completeUndo.elements.namedItem('undo_reason').value = '';
         }
 
         try {
@@ -20407,9 +20934,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
         servicePenaltyRefundModal.hidden = false;
         servicePenaltyRefundModal.setAttribute('aria-hidden', 'false');
+        setRefundEditorTab('edit');
 
         window.setTimeout(() => {
-            const preferredField = servicePenaltyRefundModal.querySelector(
+            const activePanel = refundEditorPanels.find((panel) => !panel.hidden);
+            const preferredField = activePanel?.querySelector(
                 '[data-service-correction-bar="settlement"]:not([hidden]) input[name="customer_penalty_amount"], '
                 + '[data-service-correction-bar="refund"]:not([hidden]) input[name="customer_refund_amount"], '
                 + '[data-service-correction-bar="settlement-reverse"]:not([hidden]) input[name="settlement_reverse_reason"], '
@@ -20577,6 +21106,28 @@ document.addEventListener('DOMContentLoaded', () => {
                 recordedAmount.value = `${data.receiptReceived || 0} ${data.receiptCurrency || ''}`.trim();
             }
         }
+        if (paymentReceiptManagerAccountForm instanceof HTMLFormElement) {
+            const accountId = String(data.receiptTreasuryAccountId || '');
+            const currency = String(data.receiptCurrency || '').toUpperCase();
+            const select = paymentReceiptManagerAccountForm.querySelector('[data-payment-receipt-account-select]');
+            setPaymentReceiptManagerFormValue(paymentReceiptManagerAccountForm, 'customer_receipt_id', receiptId);
+            setPaymentReceiptManagerFormValue(paymentReceiptManagerAccountForm, 'expected_treasury_account_id', accountId);
+            setPaymentReceiptManagerFormValue(paymentReceiptManagerAccountForm, 'correction_reason', '');
+            const recorded = paymentReceiptManagerAccountForm.querySelector('[data-payment-receipt-recorded-account]');
+            if (recorded instanceof HTMLInputElement) {
+                recorded.value = String(data.receiptTreasuryAccountName || `Account #${accountId}`);
+            }
+            if (select instanceof HTMLSelectElement) {
+                const options = paymentTreasuryAccounts.filter((account) => (
+                    String(account?.currency || '').toUpperCase() === currency
+                    && ['cash', 'bank'].includes(String(account?.accountType || ''))
+                    && String(account?.id || '') !== accountId
+                ));
+                select.innerHTML = '<option value="">Select account</option>' + options.map((account) => (
+                    `<option value="${escapeHtml(String(account.id))}">${escapeHtml(String(account.branchName || `Branch ${account.branchId}`))} / ${escapeHtml(String(account.accountName || account.label || 'Account'))} (${escapeHtml(String(account.currency || ''))})</option>`
+                )).join('');
+            }
+        }
         if (paymentReceiptManagerVoidForm instanceof HTMLFormElement) {
             setPaymentReceiptManagerFormValue(paymentReceiptManagerVoidForm, 'customer_receipt_id', receiptId);
             setPaymentReceiptManagerFormValue(paymentReceiptManagerVoidForm, 'void_reason', '');
@@ -20591,6 +21142,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         if (paymentReceiptManagerCorrectionSection instanceof HTMLElement) {
             paymentReceiptManagerCorrectionSection.hidden = isVoided || !canCorrect;
+        }
+        if (paymentReceiptManagerAccountSection instanceof HTMLElement) {
+            paymentReceiptManagerAccountSection.hidden = isVoided || !canCorrect || !(Number.parseInt(String(data.receiptTreasuryAccountId || 0), 10) > 0);
         }
         if (paymentReceiptManagerVoidSection instanceof HTMLElement) {
             paymentReceiptManagerVoidSection.hidden = isVoided || !canVoid;
@@ -22287,6 +22841,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 headers: { Accept: 'application/json' },
             });
             const payload = await response.json();
+            if (!response.ok || payload?.ok !== true) throw new Error('Customer advance lookup unavailable');
             const advances = uniqueCustomerAdvanceRows(payload.advances);
             advances.forEach((advance) => {
                 const availableAmount = toNumber(advance.unallocated_amount || 0);
@@ -22321,6 +22876,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 headers: { Accept: 'application/json' },
             });
             const payload = await response.json();
+            if (!response.ok || payload?.ok !== true) throw new Error('Customer advance lookup unavailable');
             const advances = uniqueCustomerAdvanceRows(payload.advances);
             advances.forEach((advance) => {
                 const advanceId = String(advance.id || '');
@@ -23033,6 +23589,24 @@ document.addEventListener('DOMContentLoaded', () => {
         button.addEventListener('click', () => openServicePenaltyRefundModal());
     });
 
+    refundEditorTabButtons.forEach((button) => {
+        button.addEventListener('click', () => setRefundEditorTab(button.dataset.refundEditorTab, true));
+        button.addEventListener('keydown', (event) => {
+            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+                return;
+            }
+            event.preventDefault();
+            const preferred = event.key === 'Home' ? 'edit' : event.key === 'End' ? 'reverse'
+                : button.dataset.refundEditorTab === 'edit' ? 'reverse' : 'edit';
+            const target = refundEditorTabButtons.find((tab) => tab.dataset.refundEditorTab === preferred && !tab.disabled)
+                || refundEditorTabButtons.find((tab) => !tab.disabled);
+            if (target) {
+                setRefundEditorTab(target.dataset.refundEditorTab);
+                target.focus();
+            }
+        });
+    });
+
     servicePenaltyRefundCloseButtons.forEach((button) => {
         button.addEventListener('click', closeServicePenaltyRefundModal);
     });
@@ -23070,15 +23644,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const confirmation = undoForm.elements.namedItem('undo_mistake_confirmed');
                 confirmation.value = '0';
                 const reference = String(invoiceNumberDisplay?.value || 'this booking');
-                const customer = undoForm.elements.namedItem('undo_customer_money').value;
-                const supplier = undoForm.elements.namedItem('undo_supplier_money').value;
-                if (!['moved', 'not_moved'].includes(customer) || !['moved', 'not_moved'].includes(supplier)) {
-                    event.preventDefault();
-                    window.alert('Please select whether customer and supplier refund money actually changed hands.');
-                    return;
-                }
-                const moneyMessage = `Customer money: ${customer === 'moved' ? 'actually paid - preserve' : 'not paid - reverse entry'}.\nSupplier money: ${supplier === 'moved' ? 'actually received - preserve' : 'not received - reverse entry'}.`;
-                if (!window.confirm(`Reverse the entire refund/cancellation for ${reference}?\n\n${moneyMessage}\n\nThe original invoice/service will be restored. Actual money may leave a receivable/payable. No money is assigned to another booking automatically. Audit history will be kept.`)) {
+                if (!window.confirm(`Reverse the recorded refund and cancellation for ${reference}?\n\nThe original invoice, service, and linked cash/bank or credit balances will be restored. Audit history will be kept.`)) {
                     event.preventDefault();
                     return;
                 }

@@ -11,6 +11,31 @@ final class AccountingRepository extends BaseRepository
 {
     private array $accountIdCache = [];
 
+    public function serviceCostBalances(string $bookingReference, string $lineReference): array
+    {
+        $statement = $this->db->prepare(
+            'SELECT je.currency, ROUND(SUM(jel.debit_amount - jel.credit_amount), 2) AS amount
+             FROM journal_entries je
+             INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+             INNER JOIN chart_of_accounts coa ON coa.id = jel.account_id
+             WHERE je.booking_reference = :booking_reference
+               AND jel.service_line_reference = :line_reference
+               AND coa.code = "SERVICE_COST"
+             GROUP BY je.currency'
+        );
+        $statement->execute([
+            'booking_reference' => $bookingReference,
+            'line_reference' => $lineReference,
+        ]);
+
+        $balances = [];
+        foreach ($statement->fetchAll(\PDO::FETCH_ASSOC) ?: [] as $row) {
+            $balances[strtoupper((string) $row['currency'])] = round((float) $row['amount'], 2);
+        }
+
+        return $balances;
+    }
+
     public function postRefundRecoveryOutstanding(array $data): int
     {
         $customer = $data['scope'] === 'customer';
@@ -164,7 +189,6 @@ final class AccountingRepository extends BaseRepository
         if ($rows === []) {
             return null;
         }
-
         $firstRow = $rows[0];
         $lines = [];
         $lineDescriptionOverrides = is_array($options['line_description_overrides'] ?? null)
@@ -873,6 +897,149 @@ final class AccountingRepository extends BaseRepository
         ], $lines);
     }
 
+    public function postBookingBranchCreditReclassification(array $data): array
+    {
+        $amount = round((float) $data['amount'], 2);
+        if ($amount <= 0 || (int) $data['from_branch_id'] === (int) $data['to_branch_id']) {
+            throw new RuntimeException('A cross-branch receipt credit amount is required.');
+        }
+        $receivable = $this->ensureAccountByCode('INTERBRANCH_TRANSFER_RECEIVABLE', 'Interbranch Transfer Receivable', 'asset', 'debit');
+        $payable = $this->ensureAccountByCode('INTERBRANCH_TRANSFER_PAYABLE', 'Interbranch Transfer Payable', 'liability', 'credit');
+        $header = [
+            'booking_reference' => $data['booking_reference'],
+            'source_type' => 'booking_branch_credit_reclassified',
+            'entry_date' => $data['entry_date'],
+            'currency' => $data['currency'],
+            'actor_user_id' => $data['actor_user_id'],
+            'narration' => 'Reclassify customer credit to corrected booking branch; bank account unchanged',
+        ];
+        $receiptId = (int) $data['customer_receipt_id'];
+        $sourceId = $this->postJournalEntry(array_merge($header, [
+            'branch_id' => $data['from_branch_id'],
+            'source_reference' => $data['source_reference'] . '-SOURCE',
+        ]), [
+            ['account_code' => 'CUSTOMER_CREDIT', 'customer_receipt_id' => $receiptId, 'line_description' => 'Customer credit moved from booking branch', 'debit_amount' => $amount, 'credit_amount' => 0],
+            ['account_id' => $payable['account_id'], 'customer_receipt_id' => $receiptId, 'line_description' => 'Interbranch credit reclassification payable', 'debit_amount' => 0, 'credit_amount' => $amount],
+        ]);
+        $destinationId = $this->postJournalEntry(array_merge($header, [
+            'branch_id' => $data['to_branch_id'],
+            'source_reference' => $data['source_reference'] . '-DESTINATION',
+        ]), [
+            ['account_id' => $receivable['account_id'], 'customer_receipt_id' => $receiptId, 'line_description' => 'Interbranch credit reclassification receivable', 'debit_amount' => $amount, 'credit_amount' => 0],
+            ['account_code' => 'CUSTOMER_CREDIT', 'customer_receipt_id' => $receiptId, 'line_description' => 'Customer credit moved to booking branch', 'debit_amount' => 0, 'credit_amount' => $amount],
+        ]);
+
+        return [$sourceId, $destinationId];
+    }
+
+    public function postCustomerReceiptAccountCorrection(array $data): array
+    {
+        $amount = round((float) $data['amount'], 2);
+        if ($amount <= 0) {
+            throw new RuntimeException('Only a receipt with positive net cash can change accounts.');
+        }
+        $from = $this->treasuryAccountLedgerReference((int) $data['from_treasury_account_id']);
+        $to = $this->treasuryAccountLedgerReference((int) $data['to_treasury_account_id']);
+        if ($from === null || $to === null || $from['account_id'] === $to['account_id']) {
+            throw new RuntimeException('Receipt account correction requires two distinct active cash or bank accounts.');
+        }
+        $header = [
+            'booking_reference' => $data['booking_reference'],
+            'source_type' => 'customer_receipt_account_corrected',
+            'entry_date' => $data['entry_date'],
+            'currency' => $data['currency'],
+            'actor_user_id' => $data['actor_user_id'],
+            'narration' => 'Correct receipt account selection: ' . $data['reason'],
+        ];
+        $receiptId = (int) $data['customer_receipt_id'];
+        if ($from['branch_id'] === $to['branch_id']) {
+            return [$this->postJournalEntry(array_merge($header, [
+                'branch_id' => $from['branch_id'],
+                'source_reference' => $data['source_reference'],
+            ]), [
+                ['account_id' => $to['account_id'], 'customer_receipt_id' => $receiptId, 'line_description' => 'Correct receipt destination account', 'debit_amount' => $amount, 'credit_amount' => 0],
+                ['account_id' => $from['account_id'], 'customer_receipt_id' => $receiptId, 'line_description' => 'Reverse incorrectly selected receipt account', 'debit_amount' => 0, 'credit_amount' => $amount],
+            ])];
+        }
+        $receivable = $this->ensureAccountByCode('INTERBRANCH_TRANSFER_RECEIVABLE', 'Interbranch Transfer Receivable', 'asset', 'debit');
+        $payable = $this->ensureAccountByCode('INTERBRANCH_TRANSFER_PAYABLE', 'Interbranch Transfer Payable', 'liability', 'credit');
+        $sourceId = $this->postJournalEntry(array_merge($header, [
+            'branch_id' => $from['branch_id'],
+            'source_reference' => $data['source_reference'] . '-SOURCE',
+        ]), [
+            ['account_id' => $receivable['account_id'], 'customer_receipt_id' => $receiptId, 'line_description' => 'Interbranch account correction receivable', 'debit_amount' => $amount, 'credit_amount' => 0],
+            ['account_id' => $from['account_id'], 'customer_receipt_id' => $receiptId, 'line_description' => 'Reverse incorrectly selected receipt account', 'debit_amount' => 0, 'credit_amount' => $amount],
+        ]);
+        $destinationId = $this->postJournalEntry(array_merge($header, [
+            'branch_id' => $to['branch_id'],
+            'source_reference' => $data['source_reference'] . '-DESTINATION',
+        ]), [
+            ['account_id' => $to['account_id'], 'customer_receipt_id' => $receiptId, 'line_description' => 'Correct receipt destination account', 'debit_amount' => $amount, 'credit_amount' => 0],
+            ['account_id' => $payable['account_id'], 'customer_receipt_id' => $receiptId, 'line_description' => 'Interbranch account correction payable', 'debit_amount' => 0, 'credit_amount' => $amount],
+        ]);
+
+        return [$sourceId, $destinationId];
+    }
+
+    public function receiptAssetBalance(int $receiptId, int $accountId, int $branchId, string $currency): float
+    {
+        $statement = $this->db->prepare(
+            'SELECT COALESCE(SUM(jel.debit_amount - jel.credit_amount), 0)
+             FROM journal_entry_lines jel
+             INNER JOIN journal_entries je ON je.id = jel.journal_entry_id
+             INNER JOIN treasury_accounts ta ON ta.linked_account_id = jel.account_id
+                 AND ta.branch_id = :branch_id
+             WHERE jel.customer_receipt_id = :receipt_id
+               AND jel.account_id = :account_id
+               AND je.currency = :currency'
+        );
+        $statement->execute([
+            'receipt_id' => $receiptId,
+            'account_id' => $accountId,
+            'branch_id' => $branchId,
+            'currency' => $currency,
+        ]);
+
+        return round((float) $statement->fetchColumn(), 2);
+    }
+
+    public function postCrossBranchCustomerReceiptAmountCorrection(array $data): array
+    {
+        $delta = round((float) $data['corrected_amount'] - (float) $data['original_amount'], 2);
+        if (abs($delta) < 0.005 || (int) $data['account_branch_id'] === (int) $data['booking_branch_id']) {
+            throw new RuntimeException('A cross-branch receipt amount difference is required.');
+        }
+        $asset = $this->customerReceiptAssetAccount($data);
+        $receivable = $this->ensureAccountByCode('INTERBRANCH_TRANSFER_RECEIVABLE', 'Interbranch Transfer Receivable', 'asset', 'debit');
+        $payable = $this->ensureAccountByCode('INTERBRANCH_TRANSFER_PAYABLE', 'Interbranch Transfer Payable', 'liability', 'credit');
+        $amount = abs($delta);
+        $receiptId = (int) $data['customer_receipt_id'];
+        $header = [
+            'booking_reference' => $data['booking_reference'],
+            'source_type' => 'customer_receipt_amount_corrected',
+            'entry_date' => $data['entry_date'],
+            'currency' => $data['currency'],
+            'actor_user_id' => $data['actor_user_id'],
+            'narration' => $data['narration'],
+        ];
+        $sourceId = $this->postJournalEntry(array_merge($header, [
+            'branch_id' => $data['account_branch_id'],
+            'source_reference' => $data['source_reference'] . '-SOURCE',
+        ]), [
+            ['account_id' => $asset['account_id'], 'customer_receipt_id' => $receiptId, 'line_description' => 'Correct actual customer money received', 'debit_amount' => $delta > 0 ? $amount : 0, 'credit_amount' => $delta < 0 ? $amount : 0],
+            ['account_id' => $payable['account_id'], 'customer_receipt_id' => $receiptId, 'line_description' => 'Interbranch receipt correction payable', 'debit_amount' => $delta < 0 ? $amount : 0, 'credit_amount' => $delta > 0 ? $amount : 0],
+        ]);
+        $destinationId = $this->postJournalEntry(array_merge($header, [
+            'branch_id' => $data['booking_branch_id'],
+            'source_reference' => $data['source_reference'] . '-DESTINATION',
+        ]), [
+            ['account_id' => $receivable['account_id'], 'customer_receipt_id' => $receiptId, 'line_description' => 'Interbranch receipt correction receivable', 'debit_amount' => $delta > 0 ? $amount : 0, 'credit_amount' => $delta < 0 ? $amount : 0],
+            ['account_code' => 'CUSTOMER_CREDIT', 'customer_receipt_id' => $receiptId, 'line_description' => 'Correct customer credit from receipt amount', 'debit_amount' => $delta < 0 ? $amount : 0, 'credit_amount' => $delta > 0 ? $amount : 0],
+        ]);
+
+        return [$sourceId, $destinationId];
+    }
+
     public function postCustomerReceiptAmountCorrection(array $data): int
     {
         $delta = round((float) $data['corrected_amount'] - (float) $data['original_amount'], 2);
@@ -1330,6 +1497,43 @@ final class AccountingRepository extends BaseRepository
         ], $lines);
     }
 
+    public function postCorrectedReceiptVoidReversals(array $data): array
+    {
+        $statement = $this->db->prepare(
+            'SELECT DISTINCT je.id
+             FROM journal_entries je
+             INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+             WHERE jel.customer_receipt_id = :receipt_id
+               AND je.source_type IN (
+                   "customer_receipt_recorded", "customer_receipt_allocated",
+                   "customer_receipt_amount_corrected", "customer_receipt_account_corrected",
+                   "booking_branch_receipt_reversal", "booking_branch_credit_reclassified"
+               )
+             ORDER BY je.id ASC'
+        );
+        $statement->execute(['receipt_id' => (int) $data['customer_receipt_id']]);
+        $journalIds = array_map('intval', $statement->fetchAll(\PDO::FETCH_COLUMN) ?: []);
+        if ($journalIds === []) {
+            throw new RuntimeException('Receipt has no linked financial journals to reverse.');
+        }
+        $reversals = [];
+        foreach ($journalIds as $journalId) {
+            $reversalId = $this->reverseJournalEntry($journalId, [
+                'source_type' => 'customer_receipt_void_reversal',
+                'source_reference' => (string) $data['source_reference'] . '-JE-' . $journalId,
+                'entry_date' => $data['entry_date'],
+                'actor_user_id' => $data['actor_user_id'],
+                'narration' => 'Void receipt journal ' . $journalId . ' in its original branch',
+            ]);
+            if ($reversalId === null) {
+                throw new RuntimeException('Receipt journal ' . $journalId . ' could not be reversed.');
+            }
+            $reversals[] = $reversalId;
+        }
+
+        return $reversals;
+    }
+
     public function postServiceRefund(array $data): int
     {
         $customerRefundAmount = round((float) ($data['customer_refund_amount'] ?? 0), 2);
@@ -1388,6 +1592,59 @@ final class AccountingRepository extends BaseRepository
         ], $lines);
     }
 
+    public function postCrossCurrencyCustomerRefund(array $data): array
+    {
+        if (! $this->db->inTransaction()) {
+            throw new RuntimeException('Cross-currency customer refund requires an enclosing transaction.');
+        }
+
+        $creditAmount = round((float) ($data['customer_refund_amount'] ?? 0), 2);
+        $cashAmount = round((float) ($data['refund_source_amount'] ?? 0), 2);
+        $creditCurrency = strtoupper((string) ($data['currency'] ?? ''));
+        $cashCurrency = strtoupper((string) ($data['refund_currency'] ?? ''));
+        if ($creditAmount <= 0 || $cashAmount <= 0 || $creditCurrency === $cashCurrency
+            || $creditCurrency === '' || $cashCurrency === '') {
+            throw new RuntimeException('Customer refund requires positive credit and cash amounts in different currencies.');
+        }
+
+        $assetAccount = $this->paymentMethodAssetAccount($data);
+        $clearing = $this->ensureAccountByCode(
+            'CUSTOMER_REFUND_FX_CLEARING', 'Customer Refund FX Clearing', 'asset', 'debit'
+        );
+        $reference = (string) ($data['source_reference'] ?? 'CUSTOMER-REFUND-FX');
+        $header = [
+            'branch_id' => $data['branch_id'],
+            'booking_reference' => $data['booking_reference'],
+            'entry_date' => $data['entry_date'],
+            'actor_user_id' => $data['actor_user_id'] ?? null,
+        ];
+
+        $creditJournalId = $this->postJournalEntry(array_merge($header, [
+            'source_type' => 'service_refund_posted',
+            'source_reference' => $reference,
+            'currency' => $creditCurrency,
+            'narration' => 'Customer credit settled by foreign-currency refund',
+        ]), [
+            ['account_code' => 'CUSTOMER_CREDIT', 'service_line_reference' => $data['service_line_reference'],
+                'line_description' => 'Customer credit refunded', 'debit_amount' => $creditAmount, 'credit_amount' => 0],
+            ['account_id' => $clearing['account_id'], 'service_line_reference' => $data['service_line_reference'],
+                'line_description' => 'Customer refund FX clearing', 'debit_amount' => 0, 'credit_amount' => $creditAmount],
+        ]);
+        $cashJournalId = $this->postJournalEntry(array_merge($header, [
+            'source_type' => 'service_refund_treasury_posted',
+            'source_reference' => $reference . '-CASH',
+            'currency' => $cashCurrency,
+            'narration' => 'Customer refund paid in actual cash or bank currency',
+        ]), [
+            ['account_id' => $clearing['account_id'], 'service_line_reference' => $data['service_line_reference'],
+                'line_description' => 'Customer refund FX clearing', 'debit_amount' => $cashAmount, 'credit_amount' => 0],
+            ['account_id' => $assetAccount['account_id'], 'service_line_reference' => $data['service_line_reference'],
+                'line_description' => 'Actual customer refund paid', 'debit_amount' => 0, 'credit_amount' => $cashAmount],
+        ]);
+
+        return ['credit_journal_id' => $creditJournalId, 'cash_journal_id' => $cashJournalId];
+    }
+
     public function postServiceRefundReversal(array $data): ?int
     {
         $originalJournalEntryId = (int) ($data['journal_entry_id'] ?? 0);
@@ -1395,6 +1652,10 @@ final class AccountingRepository extends BaseRepository
             return null;
         }
 
+        $originalSourceType = (string) ($data['original_source_type'] ?? 'service_refund_posted');
+        if (! in_array($originalSourceType, ['service_refund_posted', 'service_refund_treasury_posted'], true)) {
+            throw new RuntimeException('Unsupported refund journal type for reversal.');
+        }
         $statement = $this->db->prepare(
             'SELECT
                 je.id AS journal_entry_id,
@@ -1410,14 +1671,19 @@ final class AccountingRepository extends BaseRepository
              INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
              INNER JOIN chart_of_accounts coa ON coa.id = jel.account_id
              WHERE je.id = :journal_entry_id
-               AND je.source_type = "service_refund_posted"
+               AND je.source_type = :source_type
              ORDER BY jel.id ASC'
         );
-        $statement->execute(['journal_entry_id' => $originalJournalEntryId]);
+        $statement->execute(['journal_entry_id' => $originalJournalEntryId, 'source_type' => $originalSourceType]);
         $rows = $statement->fetchAll() ?: [];
 
         if ($rows === []) {
             return null;
+        }
+        if (strtoupper((string) ($rows[0]['currency'] ?? '')) !== strtoupper((string) ($data['currency'] ?? ''))
+            || (int) ($rows[0]['branch_id'] ?? 0) !== (int) ($data['branch_id'] ?? 0)
+            || (string) ($rows[0]['booking_reference'] ?? '') !== (string) ($data['booking_reference'] ?? '')) {
+            throw new RuntimeException('Refund reversal cannot change the original journal currency, branch or booking.');
         }
 
         $lines = [];
@@ -1446,7 +1712,8 @@ final class AccountingRepository extends BaseRepository
         return $this->postJournalEntry([
             'branch_id' => $data['branch_id'],
             'booking_reference' => $data['booking_reference'],
-            'source_type' => 'service_refund_reversed',
+            'source_type' => $originalSourceType === 'service_refund_treasury_posted'
+                ? 'service_refund_treasury_reversed' : 'service_refund_reversed',
             'source_reference' => $data['source_reference'] ?? null,
             'entry_date' => $data['entry_date'],
             'currency' => $data['currency'],
@@ -1742,18 +2009,18 @@ final class AccountingRepository extends BaseRepository
             'branch_id' => $data['source_branch_id'],
             'currency' => $data['source_currency'],
             'source_reference' => $reference . '-SOURCE',
-            'narration' => 'Treasury transfer out to ' . (string) $data['destination_currency'],
+            'narration' => $data['source_narration'] ?? 'Treasury transfer out to ' . (string) $data['destination_currency'],
         ]), [
             ['account_id' => $sourceClearing['account_id'], 'line_description' => 'Transfer clearing receivable', 'debit_amount' => $sourceAmount, 'credit_amount' => 0],
-            ['account_id' => $fromAccount['account_id'], 'line_description' => 'Cash or bank transfer out', 'debit_amount' => 0, 'credit_amount' => $sourceAmount],
+            ['account_id' => $fromAccount['account_id'], 'line_description' => $data['source_line_description'] ?? 'Cash or bank transfer out', 'debit_amount' => 0, 'credit_amount' => $sourceAmount],
         ]);
         $destinationJournalId = $this->postJournalEntry(array_merge($header, [
             'branch_id' => $data['destination_branch_id'],
             'currency' => $data['destination_currency'],
             'source_reference' => $reference . '-DESTINATION',
-            'narration' => 'Treasury transfer in from ' . (string) $data['source_currency'],
+            'narration' => $data['destination_narration'] ?? 'Treasury transfer in from ' . (string) $data['source_currency'],
         ]), [
-            ['account_id' => $toAccount['account_id'], 'line_description' => 'Cash or bank transfer in', 'debit_amount' => $destinationAmount, 'credit_amount' => 0],
+            ['account_id' => $toAccount['account_id'], 'line_description' => $data['destination_line_description'] ?? 'Cash or bank transfer in', 'debit_amount' => $destinationAmount, 'credit_amount' => 0],
             ['account_id' => $destinationClearing['account_id'], 'line_description' => 'Transfer clearing payable', 'debit_amount' => 0, 'credit_amount' => $destinationAmount],
         ]);
 

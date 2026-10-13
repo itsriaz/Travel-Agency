@@ -264,12 +264,35 @@ try {
         && abs((float) ($partPaidReceivable['allocated_amount'] ?? 0) - 500.00) <= 0.005
         && abs((float) ($partPaidObligation['net_payable_amount'] ?? 0) - ($oldPayableAmount - 400.00)) <= 0.005);
 
+    $derivedServiceRateRejected = false;
+    try {
+        $serviceWorkspace->correctFinancials([
+            'booking_id' => $bookingId,
+            'service_id' => $serviceId,
+            'corrected_invoice_currency' => 'PKR',
+            'corrected_cost_currency' => 'PKR',
+            'corrected_service_charge_currency' => 'AED',
+            'corrected_service_charge_exchange_rate' => '1',
+            'corrected_cost_basis' => '1000',
+            'corrected_service_charge' => '0',
+            'corrected_final_sale_price' => '1100',
+            'financial_correction_reason' => 'Reject a derived cross-currency service amount at 1:1',
+        ], $actorUserId, $accessibleBranchIds);
+    } catch (RuntimeException $exception) {
+        $derivedServiceRateRejected = str_contains($exception->getMessage(), '1:1 rate');
+    }
+    $check('Derived service amount also rejects a 1:1 cross-currency rate',
+        $derivedServiceRateRejected
+        && ($receivableRepository->findReceivableByServiceLine($bookingReference, $lineReference)['currency'] ?? '') === 'AED');
+
     $serviceWorkspace->correctFinancials([
         'booking_id' => $bookingId,
         'service_id' => $serviceId,
         'corrected_invoice_currency' => 'PKR',
         'corrected_cost_currency' => 'PKR',
+        'corrected_service_charge_currency' => 'PKR',
         'corrected_cost_basis' => '1000.00',
+        'corrected_service_charge' => '100.00',
         'corrected_final_sale_price' => number_format($oldReceivableAmount, 2, '.', ''),
         'financial_correction_date' => $today,
         'financial_correction_reason' => 'Correct invoice and supplier currency for regression verification',
@@ -358,7 +381,9 @@ try {
         'service_id' => $serviceId,
         'corrected_invoice_currency' => 'AED',
         'corrected_cost_currency' => 'AED',
+        'corrected_service_charge_currency' => 'AED',
         'corrected_cost_basis' => '1050.00',
+        'corrected_service_charge' => '100.00',
         'corrected_final_sale_price' => '1150.00',
         'financial_correction_date' => $today,
         'financial_correction_reason' => 'Flip the service back to AED to verify repeated currency corrections stay singular',
@@ -392,11 +417,23 @@ try {
         'service_id' => $serviceId,
         'corrected_invoice_currency' => 'PKR',
         'corrected_cost_currency' => 'PKR',
+        'corrected_service_charge_currency' => 'PKR',
         'corrected_cost_basis' => '1050.00',
+        'corrected_service_charge' => '100.00',
         'corrected_final_sale_price' => '1150.00',
         'financial_correction_date' => $today,
         'financial_correction_reason' => 'Return the service to PKR after the temporary AED flip',
     ], $actorUserId, $accessibleBranchIds);
+
+    $finalControlBalances = $controlBalances($bookingReference, $lineReference);
+    $check('Repeated supplier currency edits leave no AED cost or payable journal balance',
+        abs((float) ($finalControlBalances['AED']['SERVICE_COST'] ?? 0)) <= 0.005
+        && abs((float) ($finalControlBalances['AED']['AP_CONTROL'] ?? 0)) <= 0.005,
+        json_encode($finalControlBalances['AED'] ?? [], JSON_UNESCAPED_SLASHES));
+    $check('Repeated supplier currency edits leave one PKR cost and payable position',
+        abs((float) ($finalControlBalances['PKR']['SERVICE_COST'] ?? 0) - 1050.00) <= 0.005
+        && abs((float) ($finalControlBalances['PKR']['AP_CONTROL'] ?? 0) + 1050.00) <= 0.005,
+        json_encode($finalControlBalances['PKR'] ?? [], JSON_UNESCAPED_SLASHES));
 
     $ledgerReport = $ledgerService->report([
         'dateFrom' => null,
@@ -482,6 +519,38 @@ try {
             'print_columns' => $printColumns,
             'trace_row' => $traceRow,
         ], JSON_UNESCAPED_SLASHES));
+
+    $accountingRepository->postJournalEntry([
+        'branch_id' => (int) $booking['branch_id'],
+        'booking_reference' => $bookingReference,
+        'source_type' => 'test_currency_preflight_mismatch',
+        'source_reference' => $lineReference,
+        'entry_date' => $today,
+        'currency' => 'AED',
+        'narration' => 'Temporary wrong-currency journal for preflight regression',
+        'actor_user_id' => $actorUserId,
+    ], [
+        ['account_code' => 'SERVICE_COST', 'service_line_reference' => $lineReference, 'debit_amount' => 10, 'credit_amount' => 0],
+        ['account_code' => 'AP_CONTROL', 'service_line_reference' => $lineReference, 'supplier_obligation_id' => (int) $obligationAfter['id'], 'debit_amount' => 0, 'credit_amount' => 10],
+    ]);
+    $correctionRejected = false;
+    try {
+        $serviceWorkspace->correctFinancials([
+            'booking_id' => $bookingId,
+            'service_id' => $serviceId,
+            'corrected_invoice_currency' => 'AED',
+            'corrected_cost_currency' => 'AED',
+            'corrected_service_charge_currency' => 'AED',
+            'corrected_cost_basis' => '1050.00',
+            'corrected_service_charge' => '100.00',
+            'corrected_final_sale_price' => '1150.00',
+            'financial_correction_date' => $today,
+            'financial_correction_reason' => 'Reject a currency flip when the old journal state is inconsistent',
+        ], $actorUserId, $accessibleBranchIds);
+    } catch (RuntimeException $exception) {
+        $correctionRejected = str_contains($exception->getMessage(), 'accounting review');
+    }
+    $check('Supplier currency edit fails closed when old-currency journals are inconsistent', $correctionRejected);
 } catch (Throwable $exception) {
     $failures[] = $exception::class . ': ' . $exception->getMessage();
     echo '[FAIL] Unexpected exception - ' . $exception::class . ': ' . $exception->getMessage() . PHP_EOL;

@@ -3,21 +3,20 @@
 ## Implemented Locally
 
 - Keep Edit Refund for partial corrections. Reverse Entire Refund restores the selected service/invoice, not every booking belonging to the customer.
-- The operator explicitly confirms whether all recorded customer refund money was actually paid and all recorded supplier refund money was actually received. Entry-only movements are reversed; genuine movements keep their original journals and receipt/payment consumption. Restored invoice balances reflect money still recoverable/payable through balanced control-account journals.
+- Reverse Entire Refund uses the saved customer/supplier refund events, linked accounts, allocations and journals to reverse all recorded refund and cancellation movements. It no longer asks the operator to classify customer or supplier money. The original invoice, service and linked balances are restored in one transaction.
 - Nothing is transferred to another customer/booking automatically. If actual money belongs to another booking/person, it needs a separately confirmed attribution; complete reversal does not guess the recipient.
-- Refund History / Restore lists actor/date/reason, reversal/restoration audit references, money decisions and before/after invoice figures. Restore Reversed Refund recovers a new reversal's protected snapshot with compensating journals, not deletion of journal history.
+- Refund History / Restore lists actor/date/reason, reversal/restoration audit references and before/after invoice figures. Older reversals retain their saved money-decision history; new reversals record the automatic `recorded_transactions` mode. Restore Reversed Refund recovers a reversal's protected snapshot with compensating journals, not deletion of journal history.
 - Before/after snapshots preserve all affected receipt/payment/advance allocation records, including allocation IDs replaced by existing accounting primitives. Subsequent restoration does not erase the original audit or its restoration history.
 - Required audit failure, database failure or validation failure rolls back the whole operation, including nested savepoints. Original journal entries are never deleted or edited. Multiple partial refunds, repeat submissions, repeat recovery cycles and stale-service submissions are guarded.
 - New customer refunds persist exact receipt consumption amounts in event JSON. Their reversal restores those receipts, not an unrelated newer receipt with returned money.
-- Financial ledger/register and cash-flow queries include specifically preserved actual-money refund events even though the operational refund is voided. Entry-only reversed refunds remain excluded. Operational entitlement calculations still ignore voided refunds, preventing a later cancellation from counting an old cash movement as a new refund entitlement.
+- New complete reversals void the refund events and post linked compensating journals, so the financial ledgers and cash-flow reports exclude those refunded movements. Older reversals that explicitly preserved money remain readable under their saved audit mode.
 - Reinstatement is allowed only while saved financial dependencies still match. Later changes require review instead of silently overwriting them. Shared supplier payment/advance dependencies are conservatively guarded, even if a later change belongs to another booking.
 
 ## Deliberate Safety Boundaries
 
-- A valid audit record is not proof of physical cash movement: the operator must make the actual-money choices correctly.
-- When only some payments on one side genuinely occurred, use the existing event-specific correction workflow to reconcile that side first. The compact complete-reversal choices apply to all posted payments on each selected side.
+- Complete reversal corrects the system's recorded money and balances; it does not independently verify physical cash. Use it only to undo an erroneous posted cancellation/refund, not to represent a new real-world repayment.
 - Do not invent missing original invoice amounts/status, refund receipt mappings, supplier credit sources, journal lines or historical FX. Older contradictory records stop with an explanation and no changes.
-- Actual-money legacy combined events currently require review. Separate modern customer/supplier events cover all four money-status combinations. Verified recorded-only combined component reversals retain their existing accounting path.
+- Legacy combined refund events are reversed component by component where their source records reconcile. Ambiguous historical source records still stop safely.
 - Actual refund journal and source-credit currencies must agree. Historical mismatches need FX reconciliation; the operation does not silently convert or relabel an existing journal.
 - Released linked-party offsets without complete source matching and retained supplier credits already used on other documents require review. No unrelated credit is pulled in to make reversal succeed.
 - BK-000038 is not automatically repaired: its imported cancellation lacks original basis and source snapshots, and its synthetic refund consumption needs reconciliation. Customer AED600 genuinely paid must not disappear from cash.
@@ -50,8 +49,8 @@ SQL/schema changes: none. Existing audit/event JSON holds recovery metadata. Upl
 ## Acceptance Checklist
 
 - [ ] Financial admin: cancel a disposable invoice, reverse with both sides recorded-only, and verify original invoice, status, allocations, ledger and cash.
-- [ ] Test all four actual customer/supplier money combinations. Genuine money must remain in cash; restored invoice outstanding must equal the appropriate recoverable/payable amount. Do not test by pretending a real payment never happened.
-- [ ] Compare journal/control balances, Account Ledger, Customer Detail Ledger, Supplier Ledger and Cash Flow. Actual-money refund rows must remain visible after reversal; restoring the reversal must show the original refund once, not twice.
+- [ ] Reverse test cancellations with customer payout, supplier cash refund, supplier credit, and no refund. Each recorded reversal must restore the original linked cash/credit balances and invoice/payable positions.
+- [ ] Compare journal/control balances, Account Ledger, Customer Detail Ledger, Supplier Ledger and Cash Flow. Reversed refund rows must not remain as active cash movements; restoring the reversal must show the original refund once, not twice.
 - [ ] Cancel confirmation and try stale/foreign IDs and unauthorized branches: nothing changes. Repeat a successful submit: no duplicate operation.
 - [ ] Open Refund History / Restore, inspect actor/date/reason and before/after figures. Restore a mistaken reversal: cancelled/refunded state and balances return, linked audit/journal history remains. Repeat restoration: no duplicates.
 - [ ] Make a later allocation/edit first: restoration must refuse without overwriting it. Verify a new invoice/service cannot submit the previous service's recovery IDs.
@@ -60,7 +59,7 @@ SQL/schema changes: none. Existing audit/event JSON holds recovery metadata. Upl
 
 Security: both POST routes enforce CSRF, financial-admin authorization and booking/service/audit/treasury-branch ownership. Recovery SQL is prepared in repositories; write snapshots lock dependencies, including booking identity, service subtypes, refund details and treasury account metadata. Browser audit text uses textContent, not HTML. Financial success requires an audit inside the same transaction.
 
-Automated verification: rollback-only complete refund undo/recovery regression (all four money choices, exact receipts, ledger/control and report reconciliation, cash-flow visibility, audit failure on reversal and restoration, stale/foreign IDs, used credit, subsequent edits, duplicate and second cycles, operational-only and unpaid cases); UI confirmation/history tests; existing refund-correction and cancellation protection regressions. No reviewed local booking was committed or production database modified.
+Automated verification: rollback-only complete refund undo/recovery regression (obsolete money-status input cannot alter the automatic reversal, exact receipts, ledger/control and report reconciliation, cash-flow visibility, audit failure on reversal and restoration, stale/foreign IDs, used credit, subsequent edits, duplicate and second cycles, operational-only and unpaid cases); UI confirmation/history tests; existing refund-correction and cancellation protection regressions. No reviewed local booking was committed or production database modified.
 
 Existing regression discrepancies, not repaired by this task:
 

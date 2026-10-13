@@ -8,13 +8,16 @@ final class CounterpartyOffsetRepository extends BaseRepository
 {
     public function positions(array $branchIds = []): array
     {
+        if ($branchIds === []) {
+            return [];
+        }
         $params = [];
         $branchSql = $this->branchSql('position_rows.branch_id', $branchIds, $params);
         $statement = $this->db->prepare(
             'SELECT position_rows.link_id, position_rows.business_source_id, position_rows.supplier_id,
                     position_rows.business_source_code, position_rows.business_source_name,
                     position_rows.supplier_code, position_rows.supplier_name,
-                    position_rows.branch_id, position_rows.branch_name, position_rows.currency,
+                    position_rows.currency,
                     ROUND(SUM(position_rows.receivable), 2) AS receivable,
                     ROUND(SUM(position_rows.payable), 2) AS payable,
                     ROUND(LEAST(SUM(position_rows.receivable), SUM(position_rows.payable)), 2) AS available_offset
@@ -23,7 +26,7 @@ final class CounterpartyOffsetRepository extends BaseRepository
                        bs.code AS business_source_code, bs.name AS business_source_name,
                        s.code AS supplier_code, s.name AS supplier_name,
                        cri.branch_id, br.name AS branch_name, cri.currency,
-                       SUM(GREATEST(cri.due_amount - COALESCE(account_used.allocated_amount, 0), 0)) AS receivable, 0 AS payable
+                       SUM(GREATEST(cri.outstanding_amount - COALESCE(account_used.allocated_amount, 0), 0)) AS receivable, 0 AS payable
                 FROM business_source_supplier_links l
                 INNER JOIN business_sources bs ON bs.id = l.business_source_id
                 INNER JOIN suppliers s ON s.id = l.supplier_id
@@ -36,7 +39,7 @@ final class CounterpartyOffsetRepository extends BaseRepository
                     INNER JOIN counterparty_offsets ao ON ao.id = aa.counterparty_offset_id AND ao.status = "posted"
                     GROUP BY aa.customer_receivable_item_id
                 ) account_used ON account_used.customer_receivable_item_id = cri.id
-                WHERE cri.due_amount > 0.005
+                WHERE cri.status <> "cancelled" AND cri.outstanding_amount > 0.005
                 GROUP BY l.id, l.business_source_id, l.supplier_id, bs.code, bs.name, s.code, s.name, cri.branch_id, br.name, cri.currency
                 UNION ALL
                 SELECT l.id, l.business_source_id, l.supplier_id,
@@ -55,8 +58,36 @@ final class CounterpartyOffsetRepository extends BaseRepository
              GROUP BY position_rows.link_id, position_rows.business_source_id, position_rows.supplier_id,
                       position_rows.business_source_code, position_rows.business_source_name,
                       position_rows.supplier_code, position_rows.supplier_name,
-                      position_rows.branch_id, position_rows.branch_name, position_rows.currency
-             ORDER BY position_rows.business_source_name, position_rows.branch_name, position_rows.currency'
+                      position_rows.currency
+             ORDER BY position_rows.business_source_name, position_rows.currency'
+        );
+        $statement->execute($params);
+
+        return $statement->fetchAll() ?: [];
+    }
+
+    public function unallocatedAccountHolderReceipts(array $branchIds): array
+    {
+        if ($branchIds === []) {
+            return [];
+        }
+
+        $params = [];
+        $branchSql = $this->branchSql('cr.branch_id', $branchIds, $params);
+        $accountPaidSql = $this->columnExists('customer_receipts', 'linked_payer_role')
+            ? 'ROUND(SUM(CASE WHEN cr.linked_payer_role = "account_holder" THEN GREATEST(cr.unallocated_amount, 0) ELSE 0 END), 2)'
+            : '0';
+        $statement = $this->db->prepare(
+            'SELECT l.id AS link_id, cr.currency,
+                    ROUND(SUM(GREATEST(cr.unallocated_amount, 0)), 2) AS on_account_credit,
+                    ' . $accountPaidSql . ' AS account_paid_direct
+             FROM customer_receipts cr
+             INNER JOIN business_source_supplier_links l ON l.business_source_id = cr.business_source_id
+             WHERE cr.receipt_purpose = "account_holder_receipt"
+               AND cr.status <> "void"
+               AND cr.unallocated_amount > 0.005'
+            . $branchSql .
+            ' GROUP BY l.id, cr.currency'
         );
         $statement->execute($params);
 
@@ -67,7 +98,7 @@ final class CounterpartyOffsetRepository extends BaseRepository
     {
         $statement = $this->db->prepare(
             'SELECT cri.*,
-                    GREATEST(cri.due_amount - COALESCE(account_used.allocated_amount, 0), 0) AS available_account_amount
+                    GREATEST(cri.outstanding_amount - COALESCE(account_used.allocated_amount, 0), 0) AS available_account_amount
              FROM customer_receivable_items cri
              INNER JOIN bookings b ON b.booking_reference = cri.booking_reference
              LEFT JOIN (
@@ -78,8 +109,8 @@ final class CounterpartyOffsetRepository extends BaseRepository
              ) account_used ON account_used.customer_receivable_item_id = cri.id
              WHERE b.business_source_id = :business_source_id
                AND cri.branch_id = :branch_id AND cri.currency = :currency
-               AND cri.due_amount > 0.005
-               AND GREATEST(cri.due_amount - COALESCE(account_used.allocated_amount, 0), 0) > 0.005
+               AND cri.status <> "cancelled" AND cri.outstanding_amount > 0.005
+               AND GREATEST(cri.outstanding_amount - COALESCE(account_used.allocated_amount, 0), 0) > 0.005
              ORDER BY COALESCE(cri.due_date, "9999-12-31"), cri.created_at, cri.id' . ($forUpdate ? ' FOR UPDATE' : '')
         );
         $statement->execute(['business_source_id' => $businessSourceId, 'branch_id' => $branchId, 'currency' => $currency]);
@@ -88,11 +119,14 @@ final class CounterpartyOffsetRepository extends BaseRepository
 
     public function openAccountPositionsForLink(int $businessSourceId, array $branchIds, bool $forUpdate = false): array
     {
+        if ($branchIds === []) {
+            return [];
+        }
         $params = ['business_source_id' => $businessSourceId];
         $branchSql = $this->branchSql('cri.branch_id', $branchIds, $params);
         $statement = $this->db->prepare(
             'SELECT cri.*, br.name AS branch_name,
-                    GREATEST(cri.due_amount - COALESCE(account_used.allocated_amount, 0), 0) AS available_account_amount
+                    GREATEST(cri.outstanding_amount - COALESCE(account_used.allocated_amount, 0), 0) AS available_account_amount
              FROM customer_receivable_items cri
              INNER JOIN bookings b ON b.booking_reference = cri.booking_reference
              INNER JOIN branches br ON br.id = cri.branch_id
@@ -103,8 +137,8 @@ final class CounterpartyOffsetRepository extends BaseRepository
                 GROUP BY aa.customer_receivable_item_id
              ) account_used ON account_used.customer_receivable_item_id = cri.id
              WHERE b.business_source_id = :business_source_id
-               AND cri.due_amount > 0.005
-               AND GREATEST(cri.due_amount - COALESCE(account_used.allocated_amount, 0), 0) > 0.005'
+               AND cri.status <> "cancelled" AND cri.outstanding_amount > 0.005
+               AND GREATEST(cri.outstanding_amount - COALESCE(account_used.allocated_amount, 0), 0) > 0.005'
              . $branchSql .
             ' ORDER BY br.name, cri.currency, COALESCE(cri.due_date, "9999-12-31"), cri.created_at, cri.id'
             . ($forUpdate ? ' FOR UPDATE' : '')
@@ -127,6 +161,9 @@ final class CounterpartyOffsetRepository extends BaseRepository
 
     public function openPayablesForLink(int $supplierId, array $branchIds, bool $forUpdate = false): array
     {
+        if ($branchIds === []) {
+            return [];
+        }
         $params = ['supplier_id' => $supplierId];
         $branchSql = $this->branchSql('so.branch_id', $branchIds, $params);
         $statement = $this->db->prepare(

@@ -6,18 +6,34 @@ $closingCards = array_values(array_filter(
         if (! is_array($card)) {
             return false;
         }
+        if (($card['group'] ?? '') === 'linked_roles') {
+            return false;
+        }
         $label = (string) ($card['label'] ?? '');
         if ($closingReport === 'customer_ledger') {
             return str_starts_with($label, 'Total Sale / ')
                 || str_starts_with($label, 'Total Received / ')
-                || str_starts_with($label, 'Total Outstanding / ');
+                || str_starts_with($label, 'Total Outstanding / ')
+                || str_starts_with($label, 'Total Customer Invoice Outstanding / ')
+                || str_starts_with($label, 'Customer Sale / ')
+                || str_starts_with($label, 'Customer Cash Received / ')
+                || str_starts_with($label, 'Customer Outstanding / ')
+                || str_starts_with($label, 'Invoice Outstanding / ');
         }
 
         return $closingReport === 'supplier_ledger'
             && (str_starts_with($label, 'Supplier Debit / ')
+                || str_starts_with($label, 'Supplier Ledger Debit / ')
                 || str_starts_with($label, 'Supplier Credit / ')
                 || str_starts_with($label, 'Gross Paid to Supplier / ')
-                || str_starts_with($label, 'Supplier Balance / '));
+                || str_starts_with($label, 'Supplier bills and adjustments / ')
+                || str_starts_with($label, 'Payments to suppliers / ')
+                || str_starts_with($label, 'Supplier Payments / ')
+                || str_starts_with($label, 'Supplier Balance / ')
+                || str_starts_with($label, 'Supplier Invoice Balance / ')
+                || str_starts_with($label, 'Payable to ')
+                || str_starts_with($label, 'Receivable from ')
+                || str_starts_with($label, 'Settled with '));
     }
 ));
 ?>
@@ -35,11 +51,11 @@ $closingCards = array_values(array_filter(
     <section class="ledger-closing-summary">
         <h3>Ledger Totals</h3>
         <?php if ($closingReport === 'supplier_ledger' && ($isLinkedPartyLedger ?? false)): ?>
-            <p>Combined totals for the linked account holder and supplier. This is a read-only net position and does not post an automatic adjustment.</p>
+            <p>Supplier-role totals only. The linked account receivable and combined net are shown separately above.</p>
         <?php elseif ($closingReport === 'supplier_ledger'): ?>
-            <p>Gross paid to supplier is historical payment activity, not the amount still owed. Use Supplier Balance for the net position.</p>
+            <p>Payments include advances and direct payments to suppliers. Supplier Balance shows the amount still payable or held as an advance.</p>
         <?php else: ?>
-            <p>Customer ledger totals for the selected filters and currencies.</p>
+            <p>Sales and receipts follow the selected filters. Invoice outstanding shows the current customer balance.</p>
         <?php endif; ?>
         <div class="ledger-closing-summary-grid">
             <?php foreach ($closingCards as $closingCard): ?>

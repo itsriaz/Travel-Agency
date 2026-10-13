@@ -89,9 +89,9 @@ assert.ok(source.includes('serviceSupplierRefundCurrencyLabel.textContent = sele
 assert.ok(source.includes('serviceSupplierRefundCurrencyInput instanceof HTMLInputElement'));
 console.log('[PASS] Same-currency FX hidden; cross-currency quote direction and internal conventions preserved');
 console.log('[PASS] Refund confirmation retains its rate date without changing shared FX');
-assert.ok(expectationControls.includes('Equivalent amount in ${target}'));
+assert.ok(expectationControls.includes('Supplier Refund in ${target}'));
 assert.ok(expectationControls.includes('review.hidden = source === target'));
-console.log('[PASS] Supplier expectation asks for a manual equivalent and keeps its audit date hidden');
+console.log('[PASS] Supplier comparison uses selected penalty currency and keeps its audit date hidden');
 console.log('[PASS] FX quotes display at most two decimals without changing untouched precise rates');
 console.log('[PASS] Resulting refund amounts round to whole figures with no decimal suffix');
 console.log('[PASS] Supplier refund form uses the expected supplier currency without a separate review popup');

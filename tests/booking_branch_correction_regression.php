@@ -45,40 +45,6 @@ $payloadFor = static function (array $booking, int $branchId): array {
     ];
 };
 
-$mismatchCount = static function (PDO $db, string $bookingReference, int $branchId): int {
-    $statement = $db->prepare(
-        'SELECT
-            (SELECT COUNT(*) FROM booking_services bs INNER JOIN bookings b ON b.id = bs.booking_id WHERE b.booking_reference = :service_reference AND bs.branch_id <> :service_branch)
-          + (SELECT COUNT(*) FROM customer_receivable_items WHERE booking_reference = :receivable_reference AND branch_id <> :receivable_branch)
-          + (SELECT COUNT(*) FROM supplier_obligations WHERE booking_reference = :obligation_reference AND branch_id <> :obligation_branch)
-          + (SELECT COUNT(*) FROM service_financial_corrections WHERE booking_reference = :correction_reference AND branch_id <> :correction_branch)
-          + (SELECT COUNT(*) FROM journal_entries je
-             WHERE je.booking_reference = :journal_reference
-               AND je.currency IN (
-                    SELECT bs.currency FROM booking_services bs INNER JOIN bookings b ON b.id = bs.booking_id WHERE b.booking_reference = :currency_reference
-                    UNION
-                    SELECT bs.cost_currency FROM booking_services bs INNER JOIN bookings b ON b.id = bs.booking_id WHERE b.booking_reference = :cost_currency_reference
-               )
-               AND je.branch_id <> :journal_branch) AS mismatches'
-    );
-    $statement->execute([
-        'service_reference' => $bookingReference,
-        'service_branch' => $branchId,
-        'receivable_reference' => $bookingReference,
-        'receivable_branch' => $branchId,
-        'obligation_reference' => $bookingReference,
-        'obligation_branch' => $branchId,
-        'correction_reference' => $bookingReference,
-        'correction_branch' => $branchId,
-        'journal_reference' => $bookingReference,
-        'currency_reference' => $bookingReference,
-        'cost_currency_reference' => $bookingReference,
-        'journal_branch' => $branchId,
-    ]);
-
-    return (int) $statement->fetchColumn();
-};
-
 echo 'Booking branch correction regression' . PHP_EOL;
 
 $movable = $repository->findBookingById(298);
@@ -89,14 +55,14 @@ if ($movable === null || (string) ($movable['booking_reference'] ?? '') !== 'BK-
 
 $db->beginTransaction();
 try {
+    $blocked = false;
     $toNoble = $payloadFor($movable, 2);
-    $repository->updateBooking(298, $toNoble['booking'], $toNoble['party']);
-    $check('Branch correction synchronizes current records to Noble', $mismatchCount($db, 'BK-000298', 2) === 0);
-
-    $nobleBooking = $repository->findBookingById(298);
-    $toImdad = $payloadFor((array) $nobleBooking, 1);
-    $repository->updateBooking(298, $toImdad['booking'], $toImdad['party']);
-    $check('Branch correction synchronizes current records back to Imdad', $mismatchCount($db, 'BK-000298', 1) === 0);
+    try {
+        $repository->updateBooking(298, $toNoble['booking'], $toNoble['party']);
+    } catch (RuntimeException $exception) {
+        $blocked = str_contains($exception->getMessage(), 'supplier payment');
+    }
+    $check('Existing bank receipt is not the blocker; cross-branch supplier payment still requires review', $blocked);
 } finally {
     if ($db->inTransaction()) {
         $db->rollBack();
@@ -116,9 +82,10 @@ try {
         $toImdad = $payloadFor($protected, 1);
         $repository->updateBooking(38, $toImdad['booking'], $toImdad['party']);
     } catch (RuntimeException $exception) {
-        $blocked = str_contains($exception->getMessage(), 'active receipt');
+        $blocked = str_contains($exception->getMessage(), 'supplier advance')
+            || str_contains($exception->getMessage(), 'money returned to the customer');
     }
-    $check('Cross-branch active treasury money blocks an unsafe branch change', $blocked);
+    $check('Historical returned receipt or shared supplier credit blocks an unsafe branch change', $blocked);
 } finally {
     if ($db->inTransaction()) {
         $db->rollBack();

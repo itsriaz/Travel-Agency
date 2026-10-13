@@ -19,18 +19,31 @@ final class AccountHolderReceiptService extends Service
     private const BOOKING_REFERENCE = 'ACCOUNT-HOLDER';
     private const ALLOWED_CURRENCIES = ['PKR', 'AED', 'USD'];
     private const ALLOWED_METHODS = ['cash', 'bank_transfer'];
+    private const ALLOWED_PAYER_ROLES = ['account_holder', 'supplier'];
 
     public function record(array $input, int $actorUserId, array $accessibleBranchIds): array
     {
         $this->assertFinancialAdminActor($actorUserId, 'Only a financial administrator can record an account-holder receipt.');
 
         $linkId = (int) ($input['link_id'] ?? 0);
-        $branchId = $this->accessibleBranchId((int) ($input['branch_id'] ?? 0), $accessibleBranchIds);
         $currency = $this->currency((string) ($input['currency'] ?? ''));
         $amount = $this->positiveMoney($input['amount'] ?? null);
         $receiptDate = $this->date((string) ($input['receipt_date'] ?? ''));
         $paymentMethod = $this->paymentMethod((string) ($input['payment_method'] ?? ''));
+        $payerRole = (string) ($input['payer_role'] ?? 'account_holder');
+        if (! in_array($payerRole, self::ALLOWED_PAYER_ROLES, true)) {
+            throw new RuntimeException('Please select who made this linked-party payment.');
+        }
         $treasuryAccountId = (int) ($input['treasury_account_id'] ?? 0);
+        $selectedAccount = (new TreasuryRepository($this->app))->findAccount($treasuryAccountId, $accessibleBranchIds);
+        if ($selectedAccount === null) {
+            throw new RuntimeException('Please select a cash or bank account in an accessible branch.');
+        }
+        $branchId = (int) $selectedAccount['branch_id'];
+        $submittedBranchId = (int) ($input['branch_id'] ?? 0);
+        if ($submittedBranchId > 0 && $submittedBranchId !== $branchId) {
+            throw new RuntimeException('The selected cash or bank account does not belong to the submitted branch.');
+        }
         $referenceNumber = $this->optionalText($input['reference_number'] ?? null, 100);
         $remarks = $this->optionalText($input['remarks'] ?? null, 4000);
 
@@ -60,6 +73,7 @@ final class AccountHolderReceiptService extends Service
                 'traveler_id' => null,
                 'business_source_id' => (int) $link['business_source_id'],
                 'receipt_purpose' => self::RECEIPT_PURPOSE,
+                'linked_payer_role' => $payerRole,
                 'booking_reference' => self::BOOKING_REFERENCE,
                 'receipt_no' => $receiptNo,
                 'receipt_date' => $receiptDate,
@@ -90,7 +104,7 @@ final class AccountHolderReceiptService extends Service
                 'entry_date' => $receiptDate,
                 'currency' => $currency,
                 'actor_user_id' => $actorUserId,
-                'narration' => 'Account-holder payment received from ' . (string) $link['business_source_name'],
+                'narration' => 'Linked-party payment received from ' . (string) ($payerRole === 'supplier' ? $link['supplier_name'] : $link['business_source_name']),
             ]);
 
             AuditLog::record($this->app, 'counterparty.account_holder_receipt.recorded', [
@@ -98,6 +112,8 @@ final class AccountHolderReceiptService extends Service
                 'link_id' => $linkId,
                 'business_source_id' => (int) $link['business_source_id'],
                 'supplier_id' => (int) $link['supplier_id'],
+                'payer_role' => $payerRole,
+                'payer_name' => (string) ($payerRole === 'supplier' ? $link['supplier_name'] : $link['business_source_name']),
                 'customer_receipt_id' => $receiptId,
                 'receipt_no' => $receiptNo,
                 'journal_entry_id' => $journalEntryId,
@@ -118,6 +134,7 @@ final class AccountHolderReceiptService extends Service
                 'journal_entry_id' => $journalEntryId,
                 'amount' => $amount,
                 'currency' => $currency,
+                'payer_role' => $payerRole,
             ];
         } catch (\Throwable $exception) {
             if ($startedTransaction && $db->inTransaction()) {
@@ -236,15 +253,6 @@ final class AccountHolderReceiptService extends Service
         }
 
         return $link;
-    }
-
-    private function accessibleBranchId(int $branchId, array $accessibleBranchIds): int
-    {
-        if ($branchId <= 0 || ! in_array($branchId, array_map('intval', $accessibleBranchIds), true)) {
-            throw new RuntimeException('Please select a valid accessible branch.');
-        }
-
-        return $branchId;
     }
 
     private function currency(string $value): string

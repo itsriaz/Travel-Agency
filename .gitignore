@@ -48,6 +48,7 @@ storage/release-packages/
 tmp/
 output/
 tmp_*.php
+scripts/__pycache__/
 
 ## Runtime logs and PHP session artifacts
 storage/logs/*
@@ -55,6 +56,7 @@ storage/logs/*
 storage/documents/*
 !storage/documents/.gitkeep
 storage/backups/*
+storage/*.sql
 storage/**/*.log
 storage/**/sess_*
 storage/keys/*

@@ -26,6 +26,9 @@ final class Router
 
     public function dispatch(string $method, string $uri): void
     {
+        if (class_exists(\App\Services\InvoiceSaveHttpTrace::class)) {
+            \App\Services\InvoiceSaveHttpTrace::checkpointActive('before_router_dispatch');
+        }
         $route = $this->routes[$method][$uri] ?? null;
 
         if ($route === null) {

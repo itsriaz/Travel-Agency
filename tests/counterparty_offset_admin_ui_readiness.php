@@ -37,7 +37,7 @@ $check(
     'Screen offers invoice pairs with one amount per pair and audited reversal history',
     str_contains($view, 'Manual Linked Settlements')
         && str_contains($view, 'Settlement History')
-        && str_contains(strtolower($view), 'account-holder receivables')
+        && str_contains($view, 'Open Account Invoices')
         && str_contains($view, 'Reverse')
         && str_contains($view, 'class="manual-account-select"')
         && str_contains($view, 'class="manual-payable-select"')
@@ -49,7 +49,7 @@ $check(
 );
 $check(
     'Manual adjustment form is non-cash and has no treasury fields',
-    str_contains(strtolower($view), 'no cash or bank money moves')
+    str_contains($view, 'No invoices are selected automatically, and no cash or bank money moves')
         && ! str_contains($manualForm, 'treasury_account_id')
         && ! str_contains($manualForm, 'payment_method')
         && ! str_contains($manualForm, 'name="amount"')

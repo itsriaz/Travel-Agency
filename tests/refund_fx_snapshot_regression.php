@@ -39,19 +39,36 @@ foreach (['customer', 'supplier'] as $role) {
         && $detail['refund_exchange_rate_direction'] === 'booking_to_refund'
         && abs($detail['refund_exchange_rate_to_booking'] - 50242 / 653) < 0.00000001);
     $input[$role . '_refund_exchange_rate'] = '';
-    try {
-        $normalize($input);
-        $check($role . ' missing cross-currency rate rejects, not inferred silently', false);
-    } catch (RuntimeException $exception) {
-        $check($role . ' missing cross-currency rate rejects, not inferred silently', str_contains($exception->getMessage(), 'exchange rate'));
+    if ($role === 'customer') {
+        $derived = $normalize($input);
+        $check('Customer payout stores exact PKR amount and derives its relationship to AED credit without a rate prompt',
+            $derived['refund_source_amount'] === 50242.0 && $derived['refund_currency'] === 'PKR'
+            && abs($derived['refund_exchange_rate_to_booking'] - 50242 / 653) < 0.00000001);
+    } else {
+        try {
+            $normalize($input);
+            $check('Supplier missing cross-currency rate rejects, not inferred silently', false);
+        } catch (RuntimeException $exception) {
+            $check('Supplier missing cross-currency rate rejects, not inferred silently', str_contains($exception->getMessage(), 'exchange rate'));
+        }
     }
     $input[$role . '_refund_currency'] = 'AED';
     $input[$role . '_refund_amount'] = 653;
+    $input[$role . '_refund_source_amount'] = 653;
     $input[$role . '_refund_exchange_rate'] = '0';
     $same = $normalize($input);
     $check($role . ' same-currency refund needs no submitted FX and uses internal identity only',
         $same['refund_exchange_rate_to_booking'] === 1.0 && $same['refund_rate_date'] === null
         && $same['refund_source_amount'] === 653.0);
+    if ($role === 'customer') {
+        try {
+            $normalize(array_replace($input, ['customer_refund_source_amount' => 15000]));
+            $check('Same-currency customer payout cannot relabel PKR 15,000 as AED 653', false);
+        } catch (RuntimeException $exception) {
+            $check('Same-currency customer payout cannot relabel PKR 15,000 as AED 653',
+                str_contains($exception->getMessage(), 'must match'));
+        }
+    }
 }
 
 $supplierSource = [

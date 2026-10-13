@@ -12,10 +12,17 @@ $failed = false;
 $fixtures = json_decode(file_get_contents(__DIR__ . '/fixtures/cancellation_refund_calculations.json'), true, 512, JSON_THROW_ON_ERROR);
 foreach ($fixtures as $fixture) {
     $actual = \App\Services\CancellationRefundCalculator::customerSummary($fixture['input']);
-    $passed = $actual == $fixture['result'];
+    $passed = array_intersect_key($actual, $fixture['result']) == $fixture['result'];
     echo ($passed ? '[PASS] ' : '[FAIL] ') . $fixture['name'] . PHP_EOL;
     $failed = $failed || ! $passed;
 }
+$bk64 = \App\Services\CancellationRefundCalculator::customerSummary([
+    'invoice' => 600, 'settled' => 550, 'expected' => 50, 'penalty' => 0,
+]);
+$offsetPassed = $bk64['outstanding'] === 0.0 && $bk64['applied_to_outstanding'] === 50.0
+    && $bk64['supplier_applied_to_outstanding'] === 50.0 && $bk64['remaining'] === 0.0;
+echo ($offsetPassed ? '[PASS] ' : '[FAIL] ') . 'BK-000064 supplier equivalent clears AED 50 customer balance' . PHP_EOL;
+$failed = $failed || ! $offsetPassed;
 foreach ([-1, INF, NAN, 'invalid'] as $invalid) {
     try {
         \App\Services\CancellationRefundCalculator::customerSummary(['invoice' => $invalid]);

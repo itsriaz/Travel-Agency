@@ -99,6 +99,9 @@ if ($selectedReport === 'customer_advance_ledger') {
 
 if ($selectedReport === 'cash_bank_ledger') {
     $metaCards[] = ['label' => 'Source', 'value' => $selectedSourceLabel];
+    if (trim((string) ($filters['cashBankReference'] ?? '')) !== '') {
+        $metaCards[] = ['label' => 'Reference / Booking / Receipt', 'value' => (string) $filters['cashBankReference']];
+    }
     $selectedTreasuryAccountId = (int) ($filters['treasuryAccountId'] ?? 0);
     $selectedTreasuryAccountLabel = 'All Treasury Accounts';
     foreach ($treasuryAccountOptions as $treasuryAccountOption) {
@@ -127,12 +130,12 @@ $formatLedgerBalance = static function (string $value, string $report) use ($isL
 
     $amount = (float) $numeric;
     if (abs($amount) < 0.005) {
-        return number_format(0, $isLinkedPartyLedger ? 0 : 2);
+        return number_format(0, 2);
     }
 
     if ($report === 'supplier_ledger') {
         if ($isLinkedPartyLedger) {
-            return number_format(abs($amount), 0) . ($amount > 0 ? ' Payable' : ' Receivable');
+            return number_format(abs($amount), 2) . ($amount > 0 ? ' Payable' : ' Receivable');
         }
         $isAdvance = stripos($text, 'advance') !== false || ($amount < 0 && stripos($text, 'payable') === false);
 
@@ -161,6 +164,16 @@ $displayValue = static function (array $row, array $column) use ($formatDate, $f
 
     return $value !== '' ? $value : '-';
 };
+$supplierPrintColumnWeights = [
+    'supplier_name' => 12, 'ledger_date' => 6, 'booking_reference' => 9,
+    'entry_type' => 14, 'passenger_name' => 10, 'route' => 6,
+    'currency' => 4, 'debit_amount' => 8, 'credit_amount' => 8,
+    'balance_amount' => 9, 'trace' => 12,
+];
+$supplierPrintColumnTotal = $selectedReport === 'supplier_ledger' ? array_sum(array_map(
+    static fn (array $column): int => $supplierPrintColumnWeights[(string) ($column['key'] ?? '')] ?? 8,
+    $columns
+)) : 0;
 ?>
 <style>
     .report-print-shell {
@@ -415,6 +428,7 @@ $displayValue = static function (array $row, array $column) use ($formatDate, $f
         }
 
         .report-print-shell {
+            width: 100%;
             max-width: none;
             padding: 0;
             background: #fff;
@@ -424,6 +438,41 @@ $displayValue = static function (array $row, array $column) use ($formatDate, $f
             border: none;
             border-radius: 0;
             box-shadow: none;
+            overflow: visible;
+        }
+
+        .report-print-table-wrap {
+            width: 100%;
+            padding: 2mm 0 0;
+            overflow: visible;
+        }
+
+        .supplier-ledger-trace-table {
+            width: 100%;
+            min-width: 0;
+            table-layout: fixed;
+        }
+
+        .supplier-ledger-trace-table th,
+        .supplier-ledger-trace-table td {
+            box-sizing: border-box;
+            min-width: 0 !important;
+            width: auto !important;
+            max-width: none !important;
+            padding: 1mm 0.8mm;
+            font-size: 8px;
+            line-height: 1.15;
+            white-space: normal;
+            overflow-wrap: anywhere;
+        }
+
+        .report-print-table thead {
+            display: table-header-group;
+        }
+
+        .report-print-table tr {
+            break-inside: avoid;
+            page-break-inside: avoid;
         }
 
         .no-print {
@@ -466,7 +515,7 @@ $displayValue = static function (array $row, array $column) use ($formatDate, $f
                     <strong><?= e((string) count($rows)) ?></strong>
                 </div>
             <?php endif; ?>
-            <?php foreach ($selectedReport === 'cash_bank_ledger' ? $summaryCards : array_slice($summaryCards, 0, 7) as $summaryCard): ?>
+            <?php foreach (($selectedReport === 'cash_bank_ledger' || $isLinkedPartyLedger) ? $summaryCards : array_slice($summaryCards, 0, 7) as $summaryCard): ?>
                 <div class="report-print-summary-card">
                     <span><?= e((string) ($summaryCard['label'] ?? 'Summary')) ?></span>
                     <strong><?= e((string) ($summaryCard['value'] ?? '-')) ?></strong>
@@ -476,6 +525,13 @@ $displayValue = static function (array $row, array $column) use ($formatDate, $f
 
         <div class="report-print-table-wrap">
             <table class="report-print-table<?= $showTraceColumn ? ' supplier-ledger-trace-table' : '' ?>">
+                <?php if ($selectedReport === 'supplier_ledger'): ?>
+                    <colgroup>
+                        <?php foreach ($columns as $column): ?>
+                            <col style="width: <?= e(number_format(100 * ($supplierPrintColumnWeights[(string) ($column['key'] ?? '')] ?? 8) / max(1, $supplierPrintColumnTotal), 3, '.', '')) ?>%">
+                        <?php endforeach; ?>
+                    </colgroup>
+                <?php endif; ?>
                 <thead>
                     <tr>
                         <?php foreach ($columns as $column): ?>
@@ -498,7 +554,10 @@ $displayValue = static function (array $row, array $column) use ($formatDate, $f
                                 $bookingId = (int) ($row['booking_id'] ?? 0);
                                 ?>
                                 <td>
-                                    <?php if ($bookingId > 0 && $hasBookingColumn($columnKey)): ?>
+                                    <?php if ($selectedReport === 'cash_bank_ledger' && $columnKey === 'reference'): ?>
+                                        <?php if ((string) ($row['reference_href'] ?? '') !== ''): ?><a class="report-print-booking" href="<?= e((string) $row['reference_href']) ?>"><?= e($cellValue) ?></a><?php else: ?><?= e($cellValue) ?><?php endif; ?>
+                                        <?php if ((string) ($row['booking_reference'] ?? '') !== ''): ?><br><small>Booking: <?php if ((string) ($row['booking_reference_href'] ?? '') !== ''): ?><a class="report-print-booking" href="<?= e((string) $row['booking_reference_href']) ?>"><?= e((string) $row['booking_reference']) ?></a><?php else: ?><?= e((string) $row['booking_reference']) ?><?php endif; ?></small><?php endif; ?>
+                                    <?php elseif ($bookingId > 0 && $hasBookingColumn($columnKey)): ?>
                                         <a class="report-print-booking" href="<?= e(url('/workspace?booking_id=' . $bookingId)) ?>"><?= e($cellValue) ?></a>
                                     <?php else: ?>
                                         <?= e($cellValue) ?>

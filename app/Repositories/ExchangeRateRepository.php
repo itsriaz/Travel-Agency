@@ -99,6 +99,9 @@ final class ExchangeRateRepository extends BaseRepository
         if ($rate <= 0) {
             throw new RuntimeException('Exchange rate must be greater than zero.');
         }
+        if (abs($rate - 1.0) <= 0.00000001) {
+            throw new RuntimeException('A 1:1 exchange rate cannot be saved for different currencies.');
+        }
 
         $statement = $this->db->prepare(
             'INSERT INTO booking_exchange_rates (
@@ -223,6 +226,9 @@ final class ExchangeRateRepository extends BaseRepository
 
         if ($rate <= 0) {
             throw new RuntimeException('Exchange rate must be greater than zero.');
+        }
+        if ($fromCurrency !== $toCurrency && abs($rate - 1.0) <= 0.00000001) {
+            throw new RuntimeException('A 1:1 exchange rate cannot be saved for different currencies.');
         }
 
         $statement = $this->db->prepare(

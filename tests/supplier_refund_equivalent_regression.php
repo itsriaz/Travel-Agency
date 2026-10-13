@@ -31,6 +31,13 @@ $check('Zero penalty uses server-loaded original booking FX without a new equiva
     $reused['expected_supplier_refund_equivalent_amount'] === 1180.0
     && $reused['expected_supplier_refund_exchange_rate'] === 0.01302083
     && $reused['expected_supplier_refund_conversion_basis'] === 'saved_booking_rate');
+$manualZeroPenalty = $method->invoke($workspace, array_replace($zeroPenalty, [
+    'expected_supplier_refund_equivalent_amount' => 1200,
+]), 'AED', $recorded);
+$check('Zero penalty accepts a reviewed manual comparison instead of overwriting it with the saved rate',
+    $manualZeroPenalty['expected_supplier_refund_equivalent_amount'] === 1200.0
+    && $manualZeroPenalty['expected_supplier_refund_conversion_basis'] === 'manual_equivalent'
+    && round(90605 * $manualZeroPenalty['expected_supplier_refund_exchange_rate'], 0) === 1200.0);
 foreach ([array_replace($recorded, ['pricing_exchange_rate' => 0]), array_replace($recorded, ['cost_currency' => 'USD'])] as $missing) {
     try { $method->invoke($workspace, $zeroPenalty, 'AED', $missing); $pass = false; }
     catch (RuntimeException $e) { $pass = str_contains($e->getMessage(), 'equivalent amount'); }

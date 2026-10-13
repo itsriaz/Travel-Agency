@@ -203,6 +203,31 @@ try {
 
     $cancelEvent = $eventRepository->latestPostedEvent($serviceId, 'cancel') ?? [];
     $cancelPayload = json_decode((string) ($cancelEvent['payload_json'] ?? '{}'), true) ?: [];
+    // Recreate the historical cash-refund state before exercising its combined event.
+    $supplierRepository->reverseRetainedRefundAdvanceConversion(
+        (array) ($cancelPayload['supplier_credit_converted_advance_ids'] ?? []),
+        $actorUserId,
+        'Rollback-only legacy combined refund fixture'
+    );
+    foreach ([
+        'supplier_credit_recording_version',
+        'supplier_credit_recorded_source_amount',
+        'supplier_credit_recorded_booking_amount',
+        'supplier_credit_recorded_currency',
+        'supplier_credit_converted_payment_amount',
+        'supplier_credit_converted_advance_ids',
+    ] as $legacyField) {
+        unset($cancelPayload[$legacyField]);
+    }
+    $eventRepository->updateCancellationFinancials((int) $cancelEvent['id'], [
+        'penalty_amount' => $cancelEvent['penalty_amount'],
+        'customer_credit_amount' => $cancelEvent['customer_credit_amount'],
+        'supplier_credit_amount' => $cancelEvent['supplier_credit_amount'],
+        'journal_entry_id' => $cancelEvent['journal_entry_id'],
+        'reason' => $cancelEvent['reason'],
+        'notes' => $cancelEvent['notes'],
+        'payload_json' => $cancelPayload,
+    ]);
     $customerConsumption = $customerRepository->applyRefundAgainstBookingReceiptCredit(
         $bookingReference,
         'PKR',

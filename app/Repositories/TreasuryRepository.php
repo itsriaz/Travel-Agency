@@ -157,10 +157,15 @@ final class TreasuryRepository extends BaseRepository
         return $rows;
     }
 
-    public function recentTransfers(array $branchIds, int $limit = 20): array
+    public function recentTransfers(array $branchIds, int $limit = 20, string $transactionGroup = 'all'): array
     {
         $branchIds = array_values(array_map('intval', $branchIds));
         $limit = max(1, min($limit, 100));
+        $typeFilter = match ($transactionGroup) {
+            'direct' => "AND tt.transaction_type IN ('adjustment_increase', 'adjustment_decrease')",
+            'transfer' => "AND tt.transaction_type IN ('cash_deposit_to_bank', 'bank_withdrawal_to_cash', 'bank_to_bank_transfer', 'cash_to_cash_transfer')",
+            default => '',
+        };
 
         if ($branchIds === []) {
             return [];
@@ -230,6 +235,7 @@ final class TreasuryRepository extends BaseRepository
              LEFT JOIN users u ON u.id = tt.created_by_user_id
              LEFT JOIN users void_user ON void_user.id = tt.voided_by_user_id
              WHERE tt.branch_id IN ({$placeholders})
+             {$typeFilter}
              ORDER BY tt.transaction_date DESC, tt.id DESC
              LIMIT {$limit}"
         );
@@ -339,14 +345,6 @@ final class TreasuryRepository extends BaseRepository
             }
 
             $account = $this->validatedTransferAccount($treasuryAccountId, $branchId, $currency);
-            $availableBalance = $this->currentBalanceForAccountId($treasuryAccountId);
-            if ($transactionType === 'adjustment_decrease' && round($availableBalance + 0.005, 2) < $amount) {
-                throw new RuntimeException(
-                    'Selected treasury account does not have enough balance. Available: '
-                    . number_format($availableBalance, 2)
-                    . ' ' . $currency . '.'
-                );
-            }
 
             $counterpartyName = trim((string) ($data['counterparty_name'] ?? ''));
             $counterpartyName = $counterpartyName !== '' ? mb_substr($counterpartyName, 0, 190) : null;
@@ -486,13 +484,17 @@ final class TreasuryRepository extends BaseRepository
                 throw new RuntimeException('Please enter the correction reason before saving the treasury entry edit.');
             }
 
+            $correctionDate = date('Y-m-d');
             $voidResult = $this->voidTransfer(
                 $transactionId,
                 'Correction: ' . mb_substr($correctionReason, 0, 500),
                 $actorUserId,
-                $branchIds
+                $branchIds,
+                $correctionDate
             );
-            $newTransactionId = $this->saveDirectEntry($data, $branchIds);
+            $newTransactionId = $this->saveDirectEntry(array_merge($data, [
+                'transaction_date' => $correctionDate,
+            ]), $branchIds);
 
             AuditLog::record($this->app, 'treasury.direct_entry.corrected', [
                 'user_id' => $actorUserId,
@@ -1097,15 +1099,6 @@ final class TreasuryRepository extends BaseRepository
                 throw new RuntimeException('Cross-branch/currency treasury transfers require migration 20260825_000076.');
             }
 
-            $availableSourceBalance = $this->currentBalanceForAccountId($fromAccountId);
-            if (round($availableSourceBalance + 0.005, 2) < $sourceAmount) {
-                throw new RuntimeException(
-                    'Selected source treasury account does not have enough balance for this transfer. Available: '
-                    . number_format($availableSourceBalance, 2)
-                    . ' ' . $sourceCurrency . '.'
-                );
-            }
-
             $fromType = (string) ($fromAccount['account_type'] ?? '');
             $toType = (string) ($toAccount['account_type'] ?? '');
 
@@ -1280,6 +1273,8 @@ final class TreasuryRepository extends BaseRepository
                 }
             }
 
+            $this->assertPostedTransferJournalIntegrity($transferId);
+
             AuditLog::record($this->app, 'treasury.transfer.posted', [
                 'user_id' => $data['created_by_user_id'] ?? null,
                 'treasury_transaction_id' => $transferId,
@@ -1306,6 +1301,129 @@ final class TreasuryRepository extends BaseRepository
 
             return $transferId;
         });
+    }
+
+    public function assertPostedTransferJournalIntegrity(int $transferId): void
+    {
+        $sourceBranchColumn = $this->columnExists('treasury_transactions', 'source_branch_id')
+            ? 'tt.source_branch_id' : 'tt.branch_id AS source_branch_id';
+        $destinationBranchColumn = $this->columnExists('treasury_transactions', 'destination_branch_id')
+            ? 'tt.destination_branch_id' : 'tt.branch_id AS destination_branch_id';
+        $sourceCurrencyColumn = $this->columnExists('treasury_transactions', 'source_currency')
+            ? 'tt.source_currency' : 'tt.currency AS source_currency';
+        $destinationCurrencyColumn = $this->columnExists('treasury_transactions', 'destination_currency')
+            ? 'tt.destination_currency' : 'tt.currency AS destination_currency';
+        $sourceAmountColumn = $this->columnExists('treasury_transactions', 'source_amount')
+            ? 'tt.source_amount' : 'tt.amount AS source_amount';
+        $destinationAmountColumn = $this->columnExists('treasury_transactions', 'destination_amount')
+            ? 'tt.destination_amount' : 'tt.amount AS destination_amount';
+        $destinationJournalColumn = $this->columnExists('treasury_transactions', 'destination_journal_entry_id')
+            ? 'tt.destination_journal_entry_id' : 'NULL AS destination_journal_entry_id';
+        $statement = $this->db->prepare(
+            'SELECT tt.id, tt.status, tt.transaction_date, tt.branch_id, tt.currency,
+                    ' . $sourceBranchColumn . ', ' . $destinationBranchColumn . ',
+                    ' . $sourceCurrencyColumn . ', ' . $destinationCurrencyColumn . ',
+                    ' . $sourceAmountColumn . ', ' . $destinationAmountColumn . ',
+                    tt.amount, tt.journal_entry_id, ' . $destinationJournalColumn . ',
+                    source_ta.linked_account_id AS source_account_id,
+                    destination_ta.linked_account_id AS destination_account_id
+             FROM treasury_transactions tt
+             INNER JOIN treasury_accounts source_ta ON source_ta.id = tt.from_treasury_account_id
+             INNER JOIN treasury_accounts destination_ta ON destination_ta.id = tt.to_treasury_account_id
+             WHERE tt.id = :id'
+        );
+        $statement->execute(['id' => $transferId]);
+        $transfer = $statement->fetch(PDO::FETCH_ASSOC);
+        if (!$transfer || $transfer['status'] !== 'posted') {
+            throw new RuntimeException('Posted treasury transfer is missing or not posted.');
+        }
+
+        $sourceBranch = (int) ($transfer['source_branch_id'] ?? $transfer['branch_id']);
+        $destinationBranch = (int) ($transfer['destination_branch_id'] ?? $transfer['branch_id']);
+        $sourceCurrency = (string) ($transfer['source_currency'] ?? $transfer['currency']);
+        $destinationCurrency = (string) ($transfer['destination_currency'] ?? $transfer['currency']);
+        $sourceAmount = round((float) ($transfer['source_amount'] ?? $transfer['amount']), 2);
+        $destinationAmount = round((float) ($transfer['destination_amount'] ?? $transfer['amount']), 2);
+        $crossDimension = $sourceBranch !== $destinationBranch || $sourceCurrency !== $destinationCurrency;
+        $sourceJournalId = (int) ($transfer['journal_entry_id'] ?? 0);
+        $destinationJournalId = (int) ($transfer['destination_journal_entry_id'] ?? 0);
+        if ($sourceAmount <= 0 || $destinationAmount <= 0 || $sourceJournalId <= 0
+            || ($crossDimension && ($destinationJournalId <= 0 || $sourceJournalId === $destinationJournalId))
+            || (!$crossDimension && $destinationJournalId > 0)) {
+            throw new RuntimeException('Posted treasury transfer has incomplete journal links.');
+        }
+
+        $journalRows = function (int $journalId): array {
+            $query = $this->db->prepare(
+                'SELECT je.branch_id, je.currency, je.entry_date, je.source_type, je.source_reference,
+                        jel.account_id, coa.code AS account_code, jel.debit_amount, jel.credit_amount
+                 FROM journal_entries je
+                 INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+                 INNER JOIN chart_of_accounts coa ON coa.id = jel.account_id
+                 WHERE je.id = :id ORDER BY jel.id'
+            );
+            $query->execute(['id' => $journalId]);
+            return $query->fetchAll(PDO::FETCH_ASSOC);
+        };
+        $matches = static fn (mixed $actual, float $expected): bool => abs((float) $actual - $expected) < 0.005;
+        $sourceRows = $journalRows($sourceJournalId);
+        if (count($sourceRows) !== 2
+            || (int) $sourceRows[0]['branch_id'] !== $sourceBranch
+            || $sourceRows[0]['currency'] !== $sourceCurrency
+            || $sourceRows[0]['entry_date'] !== $transfer['transaction_date']
+            || $sourceRows[0]['source_type'] !== 'treasury_transfer_posted') {
+            throw new RuntimeException('Posted treasury transfer source journal does not match its transfer.');
+        }
+        if ($crossDimension) {
+            $sourceCash = array_values(array_filter($sourceRows, static fn (array $row): bool =>
+                (int) $row['account_id'] === (int) $transfer['source_account_id']));
+            $sourceClearingCode = $sourceBranch !== $destinationBranch
+                ? 'INTERBRANCH_TRANSFER_RECEIVABLE' : 'TREASURY_FX_CLEARING';
+            $sourceClearing = array_values(array_filter($sourceRows, static fn (array $row): bool =>
+                $row['account_code'] === $sourceClearingCode));
+            if ($sourceRows[0]['source_reference'] !== 'TR-' . $transferId . '-SOURCE'
+                || count($sourceCash) !== 1 || count($sourceClearing) !== 1
+                || !$matches($sourceCash[0]['credit_amount'], $sourceAmount)
+                || !$matches($sourceCash[0]['debit_amount'], 0)
+                || !$matches($sourceClearing[0]['debit_amount'], $sourceAmount)
+                || !$matches($sourceClearing[0]['credit_amount'], 0)) {
+                throw new RuntimeException('Posted treasury transfer source cash or clearing line is incorrect.');
+            }
+
+            $destinationRows = $journalRows($destinationJournalId);
+            $destinationCash = array_values(array_filter($destinationRows, static fn (array $row): bool =>
+                (int) $row['account_id'] === (int) $transfer['destination_account_id']));
+            $destinationClearingCode = $sourceBranch !== $destinationBranch
+                ? 'INTERBRANCH_TRANSFER_PAYABLE' : 'TREASURY_FX_CLEARING';
+            $destinationClearing = array_values(array_filter($destinationRows, static fn (array $row): bool =>
+                $row['account_code'] === $destinationClearingCode));
+            if (count($destinationRows) !== 2
+                || (int) $destinationRows[0]['branch_id'] !== $destinationBranch
+                || $destinationRows[0]['currency'] !== $destinationCurrency
+                || $destinationRows[0]['entry_date'] !== $transfer['transaction_date']
+                || $destinationRows[0]['source_type'] !== 'treasury_transfer_posted'
+                || $destinationRows[0]['source_reference'] !== 'TR-' . $transferId . '-DESTINATION'
+                || count($destinationCash) !== 1 || count($destinationClearing) !== 1
+                || !$matches($destinationCash[0]['debit_amount'], $destinationAmount)
+                || !$matches($destinationCash[0]['credit_amount'], 0)
+                || !$matches($destinationClearing[0]['credit_amount'], $destinationAmount)
+                || !$matches($destinationClearing[0]['debit_amount'], 0)) {
+                throw new RuntimeException('Posted treasury transfer destination cash or clearing line is incorrect.');
+            }
+            return;
+        }
+
+        $sourceCash = array_values(array_filter($sourceRows, static fn (array $row): bool =>
+            (int) $row['account_id'] === (int) $transfer['source_account_id']));
+        $destinationCash = array_values(array_filter($sourceRows, static fn (array $row): bool =>
+            (int) $row['account_id'] === (int) $transfer['destination_account_id']));
+        if (count($sourceCash) !== 1 || count($destinationCash) !== 1
+            || !$matches($sourceCash[0]['credit_amount'], $sourceAmount)
+            || !$matches($sourceCash[0]['debit_amount'], 0)
+            || !$matches($destinationCash[0]['debit_amount'], $destinationAmount)
+            || !$matches($destinationCash[0]['credit_amount'], 0)) {
+            throw new RuntimeException('Posted treasury transfer cash lines do not match its transfer.');
+        }
     }
 
     public function correctTransfer(array $data, int $actorUserId, array $branchIds): array
@@ -1361,11 +1479,12 @@ final class TreasuryRepository extends BaseRepository
         });
     }
 
-    public function voidTransfer(int $transferId, string $voidReason, int $actorUserId, array $branchIds): array
+    public function voidTransfer(int $transferId, string $voidReason, int $actorUserId, array $branchIds, ?string $reversalDate = null): array
     {
         $branchIds = array_values(array_map('intval', $branchIds));
+        $reversalDate ??= date('Y-m-d');
 
-        return $this->transaction(function () use ($transferId, $voidReason, $actorUserId, $branchIds): array {
+        return $this->transaction(function () use ($transferId, $voidReason, $actorUserId, $branchIds, $reversalDate): array {
             $hasDestinationJournal = $this->columnExists('treasury_transactions', 'destination_journal_entry_id');
             $hasDestinationReversal = $this->columnExists('treasury_transactions', 'destination_reversal_journal_entry_id');
             $optionalColumn = fn (string $name): string => $this->columnExists('treasury_transactions', $name)
@@ -1437,13 +1556,13 @@ final class TreasuryRepository extends BaseRepository
                 $reversalJournalEntryId = $accounting->reverseJournalEntry($sourceJournalId, [
                     'source_type' => 'treasury_transfer_void_reversed',
                     'source_reference' => 'VOID-TR-' . $transferId . '-SOURCE',
-                    'entry_date' => date('Y-m-d'),
+                    'entry_date' => $reversalDate,
                     'actor_user_id' => $actorUserId,
                 ]);
                 $destinationReversalJournalEntryId = $accounting->reverseJournalEntry($destinationJournalId, [
                     'source_type' => 'treasury_transfer_void_reversed',
                     'source_reference' => 'VOID-TR-' . $transferId . '-DESTINATION',
-                    'entry_date' => date('Y-m-d'),
+                    'entry_date' => $reversalDate,
                     'actor_user_id' => $actorUserId,
                 ]);
                 if ($reversalJournalEntryId === null || $destinationReversalJournalEntryId === null) {
@@ -1454,7 +1573,7 @@ final class TreasuryRepository extends BaseRepository
                 ? $accounting->postDirectTreasuryEntryVoidReversal([
                     'journal_entry_id' => (int) ($transfer['journal_entry_id'] ?? 0),
                     'branch_id' => $branchId,
-                    'entry_date' => date('Y-m-d'),
+                    'entry_date' => $reversalDate,
                     'currency' => (string) ($transfer['currency'] ?? 'PKR'),
                     'source_reference' => 'VOID-DTE-' . $transferId,
                     'narration' => 'Direct treasury entry void reversal for transaction #' . $transferId,
@@ -1463,7 +1582,7 @@ final class TreasuryRepository extends BaseRepository
                 : $accounting->postTreasuryTransferVoidReversal([
                     'journal_entry_id' => (int) ($transfer['journal_entry_id'] ?? 0),
                     'branch_id' => $branchId,
-                    'entry_date' => date('Y-m-d'),
+                    'entry_date' => $reversalDate,
                     'currency' => (string) ($transfer['currency'] ?? 'PKR'),
                     'source_reference' => 'VOID-TR-' . $transferId,
                     'narration' => 'Treasury transfer void reversal for transfer #' . $transferId,
@@ -1588,7 +1707,6 @@ final class TreasuryRepository extends BaseRepository
                  INNER JOIN journal_entries je ON je.id = jel.journal_entry_id
                  WHERE ta_match.account_code IS NOT NULL
                    AND ta_match.account_code <> \'\'
-                   AND je.branch_id = ta_match.branch_id
                    AND je.currency = ta_match.currency
                  GROUP BY ta_match.id
              ) AS journal_balance ON journal_balance.treasury_account_id = ta.id

@@ -20,7 +20,9 @@ final class LinkedPartyLedgerService extends Service
             if ((bool) ($row['is_financial_position_only'] ?? false)) {
                 $debit = $sourceDebit;
                 $credit = $sourceCredit;
-            } elseif (in_array($entry, ['Customer payment received', 'Customer advance received', 'Net payment received'], true)) {
+            } elseif ($entry === 'Net payment received') {
+                $credit = $sourceDebit + $sourceCredit;
+            } elseif (in_array($entry, ['Customer payment received', 'Customer advance received'], true)) {
                 $credit = $sourceDebit;
             } elseif ($entry === 'Account balance applied to linked supplier') {
                 // Keep both legs of a manual linked adjustment visible. The supplier
@@ -70,7 +72,7 @@ final class LinkedPartyLedgerService extends Service
             if ($currency !== '' && $row['currency'] !== $currency) {
                 continue;
             }
-            $key = $row['branch_id'] . '|' . $row['currency'];
+            $key = $row['currency'];
             $delta = $row['raw_debit_amount'] - $row['raw_credit_amount'];
             if ($dateFrom !== null && $row['entry_date_raw'] < $dateFrom) {
                 $opening[$key] = round(($opening[$key] ?? 0.0) + $delta, 2);
@@ -93,7 +95,7 @@ final class LinkedPartyLedgerService extends Service
         $openingShown = [];
         $rows = [];
         foreach ($displayRows as $row) {
-            $key = $row['branch_id'] . '|' . $row['currency'];
+            $key = $row['currency'];
             if ($dateFrom !== null && ! isset($openingShown[$key]) && abs($opening[$key] ?? 0.0) > 0.005) {
                 $rows[] = $this->openingRow($row, $dateFrom, $running[$key]);
                 $openingShown[$key] = true;
@@ -129,11 +131,12 @@ final class LinkedPartyLedgerService extends Service
         foreach ($totals as $key => $total) {
             $balance = round(($opening[$key] ?? 0.0) + ($total['debit'] ?? 0.0) - ($total['credit'] ?? 0.0), 2);
             $footerRows[] = [
-                '_label' => 'Total ' . $total['branch_name'] . ' / ' . $total['currency'],
+                '_label' => 'Total ' . $total['currency'] . ' / all branches',
                 'currency' => $total['currency'],
                 'debit_amount' => $this->money((float) ($total['debit'] ?? 0.0)),
                 'credit_amount' => $this->money((float) ($total['credit'] ?? 0.0)),
                 'balance_amount' => $this->balance($balance),
+                'raw_balance_amount' => $balance,
             ];
         }
 
@@ -163,7 +166,10 @@ final class LinkedPartyLedgerService extends Service
             $row['balance_amount'] = $this->balance($balance);
             $row['supplier_name'] = $supplierName;
             $row['ledger_date'] = (string) ($row['booking_date'] ?? '');
-            $row['entry_type'] = (string) ($row['ledger_entry'] ?? '');
+            $payerName = trim((string) ($row['linked_payer_name'] ?? ''));
+            $row['entry_type'] = (string) ($row['ledger_entry'] ?? '') === 'Net payment received'
+                ? ($payerName !== '' ? 'Received from ' . $payerName : 'Linked payment received')
+                : (string) ($row['ledger_entry'] ?? '');
             $row['trace'] = (string) ($row['transaction_note'] ?? '');
             $rows[] = $row;
         }
@@ -179,6 +185,7 @@ final class LinkedPartyLedgerService extends Service
                 'debit_amount' => $this->money($debit),
                 'credit_amount' => $this->money($credit),
                 'balance_amount' => $this->balance($balance),
+                'raw_balance_amount' => -1 * (float) ($footerRow['raw_balance_amount'] ?? 0),
             ];
         }
 
@@ -187,6 +194,45 @@ final class LinkedPartyLedgerService extends Service
             'footerRows' => $footerRows,
             'summaryCards' => $this->supplierSummaryCards($footerRows),
         ];
+    }
+
+    public static function netBalanceLabel(
+        ?float $agencyNet,
+        string $currency,
+        string $accountName = '',
+        string $supplierName = '',
+        ?float $accountBalance = null,
+        ?float $supplierBalance = null
+    ): string
+    {
+        if ($agencyNet === null) {
+            return 'Difference unavailable / ' . $currency;
+        }
+        if ($agencyNet > 0.005) {
+            if ($accountName !== '' && ($accountBalance === null || $accountBalance > 0.005)) {
+                return 'Net receivable from ' . $accountName . ' / ' . $currency;
+            }
+            if ($supplierName !== '') {
+                return 'Net receivable from ' . $supplierName . ' / ' . $currency;
+            }
+            return 'Receivable exceeds payable / ' . $currency;
+        }
+        if ($agencyNet < -0.005) {
+            if ($accountBalance !== null && $accountBalance < -0.005) {
+                if ($supplierBalance !== null && $supplierBalance > 0.005 && $accountName !== '' && $supplierName !== '') {
+                    return 'Net payable to ' . $accountName . ' and ' . $supplierName . ' / ' . $currency;
+                }
+                if ($accountName !== '') {
+                    return 'Net payable to ' . $accountName . ' / ' . $currency;
+                }
+            }
+            if ($supplierName !== '') {
+                return 'Net payable to ' . $supplierName . ' / ' . $currency;
+            }
+            return 'Payable exceeds receivable / ' . $currency;
+        }
+
+        return 'Net balance zero / ' . $currency;
     }
 
     private function openingRow(array $template, string $date, float $balance): array
@@ -230,6 +276,8 @@ final class LinkedPartyLedgerService extends Service
             'booking_reference_href' => (string) ($row['booking_reference_href'] ?? ''),
             'transaction_reference' => $reference,
             'ledger_entry' => (string) ($source === 'account' ? ($row['ledger_entry'] ?? '') : ($row['entry_type'] ?? '')),
+            'linked_payer_role' => (string) ($row['linked_payer_role'] ?? ''),
+            'linked_payer_name' => (string) ($row['linked_payer_name'] ?? ''),
             'lead_traveler_name' => (string) ($source === 'account'
                 ? ($row['lead_traveler_name'] ?? '')
                 : ($row['customer_name'] ?? $row['passenger_name'] ?? '')),
@@ -279,7 +327,7 @@ final class LinkedPartyLedgerService extends Service
                 2
             );
             $totals[$currency]['balance'] = round(
-                ($totals[$currency]['balance'] ?? 0.0) + $this->number((string) ($footerRow['balance_amount'] ?? '0')),
+                ($totals[$currency]['balance'] ?? 0.0) + (float) ($footerRow['raw_balance_amount'] ?? 0),
                 2
             );
         }
@@ -291,8 +339,8 @@ final class LinkedPartyLedgerService extends Service
             $cards[] = ['label' => 'Supplier Debit / ' . $currency, 'value' => $currency . ' ' . $this->money((float) ($total['debit'] ?? 0))];
             $cards[] = ['label' => 'Supplier Credit / ' . $currency, 'value' => $currency . ' ' . $this->money((float) ($total['credit'] ?? 0))];
             $cards[] = [
-                'label' => 'Supplier Balance / ' . $currency,
-                'value' => $currency . ' ' . $this->money(abs($balance)) . ($balance > 0.005 ? ' Payable' : ($balance < -0.005 ? ' Receivable' : '')),
+                'label' => self::netBalanceLabel(-$balance, $currency),
+                'value' => $currency . ' ' . $this->money(abs($balance)),
             ];
         }
 

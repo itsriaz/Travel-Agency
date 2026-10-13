@@ -3,21 +3,18 @@
 declare(strict_types=1);
 
 $salaryTablesReady = (bool) ($salaryTablesReady ?? false);
-$salaryActiveTab = in_array(($salaryActiveTab ?? 'record'), ['record', 'pay', 'link'], true) ? $salaryActiveTab : 'record';
+$salaryActiveTab = in_array(($salaryActiveTab ?? 'record'), ['record', 'pay'], true) ? $salaryActiveTab : 'record';
 $salaryRecordRows = is_array($salaryRecordRows ?? null) ? $salaryRecordRows : [];
 $salaryPaymentRows = is_array($salaryPaymentRows ?? null) ? $salaryPaymentRows : [];
 $salaryOpenRecordRows = is_array($salaryOpenRecordRows ?? null) ? $salaryOpenRecordRows : [];
 $salaryBranchOptions = is_array($salaryBranchOptions ?? null) ? $salaryBranchOptions : [];
-$salaryEmployeeOptions = is_array($salaryEmployeeOptions ?? null) ? $salaryEmployeeOptions : [];
-$salaryUserOptions = is_array($salaryUserOptions ?? null) ? $salaryUserOptions : [];
-$salaryBusinessSourceOptions = is_array($salaryBusinessSourceOptions ?? null) ? $salaryBusinessSourceOptions : [];
+$salaryAccountOptions = is_array($salaryAccountOptions ?? null) ? $salaryAccountOptions : [];
+$salaryAccountGroupKeys = is_array($salaryAccountGroupKeys ?? null) ? $salaryAccountGroupKeys : [];
 $salaryCurrencyOptions = is_array($salaryCurrencyOptions ?? null) ? $salaryCurrencyOptions : [];
 $salaryPaymentMethodOptions = is_array($salaryPaymentMethodOptions ?? null) ? $salaryPaymentMethodOptions : [];
 $salaryTreasuryAccountOptions = is_array($salaryTreasuryAccountOptions ?? null) ? $salaryTreasuryAccountOptions : [];
 $salaryEmployeePerformanceRows = is_array($salaryEmployeePerformanceRows ?? null) ? $salaryEmployeePerformanceRows : [];
 $salarySummaryCards = is_array($salarySummaryCards ?? null) ? $salarySummaryCards : [];
-$salaryEmployeeMappingRows = is_array($salaryEmployeeMappingRows ?? null) ? $salaryEmployeeMappingRows : [];
-$salaryMappingTableReady = (bool) ($salaryMappingTableReady ?? false);
 $salaryEditingRecord = is_array($salaryEditingRecord ?? null) ? $salaryEditingRecord : null;
 $salaryEditingPayment = is_array($salaryEditingPayment ?? null) ? $salaryEditingPayment : null;
 $today = date('Y-m-d');
@@ -26,7 +23,6 @@ $salaryLedgerRows = [];
 $salaryRecordLedgerRows = [];
 $salaryPaymentLedgerRows = [];
 $salaryRunningBalances = [];
-$salaryEmployeeMappingGroups = [];
 $salaryCompactBranchName = static function (string $name): string {
     $normalized = trim(preg_replace('/\s+/', ' ', $name));
     $map = [
@@ -36,24 +32,6 @@ $salaryCompactBranchName = static function (string $name): string {
 
     return $map[$normalized] ?? $normalized;
 };
-
-foreach ($salaryEmployeeMappingRows as $mappingRow) {
-    $mappingUserId = (int) ($mappingRow['user_id'] ?? 0);
-    $mappingGroupKey = $mappingUserId > 0 ? 'user-' . $mappingUserId : 'link-' . (string) ($mappingRow['id'] ?? uniqid('map', true));
-    if (! isset($salaryEmployeeMappingGroups[$mappingGroupKey])) {
-        $salaryEmployeeMappingGroups[$mappingGroupKey] = [
-            'user_name' => (string) ($mappingRow['user_name'] ?? 'Employee'),
-            'username' => (string) ($mappingRow['username'] ?? ''),
-            'accounts' => [],
-        ];
-    }
-
-    $salaryEmployeeMappingGroups[$mappingGroupKey]['accounts'][] = [
-        'id' => (string) ($mappingRow['id'] ?? '0'),
-        'business_source_name' => (string) ($mappingRow['business_source_name'] ?? 'Sales Account'),
-        'business_source_code' => (string) ($mappingRow['business_source_code'] ?? ''),
-    ];
-}
 
 foreach ($salaryRecordRows as $row) {
     $ledgerKey = implode('|', [
@@ -1089,11 +1067,10 @@ usort($salaryLedgerRows, static function (array $left, array $right): int {
 
 <section class="salary-page-head">
     <h1>Salary</h1>
-    <p>Record monthly employee salary debit first, then settle it through salary payment and deduction credits. Employees use the same account-holder master, while salary history remains separate from business expenses.</p>
+    <p>Record monthly salary against an account holder, then settle it through salary payment and deduction credits. Enter any bonus manually after reviewing the sales snapshot.</p>
     <div class="page-actions">
         <a class="btn <?= $salaryActiveTab === 'record' ? 'btn-primary' : '' ?>" href="<?= e(url('/salaries?tab=record')) ?>">Record Salary</a>
         <a class="btn <?= $salaryActiveTab === 'pay' ? 'btn-primary' : '' ?>" href="<?= e(url('/salaries?tab=pay')) ?>">Pay Salary</a>
-        <a class="btn <?= $salaryActiveTab === 'link' ? 'btn-primary' : '' ?>" href="<?= e(url('/salaries?tab=link')) ?>">Link Employee</a>
         <a class="btn" href="<?= e(url('/reports?report=salary_report')) ?>">Open Reports</a>
     </div>
 </section>
@@ -1120,112 +1097,6 @@ usort($salaryLedgerRows, static function (array $left, array $right): int {
         </div>
     </section>
 <?php else: ?>
-    <?php if ($salaryActiveTab === 'link' && $salaryMappingTableReady): ?>
-        <section class="salary-panel" style="margin-bottom:1rem;">
-            <div class="salary-panel__header">
-                <h2>Employee Sales Account Mapping</h2>
-            </div>
-            <div class="salary-panel__body">
-                <div class="salary-mapping-grid">
-                    <div class="salary-workflow-form">
-                        <h3>Link Employee Name</h3>
-                        <p>Select the real employee user and then link every sales account that belongs to that employee, for example PKR and AED accounts. One employee can have multiple linked sales accounts.</p>
-                        <form method="post" action="<?= e(url('/salaries/mappings/save')) ?>">
-                            <?= \App\Helpers\Csrf::input() ?>
-                            <div class="salary-form-grid">
-                                <label class="salary-field">
-                                    <span>Employee User</span>
-                                    <select name="user_id" required>
-                                        <option value="">Select employee</option>
-                                        <?php foreach ($salaryUserOptions as $option): ?>
-                                            <option value="<?= e((string) ($option['value'] ?? '')) ?>"><?= e((string) ($option['label'] ?? '')) ?></option>
-                                        <?php endforeach; ?>
-                                    </select>
-                                </label>
-                                <label class="salary-field">
-                                    <span>Sales Account</span>
-                                    <select name="business_source_id" required>
-                                        <option value="">Select sales account</option>
-                                        <?php foreach ($salaryBusinessSourceOptions as $option): ?>
-                                            <option value="<?= e((string) ($option['value'] ?? '')) ?>"><?= e((string) ($option['label'] ?? '')) ?></option>
-                                        <?php endforeach; ?>
-                                    </select>
-                                </label>
-                            </div>
-                            <div class="salary-form-grid" style="margin-top:0.8rem;">
-                                <label class="salary-field salary-field--full">
-                                    <span>Notes</span>
-                                    <input type="text" name="notes" maxlength="255" placeholder="Optional note for this employee-account link">
-                                </label>
-                            </div>
-                            <div class="salary-form-actions">
-                                <button class="btn btn-primary" type="submit">Save Link</button>
-                            </div>
-                        </form>
-                    </div>
-                    <div class="salary-workflow-form">
-                        <h3>Current Links</h3>
-                        <div class="salary-table-wrap salary-table-wrap--mapping">
-                            <table class="salary-table salary-mapping-table">
-                                <thead>
-                                    <tr>
-                                        <th>Employee</th>
-                                        <th>Linked Sales Accounts</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <?php if ($salaryEmployeeMappingGroups === []): ?>
-                                        <tr><td colspan="2" class="salary-empty">No employee sales-account links have been saved yet.</td></tr>
-                                    <?php else: ?>
-                                        <?php foreach ($salaryEmployeeMappingGroups as $group): ?>
-                                            <tr>
-                                                <td>
-                                                    <div class="salary-mapping-employee">
-                                                        <strong><?= e((string) ($group['user_name'] ?? 'Employee')) ?></strong>
-                                                    </div>
-                                                </td>
-                                                <td>
-                                                    <div class="salary-account-stack">
-                                                        <?php foreach ((array) ($group['accounts'] ?? []) as $account): ?>
-                                                            <div class="salary-account-flow">
-                                                                <div class="salary-account-arrow" aria-hidden="true"><span></span></div>
-                                                                <div class="salary-account-chip">
-                                                                    <div>
-                                                                        <strong><?= e((string) ($account['business_source_name'] ?? 'Sales Account')) ?></strong>
-                                                                    </div>
-                                                                    <form method="post" action="<?= e(url('/salaries/mappings/unlink')) ?>" class="salary-inline-form">
-                                                                        <?= \App\Helpers\Csrf::input() ?>
-                                                                        <input type="hidden" name="link_id" value="<?= e((string) ($account['id'] ?? '0')) ?>">
-                                                                        <button class="btn" type="submit">Remove</button>
-                                                                    </form>
-                                                                </div>
-                                                            </div>
-                                                        <?php endforeach; ?>
-                                                    </div>
-                                                </td>
-                                            </tr>
-                                        <?php endforeach; ?>
-                                    <?php endif; ?>
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </section>
-    <?php elseif ($salaryActiveTab === 'link'): ?>
-        <section class="salary-panel" style="margin-bottom:1rem;">
-            <div class="salary-panel__header">
-                <h2>Employee Sales Account Mapping</h2>
-            </div>
-            <div class="salary-panel__body">
-                <div class="salary-form-note">
-                    Run migration: <code>20260816_000071_employee_sales_account_links.php</code>
-                </div>
-            </div>
-        </section>
-    <?php endif; ?>
-    <?php if ($salaryActiveTab !== 'link'): ?>
     <section class="salary-panel">
         <div class="salary-panel__header">
             <h2>Salary Workflow</h2>
@@ -1259,11 +1130,11 @@ usort($salaryLedgerRows, static function (array $left, array $right): int {
                                 </select>
                             </label>
                             <label class="salary-field">
-                                <span>Employee</span>
-                                <select name="employee_user_id" required>
-                                    <option value="">Select employee</option>
-                                    <?php foreach ($salaryEmployeeOptions as $option): ?>
-                                        <option value="<?= e((string) ($option['value'] ?? '')) ?>" <?= (string) ($option['value'] ?? '') === (string) ($salaryEditingRecord['employee_user_id'] ?? '') ? 'selected' : '' ?>><?= e((string) ($option['label'] ?? '')) ?></option>
+                                <span>Employee Account</span>
+                                <select name="business_source_id" required>
+                                    <option value="">Select account</option>
+                                    <?php foreach ($salaryAccountOptions as $option): ?>
+                                        <option value="<?= e((string) ($option['value'] ?? '')) ?>" data-group-key="<?= e((string) ($option['group_key'] ?? '')) ?>" <?= (string) ($option['value'] ?? '') === (string) ($salaryEditingRecord['business_source_id'] ?? '') ? 'selected' : '' ?>><?= e((string) ($option['label'] ?? '')) ?></option>
                                     <?php endforeach; ?>
                                 </select>
                             </label>
@@ -1353,11 +1224,11 @@ usort($salaryLedgerRows, static function (array $left, array $right): int {
                                     </select>
                                 </label>
                                 <label class="salary-field">
-                                    <span>Employee</span>
-                                    <select name="employee_user_id" required>
-                                        <option value="">Select employee</option>
-                                        <?php foreach ($salaryEmployeeOptions as $option): ?>
-                                            <option value="<?= e((string) ($option['value'] ?? '')) ?>" <?= (string) ($option['value'] ?? '') === (string) ($salaryEditingRecord['employee_user_id'] ?? '') ? 'selected' : '' ?>><?= e((string) ($option['label'] ?? '')) ?></option>
+                                    <span>Employee Account</span>
+                                    <select name="business_source_id" required>
+                                        <option value="">Select account</option>
+                                        <?php foreach ($salaryAccountOptions as $option): ?>
+                                            <option value="<?= e((string) ($option['value'] ?? '')) ?>" data-group-key="<?= e((string) ($option['group_key'] ?? '')) ?>" <?= (string) ($option['value'] ?? '') === (string) ($salaryEditingRecord['business_source_id'] ?? '') ? 'selected' : '' ?>><?= e((string) ($option['label'] ?? '')) ?></option>
                                         <?php endforeach; ?>
                                     </select>
                                 </label>
@@ -1431,7 +1302,8 @@ usort($salaryLedgerRows, static function (array $left, array $right): int {
                                             value="<?= e((string) ($row['id'] ?? '')) ?>"
                                             data-salary-currency="<?= e((string) ($row['currency'] ?? 'PKR')) ?>"
                                             data-salary-branch="<?= e((string) ($row['branch_id'] ?? '')) ?>"
-                                            data-employee-user-id="<?= e((string) ($row['user_id'] ?? 0)) ?>"
+                                            data-account-id="<?= e((string) ($row['business_source_id'] ?? 0)) ?>"
+                                            data-group-key="<?= e((string) ($salaryAccountGroupKeys[(int) ($row['business_source_id'] ?? 0)] ?? '')) ?>"
                                             <?= (string) ($row['id'] ?? '') === (string) ($salaryEditingPayment['salary_record_id'] ?? '') ? 'selected' : '' ?>
                                         >
                                             <?= e((string) ($row['employee_name'] ?? 'Employee')) ?>
@@ -1458,14 +1330,6 @@ usort($salaryLedgerRows, static function (array $left, array $right): int {
                                 <span>Cash / Bank Paid</span>
                                 <input type="number" step="0.01" min="0" name="paid_amount" value="<?= e((string) ($salaryEditingPayment['paid_amount'] ?? '0.00')) ?>" data-clear-zero-on-focus>
                             </label>
-                        </div>
-                        <div class="salary-performance-panel" data-salary-performance-panel hidden>
-                            <div class="salary-performance-panel__head">
-                                <strong>Employee Sales Snapshot</strong>
-                                <span>Overall + <?= e(date('M Y')) ?></span>
-                            </div>
-                            <div class="salary-performance-grid" data-salary-performance-grid></div>
-                            <div class="salary-performance-empty" data-salary-performance-empty>Select a salary record to view linked sales-account performance.</div>
                         </div>
                         <div class="salary-form-grid salary-form-grid--quad salary-credit-row">
                             <label class="salary-field">
@@ -1517,12 +1381,20 @@ usort($salaryLedgerRows, static function (array $left, array $right): int {
                             </div>
                         <?php endif; ?>
                         <div class="salary-form-actions">
-                            <button class="btn btn-primary" type="submit" form="salary-credit-form"><?= e($isEditingSalaryPayment ? 'Save Credit Changes' : 'Save Salary Credit') ?></button>
+                            <button class="btn btn-primary" type="submit" form="salary-credit-form"><?= e($isEditingSalaryPayment ? 'Save Credit Changes' : 'Save Salary') ?></button>
                             <?php if ($isEditingSalaryPayment): ?>
                                 <button class="btn btn-danger" type="submit" form="salary-credit-form" formaction="<?= e(url('/salaries/pay/void')) ?>" onclick="return window.confirm('Void this salary payment?');">Void Payment</button>
                                 <button class="btn btn-danger" type="submit" form="salary-credit-form" formaction="<?= e(url('/salaries/pay/void-all')) ?>" onclick="return window.confirm('Void this salary record and all linked salary payments?');">Void All</button>
                                 <a class="btn btn-secondary" href="<?= e(url('/salaries?tab=pay')) ?>">Cancel Edit</a>
                             <?php endif; ?>
+                        </div>
+                        <div class="salary-performance-panel" data-salary-performance-panel hidden>
+                            <div class="salary-performance-panel__head">
+                                <strong>Employee Sales Snapshot</strong>
+                                <span>Overall + <?= e(date('M Y')) ?></span>
+                            </div>
+                            <div class="salary-performance-grid" data-salary-performance-grid></div>
+                            <div class="salary-performance-empty" data-salary-performance-empty>Select a salary record to view account sales performance.</div>
                         </div>
                     </form>
                     <div class="salary-fx-modal" data-salary-fx-modal hidden>
@@ -1720,21 +1592,25 @@ usort($salaryLedgerRows, static function (array $left, array $right): int {
 
             function updateSalaryPerformanceForRecordForm(form) {
                 var panel = form.querySelector('[data-salary-performance-panel]');
-                var employeeSelect = form.querySelector('select[name="employee_user_id"]');
+                var accountSelect = form.querySelector('select[name="business_source_id"]');
                 var currencySelect = form.querySelector('select[name="currency"]');
-                if (!panel || !employeeSelect) {
+                if (!panel || !accountSelect) {
                     return;
                 }
 
-                var userId = String(employeeSelect.value || '');
-                if (userId === '') {
+                var accountId = String(accountSelect.value || '');
+                if (accountId === '') {
                     panel.hidden = true;
                     return;
                 }
 
+                var selectedOption = accountSelect.options[accountSelect.selectedIndex];
+                var groupKey = selectedOption ? String(selectedOption.dataset.groupKey || '') : '';
                 var activeCurrency = currencySelect ? currencySelect.value : '';
                 var rows = salaryPerformanceData.filter(function (row) {
-                    return String(row.user_id || '') === userId;
+                    return groupKey !== ''
+                        ? String(row.account_group_key || '') === groupKey
+                        : String(row.business_source_id || '') === accountId;
                 });
                 renderSalaryPerformancePanel(panel, rows, activeCurrency);
             }
@@ -1752,10 +1628,13 @@ usort($salaryLedgerRows, static function (array $left, array $right): int {
                     return;
                 }
 
-                var userId = String(selectedOption.getAttribute('data-employee-user-id') || '');
+                var accountId = String(selectedOption.getAttribute('data-account-id') || '');
+                var groupKey = String(selectedOption.getAttribute('data-group-key') || '');
                 var activeCurrency = String(selectedOption.getAttribute('data-salary-currency') || '');
                 var rows = salaryPerformanceData.filter(function (row) {
-                    return String(row.user_id || '') === userId;
+                    return groupKey !== ''
+                        ? String(row.account_group_key || '') === groupKey
+                        : String(row.business_source_id || '') === accountId;
                 });
                 renderSalaryPerformancePanel(panel, rows, activeCurrency);
             }
@@ -2033,10 +1912,10 @@ usort($salaryLedgerRows, static function (array $left, array $right): int {
             });
 
             Array.prototype.forEach.call(document.querySelectorAll('#salary-record-form, #salary-linked-record-form'), function (form) {
-                var employeeSelect = form.querySelector('select[name="employee_user_id"]');
+                var accountSelect = form.querySelector('select[name="business_source_id"]');
                 var currencySelect = form.querySelector('select[name="currency"]');
-                if (employeeSelect) {
-                    employeeSelect.addEventListener('change', function () {
+                if (accountSelect) {
+                    accountSelect.addEventListener('change', function () {
                         updateSalaryPerformanceForRecordForm(form);
                     });
                 }
@@ -2088,5 +1967,4 @@ usort($salaryLedgerRows, static function (array $left, array $right): int {
             }
         }());
     </script>
-    <?php endif; ?>
 <?php endif; ?>

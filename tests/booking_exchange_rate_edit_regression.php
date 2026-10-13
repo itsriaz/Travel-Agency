@@ -121,6 +121,35 @@ try {
     $serviceId = (int) ($service['id'] ?? 0);
     $lineReference = (string) ($service['line_reference'] ?? '');
 
+    $identityRateRejected = false;
+    try {
+        $receiptWorkspace->saveSettlementExchangeRate([
+            'booking_id' => $bookingId,
+            'branch_id' => 1,
+            'settlement_rate_from_currency' => 'AED',
+            'settlement_rate_to_currency' => 'PKR',
+            'settlement_exchange_rate' => '1',
+            'settlement_exchange_rate_effective_date' => $today,
+            'synchronize_booking_pricing' => '1',
+        ], $actorUserId, $accessibleBranchIds);
+    } catch (RuntimeException $exception) {
+        $identityRateRejected = str_contains($exception->getMessage(), '1:1 exchange rate');
+    }
+    $storedAfterInvalidRate = $serviceRepository->findServiceById($serviceId);
+    $check(
+        $identityRateRejected
+        && $exchangeRepository->getBookingRate($bookingId, 'AED', 'PKR') === null
+        && abs((float) ($storedAfterInvalidRate['pricing_exchange_rate'] ?? 0) - 0.0125) <= 0.00000001,
+        'A 1:1 cross-currency quote cannot be saved or reprice the booking'
+    );
+    $repositoryRejectedIdentity = false;
+    try {
+        $exchangeRepository->upsertDailyRate('AED', 'PKR', $today, 1.0, 1, $actorUserId);
+    } catch (RuntimeException $exception) {
+        $repositoryRejectedIdentity = str_contains($exception->getMessage(), '1:1 exchange rate');
+    }
+    $check($repositoryRejectedIdentity, 'Direct rate writes cannot bypass the cross-currency guard');
+
     $receiptWorkspace->saveSettlementExchangeRate([
         'booking_id' => $bookingId,
         'branch_id' => 1,

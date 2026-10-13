@@ -6,7 +6,6 @@ $filters = is_array($filters ?? null) ? $filters : [];
 $columns = is_array($columns ?? null) ? $columns : [];
 $rows = is_array($rows ?? null) ? $rows : [];
 $summaryCards = is_array($summaryCards ?? null) ? $summaryCards : [];
-$regularSummaryCards = $summaryCards;
 $groupedSummaryCards = [];
 $regularSummaryCards = [];
 foreach ($summaryCards as $summaryCard) {
@@ -25,6 +24,28 @@ foreach ($summaryCards as $summaryCard) {
 
     $groupedSummaryCards[$groupKey]['cards'][] = $summaryCard;
 }
+$supplierCurrencyCards = [];
+if (($selectedReport ?? '') === 'supplier_ledger') {
+    foreach ($regularSummaryCards as $summaryCard) {
+        $label = (string) ($summaryCard['label'] ?? '');
+        $currency = preg_match('/\/ ([A-Z]{3})$/', $label, $matches) === 1 ? $matches[1] : 'Other';
+        $supplierCurrencyCards[$currency][] = $summaryCard;
+    }
+    $currencyOrder = ['AED' => 0, 'PKR' => 1, 'USD' => 2];
+    uksort($supplierCurrencyCards, static fn (string $left, string $right): int =>
+        (($currencyOrder[$left] ?? 99) <=> ($currencyOrder[$right] ?? 99)) ?: strcmp($left, $right));
+}
+$serviceProfitCurrencyCards = [];
+if (($selectedReport ?? '') === 'service_profit') {
+    foreach ($regularSummaryCards as $summaryCard) {
+        $label = (string) ($summaryCard['label'] ?? '');
+        $currency = preg_match('/\/ ([A-Z]{3})$/', $label, $matches) === 1 ? $matches[1] : 'Other';
+        $serviceProfitCurrencyCards[$currency][] = $summaryCard;
+    }
+    $currencyOrder = ['AED' => 0, 'PKR' => 1, 'USD' => 2];
+    uksort($serviceProfitCurrencyCards, static fn (string $left, string $right): int =>
+        (($currencyOrder[$left] ?? 99) <=> ($currencyOrder[$right] ?? 99)) ?: strcmp($left, $right));
+}
 $receivableAgingSummaryRows = is_array($receivableAgingSummaryRows ?? null) ? $receivableAgingSummaryRows : [];
 $receivableAgingSummaryColumns = is_array($receivableAgingSummaryColumns ?? null) ? $receivableAgingSummaryColumns : [];
 $customerOutstandingSummaryRows = is_array($customerOutstandingSummaryRows ?? null) ? $customerOutstandingSummaryRows : [];
@@ -33,7 +54,6 @@ $supplierAdvanceSummaryRows = is_array($supplierAdvanceSummaryRows ?? null) ? $s
 $supplierAdvanceSummaryColumns = is_array($supplierAdvanceSummaryColumns ?? null) ? $supplierAdvanceSummaryColumns : [];
 $businessSourceOptions = is_array($businessSourceOptions ?? null) ? $businessSourceOptions : [];
 $expenseCategoryOptions = is_array($expenseCategoryOptions ?? null) ? $expenseCategoryOptions : [];
-$salaryEmployeeOptions = is_array($salaryEmployeeOptions ?? null) ? $salaryEmployeeOptions : [];
 $customerOptions = is_array($customerOptions ?? null) ? $customerOptions : [];
 $supplierOptions = is_array($supplierOptions ?? null) ? $supplierOptions : [];
 $selectedReport = (string) ($selectedReport ?? 'receivable_aging');
@@ -79,6 +99,13 @@ $formatReportTableDate = static function (string $columnKey, string $value): str
 };
 
 $renderReportHeaderLabel = static function (string $reportKey, string $columnKey, string $label): string {
+    if ($reportKey === 'customer_ledger' && in_array($columnKey, ['transaction_reference', 'debit_amount', 'credit_amount'], true)) {
+        $parts = explode(' / ', $label, 2);
+        if (count($parts) === 2) {
+            return '<span class="report-header-stack">' . e($parts[0] . ' /') . '<br>' . e($parts[1]) . '</span>';
+        }
+    }
+
     if ($reportKey !== 'prepaid_supplier_ledger') {
         return e($label);
     }
@@ -186,12 +213,12 @@ $asOfDate = (string) ($filters['asOfDate'] ?? date('Y-m-d'));
 $selectedBranchId = (int) ($filters['branchId'] ?? 0);
 $selectedCurrency = (string) ($filters['currency'] ?? '');
 $selectedBusinessSourceId = (int) ($filters['businessSourceId'] ?? 0);
-$selectedEmployeeUserId = (int) ($filters['employeeUserId'] ?? 0);
 $selectedExpenseCategoryId = (int) ($filters['expenseCategoryId'] ?? 0);
 $selectedCustomerName = (string) ($filters['customerName'] ?? '');
 $selectedSupplierId = (int) ($filters['supplierId'] ?? 0);
 $selectedAirline = (string) ($filters['airline'] ?? '');
 $selectedBookingReference = (string) ($filters['bookingReference'] ?? '');
+$selectedCashBankReference = (string) ($filters['cashBankReference'] ?? '');
 $selectedTicketRegisterType = (string) ($filters['ticketRegisterType'] ?? 'all');
 $advanceBalanceView = (string) ($filters['advanceBalanceView'] ?? 'all');
 $reminderStatus = (string) ($filters['reminderStatus'] ?? 'active');
@@ -220,7 +247,6 @@ $selectedTreasuryTransferSearch = (string) ($filters['treasuryTransferSearch'] ?
 $selectedCashBankAmount = $filters['cashBankAmount'] ?? null;
 $selectedDebitAmount = $filters['debitAmount'] ?? null;
 $selectedCreditAmount = $filters['creditAmount'] ?? null;
-$selectedCashBankDateOrder = (string) ($filters['cashBankDateOrder'] ?? 'desc');
 $selectedBranchLabel = 'All Accessible Branches';
 $selectedBusinessSourceLabel = 'All Accounts';
 $selectedExpenseCategoryLabel = 'All Categories';
@@ -404,6 +430,7 @@ if ($selectedReport === 'receivable_aging') {
         . ' | Currency: ' . $currencyLabel
         . ($selectedReport === 'cash_bank_ledger' ? ' | Treasury account: ' . $selectedTreasuryAccountLabel : '')
         . ($selectedReport === 'cash_bank_ledger' ? ' | Source: ' . $sourceLabel : '')
+        . ($selectedReport === 'cash_bank_ledger' && $selectedCashBankReference !== '' ? ' | Reference: ' . $selectedCashBankReference : '')
         . ($selectedReport !== 'cash_bank_ledger'
             ? ' | Account: ' . $selectedBusinessSourceLabel . ' | Supplier: ' . $selectedSupplierLabel
             : '')
@@ -416,9 +443,7 @@ if ($selectedReport === 'receivable_aging') {
         . ($selectedCreditAmount !== null
             ? ' | Credit: ' . number_format((float) $selectedCreditAmount, 2)
             : '')
-        . ($selectedReport === 'cash_bank_ledger'
-            ? ' | Date order: ' . ($selectedCashBankDateOrder === 'asc' ? 'Oldest first' : 'Newest first')
-            : '')
+        . ($selectedReport === 'cash_bank_ledger' ? ' | Date order: Newest first' : '')
         . ' | Scope: Financial entries with debit, credit, and running balance.';
 } elseif ($selectedReport === 'internal_treasury_transfer') {
     $sourceCurrencyLabel = $selectedSourceCurrency !== '' ? $selectedSourceCurrency : 'All source currencies';
@@ -480,12 +505,12 @@ $exportQuery = http_build_query([
     'branch_id' => (int) ($filters['branchId'] ?? 0),
     'currency' => (string) ($filters['currency'] ?? ''),
     'business_source_id' => (int) ($filters['businessSourceId'] ?? 0),
-    'employee_user_id' => (int) ($filters['employeeUserId'] ?? 0),
     'expense_category_id' => (int) ($filters['expenseCategoryId'] ?? 0),
     'customer_name' => (string) ($filters['customerName'] ?? ''),
     'supplier_id' => (int) ($filters['supplierId'] ?? 0),
     'airline' => (string) ($filters['airline'] ?? ''),
     'booking_reference' => (string) ($filters['bookingReference'] ?? ''),
+    'cash_bank_reference' => (string) ($filters['cashBankReference'] ?? ''),
     'ticket_register_type' => (string) ($filters['ticketRegisterType'] ?? 'all'),
     'advance_balance_view' => (string) ($filters['advanceBalanceView'] ?? 'all'),
     'reminder_status' => (string) ($filters['reminderStatus'] ?? 'active'),
@@ -497,7 +522,6 @@ $exportQuery = http_build_query([
     'cash_bank_amount' => ($filters['cashBankAmount'] ?? null) !== null ? (string) $filters['cashBankAmount'] : '',
     'debit_amount' => ($filters['debitAmount'] ?? null) !== null ? (string) $filters['debitAmount'] : '',
     'credit_amount' => ($filters['creditAmount'] ?? null) !== null ? (string) $filters['creditAmount'] : '',
-    'cash_bank_date_order' => (string) ($filters['cashBankDateOrder'] ?? 'desc'),
     'date_from' => (string) ($filters['dateFrom'] ?? ''),
     'date_to' => (string) ($filters['dateTo'] ?? ''),
     'as_of_date' => (string) ($filters['asOfDate'] ?? date('Y-m-d')),
@@ -539,14 +563,14 @@ $formatLedgerBalance = static function (string $value, string $report) use ($isL
     }
 
     $amount = (float) $numeric;
-    $precision = $isLinkedPartyLedger && in_array($report, ['customer_ledger', 'supplier_ledger'], true) ? 0 : 2;
+    $precision = 2;
     if (abs($amount) < 0.005) {
         return number_format(0, $precision);
     }
 
     if ($report === 'supplier_ledger') {
         if ($isLinkedPartyLedger) {
-            return number_format(abs($amount), 0) . ($amount > 0 ? ' Payable' : ' Receivable');
+            return number_format(abs($amount), 2) . ($amount > 0 ? ' Payable' : ' Receivable');
         }
         $isAdvance = stripos($text, 'advance') !== false || ($amount < 0 && stripos($text, 'payable') === false);
 
@@ -556,19 +580,6 @@ $formatLedgerBalance = static function (string $value, string $report) use ($isL
     $suffix = $amount > 0 ? 'Dr' : 'Cr';
 
     return number_format(abs($amount), $precision) . ' ' . $suffix;
-};
-
-$formatLinkedClosingBalance = static function (string $value, string $report): string {
-    $amount = (float) str_replace(',', '', $value);
-    if (abs($amount) < 0.005) {
-        return '0 Balance';
-    }
-
-    if ($report === 'supplier_ledger') {
-        return number_format(abs($amount), 0) . ($amount > 0 ? ' Payable' : ' Receivable');
-    }
-
-    return number_format(abs($amount), 0) . ($amount > 0 ? ' Receivable' : ' Payable');
 };
 
 $summableColumnKeys = [
@@ -669,28 +680,15 @@ if ($selectedReport === 'receivable_aging') {
         $reportFooterRows[] = $footerRow;
     }
 } elseif ($selectedReport === 'customer_advance_ledger') {
-    $advanceClosingBalances = [];
-    foreach ($rows as $row) {
-        if ((int) ($row['exclude_from_footer_totals'] ?? 0) === 1) {
+    foreach ($summaryCards as $summaryCard) {
+        $label = (string) ($summaryCard['label'] ?? '');
+        if (! str_starts_with($label, 'Total Available / ')) {
             continue;
         }
-
-        $currency = strtoupper(trim((string) ($row['currency'] ?? 'PKR')));
-        if ($currency === '') {
-            $currency = 'PKR';
-        }
-
-        $receivedAmount = $parseReportNumber((string) ($row['received_amount'] ?? '')) ?? 0.0;
-        $appliedAmount = $parseReportNumber((string) ($row['applied_amount'] ?? '')) ?? 0.0;
-        $returnedAmount = $parseReportNumber((string) ($row['returned_amount'] ?? '')) ?? 0.0;
-        $advanceClosingBalances[$currency] = ($advanceClosingBalances[$currency] ?? 0.0)
-            + $receivedAmount - $appliedAmount - $returnedAmount;
-    }
-
-    ksort($advanceClosingBalances);
-    foreach ($advanceClosingBalances as $currency => $closingBalance) {
+        $currency = substr($label, strlen('Total Available / '));
+        $closingBalance = $parseReportNumber((string) ($summaryCard['value'] ?? '')) ?? 0.0;
         $reportFooterRows[] = [
-            '_label' => 'Closing Balance ' . $currency,
+            '_label' => 'Available Now ' . $currency,
             'currency' => $currency,
             'balance_amount' => $formatReportTotal($closingBalance),
         ];
@@ -734,10 +732,7 @@ if ($selectedReport === 'receivable_aging') {
     }
 } elseif (in_array($selectedReport, ['service_profit', 'loss_report'], true)) {
     // Currency-aware footer rows are prepared by ReportService.
-} elseif (
-    $selectedReport !== 'supplier_ledger'
-    && ! ($selectedReport === 'customer_ledger' && ($isLinkedPartyLedger ?? false))
-) {
+} elseif (! in_array($selectedReport, ['supplier_ledger', 'customer_ledger', 'customer_detail_ledger'], true)) {
     $reportFooterTotals = [];
     foreach ($columns as $column) {
         $columnKey = (string) ($column['key'] ?? '');
@@ -783,8 +778,16 @@ if ($selectedReport === 'receivable_aging') {
         grid-template-columns: repeat(3, minmax(0, 1fr));
     }
 
+    .report-stat-grid--supplier-ledger {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .report-stat-grid--service-profit {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
     .report-stat-grid--customer-advance {
-        grid-template-columns: repeat(5, minmax(0, 1fr));
+        grid-template-columns: repeat(3, minmax(0, 1fr));
     }
 
     .report-stat-grid--customer-advance .stat-card {
@@ -794,7 +797,8 @@ if ($selectedReport === 'receivable_aging') {
     }
 
     .report-stat-grid .stat-card,
-    .report-summary-group .report-stat-grid .stat-card {
+    .report-summary-group .report-stat-grid .stat-card,
+    .linked-account-summary-grid .stat-card {
         min-height: 54px;
         padding: 8px 12px 7px 14px;
         border-radius: 14px;
@@ -1111,6 +1115,13 @@ if ($selectedReport === 'receivable_aging') {
         text-decoration: underline;
     }
 
+    .cash-bank-booking-ref {
+        display: block;
+        margin-top: 0.18rem;
+        color: #526a80;
+        white-space: nowrap;
+    }
+
     .dense-table {
         border-collapse: separate;
         border-spacing: 0;
@@ -1167,80 +1178,73 @@ if ($selectedReport === 'receivable_aging') {
     }
 
     .supplier-ledger-trace-table {
-        min-width: 1180px;
-        table-layout: fixed;
+        width: max-content;
+        min-width: 0;
+        table-layout: auto;
     }
 
     .supplier-ledger-trace-table th,
     .supplier-ledger-trace-table td {
-        padding: 7px 8px;
+        padding: 6px 7px;
     }
 
-    .supplier-ledger-trace-table th:nth-child(1),
-    .supplier-ledger-trace-table td:nth-child(1) {
-        min-width: 210px;
-        width: 210px;
+    .supplier-ledger-trace-table [data-column-key="supplier_name"] {
+        min-width: 175px;
+        width: 175px;
+        white-space: normal;
     }
 
-    .supplier-ledger-trace-table th:nth-child(2),
-    .supplier-ledger-trace-table td:nth-child(2) {
+    .supplier-ledger-trace-table [data-column-key="ledger_date"] {
         min-width: 96px;
         width: 96px;
     }
 
-    .supplier-ledger-trace-table th:nth-child(3),
-    .supplier-ledger-trace-table td:nth-child(3) {
-        min-width: 130px;
-        width: 130px;
+    .supplier-ledger-trace-table [data-column-key="booking_reference"] {
+        min-width: 145px;
+        width: 145px;
     }
 
-    .supplier-ledger-trace-table th:nth-child(4),
-    .supplier-ledger-trace-table td:nth-child(4) {
-        min-width: 220px;
-        width: 220px;
+    .supplier-ledger-trace-table [data-column-key="entry_type"] {
+        min-width: 180px;
+        width: 180px;
         white-space: normal;
         overflow-wrap: anywhere;
-        word-break: break-word;
         line-height: 1.2;
     }
 
-    .supplier-ledger-trace-table th:nth-child(5),
-    .supplier-ledger-trace-table td:nth-child(5) {
-        min-width: 105px;
-        width: 105px;
+    .supplier-ledger-trace-table [data-column-key="passenger_name"] {
+        min-width: 135px;
+        width: 135px;
+        white-space: normal;
     }
 
-    .supplier-ledger-trace-table th:nth-child(6),
-    .supplier-ledger-trace-table td:nth-child(6) {
-        min-width: 82px;
-        width: 82px;
+    .supplier-ledger-trace-table [data-column-key="route"] {
+        min-width: 70px;
+        width: 70px;
     }
 
-    .supplier-ledger-trace-table th:nth-child(7),
-    .supplier-ledger-trace-table td:nth-child(7) {
+    .supplier-ledger-trace-table [data-column-key="currency"] {
         min-width: 58px;
         width: 58px;
     }
 
-    .supplier-ledger-trace-table th:nth-child(8),
-    .supplier-ledger-trace-table td:nth-child(8),
-    .supplier-ledger-trace-table th:nth-child(9),
-    .supplier-ledger-trace-table td:nth-child(9),
-    .supplier-ledger-trace-table th:nth-child(10),
-    .supplier-ledger-trace-table td:nth-child(10) {
-        min-width: 88px;
-        width: 88px;
+    .supplier-ledger-trace-table [data-column-key="debit_amount"],
+    .supplier-ledger-trace-table [data-column-key="credit_amount"] {
+        min-width: 100px;
+        width: 100px;
     }
 
-    .supplier-ledger-trace-table th:last-child,
-    .supplier-ledger-trace-table td:last-child {
-        box-sizing: border-box;
-        min-width: 150px;
-        width: 150px;
-        max-width: 150px;
+    .supplier-ledger-trace-table [data-column-key="balance_amount"] {
+        min-width: 125px;
+        width: 125px;
+        white-space: normal;
+    }
+
+    .supplier-ledger-trace-table [data-column-key="trace"] {
+        min-width: 160px;
+        width: 160px;
         white-space: normal;
         overflow-wrap: anywhere;
-        word-break: break-word;
         line-height: 1.2;
     }
 
@@ -1646,6 +1650,89 @@ if ($selectedReport === 'receivable_aging') {
         white-space: normal;
     }
 
+    .account-ledger-summary-table,
+    .account-ledger-detail-table {
+        width: max-content;
+    }
+
+    .account-ledger-summary-wrap {
+        width: fit-content;
+        max-width: 100%;
+        overflow-x: auto;
+    }
+
+    .account-ledger-summary-table th,
+    .account-ledger-summary-table td,
+    .customer-ledger-table.account-ledger-detail-table th,
+    .customer-ledger-table.account-ledger-detail-table td {
+        min-width: 0;
+        padding: 0.42rem 0.65rem;
+        white-space: nowrap;
+    }
+
+    .account-ledger-summary-table [data-column-key="lead_traveler_name"] { width: 210px; }
+    .account-ledger-summary-table [data-column-key="contact_mobile"] { width: 130px; }
+    .account-ledger-summary-table [data-column-key="currency"] { width: 62px; }
+    .account-ledger-summary-table [data-column-key="recognized_profit_loss"],
+    .account-ledger-summary-table [data-column-key="invoice_amount"],
+    .account-ledger-summary-table [data-column-key="total_debit"],
+    .account-ledger-summary-table [data-column-key="total_credit"],
+    .account-ledger-summary-table [data-column-key="customer_paid"] { width: 112px; }
+    .account-ledger-summary-table [data-column-key="outstanding_amount"] { width: 160px; }
+    .account-ledger-summary-table [data-column-key="invoice_count"] { width: 82px; }
+
+    .account-ledger-summary-wrap.linked-account-summary-wrap {
+        width: 100%;
+    }
+
+    .account-ledger-summary-table.linked-account-summary-table {
+        width: 100%;
+        min-width: 900px;
+        table-layout: fixed;
+    }
+
+    .linked-account-summary-table [data-column-key="lead_traveler_name"] { width: 24%; }
+    .linked-account-summary-table [data-column-key="currency"] { width: 8%; }
+    .linked-account-summary-table [data-column-key="invoice_amount"] { width: 16%; }
+    .linked-account-summary-table [data-column-key="customer_paid"] { width: 18%; }
+    .linked-account-summary-table [data-column-key="outstanding_amount"] { width: 23%; }
+    .linked-account-summary-table [data-column-key="invoice_count"] { width: 11%; }
+
+    .account-ledger-summary-table td[data-column-key="lead_traveler_name"],
+    .account-ledger-detail-table td[data-column-key="transaction_reference"],
+    .account-ledger-detail-table td[data-column-key="ledger_entry"],
+    .account-ledger-detail-table td[data-column-key="counterparty"],
+    .account-ledger-detail-table td[data-column-key="pnr"],
+    .account-ledger-detail-table td[data-column-key="route"],
+    .account-ledger-detail-table td[data-column-key="passenger_name"],
+    .account-ledger-detail-table td[data-column-key="transaction_note"] {
+        white-space: normal;
+        overflow-wrap: anywhere;
+    }
+
+    .account-ledger-detail-table [data-column-key="branch_name"] { width: 118px; }
+    .account-ledger-detail-table [data-column-key="booking_date"] { width: 104px; }
+    .account-ledger-detail-table [data-column-key="booking_reference"] { width: 112px; }
+    .account-ledger-detail-table [data-column-key="transaction_reference"] { width: 145px; }
+    .account-ledger-detail-table [data-column-key="ledger_entry"] { width: 260px; }
+    .account-ledger-detail-table [data-column-key="counterparty"],
+    .account-ledger-detail-table [data-column-key="lead_traveler_name"] { width: 165px; }
+    .account-ledger-detail-table [data-column-key="pnr"] { width: 100px; }
+    .account-ledger-detail-table [data-column-key="route"] { width: 130px; }
+    .account-ledger-detail-table [data-column-key="passenger_name"] { width: 165px; }
+    .account-ledger-detail-table [data-column-key="currency"] { width: 64px; }
+    .account-ledger-detail-table [data-column-key="settlement_status"] { width: 116px; }
+    .account-ledger-detail-table [data-column-key="debit_amount"],
+    .account-ledger-detail-table [data-column-key="credit_amount"] { width: 130px; }
+    .account-ledger-detail-table [data-column-key="balance_amount"] { width: 130px; }
+    .account-ledger-detail-table [data-column-key="transaction_note"] { width: 320px; }
+
+    .account-ledger-detail-table th[data-column-key="transaction_reference"],
+    .account-ledger-detail-table th[data-column-key="debit_amount"],
+    .account-ledger-detail-table th[data-column-key="credit_amount"] {
+        white-space: normal;
+    }
+
     .advance-correction-modal[hidden] {
         display: none;
     }
@@ -1981,6 +2068,37 @@ if ($selectedReport === 'receivable_aging') {
         width: 100%;
     }
 
+    .report-summary-group--linked_roles .report-stat-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        width: 100%;
+    }
+
+    .report-summary-group--linked_roles .report-stat-grid + .report-stat-grid {
+        margin-top: 10px;
+    }
+
+    .cash-position-summary-groups {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+        margin-bottom: 12px;
+    }
+
+    .cash-position-summary-groups .report-summary-group {
+        min-width: 0;
+        margin-bottom: 0;
+    }
+
+    .cash-position-summary-groups .report-stat-grid {
+        grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+        width: 100%;
+    }
+
+    .cash-position-summary-groups .report-summary-group--cash_position_net {
+        border-color: #bfd8e8;
+        background: linear-gradient(180deg, #f8fcff 0%, #eef7fc 100%);
+    }
+
     .report-summary-group .report-stat-grid .stat-card {
         min-height: 65px;
         padding: 10px 13px 9px 16px;
@@ -1990,21 +2108,29 @@ if ($selectedReport === 'receivable_aging') {
         box-shadow: 0 7px 17px rgba(15, 57, 88, 0.07);
     }
 
-    .report-summary-group .report-stat-grid .stat-card::before {
+    .report-summary-group .report-stat-grid .stat-card::before,
+    .linked-account-summary-grid .stat-card::before {
         width: 4px;
         background: linear-gradient(180deg, #21a4d0 0%, #0d668f 100%);
     }
 
-    .report-summary-group .report-stat-grid .stat-label {
+    .report-summary-group .report-stat-grid .stat-label,
+    .linked-account-summary-grid .stat-label {
         color: #557087;
         font-size: 9px;
         letter-spacing: 0.07em;
     }
 
-    .report-summary-group .report-stat-grid .stat-value {
+    .report-summary-group .report-stat-grid .stat-value,
+    .linked-account-summary-grid .stat-value {
         margin-top: 6px;
         color: #092b4c;
         font-size: 17px;
+    }
+
+    .report-stat-grid.linked-account-summary-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        margin-bottom: 12px;
     }
 
     @media (max-width: 1180px) {
@@ -2018,6 +2144,30 @@ if ($selectedReport === 'receivable_aging') {
     }
 
     @media (max-width: 760px) {
+        .cash-position-summary-groups {
+            grid-template-columns: 1fr;
+        }
+
+        .report-summary-group--linked_roles .report-stat-grid {
+            grid-template-columns: 1fr;
+        }
+
+        .report-stat-grid.linked-account-summary-grid {
+            grid-template-columns: 1fr;
+        }
+
+        .report-stat-grid--supplier-ledger {
+            grid-template-columns: 1fr;
+        }
+
+        .report-stat-grid--service-profit {
+            grid-template-columns: 1fr;
+        }
+
+        .report-stat-grid--cash-bank-ledger {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
         .reports-page-head {
             align-items: stretch;
             min-height: 0;
@@ -2155,19 +2305,6 @@ if ($selectedReport === 'receivable_aging') {
                     <?php foreach ($businessSourceOptions as $businessSourceOption): ?>
                         <option value="<?= e((string) ($businessSourceOption['id'] ?? 0)) ?>" <?= $selectedBusinessSourceId === (int) ($businessSourceOption['id'] ?? 0) ? 'selected' : '' ?>>
                             <?= e((string) ($businessSourceOption['name'] ?? 'Account')) ?>
-                        </option>
-                    <?php endforeach; ?>
-                </select>
-            </label>
-        <?php endif; ?>
-        <?php if ($selectedReport === 'salary_report'): ?>
-            <label class="station-field span-2">
-                <span>Employee</span>
-                <select name="employee_user_id" data-report-filter="immediate">
-                    <option value="0" <?= $selectedEmployeeUserId <= 0 ? 'selected' : '' ?>>All Employees</option>
-                    <?php foreach ($salaryEmployeeOptions as $salaryEmployeeOption): ?>
-                        <option value="<?= e((string) ($salaryEmployeeOption['user_id'] ?? 0)) ?>" <?= $selectedEmployeeUserId === (int) ($salaryEmployeeOption['user_id'] ?? 0) ? 'selected' : '' ?>>
-                            <?= e((string) ($salaryEmployeeOption['user_name'] ?? 'Employee')) ?>
                         </option>
                     <?php endforeach; ?>
                 </select>
@@ -2313,6 +2450,7 @@ if ($selectedReport === 'receivable_aging') {
 <?php endif; ?>
 
 <?php if ($selectedReport === 'cash_bank_ledger'): ?>
+            <label class="station-field span-2"><span>Booking / Receipt / Ref.</span><input type="text" name="cash_bank_reference" value="<?= e($selectedCashBankReference) ?>" maxlength="120" placeholder="BK-000819 or RCPT-000873" data-report-filter="debounced-reference"></label>
             <label class="station-field span-2">
                 <span>Cash / Bank Account</span>
                 <select name="treasury_account_id" data-report-filter="immediate">
@@ -2333,13 +2471,6 @@ if ($selectedReport === 'receivable_aging') {
                             <?= e((string) $sourceLabel) ?>
                         </option>
                     <?php endforeach; ?>
-                </select>
-            </label>
-            <label class="station-field span-2">
-                <span>Date Order</span>
-                <select name="cash_bank_date_order" data-report-filter="immediate">
-                    <option value="desc" <?= $selectedCashBankDateOrder === 'desc' ? 'selected' : '' ?>>Newest First</option>
-                    <option value="asc" <?= $selectedCashBankDateOrder === 'asc' ? 'selected' : '' ?>>Oldest First</option>
                 </select>
             </label>
         <?php endif; ?>
@@ -2466,6 +2597,15 @@ if ($selectedReport === 'receivable_aging') {
     </form>
 </section>
 
+<?php if ($selectedReport === 'service_profit'): ?>
+    <?php if ((int) ($filters['supplierId'] ?? 0) > 0 || (int) ($filters['businessSourceId'] ?? 0) > 0
+        || (string) ($filters['customerName'] ?? '') !== '' || (string) ($filters['bookingReference'] ?? '') !== ''): ?>
+        <p class="report-context-line">Expenses and the result after expenses are hidden because they cannot be matched to this supplier, account, customer, or booking filter.</p>
+    <?php else: ?>
+        <p class="report-context-line">Service profit includes service charges and dated cancellation adjustments. Recorded expenses are deducted once for the selected branches and dates.</p>
+    <?php endif; ?>
+<?php endif; ?>
+
 <?php $renderSummaryCard = static function (array $summaryCard): void { ?>
     <?php $toneClass = trim((string) ($summaryCard['tone'] ?? '')); ?>
     <article class="stat-card <?= ! empty($summaryCard['lines']) ? 'stat-card--ledger' : '' ?> <?= $toneClass !== '' ? 'stat-card--' . e($toneClass) : '' ?> <?= $toneClass === 'converted' ? 'stat-card--converted' : '' ?> <?= $toneClass === 'branch-local' ? 'stat-card--branch-local' : '' ?>">
@@ -2489,28 +2629,69 @@ if ($selectedReport === 'receivable_aging') {
     </article>
 <?php }; ?>
 
-<section class="stat-grid report-stat-grid<?= $selectedReport === 'reminder_hub' ? ' reminder-hub-stat-grid' : '' ?><?= in_array($selectedReport, ['actual_money_voucher_ledger', 'booking_voucher_ledger'], true) ? ' report-stat-grid--journal-voucher' : '' ?><?= $selectedReport === 'customer_advance_ledger' ? ' report-stat-grid--customer-advance' : '' ?>">
-    <?php foreach ($regularSummaryCards as $summaryCard): ?>
-        <?php $renderSummaryCard($summaryCard); ?>
+<?php if ($selectedReport === 'supplier_ledger'): ?>
+    <?php foreach ($supplierCurrencyCards as $currency => $currencyCards): ?>
+        <section class="stat-grid report-stat-grid report-stat-grid--supplier-ledger" data-supplier-currency="<?= e($currency) ?>">
+            <?php foreach ($currencyCards as $summaryCard): ?>
+                <?php $renderSummaryCard($summaryCard); ?>
+            <?php endforeach; ?>
+        </section>
     <?php endforeach; ?>
-</section>
+<?php elseif ($selectedReport === 'service_profit'): ?>
+    <?php foreach ($serviceProfitCurrencyCards as $currency => $currencyCards): ?>
+        <section class="stat-grid report-stat-grid report-stat-grid--service-profit" data-service-profit-currency="<?= e($currency) ?>">
+            <?php foreach ($currencyCards as $summaryCard): ?>
+                <?php $renderSummaryCard($summaryCard); ?>
+            <?php endforeach; ?>
+        </section>
+    <?php endforeach; ?>
+<?php elseif ($selectedReport !== 'cash_bank_position' || $regularSummaryCards !== []): ?>
+    <section class="stat-grid report-stat-grid<?= $selectedReport === 'reminder_hub' ? ' reminder-hub-stat-grid' : '' ?><?= in_array($selectedReport, ['actual_money_voucher_ledger', 'booking_voucher_ledger'], true) ? ' report-stat-grid--journal-voucher' : '' ?><?= $selectedReport === 'customer_advance_ledger' ? ' report-stat-grid--customer-advance' : '' ?><?= $selectedReport === 'cash_bank_ledger' ? ' report-stat-grid--cash-bank-ledger' : '' ?>">
+        <?php foreach ($regularSummaryCards as $summaryCard): ?>
+            <?php $renderSummaryCard($summaryCard); ?>
+        <?php endforeach; ?>
+    </section>
+<?php endif; ?>
 
 <?php if ($groupedSummaryCards !== []): ?>
+    <?php if ($selectedReport === 'cash_bank_position'): ?><div class="cash-position-summary-groups"><?php endif; ?>
     <?php foreach ($groupedSummaryCards as $groupKey => $groupSection): ?>
         <?php if (($groupSection['cards'] ?? []) === []): ?>
             <?php continue; ?>
         <?php endif; ?>
+        <?php
+        $linkedCurrencyRows = [];
+        if ($groupKey === 'linked_roles') {
+            foreach ($groupSection['cards'] as $summaryCard) {
+                $linkedCurrencyRows[(string) ($summaryCard['linked_currency'] ?? '')][] = $summaryCard;
+            }
+            $currencyOrder = ['AED' => 0, 'PKR' => 1, 'USD' => 2];
+            uksort($linkedCurrencyRows, static fn (string $left, string $right): int =>
+                (($currencyOrder[$left] ?? 99) <=> ($currencyOrder[$right] ?? 99)) ?: strcmp($left, $right));
+        }
+        ?>
         <section class="panel compact-panel report-summary-group report-summary-group--<?= e((string) $groupKey) ?><?= $selectedReport === 'customer_detail_ledger' && str_starts_with((string) $groupKey, 'customer_detail_') ? ' report-summary-group--customer-currency' : '' ?>">
             <div class="panel-header">
                 <h2><?= e((string) ($groupSection['title'] ?? 'Summary')) ?></h2>
             </div>
-            <div class="stat-grid stat-grid--group report-stat-grid">
-                <?php foreach (($groupSection['cards'] ?? []) as $summaryCard): ?>
-                    <?php $renderSummaryCard($summaryCard); ?>
+            <?php if ($groupKey === 'linked_roles'): ?>
+                <?php foreach ($linkedCurrencyRows as $currency => $currencyCards): ?>
+                    <div class="stat-grid stat-grid--group report-stat-grid linked-party-currency-row" data-linked-currency="<?= e($currency) ?>">
+                        <?php foreach ($currencyCards as $summaryCard): ?>
+                            <?php $renderSummaryCard($summaryCard); ?>
+                        <?php endforeach; ?>
+                    </div>
                 <?php endforeach; ?>
-            </div>
+            <?php else: ?>
+                <div class="stat-grid stat-grid--group report-stat-grid">
+                    <?php foreach ($groupSection['cards'] as $summaryCard): ?>
+                        <?php $renderSummaryCard($summaryCard); ?>
+                    <?php endforeach; ?>
+                </div>
+            <?php endif; ?>
         </section>
     <?php endforeach; ?>
+    <?php if ($selectedReport === 'cash_bank_position'): ?></div><?php endif; ?>
 <?php endif; ?>
 
 <section class="panel compact-panel<?= $selectedReport === 'reminder_hub' ? ' report-panel--reminder-hub' : '' ?><?= in_array($selectedReport, $wideViewReports, true) ? ' customer-ledger-panel' : '' ?>">
@@ -2583,18 +2764,21 @@ if ($selectedReport === 'receivable_aging') {
     <?php endif; ?>
     <?php if (in_array($selectedReport, $customerLedgerReports, true) && $customerOutstandingSummaryRows !== []): ?>
         <div class="panel-header customer-ledger-toolbar" style="padding-top: 0.15rem;">
-            <h2><?= e($selectedReport === 'customer_ledger' ? 'Account Ledger Summary' : 'Customer Ledger Summary') ?></h2>
+            <h2><?= e($selectedReport === 'customer_ledger'
+                ? (($isLinkedPartyLedger ?? false) ? 'Account Summary' : 'Account Ledger Summary')
+                : 'Customer Ledger Summary') ?></h2>
             <div class="customer-ledger-toolbar-actions">
                 <button class="btn btn-sm" type="button" id="customer-ledger-expand-button">Open Wide View</button>
                 <button class="btn btn-sm customer-ledger-close" type="button" id="customer-ledger-close-button">Close Wide View</button>
             </div>
         </div>
-        <div class="dense-table-wrap customer-ledger-summary-wrap">
-            <table class="dense-table">
+        <div class="dense-table-wrap customer-ledger-summary-wrap<?= $selectedReport === 'customer_ledger' ? ' account-ledger-summary-wrap' : '' ?><?= $selectedReport === 'customer_ledger' && ($isLinkedPartyLedger ?? false) ? ' linked-account-summary-wrap' : '' ?>">
+            <table class="dense-table<?= $selectedReport === 'customer_ledger' ? ' account-ledger-summary-table' : '' ?><?= $selectedReport === 'customer_ledger' && ($isLinkedPartyLedger ?? false) ? ' linked-account-summary-table' : '' ?>">
                 <thead>
                     <tr>
                         <?php foreach ($customerOutstandingSummaryColumns as $column): ?>
-                            <th><?= e((string) $column['label']) ?></th>
+                            <?php $summaryColumnKey = (string) ($column['key'] ?? ''); ?>
+                            <th data-column-key="<?= e($summaryColumnKey) ?>"><?= e((string) $column['label']) ?></th>
                         <?php endforeach; ?>
                     </tr>
                 </thead>
@@ -2607,7 +2791,7 @@ if ($selectedReport === 'receivable_aging') {
                                 $summaryCellValue = (string) ($row[$summaryColumnKey] ?? '');
                                 $summaryDisplayValue = $formatReportTableDate($summaryColumnKey, $summaryCellValue);
                                 ?>
-                                <td>
+                                <td data-column-key="<?= e($summaryColumnKey) ?>">
                                     <?php if ($summaryColumnKey === 'lead_traveler_name' && (string) ($row['summary_drilldown_key'] ?? '') !== ''): ?>
                                         <button
                                             type="button"
@@ -2664,7 +2848,7 @@ if ($selectedReport === 'receivable_aging') {
         </div>
     <?php endif; ?>
     <div class="dense-table-wrap receivable-aging-detail-section" id="ledger-detail-section">
-        <table class="dense-table<?= $selectedReport === 'reminder_hub' ? ' reminder-hub-table' : '' ?><?= in_array($selectedReport, $customerLedgerReports, true) ? ' customer-ledger-table' : '' ?><?= $selectedReport === 'customer_advance_ledger' ? ' customer-advance-ledger-table' : '' ?><?= $selectedReport === 'expense_register' ? ' expense-register-table' : '' ?><?= in_array($selectedReport, ['prepaid_supplier_ledger', 'supplier_prepaid_payments'], true) ? ' supplier-prepaid-report-table' : '' ?><?= $selectedReport === 'supplier_all_payments' ? ' supplier-all-payments-table' : '' ?><?= $showTraceColumn ? ' supplier-ledger-trace-table' : '' ?>">
+        <table class="dense-table<?= $selectedReport === 'reminder_hub' ? ' reminder-hub-table' : '' ?><?= in_array($selectedReport, $customerLedgerReports, true) ? ' customer-ledger-table' : '' ?><?= $selectedReport === 'customer_ledger' ? ' account-ledger-detail-table' : '' ?><?= $selectedReport === 'customer_advance_ledger' ? ' customer-advance-ledger-table' : '' ?><?= $selectedReport === 'expense_register' ? ' expense-register-table' : '' ?><?= in_array($selectedReport, ['prepaid_supplier_ledger', 'supplier_prepaid_payments'], true) ? ' supplier-prepaid-report-table' : '' ?><?= $selectedReport === 'supplier_all_payments' ? ' supplier-all-payments-table' : '' ?><?= $showTraceColumn ? ' supplier-ledger-trace-table' : '' ?>">
             <thead>
                 <tr>
                     <?php foreach ($columns as $column): ?>
@@ -2712,7 +2896,14 @@ if ($selectedReport === 'receivable_aging') {
                                     $displayCellValue = $formatLedgerBalance($cellValue, $selectedReport);
                                 }
                                 ?>
-                                <?php if (in_array($selectedReport, ['prepaid_supplier_ledger', 'supplier_prepaid_payments'], true) && $columnKey === 'action' && $cellValue !== '' && $canCorrectSupplierAdvances): ?>
+                                <?php if ($selectedReport === 'money_in_out_ledger' && $columnKey === 'action' && ! empty($row['can_correct'])): ?>
+                                    <a class="btn btn-sm" href="<?= e(url('/treasury/accounts?' . http_build_query([
+                                        'edit_transaction_id' => (int) ($row['treasury_transaction_id'] ?? 0),
+                                        'return_to' => (string) ($_SERVER['REQUEST_URI'] ?? '/reports?report=money_in_out_ledger'),
+                                    ]))) ?>">Correct</a>
+                                <?php elseif ($selectedReport === 'money_in_out_ledger' && $columnKey === 'action'): ?>
+                                    <span class="muted">—</span>
+                                <?php elseif (in_array($selectedReport, ['prepaid_supplier_ledger', 'supplier_prepaid_payments'], true) && $columnKey === 'action' && $cellValue !== '' && $canCorrectSupplierAdvances): ?>
                                     <button
                                         type="button"
                                         class="btn btn-sm"
@@ -2816,6 +3007,11 @@ if ($selectedReport === 'receivable_aging') {
                                     <a class="report-booking-link reminder-hub-link<?= $columnKey === 'booking_reference' ? ' reminder-hub-link--booking' : '' ?>" href="<?= e($cellHref) ?>">
                                         <?= e($displayCellValue) ?>
                                     </a>
+                                <?php elseif ($selectedReport === 'cash_bank_ledger' && $columnKey === 'reference'): ?>
+                                    <?php if ($cellHref !== ''): ?><a class="report-booking-link" href="<?= e($cellHref) ?>" target="_blank" rel="noopener"><?= e($displayCellValue) ?></a><?php else: ?><?= e($displayCellValue) ?><?php endif; ?>
+                                    <?php if ((string) ($row['booking_reference'] ?? '') !== ''): ?>
+                                        <small class="cash-bank-booking-ref">Booking: <?php if ((string) ($row['booking_reference_href'] ?? '') !== ''): ?><a class="report-booking-link" href="<?= e((string) $row['booking_reference_href']) ?>" target="_blank" rel="noopener"><?= e((string) $row['booking_reference']) ?></a><?php else: ?><?= e((string) $row['booking_reference']) ?><?php endif; ?></small>
+                                    <?php endif; ?>
                                 <?php elseif ($cellHref !== ''): ?>
                                     <a class="report-booking-link" href="<?= e($cellHref) ?>">
                                         <?= e($displayCellValue) ?>
@@ -2828,7 +3024,7 @@ if ($selectedReport === 'receivable_aging') {
                     </tr>
                 <?php endforeach; ?>
             </tbody>
-            <?php if ($reportFooterRows !== [] && (! in_array($selectedReport, ['customer_ledger', 'customer_detail_ledger'], true) || ($selectedReport === 'customer_ledger' && ($isLinkedPartyLedger ?? false)))): ?>
+            <?php if ($reportFooterRows !== [] && ! in_array($selectedReport, ['customer_ledger', 'customer_detail_ledger'], true)): ?>
                 <tfoot>
                     <?php foreach ($reportFooterRows as $footerRow): ?>
                         <tr class="report-total-row">
@@ -2840,16 +3036,8 @@ if ($selectedReport === 'receivable_aging') {
                                 ?>
                                 <td data-column-key="<?= e($columnKey) ?>">
                                     <?php if ($totalValue !== ''): ?>
-                                        <strong><?= e(
-                                            ($isLinkedPartyLedger ?? false)
-                                            && in_array($selectedReport, ['customer_ledger', 'supplier_ledger'], true)
-                                            && $columnKey === 'balance_amount'
-                                                ? $formatLinkedClosingBalance($totalValue, $selectedReport)
-                                                : $totalValue
-                                        ) ?></strong>
-                                    <?php elseif ($selectedReport === 'customer_ledger' && ($isLinkedPartyLedger ?? false) && $columnKey === 'ledger_entry'): ?>
-                                        <strong><?= e((string) ($footerRow['_label'] ?? 'Totals')) ?></strong>
-                                    <?php elseif (! ($selectedReport === 'customer_ledger' && ($isLinkedPartyLedger ?? false)) && ! $totalLabelPrinted): ?>
+                                        <strong><?= e($totalValue) ?></strong>
+                                    <?php elseif (! $totalLabelPrinted): ?>
                                         <?php $totalLabelPrinted = true; ?>
                                         <strong><?= e((string) ($footerRow['_label'] ?? 'Totals')) ?></strong>
                                     <?php endif; ?>

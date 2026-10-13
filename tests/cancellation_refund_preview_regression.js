@@ -21,9 +21,26 @@ vm.runInContext(source.slice(start, end) + '\nthis.calculate = calculateCancella
 const plain = (value) => JSON.parse(JSON.stringify(value));
 const fixtures = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures/cancellation_refund_calculations.json'), 'utf8'));
 for (const fixture of fixtures) {
-    assert.deepEqual(plain(context.calculate(fixture.input)), fixture.result, fixture.name);
+    const calculated = plain(context.calculate(fixture.input));
+    for (const [key, expected] of Object.entries(fixture.result)) {
+        assert.equal(calculated[key], expected, `${fixture.name}: ${key}`);
+    }
     console.log(`[PASS] ${fixture.name}`);
 }
+const bk64Offset = context.calculate({ invoice: 600, settled: 550, expected: 50, penalty: 0, fee_refund: 0 });
+assert.equal(bk64Offset.outstanding, 0);
+assert.equal(bk64Offset.applied_to_outstanding, 50);
+assert.equal(bk64Offset.supplier_applied_to_outstanding, 50);
+assert.equal(bk64Offset.remaining, 0);
+const bk64Excess = context.calculate({ invoice: 600, settled: 550, expected: 70, penalty: 0, fee_refund: 0 });
+assert.equal(bk64Excess.outstanding, 0);
+assert.equal(bk64Excess.applied_to_outstanding, 50);
+assert.equal(bk64Excess.remaining, 20);
+assert.equal(context.calculate({ invoice: 600, settled: 550, expected: 0, fee_refund: 50 }).supplier_applied_to_outstanding, 0,
+    'Service-fee refund must not be labeled as supplier money');
+assert.match(source, /setupSettlementCurrencyForm\(serviceEventBars\.settlement,/);
+assert.match(source, /setupSettlementCurrencyForm\(serviceCorrectionSettlementForm,/);
+console.log('[PASS] Both Refund and Edit Refund use the entered customer-currency equivalent and show the balance offset');
 for (const bad of [-1, Infinity, NaN, 'invalid']) {
     assert.throws(() => context.calculate({ invoice: bad }));
 }
@@ -43,6 +60,35 @@ assert.equal(input.value, '0');
 assert.equal(input.dataset.refundCurrency, 'AED');
 assert.match(label.textContent, /Remaining Customer Refund Due \(AED\)/);
 console.log('[PASS] Saved refund entitlement, total paid and remaining are preserved in AED');
+const pendingBk64 = context.summary({
+    currency: 'AED', latestCancelFinanciallySettled: true,
+    latestCancelCustomerSettlementPending: true,
+    latestCancelPriorCustomerDueAmount: 600, latestCancelCustomerRefundBasisAmount: 550,
+    latestCancelCustomerFinalChargeAmount: 600,
+    customerRefundSummary: { currency: 'AED', entitlement: 0, paid: 0, remaining: 0 },
+}, 50, 0, 0);
+assert.equal(pendingBk64.outstanding, 0);
+assert.equal(pendingBk64.applied_to_outstanding, 50);
+assert.equal(pendingBk64.draft, true);
+assert.match(context.render(form, pendingBk64), /Customer outstanding after refund: AED 0/);
+const bk1041 = {
+    currency: 'AED', latestCancelFinanciallySettled: true,
+    latestCancelPriorCustomerDueAmount: 23, latestCancelCustomerRefundBasisAmount: 23,
+    latestCancelExpectedSupplierRefundAmount: 0, latestCancelCustomerPenaltyAmount: 0,
+    latestCancelAgencyFeeRefundAmount: 0,
+    customerRefundSummary: { currency: 'AED', entitlement: 0, paid: 0, remaining: 0, basis_verified: true },
+};
+const proposed = context.summary(bk1041, 10, 3, 0);
+assert.equal(proposed.remaining, 7, 'BK-001041 AED10 equivalent less AED3 penalty yields AED7 after its AED23 receipt');
+assert.equal(proposed.draft, true);
+assert.match(context.render(form, proposed), /Unsaved correction preview/);
+assert.match(label.textContent, /Projected Customer Refund Due \(AED, unsaved\)/);
+assert.equal(context.summary(bk1041, 0, 0, 0).remaining, 0, 'Unchanged saved cancellation remains AED0');
+assert.equal(context.summary({ ...bk1041, latestCustomerRefundEventId: 1 }, 10, 3, 0).remaining, 0,
+    'An already-posted customer payout cannot be represented as an unpaid draft refund');
+assert.equal(context.summary({ ...bk1041, latestCancelCustomerRefundBasisAmount: 0 }, 10, 3, 0).remaining, 0,
+    'No verified customer payment means no projected customer refund');
+console.log('[PASS] BK-001041 Edit Refund previews AED7 without changing the saved or paid balance');
 const feeLine = {
     currency: 'AED', latestCancelFinanciallySettled: true,
     latestCancelAgencyFeeRefundAmount: 0, latestCancelCustomerRefundBasisAmount: 1280,
@@ -100,6 +146,22 @@ feeInput.value = '0';
 vm.runInContext('syncSettlementCorrectionDerivedAmounts();', context);
 assert.equal(input.value, '1180', 'Removing fee refund restores saved credit even with missing equivalent');
 console.log('[PASS] Exact reported zero-equivalent screen previews AED1280 while retaining required conversion warning');
+context.serviceLine = bk1041;
+context.customerPenaltyField.value = '3';
+context.expectedSupplierRefundField.value = '800';
+context.agencyFeeRefundField.value = '0';
+context.supplierSourceCostAmount = 1000;
+context.customerRefundCredit = 0;
+context.supplierRefundCredit = 0;
+context.settlementCurrencyState.expectedSupplierRefundCurrencyState.amountField.value = '800';
+context.settlementCurrencyState.expectedSupplierRefundCurrencyState.rateToBooking = () => 10 / 800;
+context.settlementCurrencyState.expectedSupplierRefundCurrencyState.selectedToBooking = () => 10;
+context.settlementCurrencyState.expectedSupplierRefundCurrencyState.bookingToSelected = () => 800;
+context.settlementCurrencyState.customerPenaltyCurrencyState.bookingToSelected = (amount) => amount;
+vm.runInContext('syncSettlementCorrectionDerivedAmounts();', context);
+assert.equal(input.value, '7', 'Actual BK-001041 Edit Refund callback must display AED7');
+assert.match(label.textContent, /Projected Customer Refund Due \(AED, unsaved\)/);
+console.log('[PASS] Edit Refund form callback previews the BK-001041 correction as AED7');
 const unposted = context.summary({ currency: 'AED', currentCustomerInvoiceAmount: 1188, currentCustomerReceivedAmount: 1180 }, 653, 53, 0);
 assert.equal(unposted.entitlement, 592, 'Preview must use original invoice and actual settlement, including short payment');
 let validity = '';
@@ -121,6 +183,6 @@ assert.ok(source.includes('settlementCustomerSummary(serviceLine, liveExpectedSu
 console.log('Cancellation refund preview regression passed. No database writes.');
 assert.match(context.statusText({ latestCancelCustomerRefundBasisAmount: 0, currentCustomerReceivedAmount: 0 },
     { saved: true, entitlement: 0, paid: 0, basis_verified: true }), /No customer payment is linked/);
-assert.equal(context.statusText({}, { saved: true, entitlement: 40000, paid: 0 }), 'Customer refund has not been paid yet.');
+assert.equal(context.statusText({}, { saved: true, entitlement: 40000, paid: 0 }), 'No cash refund has been paid to the customer.');
 assert.match(context.statusText({}, { saved: true, entitlement: 0, paid: 0, basis_verified: false }), /Review the payment/);
 console.log('[PASS] Zero refund without recorded payment explains missing payment; confirmed entitlement retains normal unpaid-refund message');

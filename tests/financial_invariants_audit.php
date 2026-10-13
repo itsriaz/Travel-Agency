@@ -320,21 +320,11 @@ $check(
 $activeMoneyBranchMismatches = $fetchAll(
     'SELECT mismatch_type, booking_reference, source_reference, money_branch_id, target_branch_id
      FROM (
-        SELECT "customer_receipt_treasury" AS mismatch_type,
-               cr.booking_reference,
+        SELECT "customer_allocation" AS mismatch_type,
+               cri.booking_reference,
                cr.receipt_no AS source_reference,
                cr.branch_id AS money_branch_id,
-               ta.branch_id AS target_branch_id
-        FROM customer_receipts cr
-        INNER JOIN treasury_accounts ta ON ta.id = cr.treasury_account_id
-        WHERE cr.status <> "void"
-          AND cr.branch_id <> ta.branch_id
-        UNION ALL
-        SELECT "customer_allocation",
-               cri.booking_reference,
-               cr.receipt_no,
-               cr.branch_id,
-               cri.branch_id
+               cri.branch_id AS target_branch_id
         FROM customer_receipt_allocations cra
         INNER JOIN customer_receipts cr ON cr.id = cra.customer_receipt_id
         INNER JOIN customer_receivable_items cri ON cri.id = cra.customer_receivable_item_id
@@ -356,9 +346,33 @@ $activeMoneyBranchMismatches = $fetchAll(
      LIMIT 10'
 );
 $check(
-    'Active money stays branch-bound unless supplier allocation is explicitly global',
+    'Active allocations stay branch-bound unless supplier allocation is explicitly global',
     $activeMoneyBranchMismatches === [],
     $activeMoneyBranchMismatches === [] ? 'No invalid non-global cross-branch money allocation found' : json_encode($activeMoneyBranchMismatches, JSON_UNESCAPED_SLASHES)
+);
+
+$crossBranchReceiptTreasuryBreaks = $fetchAll(
+    'SELECT cr.receipt_no, cr.booking_reference, cr.currency,
+            ta.currency AS treasury_currency, ta.branch_id AS treasury_branch_id
+     FROM customer_receipts cr
+     INNER JOIN treasury_accounts ta ON ta.id = cr.treasury_account_id
+     WHERE cr.status <> "void" AND cr.branch_id <> ta.branch_id
+       AND (cr.currency <> ta.currency OR ta.linked_account_id IS NULL OR NOT EXISTS (
+           SELECT 1 FROM journal_entry_lines jel
+           INNER JOIN journal_entries je ON je.id = jel.journal_entry_id
+           WHERE jel.customer_receipt_id = cr.id
+             AND jel.account_id = ta.linked_account_id
+             AND je.currency = cr.currency
+             AND jel.debit_amount > 0
+       ))
+     LIMIT 10'
+);
+$check(
+    'Cross-branch receipts fund their selected treasury account in the matching currency',
+    $crossBranchReceiptTreasuryBreaks === [],
+    $crossBranchReceiptTreasuryBreaks === []
+        ? 'Every cross-branch receipt has matching treasury evidence'
+        : json_encode($crossBranchReceiptTreasuryBreaks, JSON_UNESCAPED_SLASHES)
 );
 
 $crossBranchSupplierAllocationBreaks = CrossBranchSupplierAllocationAudit::failures($db);

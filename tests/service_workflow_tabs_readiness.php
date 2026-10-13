@@ -114,7 +114,7 @@ $check(
     substr_count($view, '<strong>Save Refund</strong>') === 1
         && str_contains($view, '<strong>Pay Refund</strong>')
         && substr_count($view, '>Save Refund</button>') >= 2
-        && str_contains($javascript, ": 'Save Refund';")
+        && str_contains($javascript, "'Save Customer Refund' : 'Save Refund'")
         && str_contains($css, 'content: "Save Refund";')
         && str_contains($css, 'content: "Pay Refund";')
 );

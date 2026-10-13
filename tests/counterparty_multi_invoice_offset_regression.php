@@ -90,8 +90,25 @@ try {
         $check('Rejects ' . $label . ' atomically', $rejected && $before === (int) $db->query('SELECT COUNT(*) FROM counterparty_offsets')->fetchColumn());
     }
 
+    $noBranchRejected = false;
+    try {
+        $service->settle($baseInput, $actorId, []);
+    } catch (RuntimeException) {
+        $noBranchRejected = true;
+    }
+    $check('Empty accessible-branch scope cannot post an adjustment', $noBranchRejected
+        && (new \App\Repositories\CounterpartyOffsetRepository($app))->positions([]) === []);
+
     $offset = $service->settle($baseInput, $actorId, [$branchId]);
     $offsetId = (int) $offset['id'];
+    $noBranchVoidRejected = false;
+    try {
+        $service->void($offsetId, 'QA inaccessible reversal', $actorId, []);
+    } catch (RuntimeException) {
+        $noBranchVoidRejected = true;
+    }
+    $check('Empty accessible-branch scope cannot void an adjustment', $noBranchVoidRejected
+        && (string) $db->query('SELECT status FROM counterparty_offsets WHERE id=' . $offsetId)->fetchColumn() === 'posted');
     $accountRows = $db->query('SELECT customer_receivable_item_id item_id, allocated_amount FROM counterparty_offset_account_allocations WHERE counterparty_offset_id=' . $offsetId . ' ORDER BY customer_receivable_item_id')->fetchAll(PDO::FETCH_ASSOC);
     $payableRows = $db->query('SELECT supplier_obligation_id item_id, allocated_amount FROM counterparty_offset_payable_allocations WHERE counterparty_offset_id=' . $offsetId . ' ORDER BY supplier_obligation_id')->fetchAll(PDO::FETCH_ASSOC);
     $check('One PKR 700 header stores two exact account invoice allocations', (float) $offset['amount'] === 700.0

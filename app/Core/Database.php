@@ -19,19 +19,38 @@ final class Database
             $config['charset']
         );
 
-        try {
-            $connection = new PDO($dsn, $config['username'], $config['password'], [
-                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-                PDO::ATTR_EMULATE_PREPARES => false,
-            ]);
+        for ($attempt = 1; $attempt <= 3; $attempt++) {
+            try {
+                $connection = new PDO($dsn, $config['username'], $config['password'], [
+                    PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                    PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+                    PDO::ATTR_EMULATE_PREPARES => false,
+                    PDO::ATTR_TIMEOUT => 3,
+                ]);
 
-            self::applySessionTimezone($connection);
+                self::applySessionTimezone($connection);
 
-            return $connection;
-        } catch (PDOException $exception) {
-            throw new PDOException('Database connection failed.', (int) $exception->getCode(), $exception);
+                return $connection;
+            } catch (PDOException $exception) {
+                $driverCode = (int) ($exception->errorInfo[1] ?? 0);
+                $transient = in_array($driverCode, [2002, 2003, 2006, 2013], true);
+                if ($transient && $attempt < 3) {
+                    usleep($attempt * 100000);
+                    continue;
+                }
+
+                error_log('app.database.connection_failed ' . json_encode([
+                    'request_id' => function_exists('app_request_id') ? app_request_id() : null,
+                    'sqlstate' => (string) $exception->getCode(),
+                    'driver_code' => $driverCode,
+                    'attempts' => $attempt,
+                    'transient' => $transient,
+                ], JSON_UNESCAPED_SLASHES));
+                throw new PDOException('Database connection failed.', (int) $exception->getCode(), $exception);
+            }
         }
+
+        throw new PDOException('Database connection failed.');
     }
 
     private static function applySessionTimezone(PDO $connection): void

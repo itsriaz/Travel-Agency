@@ -30,7 +30,7 @@ $branchId = (int) ($db->query('SELECT id FROM branches WHERE is_active = 1 ORDER
 $actorUserId = (int) ($db->query('SELECT id FROM users WHERE is_active = 1 ORDER BY id LIMIT 1')->fetchColumn() ?: 0);
 $check('Active branch and user are available', $branchId > 0 && $actorUserId > 0);
 if ($branchId <= 0 || $actorUserId <= 0) {
-    return 1;
+    exit(1);
 }
 
 $db->beginTransaction();
@@ -164,6 +164,62 @@ try {
             'applications_after' => $secondApplicationsAfter,
         ], JSON_THROW_ON_ERROR)
     );
+    $db->prepare('INSERT INTO suppliers (branch_id, code, name, supplier_mode, default_currency, is_active)
+        VALUES (?, ?, ?, "normal_payable", "AED", 1)')->execute([
+        $branchId, 'REG-PARTIAL-' . $suffix, 'REG Partial Advance ' . $suffix,
+    ]);
+    $partialSupplierId = (int) $db->lastInsertId();
+    $db->prepare('INSERT INTO supplier_obligations
+        (supplier_id, branch_id, booking_reference, service_line_reference, obligation_group, currency,
+         gross_amount, advance_applied_amount, net_payable_amount, status, created_by_user_id)
+        VALUES (?, ?, ?, "SV-001", "service_cost", "AED", 549, 529, 0, "paid", ?)')->execute([
+        $partialSupplierId, $branchId, 'REG-BK-PARTIAL-' . $suffix, $actorUserId,
+    ]);
+    $partialObligationId = (int) $db->lastInsertId();
+    $db->prepare('INSERT INTO supplier_payments
+        (supplier_id, branch_id, booking_reference, payment_no, payment_date, currency,
+         paid_amount, allocated_amount, unallocated_amount, payment_method, status, created_by_user_id)
+        VALUES (?, ?, ?, ?, ?, "AED", 545, 545, 0, "cash", "paid", ?)')->execute([
+        $partialSupplierId, $branchId, 'REG-BK-PARTIAL-' . $suffix,
+        'REG-SPAY-PARTIAL-' . $suffix, date('Y-m-d'), $actorUserId,
+    ]);
+    $partialPaymentId = (int) $db->lastInsertId();
+    $db->prepare('INSERT INTO supplier_payment_allocations
+        (supplier_payment_id, supplier_obligation_id, allocated_amount, exchange_rate_used, created_by_user_id)
+        VALUES (?, ?, 545, 1, ?)')->execute([
+        $partialPaymentId, $partialObligationId, $actorUserId,
+    ]);
+    $db->prepare('INSERT INTO supplier_advances
+        (supplier_id, branch_id, currency, deposit_amount, available_amount,
+         reference_no, received_at, created_by_user_id)
+        VALUES (?, ?, "AED", 529, 0, ?, ?, ?)')->execute([
+        $partialSupplierId, $branchId, 'REG-ADV-PARTIAL-' . $suffix,
+        date('Y-m-d'), $actorUserId,
+    ]);
+    $partialAdvanceId = (int) $db->lastInsertId();
+    $db->prepare('INSERT INTO supplier_advance_applications
+        (supplier_advance_id, supplier_obligation_id, applied_amount, application_type,
+         advance_currency, advance_amount_consumed, obligation_currency, obligation_amount_applied,
+         rate_from_currency, rate_to_currency, exchange_rate, exchange_rate_effective_date,
+         created_by_user_id)
+        VALUES (?, ?, 529, "same_currency_auto", "AED", 529, "AED", 529,
+            "AED", "AED", 1, ?, ?)')->execute([
+        $partialAdvanceId, $partialObligationId, date('Y-m-d'), $actorUserId,
+    ]);
+
+    $partialResult = $repository->autoApplyAvailableAdvanceToObligation($partialObligationId, $actorUserId);
+    $partialAdvance = $repository->findAdvanceById($partialAdvanceId) ?? [];
+    $partialObligation = $repository->findObligationById($partialObligationId) ?? [];
+    $applicationAmount = (float) $db->query('SELECT applied_amount FROM supplier_advance_applications
+        WHERE supplier_obligation_id = ' . $partialObligationId)->fetchColumn();
+    $check(
+        'AED 545 payment plus AED 4 advance settles AED 549 and releases AED 525',
+        abs((float) ($partialResult['applied_amount_delta'] ?? 0) + 525) < 0.005
+            && abs($applicationAmount - 4) < 0.005
+            && abs((float) ($partialAdvance['available_amount'] ?? 0) - 525) < 0.005
+            && abs((float) ($partialObligation['advance_applied_amount'] ?? 0) - 4) < 0.005
+            && abs((float) ($partialObligation['net_payable_amount'] ?? 0)) < 0.005
+    );
 } finally {
     if ($db->inTransaction()) {
         $db->rollBack();
@@ -175,8 +231,8 @@ if ($failures !== []) {
     foreach ($failures as $failure) {
         echo ' - ' . $failure . PHP_EOL;
     }
-    return 1;
+    exit(1);
 }
 
 echo PHP_EOL . 'Supplier paid-payable blocks advance reapply regression passed.' . PHP_EOL;
-return 0;
+exit(0);

@@ -450,8 +450,8 @@ try {
     $openMoneyRow = $receiptRows[0] ?? [];
     $check('Open-money report clearly identifies the PKR 300 as received on account',
         count($receiptRows) === 1
-        && (string) ($openMoneyRow['source_type'] ?? '') === 'Account-Holder Payment on Account'
-        && (string) ($openMoneyRow['status'] ?? '') === 'Received On Account'
+        && (string) ($openMoneyRow['source_type'] ?? '') === 'Linked-Party Direct Payment'
+        && (string) ($openMoneyRow['status'] ?? '') === 'Included In Linked Balance'
         && $money($openMoneyRow['unallocated_amount'] ?? 0) === 300.0);
     $check('Automatic linked adjustment remains disabled',
         $offsetService->autoSettleLink($linkId, $today, $actorId) === []
@@ -559,6 +559,8 @@ $positions = [[
     'currency' => 'PKR',
     'receivable' => 1000,
     'payable' => 700,
+    'on_account_credit' => 0,
+    'net_balance' => 300,
     'available_offset' => 700,
 ], [
     'link_id' => 2,
@@ -569,6 +571,8 @@ $positions = [[
     'currency' => 'AED',
     'receivable' => 0,
     'payable' => 6086,
+    'on_account_credit' => 0,
+    'net_balance' => -6086,
     'available_offset' => 0,
 ], [
     'link_id' => 3,
@@ -579,6 +583,8 @@ $positions = [[
     'currency' => 'USD',
     'receivable' => 500,
     'payable' => 0,
+    'on_account_credit' => 0,
+    'net_balance' => 500,
     'available_offset' => 0,
 ]];
 $manualPosition = [];
@@ -602,13 +608,17 @@ require BASE_PATH . '/app/Views/control/linked_party_settlements.php';
 $reconciliationView = (string) ob_get_clean();
 $check('Linked balance table uses professional reconciliation terminology',
     str_contains($reconciliationView, 'Linked Party Balance Reconciliation')
-    && str_contains($reconciliationView, 'Account Receivable')
+    && str_contains($reconciliationView, 'Open Account Invoices')
+    && str_contains($reconciliationView, 'Direct Payments In Net')
+    && str_contains($reconciliationView, 'Net Position')
     && ! str_contains($reconciliationView, 'Separate Balances')
     && ! str_contains($reconciliationView, 'Account Recovery Available'));
 $check('Linked balance actions explain every matchable and unmatched state',
-    substr_count($reconciliationView, 'Match Invoices') === 1
-    && str_contains($reconciliationView, 'No account receivable')
-    && str_contains($reconciliationView, 'No supplier payable'));
+    substr_count($reconciliationView, 'Open / Match') === 1
+    && substr_count($reconciliationView, 'Open / Receive') === 2
+    && str_contains($reconciliationView, 'Receivable from Receivable Only Account')
+    && str_contains($reconciliationView, 'Payable to Payable Only Supplier')
+    && ! str_contains($reconciliationView, 'Due from party'));
 $check('Settlement history preserves readable column and action spacing',
     ! str_contains($reconciliationView, '<th>Settlement</th>')
     && ! str_contains($reconciliationView, '<th>Service</th>')

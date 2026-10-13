@@ -43,7 +43,8 @@ final class SupplierLedgerService extends Service
             $rows,
             static fn (mixed $row): bool => ! is_array($row)
                 || (
-                    ($bookingScoped || (string) ($row['entry_type'] ?? '') !== 'Advance Applied')
+                    ($bookingScoped || ! in_array((string) ($row['entry_type'] ?? ''), ['Advance Applied', 'Advance Released'], true))
+                    && ! str_contains((string) ($row['source_reference'] ?? ''), '-HIST-CUR-RECON-')
                     && ! (
                         (string) ($row['entry_type'] ?? '') === 'Payable Adjustment'
                         && (
@@ -247,6 +248,7 @@ final class SupplierLedgerService extends Service
                     }
                     break;
                 case 'Supplier Credit Moved to Advance':
+                case 'Advance Released':
                     if ($bookingScoped) {
                         $advanceReturnedSummary[$currency] = round(($advanceReturnedSummary[$currency] ?? 0.0) + $effectiveDebitAmount, 2);
                     }
@@ -267,8 +269,8 @@ final class SupplierLedgerService extends Service
         return [
             'rows' => $reportRows,
             'summaryCards' => array_merge(
-                $this->summaryCards('Supplier Debit', $debitSummary, $currencyFilter),
-                $this->summaryCards('Gross Paid to Supplier', $creditSummary, $currencyFilter),
+                $this->summaryCards('Supplier bills and adjustments', $debitSummary, $currencyFilter),
+                $this->summaryCards('Payments to suppliers', $creditSummary, $currencyFilter),
                 $advanceUsedSummary !== [] ? $this->summaryCards('Advance Used', $advanceUsedSummary, $currencyFilter) : [],
                 $advanceReturnedSummary !== [] ? $this->summaryCards('Returned to Advance', $advanceReturnedSummary, $currencyFilter) : [],
                 $this->balanceSummaryCards($balanceSummary, $currencyFilter)
@@ -294,6 +296,7 @@ final class SupplierLedgerService extends Service
             'Supplier Refund Retained as Credit' => 'Supplier refund retained as supplier credit',
             'Supplier Credit Moved to Advance' => 'Supplier refund moved to advance',
             'Advance Applied' => 'Supplier advance applied',
+            'Advance Released' => 'Supplier advance application released',
             'Refund Advance Applied' => 'Supplier refund credit applied',
             'Advance Adjustment' => 'Supplier advance adjustment',
             'Customer Paid Supplier' => $customerName !== '' ? 'Customer ' . $customerName . ' paid supplier.' : 'Customer paid supplier.',

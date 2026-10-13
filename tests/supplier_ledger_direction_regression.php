@@ -83,10 +83,10 @@ if (! str_contains((string) ($formatted[1]['booking_reference_href'] ?? ''), '/s
     $failures[] = 'Supplier payment references must open the unified Supplier Payment screen.';
 }
 
-if (($cards['Supplier Debit / PKR'] ?? '') !== 'PKR 535.00') {
+if (($cards['Supplier bills and adjustments / PKR'] ?? '') !== 'PKR 535.00') {
     $failures[] = 'Summary Debit must contain the latest net supplier cost after cancellation.';
 }
-if (($cards['Gross Paid to Supplier / PKR'] ?? '') !== 'PKR 1,188.00') {
+if (($cards['Payments to suppliers / PKR'] ?? '') !== 'PKR 1,188.00') {
     $failures[] = 'Gross Paid to Supplier must contain the historical supplier payment, not the outstanding balance.';
 }
 if (($cards['Supplier Balance / PKR'] ?? '') !== 'PKR 0.00') {
@@ -144,7 +144,7 @@ if (
     count($advanceConsumptionFormatted) !== 4
     || $advanceApplicationRows !== []
     || (string) ($advanceConsumptionFormatted[3]['balance_amount'] ?? '') !== '194.00 Advance'
-    || ($advanceConsumptionCards['Gross Paid to Supplier / PKR'] ?? '') !== 'PKR 3,000.00'
+    || ($advanceConsumptionCards['Payments to suppliers / PKR'] ?? '') !== 'PKR 3,000.00'
     || ($advanceConsumptionCards['Supplier Balance / PKR'] ?? '') !== 'PKR 194.00 Advance'
 ) {
     $failures[] = 'A PKR 3,000 supplier advance consumed by invoices of 502, 1,743, and 561 must appear once and close at PKR 194 Advance.';
@@ -198,7 +198,7 @@ if (
     || count($lumpSumPaymentRows) !== 1
     || abs((float) ($lumpSumPaymentRows[0]['raw_credit_amount'] ?? 0) - 5000.00) > 0.005
     || (string) ($lumpSumPaymentRows[0]['balance_amount'] ?? '') !== '2,000.00 Advance'
-    || ($lumpSumCards['Gross Paid to Supplier / PKR'] ?? '') !== 'PKR 5,000.00'
+    || ($lumpSumCards['Payments to suppliers / PKR'] ?? '') !== 'PKR 5,000.00'
 ) {
     $failures[] = 'One PKR 5,000 lump-sum payment must render once against three PKR 1,000 invoices and leave PKR 2,000 supplier advance.';
 }

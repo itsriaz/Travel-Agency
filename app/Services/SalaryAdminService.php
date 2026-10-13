@@ -4,10 +4,10 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+use App\Helpers\AuditLog;
 use App\Repositories\MasterDataRepository;
 use App\Repositories\SalaryRepository;
 use App\Repositories\TreasuryRepository;
-use App\Repositories\UserRepository;
 use PDO;
 use RuntimeException;
 
@@ -43,30 +43,10 @@ final class SalaryAdminService extends Service
             throw new RuntimeException('Please select a valid salary currency.');
         }
 
-        $selectedUserId = (int) ($input['employee_user_id'] ?? 0);
-        $linkedBusinessSourceRows = $repository->linkedBusinessSourceRowsForUser($selectedUserId);
-        if ($linkedBusinessSourceRows === []) {
-            throw new RuntimeException('Please select a linked employee before saving salary.');
-        }
-
-        $businessSourceId = 0;
-        if (count($linkedBusinessSourceRows) === 1) {
-            $businessSourceId = (int) ($linkedBusinessSourceRows[0]['id'] ?? 0);
-        } else {
-            foreach ($linkedBusinessSourceRows as $linkedRow) {
-                $linkedText = strtoupper(trim(
-                    (string) ($linkedRow['name'] ?? '') . ' ' . (string) ($linkedRow['code'] ?? '')
-                ));
-                if ($linkedText !== '' && str_contains($linkedText, $currency)) {
-                    $businessSourceId = (int) ($linkedRow['id'] ?? 0);
-                    break;
-                }
-            }
-        }
-
+        $businessSourceId = (int) ($input['business_source_id'] ?? 0);
         $businessSource = $masterData->find('business_sources', $businessSourceId);
         if ($businessSourceId <= 0 || $businessSource === null || (int) ($businessSource['is_active'] ?? 0) !== 1) {
-            throw new RuntimeException('No linked sales account matched the selected employee and salary currency.');
+            throw new RuntimeException('Please select an active account for this salary record.');
         }
 
         $salaryMonth = $this->normalizeMonth((string) ($input['salary_month'] ?? ''));
@@ -111,6 +91,9 @@ final class SalaryAdminService extends Service
                 'notes' => $notes,
                 'entered_by_user_id' => $actorUserId,
                 'updated_by_user_id' => $actorUserId,
+            ]);
+            $this->auditChange('salary.record.created', $actorUserId, [], [
+                'record' => $repository->findRecord($salaryRecordId, $accessibleBranchIds),
             ]);
 
             if ($startedTransaction && $db->inTransaction()) {
@@ -169,30 +152,10 @@ final class SalaryAdminService extends Service
             throw new RuntimeException('Please select a valid salary currency.');
         }
 
-        $selectedUserId = (int) ($input['employee_user_id'] ?? 0);
-        $linkedBusinessSourceRows = $repository->linkedBusinessSourceRowsForUser($selectedUserId);
-        if ($linkedBusinessSourceRows === []) {
-            throw new RuntimeException('Please select a linked employee before saving salary.');
-        }
-
-        $businessSourceId = 0;
-        if (count($linkedBusinessSourceRows) === 1) {
-            $businessSourceId = (int) ($linkedBusinessSourceRows[0]['id'] ?? 0);
-        } else {
-            foreach ($linkedBusinessSourceRows as $linkedRow) {
-                $linkedText = strtoupper(trim(
-                    (string) ($linkedRow['name'] ?? '') . ' ' . (string) ($linkedRow['code'] ?? '')
-                ));
-                if ($linkedText !== '' && str_contains($linkedText, $currency)) {
-                    $businessSourceId = (int) ($linkedRow['id'] ?? 0);
-                    break;
-                }
-            }
-        }
-
+        $businessSourceId = (int) ($input['business_source_id'] ?? 0);
         $businessSource = $masterData->find('business_sources', $businessSourceId);
         if ($businessSourceId <= 0 || $businessSource === null || (int) ($businessSource['is_active'] ?? 0) !== 1) {
-            throw new RuntimeException('No linked sales account matched the selected employee and salary currency.');
+            throw new RuntimeException('Please select an active account for this salary record.');
         }
 
         $salaryMonth = $this->normalizeMonth((string) ($input['salary_month'] ?? ''));
@@ -252,6 +215,11 @@ final class SalaryAdminService extends Service
                 'updated_by_user_id' => $actorUserId,
             ]);
             $repository->refreshRecordTotals($recordId);
+            $this->auditChange('salary.record.updated', $actorUserId, [
+                'record' => $existingRecord,
+            ], [
+                'record' => $repository->findRecord($recordId, $accessibleBranchIds),
+            ]);
 
             if ($startedTransaction && $db->inTransaction()) {
                 $db->commit();
@@ -384,6 +352,12 @@ final class SalaryAdminService extends Service
                 'updated_by_user_id' => $actorUserId,
             ]);
             $repository->refreshRecordTotals($salaryRecordId);
+            $this->auditChange('salary.payment.created', $actorUserId, [
+                'record' => $record,
+            ], [
+                'record' => $repository->findRecord($salaryRecordId, $accessibleBranchIds),
+                'payment' => $repository->findPayment($paymentId, $accessibleBranchIds),
+            ]);
 
             if ($startedTransaction && $db->inTransaction()) {
                 $db->commit();
@@ -533,6 +507,14 @@ final class SalaryAdminService extends Service
             if ($oldRecordId > 0 && $oldRecordId !== $salaryRecordId) {
                 $repository->refreshRecordTotals($oldRecordId);
             }
+            $this->auditChange('salary.payment.updated', $actorUserId, [
+                'payment' => $existingPayment,
+            ], [
+                'payment' => $repository->findPayment($paymentId, $accessibleBranchIds),
+                'record' => $repository->findRecord($salaryRecordId, $accessibleBranchIds),
+                'previous_record' => $oldRecordId !== $salaryRecordId
+                    ? $repository->findRecord($oldRecordId, $accessibleBranchIds) : null,
+            ]);
 
             if ($startedTransaction && $db->inTransaction()) {
                 $db->commit();
@@ -583,6 +565,12 @@ final class SalaryAdminService extends Service
         try {
             $repository->voidPayment($paymentId, $voidReason, $actorUserId);
             $repository->refreshRecordTotals((int) ($existingPayment['salary_record_id'] ?? 0));
+            $this->auditChange('salary.payment.voided', $actorUserId, [
+                'payment' => $existingPayment,
+            ], [
+                'payment' => $repository->findPayment($paymentId, $accessibleBranchIds),
+                'record' => $repository->findRecord((int) ($existingPayment['salary_record_id'] ?? 0), $accessibleBranchIds),
+            ]);
 
             if ($startedTransaction && $db->inTransaction()) {
                 $db->commit();
@@ -636,6 +624,11 @@ final class SalaryAdminService extends Service
 
         try {
             $repository->voidRecord($recordId, $voidReason, $actorUserId);
+            $this->auditChange('salary.record.voided', $actorUserId, [
+                'record' => $existingRecord,
+            ], [
+                'record' => $repository->findRecord($recordId, $accessibleBranchIds),
+            ]);
 
             if ($startedTransaction && $db->inTransaction()) {
                 $db->commit();
@@ -686,11 +679,18 @@ final class SalaryAdminService extends Service
         }
 
         try {
+            $beforeEntities = ['record' => $existingRecord];
             foreach ($activePaymentIds as $paymentId) {
+                $beforeEntities['payment_' . $paymentId] = $repository->findPayment($paymentId, $accessibleBranchIds);
                 $repository->voidPayment($paymentId, $voidReason, $actorUserId);
             }
             $repository->refreshRecordTotals($recordId);
             $repository->voidRecord($recordId, $voidReason, $actorUserId);
+            $afterEntities = ['record' => $repository->findRecord($recordId, $accessibleBranchIds)];
+            foreach ($activePaymentIds as $paymentId) {
+                $afterEntities['payment_' . $paymentId] = $repository->findPayment($paymentId, $accessibleBranchIds);
+            }
+            $this->auditChange('salary.record.voided_all', $actorUserId, $beforeEntities, $afterEntities);
 
             if ($startedTransaction && $db->inTransaction()) {
                 $db->commit();
@@ -709,60 +709,33 @@ final class SalaryAdminService extends Service
         }
     }
 
-    public function saveEmployeeLink(array $input, int $actorUserId): array
+    private function auditChange(string $event, int $actorUserId, array $before, array $after, array $details = []): void
     {
-        $repository = new SalaryRepository($this->app);
-        if (! $repository->employeeLinkTableExists()) {
-            throw new RuntimeException('Employee sales-account links are not available until the latest migration is applied.');
-        }
+        $snapshot = static function (array $entities): array {
+            $fields = [
+                'id', 'salary_record_id', 'business_source_id', 'branch_id', 'salary_month',
+                'currency', 'payment_currency', 'basic_salary_amount', 'bonus_amount',
+                'gross_debit_amount', 'paid_credit_amount', 'deduction_credit_amount',
+                'outstanding_amount', 'paid_amount', 'source_paid_amount', 'deduction_amount',
+                'exchange_rate_to_salary', 'treasury_account_id', 'status',
+            ];
+            $result = [];
+            foreach ($entities as $name => $entity) {
+                if (! is_array($entity)) {
+                    continue;
+                }
+                $result[$name] = array_intersect_key($entity, array_flip($fields));
+            }
+            return $result;
+        };
 
-        $userId = (int) ($input['user_id'] ?? 0);
-        $businessSourceId = (int) ($input['business_source_id'] ?? 0);
-        $notes = $this->optionalText($input['notes'] ?? null, 255);
-
-        $user = (new UserRepository($this->app))->findById($userId);
-        if ($user === null || (int) ($user['is_active'] ?? 0) !== 1) {
-            throw new RuntimeException('Please select a valid active employee user.');
-        }
-
-        $businessSource = (new MasterDataRepository($this->app))->find('business_sources', $businessSourceId);
-        if ($businessSource === null || (int) ($businessSource['is_active'] ?? 0) !== 1) {
-            throw new RuntimeException('Please select a valid active sales account.');
-        }
-
-        $repository->saveEmployeeLink([
-            'user_id' => $userId,
-            'business_source_id' => $businessSourceId,
-            'notes' => $notes,
-            'linked_by_user_id' => $actorUserId,
+        AuditLog::recordRequired($this->app, $event, [
+            'user_id' => $actorUserId,
+            'request_id' => app_request_id(),
+            'before' => $snapshot($before),
+            'after' => $snapshot($after),
+            'details' => $details,
         ]);
-
-        return [
-            'action' => 'linked',
-            'user_id' => $userId,
-            'business_source_id' => $businessSourceId,
-        ];
-    }
-
-    public function unlinkEmployeeLink(array $input): array
-    {
-        $repository = new SalaryRepository($this->app);
-        if (! $repository->employeeLinkTableExists()) {
-            throw new RuntimeException('Employee sales-account links are not available until the latest migration is applied.');
-        }
-
-        $linkId = (int) ($input['link_id'] ?? 0);
-        $link = $repository->findEmployeeLink($linkId);
-        if ($link === null || (int) ($link['is_active'] ?? 0) !== 1) {
-            throw new RuntimeException('The selected employee sales-account link was not found.');
-        }
-
-        $repository->deactivateEmployeeLink($linkId);
-
-        return [
-            'action' => 'unlinked',
-            'link_id' => $linkId,
-        ];
     }
 
     private function normalizeMonth(string $value): string

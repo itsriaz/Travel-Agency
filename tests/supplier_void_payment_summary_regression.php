@@ -60,7 +60,7 @@ $fail = static function (string $message): never {
     exit(1);
 };
 
-if (($cards['Gross Paid to Supplier / PKR'] ?? '') !== 'PKR 0.00') {
+if (($cards['Payments to suppliers / PKR'] ?? '') !== 'PKR 0.00') {
     $fail('Voided supplier payment must reduce Gross Paid to Supplier to PKR 0.00.');
 }
 

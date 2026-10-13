@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Repositories;
 
+use App\Services\BookingEditTraceService;
+
 final class BookingServiceEventRepository extends BaseRepository
 {
     public function hasPostedCancellationSettlement(int $bookingServiceId): bool
@@ -129,6 +131,11 @@ final class BookingServiceEventRepository extends BaseRepository
 
             $eventId = (int) $this->db->lastInsertId();
             if ($eventId > 0) {
+                BookingEditTraceService::checkpoint('BookingServiceEventRepository::createEvent', 'completed', [
+                    'event_id' => $eventId,
+                    'event_type' => (string) $data['event_type'],
+                    'currency' => (string) $data['currency'],
+                ]);
                 return $eventId;
             }
 
@@ -189,7 +196,13 @@ final class BookingServiceEventRepository extends BaseRepository
                 'created_by_user_id' => $data['actor_user_id'] ?? null,
             ]);
 
-            return (int) ($lookup->fetchColumn() ?: 0);
+            $eventId = (int) ($lookup->fetchColumn() ?: 0);
+            BookingEditTraceService::checkpoint('BookingServiceEventRepository::createEvent', 'completed', [
+                'event_id' => $eventId,
+                'event_type' => (string) $data['event_type'],
+                'currency' => (string) $data['currency'],
+            ]);
+            return $eventId;
         });
     }
 
@@ -283,6 +296,19 @@ final class BookingServiceEventRepository extends BaseRepository
         return $row !== false ? $row : null;
     }
 
+    public function lockPostedEventById(int $eventId, string $eventType): ?array
+    {
+        $statement = $this->db->prepare(
+            'SELECT * FROM booking_service_events
+             WHERE id = :id AND event_type = :event_type AND event_status = "posted"
+             FOR UPDATE'
+        );
+        $statement->execute(['id' => $eventId, 'event_type' => $eventType]);
+        $row = $statement->fetch();
+
+        return $row !== false ? $row : null;
+    }
+
     public function updateCancellationFinancials(int $eventId, array $data): void
     {
         $statement = $this->db->prepare(
@@ -307,6 +333,12 @@ final class BookingServiceEventRepository extends BaseRepository
             'reason' => $data['reason'] ?? null,
             'notes' => $data['notes'] ?? null,
             'payload_json' => isset($data['payload_json']) ? json_encode($data['payload_json'], JSON_UNESCAPED_SLASHES) : null,
+        ]);
+        BookingEditTraceService::checkpoint('BookingServiceEventRepository::updateCancellationFinancials', 'completed', [
+            'event_id' => $eventId,
+            'penalty_amount' => (float) ($data['penalty_amount'] ?? 0),
+            'customer_credit_amount' => (float) ($data['customer_credit_amount'] ?? 0),
+            'supplier_credit_amount' => (float) ($data['supplier_credit_amount'] ?? 0),
         ]);
     }
 
@@ -343,6 +375,11 @@ final class BookingServiceEventRepository extends BaseRepository
             'reason' => $data['reason'] ?? null,
             'notes' => $data['notes'] ?? null,
             'payload_json' => json_encode($payload, JSON_UNESCAPED_SLASHES),
+        ]);
+        BookingEditTraceService::checkpoint('BookingServiceEventRepository::updateRefundFinancials', 'completed', [
+            'event_id' => $eventId,
+            'customer_refund_amount' => (float) ($data['customer_refund_amount'] ?? $existing['customer_refund_amount'] ?? 0),
+            'supplier_refund_amount' => (float) ($data['supplier_refund_amount'] ?? $existing['supplier_refund_amount'] ?? 0),
         ]);
     }
 
@@ -480,6 +517,11 @@ final class BookingServiceEventRepository extends BaseRepository
                  WHERE id = :event_id'
             );
             $update->execute($params);
+            BookingEditTraceService::checkpoint('BookingServiceEventRepository::voidEvent', 'completed', [
+                'event_id' => $eventId,
+                'event_type' => (string) ($event['event_type'] ?? ''),
+                'reversal_journal_entry_id' => (int) ($reversalJournalEntryId ?? 0),
+            ]);
 
             return [
                 'id' => (int) ($event['id'] ?? 0),

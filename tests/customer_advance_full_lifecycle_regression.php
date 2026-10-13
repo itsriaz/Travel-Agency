@@ -120,6 +120,30 @@ try {
         $failures[] = 'Manual customer advance application did not settle the selected invoice.';
     }
 
+    $db->exec('SAVEPOINT advance_allocation_history');
+    $released = $paymentRepository->releaseSpecificReceiptAllocations(
+        (int) $advance['receipt_id'],
+        null,
+        $userId,
+        'Rollback-only allocation history check'
+    );
+    $movementStatement = $db->prepare(
+        'SELECT action, receivable_amount_before, receivable_amount_after
+         FROM customer_receipt_allocation_movements
+         WHERE customer_receipt_id = ? ORDER BY id'
+    );
+    $movementStatement->execute([(int) $advance['receipt_id']]);
+    $movements = $movementStatement->fetchAll(PDO::FETCH_ASSOC);
+    if ((int) ($released['allocation_count_released'] ?? 0) !== 1
+        || array_column($movements, 'action') !== ['allocated', 'released']
+        || abs((float) ($movements[1]['receivable_amount_before'] ?? 0) - $invoiceOutstanding) > 0.005
+        || abs((float) ($movements[1]['receivable_amount_after'] ?? -1)) > 0.005
+    ) {
+        $failures[] = 'Customer advance allocation release did not preserve its movement history.';
+    }
+    $db->exec('ROLLBACK TO SAVEPOINT advance_allocation_history');
+    $db->exec('RELEASE SAVEPOINT advance_allocation_history');
+
     $workspaceService->refundCustomerAdvance([
         'branch_id' => $branchId,
         'traveler_id' => $travelerId,

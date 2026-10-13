@@ -62,6 +62,9 @@ final class CounterpartyOffsetService extends Service
 
         if ($linkId <= 0) throw new RuntimeException('Please select a linked account holder and supplier.');
         $allowedBranches = array_values(array_unique(array_filter(array_map('intval', $accessibleBranchIds))));
+        if ($allowedBranches === []) {
+            throw new RuntimeException('No accessible branch is available for this linked-party adjustment.');
+        }
 
         /** @var PDO $db */
         $db = $this->app->get('db');
@@ -251,7 +254,7 @@ final class CounterpartyOffsetService extends Service
             $allowedBranches = array_values(array_unique(array_filter(array_map('intval', $accessibleBranchIds))));
             $accountBranchId = (int) ($offset['account_branch_id'] ?? $offset['branch_id']);
             $supplierBranchId = (int) ($offset['supplier_branch_id'] ?? $offset['branch_id']);
-            if ($allowedBranches !== [] && (! in_array($accountBranchId, $allowedBranches, true)
+            if ($allowedBranches === [] || (! in_array($accountBranchId, $allowedBranches, true)
                 || ! in_array($supplierBranchId, $allowedBranches, true))) {
                 throw new RuntimeException('You do not have access to both settlement branches.');
             }

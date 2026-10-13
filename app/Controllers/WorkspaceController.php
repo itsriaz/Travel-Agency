@@ -19,6 +19,7 @@ use App\Repositories\TreasuryRepository;
 use App\Repositories\TravelerRepository;
 use App\Services\AccountingFoundationService;
 use App\Services\BookingWorkspaceService;
+use App\Services\BookingEditTraceService;
 use App\Services\CustomerPaymentFoundationService;
 use App\Services\CustomerReceiptWorkspaceService;
 use App\Services\DocumentWorkspaceService;
@@ -35,6 +36,35 @@ use Throwable;
 
 final class WorkspaceController extends BaseController
 {
+    private function beginBookingEditTrace(string $action): BookingEditTraceService
+    {
+        try {
+            $branchIds = Authorization::accessibleBranchIds();
+        } catch (Throwable) {
+            $branchIds = [];
+        }
+
+        return BookingEditTraceService::begin($this->app, $action, $_POST, (int) Auth::id(), $branchIds);
+    }
+
+    private function traceServiceOperation(string $action, string $service, callable $operation): int
+    {
+        $trace = $this->beginBookingEditTrace($action);
+        BookingEditTraceService::checkpoint($service, 'started', ['service_id' => (int) ($_POST['service_id'] ?? 0)]);
+        try {
+            $bookingId = $operation();
+            BookingEditTraceService::checkpoint($service, 'completed', ['booking_id' => $bookingId]);
+            $trace->finish('committed', $bookingId);
+            return $bookingId;
+        } catch (RuntimeException $exception) {
+            $trace->finish('rejected', null, $exception);
+            throw $exception;
+        } catch (Throwable $exception) {
+            $trace->finish('failed', null, $exception);
+            throw $exception;
+        }
+    }
+
     private function workspaceLoadFailureContext(array $booking, array $extra = []): array
     {
         return array_merge(app_request_log_context(), [
@@ -739,6 +769,16 @@ final class WorkspaceController extends BaseController
         $payload = is_array($decoded) ? $decoded : [];
 
         $type = substr(trim((string) ($payload['type'] ?? 'client_runtime')), 0, 80);
+        if ($type === 'booking_ui_trace') {
+            if (! is_string($rawPayload) || strlen($rawPayload) > 8192) {
+                $this->jsonResponse(['ok' => false], 413);
+            }
+            Csrf::verifyOrFail($_SERVER['HTTP_X_CSRF_TOKEN'] ?? null);
+            $recorded = BookingEditTraceService::observeBrowserState(
+                $this->app, $payload, (int) Auth::id(), Authorization::accessibleBranchIds()
+            );
+            $this->jsonResponse(['ok' => $recorded], $recorded ? 200 : 422);
+        }
         $message = trim((string) ($payload['message'] ?? 'Client runtime event captured.'));
         $file = trim((string) ($payload['file'] ?? ''));
         $line = (int) ($payload['line'] ?? 0);
@@ -1157,6 +1197,7 @@ final class WorkspaceController extends BaseController
     public function save(): never
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);
+        $editTrace = $this->beginBookingEditTrace('booking.save');
 
         try {
             $result = (new BookingWorkspaceService($this->app))->saveBooking(
@@ -1164,9 +1205,11 @@ final class WorkspaceController extends BaseController
                 (int) Auth::id(),
                 Authorization::accessibleBranchIds()
             );
+            $editTrace->finish('committed', (int) $result['booking']['id']);
             Flash::success('Booking ' . $result['action'] . ' successfully.');
             $this->redirect('/workspace?booking_id=' . (int) $result['booking']['id']);
         } catch (RuntimeException $exception) {
+            $editTrace->finish('rejected', null, $exception);
             Flash::error($exception->getMessage());
 
             $bookingId = (int) ($_POST['booking_id'] ?? 0);
@@ -1175,15 +1218,20 @@ final class WorkspaceController extends BaseController
             }
 
             $this->redirect('/workspace?new=1');
+        } catch (Throwable $exception) {
+            $editTrace->finish('failed', null, $exception);
+            throw $exception;
         }
     }
 
     public function autosaveInvoice(): never
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);
+        $editTrace = $this->beginBookingEditTrace('booking.autosave');
 
         try {
             if ((int) ($_POST['booking_id'] ?? 0) <= 0 && (string) ($_POST['commit_intent'] ?? '') !== 'payment_save') {
+                $editTrace->finish('rejected');
                 app_write_log('workspace.autosave_invoice.draft_create_blocked', 'Draft invoice creation was blocked outside Save Payment.', $this->autosaveFailureContext($_POST));
                 $this->jsonResponse([
                     'ok' => false,
@@ -1199,10 +1247,12 @@ final class WorkspaceController extends BaseController
             );
             $booking = $result['booking'];
             $snapshot = $this->workspaceAutosaveSnapshot((int) ($booking['id'] ?? 0), $accessibleBranchIds);
+            $editTrace->finish('committed', (int) ($booking['id'] ?? 0));
 
             $this->jsonResponse([
                 'ok' => true,
                 'booking_id' => (int) ($booking['id'] ?? 0),
+                'branch_id' => (int) ($booking['branch_id'] ?? 0),
                 'invoice_no' => (string) ($booking['booking_reference'] ?? ''),
                 'lead_traveler_id' => (int) ($booking['lead_traveler_id'] ?? 0),
                 'customer' => $this->workspaceAutosaveCustomer(
@@ -1220,6 +1270,7 @@ final class WorkspaceController extends BaseController
                 'message' => 'Invoice autosaved',
             ]);
         } catch (RuntimeException $exception) {
+            $editTrace->finish('rejected', null, $exception);
             app_write_log('workspace.autosave_invoice.validation_failed', $exception->getMessage(), $this->autosaveFailureContext($_POST, [
                 'type' => $exception::class,
                 'file' => $exception->getFile(),
@@ -1230,6 +1281,7 @@ final class WorkspaceController extends BaseController
                 'message' => $exception->getMessage(),
             ], 422);
         } catch (Throwable $exception) {
+            $editTrace->finish('failed', null, $exception);
             app_write_log('workspace.autosave_invoice.failed', $exception->getMessage(), $this->autosaveFailureContext($_POST, [
                 'type' => $exception::class,
                 'file' => $exception->getFile(),
@@ -1245,6 +1297,7 @@ final class WorkspaceController extends BaseController
     public function autosaveService(): never
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);
+        $editTrace = $this->beginBookingEditTrace('service.autosave');
         $traceId = $this->startSupplierAdvanceTrace('autosaveService', $_POST);
         app_write_log('workspace.autosave_service.currency_request', 'Service autosave request received for currency tracing.', array_merge(
             $this->autosaveFailureContext($_POST, ['trace_id' => $traceId]),
@@ -1265,6 +1318,7 @@ final class WorkspaceController extends BaseController
             $accessibleBranchIds = Authorization::accessibleBranchIds();
             if ((int) ($_POST['booking_id'] ?? 0) <= 0) {
                 if ((string) ($_POST['commit_intent'] ?? '') !== 'payment_save') {
+                    $editTrace->finish('rejected');
                     app_write_log('workspace.autosave_service.draft_create_blocked', 'Draft service creation was blocked outside Save Payment.', $this->autosaveFailureContext($_POST));
                     $this->jsonResponse([
                         'ok' => false,
@@ -1286,7 +1340,14 @@ final class WorkspaceController extends BaseController
                 $accessibleBranchIds,
                 true
             );
+            if ((string) ($_POST['supplier_advance_fx_use'] ?? '') === '1') {
+                BookingEditTraceService::checkpoint('WorkspaceController::applyServiceSupplierAdvanceFxIfRequested', 'started');
+            }
             $this->applyServiceSupplierAdvanceFxIfRequested($_POST, $result, (int) Auth::id(), $accessibleBranchIds);
+            if ((string) ($_POST['supplier_advance_fx_use'] ?? '') === '1') {
+                BookingEditTraceService::checkpoint('WorkspaceController::applyServiceSupplierAdvanceFxIfRequested', 'completed');
+            }
+            $editTrace->finish('committed', (int) ($result['booking_id'] ?? 0));
             $savedServiceId = (int) (($result['service']['id'] ?? 0));
             $savedService = $savedServiceId > 0
                 ? (new BookingServiceRepository($this->app))->findServiceById($savedServiceId)
@@ -1336,6 +1397,7 @@ final class WorkspaceController extends BaseController
                 'message' => 'Service autosaved',
             ]);
         } catch (RuntimeException $exception) {
+            $editTrace->finish('rejected', null, $exception);
             app_write_log('workspace.autosave_service.validation_failed', $exception->getMessage(), $this->autosaveFailureContext($_POST, [
                 'type' => $exception::class,
                 'file' => $exception->getFile(),
@@ -1347,6 +1409,7 @@ final class WorkspaceController extends BaseController
                 'message' => $exception->getMessage(),
             ], 422);
         } catch (Throwable $exception) {
+            $editTrace->finish('failed', null, $exception);
             app_write_log('workspace.autosave_service.failed', $exception->getMessage(), $this->autosaveFailureContext($_POST, [
                 'type' => $exception::class,
                 'file' => $exception->getFile(),
@@ -1448,6 +1511,7 @@ final class WorkspaceController extends BaseController
     public function saveService(): never
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);
+        $editTrace = $this->beginBookingEditTrace('service.save');
         $traceId = $this->startSupplierAdvanceTrace('saveService', $_POST);
 
         try {
@@ -1473,7 +1537,14 @@ final class WorkspaceController extends BaseController
                 $accessibleBranchIds,
                 true
             );
+            if ((string) ($_POST['supplier_advance_fx_use'] ?? '') === '1') {
+                BookingEditTraceService::checkpoint('WorkspaceController::applyServiceSupplierAdvanceFxIfRequested', 'started');
+            }
             $this->applyServiceSupplierAdvanceFxIfRequested($_POST, $result, (int) Auth::id(), $accessibleBranchIds);
+            if ((string) ($_POST['supplier_advance_fx_use'] ?? '') === '1') {
+                BookingEditTraceService::checkpoint('WorkspaceController::applyServiceSupplierAdvanceFxIfRequested', 'completed');
+            }
+            $editTrace->finish('committed', (int) $result['booking_id']);
             $savedServiceId = (int) (($result['service']['id'] ?? 0));
             $savedService = $savedServiceId > 0
                 ? (new BookingServiceRepository($this->app))->findServiceById($savedServiceId)
@@ -1526,14 +1597,19 @@ final class WorkspaceController extends BaseController
             Flash::success(((string) $result['action'] === 'created' ? 'Service line saved.' : 'Service line updated.'));
             $this->redirect('/workspace?booking_id=' . (int) $result['booking_id'] . '#dock-panel-services');
         } catch (RuntimeException $exception) {
+            $editTrace->finish('rejected', null, $exception);
             Flash::error($exception->getMessage());
             $this->redirect('/workspace?booking_id=' . (int) ($_POST['booking_id'] ?? 0) . '#dock-panel-services');
+        } catch (Throwable $exception) {
+            $editTrace->finish('failed', null, $exception);
+            throw $exception;
         }
     }
 
     public function correctServiceFinancials(): never
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);
+        $editTrace = $this->beginBookingEditTrace('service.financial_correction');
 
         try {
             $result = (new ServiceWorkspaceService($this->app))->correctFinancials(
@@ -1541,6 +1617,7 @@ final class WorkspaceController extends BaseController
                 (int) Auth::id(),
                 Authorization::accessibleBranchIds()
             );
+            $editTrace->finish('committed', (int) ($result['booking_id'] ?? 0));
             $releasedCustomerCreditAmount = round((float) ($result['released_customer_credit_amount'] ?? 0), 2);
             $correctionCurrency = strtoupper(trim((string) ($result['currency'] ?? 'PKR')));
             if ($releasedCustomerCreditAmount > 0.005) {
@@ -1556,8 +1633,12 @@ final class WorkspaceController extends BaseController
             }
             $this->redirect('/workspace?booking_id=' . (int) ($result['booking_id'] ?? 0) . '#dock-panel-services');
         } catch (RuntimeException $exception) {
+            $editTrace->finish('rejected', null, $exception);
             Flash::error($exception->getMessage());
             $this->redirect('/workspace?booking_id=' . (int) ($_POST['booking_id'] ?? 0) . '#dock-panel-services');
+        } catch (Throwable $exception) {
+            $editTrace->finish('failed', null, $exception);
+            throw $exception;
         }
     }
 
@@ -1593,11 +1674,11 @@ final class WorkspaceController extends BaseController
         ]);
 
         try {
-            $bookingId = (new ServiceWorkspaceService($this->app))->cancelService(
+            $bookingId = $this->traceServiceOperation('service.cancel', 'ServiceWorkspaceService::cancelService', fn (): int => (new ServiceWorkspaceService($this->app))->cancelService(
                 $_POST,
                 (int) Auth::id(),
                 Authorization::accessibleBranchIds()
-            );
+            ));
             $redirectUrl = $this->buildServiceWorkflowRedirect($bookingId, $serviceId, 'cancelled');
             app_write_log('workspace.cancel_service.success', 'Service cancellation recorded successfully.', [
                 'booking_id' => $bookingId,
@@ -1638,11 +1719,11 @@ final class WorkspaceController extends BaseController
         $serviceId = (int) ($_POST['service_id'] ?? 0);
 
         try {
-            $bookingId = (new ServiceWorkspaceService($this->app))->refundService(
+            $bookingId = $this->traceServiceOperation('service.refund', 'ServiceWorkspaceService::refundService', fn (): int => (new ServiceWorkspaceService($this->app))->refundService(
                 $_POST,
                 (int) Auth::id(),
                 Authorization::accessibleBranchIds()
-            );
+            ));
             Flash::success('Service refund posted successfully.');
             $this->redirect($this->buildServiceWorkflowRedirect($bookingId, $serviceId, 'refunded', [
                 'auto_print_refund' => '1',
@@ -1658,10 +1739,10 @@ final class WorkspaceController extends BaseController
         Csrf::verifyOrFail($_POST['_token'] ?? null);
         $serviceId = (int) ($_POST['service_id'] ?? 0);
         try {
-            $bookingId = (new ServiceWorkspaceService($this->app))->undoMistakenRefund(
+            $bookingId = $this->traceServiceOperation('service.refund_undo', 'ServiceWorkspaceService::undoMistakenRefund', fn (): int => (new ServiceWorkspaceService($this->app))->undoMistakenRefund(
                 $_POST, (int) Auth::id(), Authorization::accessibleBranchIds()
-            );
-            Flash::success('Refund reversed. Original invoice and service restored. Any actual money remains recorded; see Refund History / Restore for details.');
+            ));
+            Flash::success('Recorded refund and cancellation reversed. Original invoice, service, and linked account balances restored. See Refund History / Restore for the audit.');
             $this->redirect($this->buildServiceWorkflowRedirect($bookingId, $serviceId, 'cancel_reopened'));
         } catch (RuntimeException $exception) {
             Flash::error($exception->getMessage());
@@ -1674,9 +1755,9 @@ final class WorkspaceController extends BaseController
         Csrf::verifyOrFail($_POST['_token'] ?? null);
         $serviceId = (int) ($_POST['service_id'] ?? 0);
         try {
-            $bookingId = (new ServiceWorkspaceService($this->app))->restoreReversedRefund(
+            $bookingId = $this->traceServiceOperation('service.refund_restore', 'ServiceWorkspaceService::restoreReversedRefund', fn (): int => (new ServiceWorkspaceService($this->app))->restoreReversedRefund(
                 $_POST, (int) Auth::id(), Authorization::accessibleBranchIds()
-            );
+            ));
             Flash::success('Refund restored. The reversal and restoration remain in the audit history.');
             $this->redirect($this->buildServiceWorkflowRedirect($bookingId, $serviceId));
         } catch (RuntimeException $exception) {
@@ -1691,11 +1772,11 @@ final class WorkspaceController extends BaseController
         $serviceId = (int) ($_POST['service_id'] ?? 0);
 
         try {
-            $bookingId = (new ServiceWorkspaceService($this->app))->reverseRefundService(
+            $bookingId = $this->traceServiceOperation('service.refund_reverse', 'ServiceWorkspaceService::reverseRefundService', fn (): int => (new ServiceWorkspaceService($this->app))->reverseRefundService(
                 $_POST,
                 (int) Auth::id(),
                 Authorization::accessibleBranchIds()
-            );
+            ));
             Flash::success('Service refund reversed successfully.');
             $this->redirect($this->buildServiceWorkflowRedirect($bookingId, $serviceId, 'refund_reversed'));
         } catch (RuntimeException $exception) {
@@ -1711,11 +1792,11 @@ final class WorkspaceController extends BaseController
         $isAjax = strtolower((string) ($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '')) === 'xmlhttprequest';
 
         try {
-            $bookingId = (new ServiceWorkspaceService($this->app))->correctPenaltyRefundWorkflow(
+            $bookingId = $this->traceServiceOperation('service.refund_edit', 'ServiceWorkspaceService::correctPenaltyRefundWorkflow', fn (): int => (new ServiceWorkspaceService($this->app))->correctPenaltyRefundWorkflow(
                 array_merge($_POST, ['supplier_refund_conversion_mode' => 'manual_equivalent']),
                 (int) Auth::id(),
                 Authorization::accessibleBranchIds()
-            );
+            ));
             if ($isAjax) {
                 $this->jsonResponse([
                     'ok' => true,
@@ -1744,11 +1825,11 @@ final class WorkspaceController extends BaseController
         $serviceId = (int) ($_POST['service_id'] ?? 0);
 
         try {
-            $bookingId = (new ServiceWorkspaceService($this->app))->settleCancellationFinancials(
+            $bookingId = $this->traceServiceOperation('service.cancellation_settlement', 'ServiceWorkspaceService::settleCancellationFinancials', fn (): int => (new ServiceWorkspaceService($this->app))->settleCancellationFinancials(
                 array_merge($_POST, ['supplier_refund_conversion_mode' => 'manual_equivalent']),
                 (int) Auth::id(),
                 Authorization::accessibleBranchIds()
-            );
+            ));
             Flash::success('Cancellation financial adjustment posted successfully.');
             $this->redirect($this->buildServiceWorkflowRedirect($bookingId, $serviceId, 'settled'));
         } catch (RuntimeException $exception) {
@@ -1763,11 +1844,11 @@ final class WorkspaceController extends BaseController
         $serviceId = (int) ($_POST['service_id'] ?? 0);
 
         try {
-            $bookingId = (new ServiceWorkspaceService($this->app))->reverseCancellationSettlement(
+            $bookingId = $this->traceServiceOperation('service.cancellation_settlement_reverse', 'ServiceWorkspaceService::reverseCancellationSettlement', fn (): int => (new ServiceWorkspaceService($this->app))->reverseCancellationSettlement(
                 $_POST,
                 (int) Auth::id(),
                 Authorization::accessibleBranchIds()
-            );
+            ));
             Flash::success('Cancellation settlement reversed successfully.');
             $this->redirect($this->buildServiceWorkflowRedirect($bookingId, $serviceId, 'settlement_reversed'));
         } catch (RuntimeException $exception) {
@@ -1782,11 +1863,11 @@ final class WorkspaceController extends BaseController
         $serviceId = (int) ($_POST['service_id'] ?? 0);
 
         try {
-            $bookingId = (new ServiceWorkspaceService($this->app))->reopenCancelledService(
+            $bookingId = $this->traceServiceOperation('service.cancel_reopen', 'ServiceWorkspaceService::reopenCancelledService', fn (): int => (new ServiceWorkspaceService($this->app))->reopenCancelledService(
                 $_POST,
                 (int) Auth::id(),
                 Authorization::accessibleBranchIds()
-            );
+            ));
             Flash::success('Cancelled service reopened successfully.');
             $this->redirect($this->buildServiceWorkflowRedirect($bookingId, $serviceId, 'cancel_reopened'));
         } catch (RuntimeException $exception) {
@@ -1817,14 +1898,21 @@ final class WorkspaceController extends BaseController
     public function saveReceipt(): never
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);
+        $editTrace = $this->beginBookingEditTrace('customer_receipt.save');
         $isAjax = strtolower((string) ($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '')) === 'xmlhttprequest';
 
         try {
+            BookingEditTraceService::checkpoint('CustomerReceiptWorkspaceService::saveReceipt', 'started');
             $result = (new CustomerReceiptWorkspaceService($this->app))->saveReceipt(
                 $_POST,
                 (int) Auth::id(),
                 Authorization::accessibleBranchIds()
             );
+            BookingEditTraceService::checkpoint('CustomerReceiptWorkspaceService::saveReceipt', 'completed', [
+                'booking_id' => (int) ($result['booking_id'] ?? 0),
+                'receipt_id' => (int) ($result['receipt']['id'] ?? 0),
+            ]);
+            $editTrace->finish('committed', (int) ($result['booking_id'] ?? 0));
             $receiptAction = strtolower(trim((string) ($_POST['receipt_action'] ?? 'save')));
             $receiptId = (int) ($result['receipt']['id'] ?? 0);
             $creditAppliedAmount = round((float) ($result['customer_credit_applied']['allocated_amount'] ?? 0), 2);
@@ -1885,6 +1973,7 @@ final class WorkspaceController extends BaseController
                 : 'Customer receipt recorded successfully.');
             $this->redirect('/workspace?booking_id=' . (int) $result['booking_id'] . '#dock-panel-payments');
         } catch (RuntimeException $exception) {
+            $editTrace->finish('rejected', null, $exception);
             if ($isAjax) {
                 $this->jsonResponse([
                     'ok' => false,
@@ -1893,6 +1982,9 @@ final class WorkspaceController extends BaseController
             }
             Flash::error($exception->getMessage());
             $this->redirect('/workspace?booking_id=' . (int) ($_POST['booking_id'] ?? 0) . '#dock-panel-payments');
+        } catch (Throwable $exception) {
+            $editTrace->finish('failed', null, $exception);
+            throw $exception;
         }
     }
 
@@ -1982,6 +2074,21 @@ final class WorkspaceController extends BaseController
                 $_POST, (int) Auth::id(), Authorization::accessibleBranchIds()
             );
             Flash::success('Customer receipt amount corrected; allocations and audit history were preserved.');
+            $this->redirect('/workspace?booking_id=' . (int) $result['booking_id'] . '#dock-panel-payments');
+        } catch (RuntimeException $exception) {
+            Flash::error($exception->getMessage());
+            $this->redirect('/workspace?booking_id=' . (int) ($_POST['booking_id'] ?? 0) . '#dock-panel-payments');
+        }
+    }
+
+    public function correctReceiptAccount(): never
+    {
+        Csrf::verifyOrFail($_POST['_token'] ?? null);
+        try {
+            $result = (new CustomerReceiptWorkspaceService($this->app))->correctReceiptAccount(
+                $_POST, (int) Auth::id(), Authorization::accessibleBranchIds()
+            );
+            Flash::success('Receipt account corrected with balanced journals; the received amount and allocations were unchanged.');
             $this->redirect('/workspace?booking_id=' . (int) $result['booking_id'] . '#dock-panel-payments');
         } catch (RuntimeException $exception) {
             Flash::error($exception->getMessage());
@@ -2612,12 +2719,21 @@ final class WorkspaceController extends BaseController
         }
 
         try {
+            BookingEditTraceService::checkpoint('WorkspaceController::prepareAutosaveBookingInput', 'started');
             $preparedInput = $this->prepareAutosaveBookingInput($input, $actorUserId, $accessibleBranchIds);
+            BookingEditTraceService::checkpoint('WorkspaceController::prepareAutosaveBookingInput', 'completed', [
+                'branch_id' => (int) ($preparedInput['branch_id'] ?? 0),
+            ]);
+            BookingEditTraceService::checkpoint('BookingWorkspaceService::saveBooking', 'started');
             $result = (new BookingWorkspaceService($this->app))->saveBooking(
                 $preparedInput,
                 $actorUserId,
                 $accessibleBranchIds
             );
+            BookingEditTraceService::checkpoint('BookingWorkspaceService::saveBooking', 'completed', [
+                'booking_id' => (int) ($result['booking']['id'] ?? 0),
+                'action' => (string) ($result['action'] ?? ''),
+            ]);
 
             if ($startedTransaction && $db->inTransaction()) {
                 $db->commit();

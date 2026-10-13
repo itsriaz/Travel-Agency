@@ -86,6 +86,23 @@ if ($failures === []) {
         $check('Both distinct journal IDs are linked to the posted transfer',
             $sourceJournalId > 0 && $destinationJournalId > 0 && $sourceJournalId !== $destinationJournalId
                 && ($transfer['status'] ?? '') === 'posted');
+        $treasury->assertPostedTransferJournalIntegrity($transferId);
+        $hideDestination = $db->prepare(
+            'UPDATE treasury_transactions SET destination_journal_entry_id = NULL WHERE id = :id'
+        );
+        $hideDestination->execute(['id' => $transferId]);
+        $missingJournalRejected = false;
+        try {
+            $treasury->assertPostedTransferJournalIntegrity($transferId);
+        } catch (RuntimeException $exception) {
+            $missingJournalRejected = str_contains($exception->getMessage(), 'incomplete journal links');
+        } finally {
+            $restoreDestination = $db->prepare(
+                'UPDATE treasury_transactions SET destination_journal_entry_id = :journal_id WHERE id = :id'
+            );
+            $restoreDestination->execute(['journal_id' => $destinationJournalId, 'id' => $transferId]);
+        }
+        $check('Posted transfer journal guard rejects a missing destination link', $missingJournalRejected);
 
         $journalStatement = $db->prepare(
             'SELECT je.id, je.branch_id, je.currency,
@@ -124,13 +141,18 @@ if ($failures === []) {
         $check('One-branch access cannot reverse a two-branch transfer',
             $unauthorizedRejected && abs(($balance(34) - $sourceBefore) + 10.00) <= 0.005);
 
-        $legacyRejected = false;
-        try {
-            $treasury->voidTransfer(5, 'Unverified historical transfer probe', $actorId, [$sourceBranch, $destinationBranch]);
-        } catch (RuntimeException $exception) {
-            $legacyRejected = str_contains($exception->getMessage(), 'lacks a verified journal pair');
+        if ($legacyBefore === 3) {
+            $legacyRejected = false;
+            try {
+                $treasury->voidTransfer(5, 'Unverified historical transfer probe', $actorId, [$sourceBranch, $destinationBranch]);
+            } catch (RuntimeException $exception) {
+                $legacyRejected = str_contains($exception->getMessage(), 'lacks a verified journal pair');
+            }
+            $check('Unverified historical transfer refuses automatic reversal', $legacyRejected);
+        } else {
+            $treasury->assertPostedTransferJournalIntegrity(5);
+            $check('Reconciled historical transfer has both verified journal legs', $legacyBefore === 0);
         }
-        $check('Unverified historical transfer refuses automatic reversal', $legacyRejected);
 
         $void = $treasury->voidTransfer($transferId, 'Rollback-only cross-dimension reversal', $actorId, [$sourceBranch, $destinationBranch]);
         $check('Voiding reverses both journal legs and restores both cash balances',
@@ -186,7 +208,42 @@ if ($failures === []) {
         $check('Corrected transfer void restores both original cash balances',
             abs($balance(34) - $sourceBefore) <= 0.005
                 && abs($balance(33) - $destinationBefore) <= 0.005);
-        $check('Existing unverified transfers remain without new journals',
+
+        $db->exec('SAVEPOINT negative_cross_currency_transfer');
+        $zeroSource = $db->prepare(
+            'UPDATE treasury_accounts SET opening_balance = COALESCE(opening_balance, 0) - :balance WHERE id = :id'
+        );
+        $zeroSource->execute(['balance' => $balance(34), 'id' => 34]);
+        $check('Rollback-only AED source starts at zero', abs($balance(34)) <= 0.005);
+        $negativeTransferId = $treasury->saveTransfer([
+            'branch_id' => $sourceBranch,
+            'transaction_type' => 'cash_to_cash_transfer',
+            'transaction_date' => $date,
+            'source_currency' => 'AED',
+            'destination_currency' => 'PKR',
+            'from_treasury_account_id' => 34,
+            'to_treasury_account_id' => 33,
+            'source_amount' => 10.00,
+            'destination_amount' => 770.00,
+            'exchange_rate' => 77.00,
+            'exchange_rate_effective_date' => $date,
+            'reference_no' => 'REG-NEGATIVE-CROSS-TREASURY',
+            'created_by_user_id' => $actorId,
+        ], [$sourceBranch, $destinationBranch]);
+        $treasury->assertPostedTransferJournalIntegrity($negativeTransferId);
+        $check('Cross-currency transfer from zero records AED -10 and PKR +770',
+            abs($balance(34) + 10.00) <= 0.005
+                && abs($balance(33) - $destinationBefore - 770.00) <= 0.005);
+        $treasury->voidTransfer($negativeTransferId, 'Rollback-only negative cross-currency reversal', $actorId, [$sourceBranch, $destinationBranch]);
+        $check('Reversing negative cross-currency transfer restores both accounts',
+            abs($balance(34)) <= 0.005
+                && abs($balance(33) - $destinationBefore) <= 0.005);
+        $db->exec('ROLLBACK TO SAVEPOINT negative_cross_currency_transfer');
+        $db->exec('RELEASE SAVEPOINT negative_cross_currency_transfer');
+        $check('Cross-currency probe restores its source opening balance',
+            abs($balance(34) - $sourceBefore) <= 0.005);
+
+        $check('Historical transfer journal state is unchanged by the rollback-only test',
             (int) $db->query(
                 'SELECT COUNT(*) FROM treasury_transactions
                  WHERE id IN (5, 6, 9) AND status = "posted" AND journal_entry_id IS NULL'

@@ -25,6 +25,7 @@ use App\Services\CustomerPaymentFoundationService;
 use App\Services\CounterpartyLinkService;
 use App\Services\CounterpartyOffsetService;
 use App\Services\ExpenseAdminService;
+use App\Services\LinkedPartyPositionService;
 use App\Services\MasterDataAdminService;
 use App\Services\SupplierMasterService;
 use App\Services\SupplierFoundationService;
@@ -362,7 +363,12 @@ final class ControlController extends BaseController
         $selectedAccountAllocations = [];
         $selectedPayableAllocations = [];
         $selectedOffsetId = (int) ($_GET['offset_id'] ?? 0);
-        $positions = $repository->positions($branchIds);
+        $positions = (new LinkedPartyPositionService($this->app))->positions($branchIds);
+        $linkedPartyOptions = array_values(array_filter(
+            (new CounterpartyLinkRepository($this->app))->listLinks(),
+            static fn (array $link): bool => (int) ($link['business_source_is_active'] ?? 0) === 1
+                && (int) ($link['supplier_is_active'] ?? 0) === 1
+        ));
         $linkTotals = [];
         foreach ($positions as $position) {
             $linkId = (int) ($position['link_id'] ?? 0);
@@ -380,24 +386,39 @@ final class ControlController extends BaseController
         $manualPayables = [];
         $accountHolderReceiptAccounts = [];
         $accountHolderReceipts = [];
-        foreach ($positions as $position) {
-            if ((int) $position['link_id'] === (int) ($_GET['link_id'] ?? 0)
-                && (int) $position['branch_id'] === (int) ($_GET['branch_id'] ?? 0)
-                && (string) $position['currency'] === (string) ($_GET['currency'] ?? '')
-            ) {
-                $manualPosition = $position;
-                $manualAccounts = $repository->openAccountPositionsForLink((int) $position['business_source_id'], $branchIds);
-                $manualPayables = $repository->openPayablesForLink((int) $position['supplier_id'], $branchIds);
+        $selectedLinkId = (int) ($_GET['link_id'] ?? 0);
+        $selectedCurrency = strtoupper(trim((string) ($_GET['currency'] ?? '')));
+        if ($branchIds !== [] && in_array($selectedCurrency, ['PKR', 'AED', 'USD'], true)) {
+            foreach ($linkedPartyOptions as $link) {
+                if ((int) $link['id'] !== $selectedLinkId) {
+                    continue;
+                }
+                $manualPosition = [
+                    'link_id' => $selectedLinkId,
+                    'business_source_id' => (int) $link['business_source_id'],
+                    'supplier_id' => (int) $link['supplier_id'],
+                    'business_source_name' => (string) $link['business_source_name'],
+                    'supplier_name' => (string) $link['supplier_name'],
+                    'currency' => $selectedCurrency,
+                ];
+                foreach ($positions as $position) {
+                    if ((int) $position['link_id'] === $selectedLinkId && (string) $position['currency'] === $selectedCurrency) {
+                        $manualPosition = $position;
+                        break;
+                    }
+                }
+                $manualAccounts = $repository->openAccountPositionsForLink((int) $link['business_source_id'], $branchIds);
+                $manualPayables = $repository->openPayablesForLink((int) $link['supplier_id'], $branchIds);
                 $accountHolderReceiptAccounts = array_values(array_filter(
-                    (new TreasuryRepository($this->app))->accounts([(int) $position['branch_id']]),
+                    (new TreasuryRepository($this->app))->accounts($branchIds),
                     static fn (array $account): bool => (int) ($account['is_active'] ?? 0) === 1
-                        && strtoupper((string) ($account['currency'] ?? '')) === strtoupper((string) $position['currency'])
+                        && strtoupper((string) ($account['currency'] ?? '')) === $selectedCurrency
                         && in_array((string) ($account['account_type'] ?? ''), ['cash', 'bank'], true)
                 ));
-                $accountHolderReceipts = (new CustomerPaymentRepository($this->app))->accountHolderReceipts(
-                    (int) $position['business_source_id'],
-                    (int) $position['branch_id'],
-                    (string) $position['currency']
+                $accountHolderReceipts = (new CustomerPaymentRepository($this->app))->accountHolderReceiptsForBranches(
+                    (int) $link['business_source_id'],
+                    $branchIds,
+                    $selectedCurrency
                 );
                 break;
             }
@@ -406,10 +427,10 @@ final class ControlController extends BaseController
         if ($selectedOffsetId > 0) {
             $candidate = $repository->find($selectedOffsetId);
             if ($candidate !== null
-                && ($branchIds === [] || (
+                && $branchIds !== [] && (
                     in_array((int) ($candidate['account_branch_id'] ?? $candidate['branch_id']), $branchIds, true)
                     && in_array((int) ($candidate['supplier_branch_id'] ?? $candidate['branch_id']), $branchIds, true)
-                ))
+                )
             ) {
                 $selectedOffset = $candidate;
                 $selectedAccountAllocations = $repository->allocations($selectedOffsetId, 'account');
@@ -423,12 +444,13 @@ final class ControlController extends BaseController
         return $this->view('control/linked_party_settlements', [
             'title' => 'Linked Party Settlements',
             'positions' => $positions,
+            'linkedPartyOptions' => $linkedPartyOptions,
             'manualPosition' => $manualPosition,
             'manualAccounts' => $manualAccounts,
             'manualPayables' => $manualPayables,
             'accountHolderReceiptAccounts' => $accountHolderReceiptAccounts,
             'accountHolderReceipts' => $accountHolderReceipts,
-            'recentOffsets' => $repository->recent($branchIds),
+            'recentOffsets' => $branchIds === [] ? [] : $repository->recent($branchIds),
             'selectedOffset' => $selectedOffset,
             'selectedAccountAllocations' => $selectedAccountAllocations,
             'selectedPayableAllocations' => $selectedPayableAllocations,
@@ -462,7 +484,7 @@ final class ControlController extends BaseController
             );
             Flash::success(
                 (string) ($receipt['receipt_no'] ?? 'Receipt')
-                . ' recorded as a net payment received on account. No ticket was adjusted.'
+                . ' recorded as a linked-party payment. The shared net balance changed once; no invoice was adjusted.'
             );
         } catch (RuntimeException $exception) {
             Flash::error($exception->getMessage());
@@ -480,7 +502,7 @@ final class ControlController extends BaseController
                 (int) Auth::id(),
                 Authorization::accessibleBranchIds()
             );
-            Flash::success('Account-holder receipt voided and its accounting entry reversed.');
+            Flash::success('Linked-party receipt voided and its accounting entry reversed.');
         } catch (RuntimeException $exception) {
             Flash::error($exception->getMessage());
         }
@@ -509,7 +531,6 @@ final class ControlController extends BaseController
     {
         $query = http_build_query([
             'link_id' => max(0, (int) ($input['link_id'] ?? 0)),
-            'branch_id' => max(0, (int) ($input['branch_id'] ?? 0)),
             'currency' => strtoupper(trim((string) ($input['currency'] ?? ''))),
         ]);
         $this->redirect('/linked-party-settlements?' . $query);

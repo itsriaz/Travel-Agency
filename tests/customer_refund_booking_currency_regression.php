@@ -36,11 +36,10 @@ $check(
         && str_contains($serviceSource, 'return $this->moneyValue($input[$field] ?? 0);')
 );
 $check(
-    'Refund detail payload supports forcing booking currency',
+    'Refund detail payload preserves booking currency separately from actual payout currency',
     str_contains($serviceSource, 'bool $forceBookingCurrency = false')
-        && str_contains($serviceSource, 'if ($forceBookingCurrency) {')
-        && str_contains($serviceSource, '$refundCurrency = $currency;')
-        && str_contains($serviceSource, '$refundExchangeRateToBooking = $refundAmount > 0.005 ? 1.0 : null;')
+        && str_contains($serviceSource, "'booking_currency' => \$currency")
+        && str_contains($serviceSource, "'refund_currency' => \$refundCurrency")
 );
 $check(
     'New cancellation settlement persists converted customer refund credit in invoice currency',
@@ -86,27 +85,39 @@ $check(
         && str_contains($paymentRepositorySource, 'customer.receipt.refund_restored_synthetic')
 );
 $check(
-    'Customer refund detail payload is forced back to booking currency',
-    str_contains(
-        $serviceSource,
-        "'refund_treasury_account_id',\n            true,\n            null,\n            null,\n            null,\n            true"
-    )
+    'Customer refund detail uses actual payout currency without forcing invoice currency',
+    str_contains($serviceSource, "if (\$requireCustomerBankDestination) {")
+        && str_contains($serviceSource, '$refundExchangeRateToBooking = round($refundSourceAmount / $refundAmount, 8);')
+        && str_contains($serviceSource, 'postCrossCurrencyCustomerRefund($customerJournalData)')
 );
 $check(
-    'Customer refund workflow only offers the settled due currency in the main workspace form',
-    str_contains($viewSource, 'Customer refund is paid in the settled due currency.')
-        && str_contains($viewSource, '<input type="hidden" name="customer_refund_currency" value="<?= e($customerRefundFixedCurrency) ?>">')
-        && str_contains($viewSource, '<span class="legacy-service-event-money-currency" aria-hidden="true"><?= e($customerRefundFixedCurrency) ?></span>')
+    'Main refund form takes exact payout and selected currency',
+    str_contains($viewSource, 'name="customer_refund_source_amount" value="" min="1"')
+        && str_contains($viewSource, 'name="customer_refund_currency" data-refund-fx-currency-trigger="customer"')
+        && str_contains($viewSource, 'name="customer_refund_amount" value="0" disabled')
 );
 $check(
-    'Customer refund correction form is locked to booking currency with rate 1',
-    str_contains($viewSource, 'name="customer_refund_source_amount" value="<?= e(number_format(round((float) ($latestCustomerRefundAmountOnlyValue), 0), 0, \'.\', \'\')) ?>"')
-        && str_contains($viewSource, 'name="customer_refund_exchange_rate" value="1"')
-        && str_contains($viewSource, 'readonly')
+    'Edit Refund loads saved actual amount and offers all supported payout currencies',
+    str_contains($viewSource, "\$latestCustomerRefundDetail['refund_source_amount'] ?? \$latestCustomerRefundAmountOnlyValue")
+        && str_contains($viewSource, "\$latestCustomerRefundDetail['refund_currency'] ?? \$activeService['customerRefundTruthCurrency']")
+        && str_contains($viewSource, '<select name="customer_refund_currency" aria-label="Actual customer refund currency"')
 );
 $check(
     'Workspace controller exposes customer refund truth currency to the frontend',
     str_contains($controllerSource, "'customerRefundTruthCurrency' => (string) (\$serviceRow['customer_refund_truth_currency'] ?? \$invoiceCurrency),")
+);
+$workspaceScriptPath = BASE_PATH . '/public/assets/js/workspace.js';
+$workspaceScript = is_file($workspaceScriptPath) ? (string) file_get_contents($workspaceScriptPath) : '';
+$check(
+    'Customer payout UI uses saved credit currency rather than assuming invoice currency',
+    str_contains($workspaceScript, "(role === 'customer' ? activeServiceLine?.customerRefundTruthCurrency : '')")
+        && str_contains($workspaceScript, "currentActiveServiceLineForRefund()?.customerRefundTruthCurrency || refundFxBookingCurrencyCode()")
+        && str_contains($workspaceScript, "customerRefundCurrency !== refundFxAccountingCurrencyCode('customer')")
+);
+$check(
+    'Customer treasury choices match payout currency without narrowing supplier choices',
+    str_contains($workspaceScript, 'restrictDimension = false')
+        && substr_count($workspaceScript, 'restrictDimension: true,') === 2
 );
 
 if ($failures !== []) {

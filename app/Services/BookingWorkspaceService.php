@@ -124,12 +124,26 @@ final class BookingWorkspaceService extends Service
             }
 
             $this->assertCanUseStatus($repository, $bookingId, (string) $payload['booking']['booking_status']);
+            $priorBranchId = (int) ($priorBooking['branch_id'] ?? 0);
+            $targetBranchId = (int) ($payload['booking']['branch_id'] ?? 0);
+            if ($priorBranchId !== $targetBranchId) {
+                BookingEditTraceService::checkpoint('BookingWorkspaceService::branchChange', 'requested', [
+                    'booking_id' => $bookingId,
+                    'from_branch_id' => $priorBranchId,
+                    'to_branch_id' => $targetBranchId,
+                ]);
+            }
 
+            BookingEditTraceService::checkpoint('BookingRepository::updateBooking', 'started', ['booking_id' => $bookingId]);
             $repository->updateBooking(
                 $bookingId,
                 array_merge($payload['booking'], ['actor_user_id' => $actorUserId]),
                 $payload['party']
             );
+            BookingEditTraceService::checkpoint('BookingRepository::updateBooking', 'completed', [
+                'booking_id' => $bookingId,
+                'branch_id' => (int) ($payload['booking']['branch_id'] ?? 0),
+            ]);
 
             if ($selectedTravelerId > 0) {
                 $travelerRepository = new TravelerRepository($this->app);
@@ -137,13 +151,23 @@ final class BookingWorkspaceService extends Service
                     throw new RuntimeException('The selected customer profile is outside your accessible branches.');
                 }
 
+                BookingEditTraceService::checkpoint('TravelerRepository::attachTravelerToBooking', 'started', ['traveler_id' => $selectedTravelerId]);
                 $travelerRepository->attachTravelerToBooking($bookingId, $selectedTravelerId, 'lead', $actorUserId);
+                BookingEditTraceService::checkpoint('TravelerRepository::attachTravelerToBooking', 'completed', [
+                    'traveler_id' => $selectedTravelerId,
+                ]);
             }
 
             $savedBooking = $repository->findBookingById($bookingId);
 
             if ($savedBooking === null) {
                 throw new RuntimeException('The booking was updated but could not be reloaded.');
+            }
+            if ($priorBranchId !== $targetBranchId) {
+                BookingEditTraceService::checkpoint('BookingWorkspaceService::branchChange', 'saved', [
+                    'booking_id' => $bookingId,
+                    'saved_branch_id' => (int) ($savedBooking['branch_id'] ?? 0),
+                ]);
             }
 
             AuditLog::record($this->app, 'booking.updated', [
@@ -166,10 +190,14 @@ final class BookingWorkspaceService extends Service
             throw new RuntimeException('A new invoice cannot be created as Closed. Save the invoice, complete services and payments, then close it.');
         }
 
+        BookingEditTraceService::checkpoint('BookingRepository::createBooking', 'started');
         $newBookingId = $repository->createBooking(
             array_merge($payload['booking'], ['actor_user_id' => $actorUserId]),
             $payload['party']
         );
+        BookingEditTraceService::checkpoint('BookingRepository::createBooking', 'completed', [
+            'booking_id' => $newBookingId,
+        ]);
             $savedBooking = $repository->findBookingById($newBookingId);
 
             if ($savedBooking === null) {

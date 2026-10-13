@@ -95,6 +95,7 @@ final class RefundRecoveryRepository extends BaseRepository
             JSON_UNQUOTE(JSON_EXTRACT(a.payload_json, "$.recovery_version")) AS recovery_version,
             JSON_UNQUOTE(JSON_EXTRACT(a.payload_json, "$.customer_money")) AS customer_money,
             JSON_UNQUOTE(JSON_EXTRACT(a.payload_json, "$.supplier_money")) AS supplier_money,
+            JSON_UNQUOTE(JSON_EXTRACT(a.payload_json, "$.reversal_mode")) AS reversal_mode,
             JSON_EXTRACT(a.payload_json, "$.summary") AS summary_json
             FROM audit_logs a LEFT JOIN users u ON u.id = a.actor_user_id
             WHERE a.event_name IN ("service.refund.complete_undo", "service.refund.complete_restored")

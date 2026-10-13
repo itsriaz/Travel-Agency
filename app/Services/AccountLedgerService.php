@@ -280,13 +280,12 @@ final class AccountLedgerService extends Service
             $latestInvoiceAmount = max($this->amount($position['current_customer_due'] ?? 0), 0.0);
             $positionSummaries[$summaryKey]['invoiceAmount'] += $latestInvoiceAmount;
             $positionSummaries[$summaryKey]['totalSaleAmount'] += $latestInvoiceAmount;
-            $positionSummaries[$summaryKey]['netSupplierCredit'] += max($this->amount($position['current_supplier_paid'] ?? 0), 0.0);
+            $positionSummaries[$supplierSummaryKey]['netSupplierCredit'] += max($this->amount($position['current_supplier_paid'] ?? 0), 0.0);
             $positionSummaries[$summaryKey]['customerRefundPayable'] += $customerRefundPayable;
             $positionSummaries[$summaryKey]['recognizedProfit'] += $recognizedProfit;
             $positionSummaries[$summaryKey]['invoiceReferences'][(string) ($position['booking_reference'] ?? '')] = true;
             $positionSummaries[$supplierSummaryKey]['supplierPayable'] += $supplierPayable;
             $positionSummaries[$supplierSummaryKey]['supplierRefundReceivable'] += $supplierRefundReceivable;
-            $positionSummaries[$supplierSummaryKey]['invoiceReferences'][(string) ($position['booking_reference'] ?? '')] = true;
             $positionSummaries[$supplierSummaryKey]['controlWarnings'] += $reconciliation['hasControlWarning'] ? 1 : 0;
         }
 
@@ -314,6 +313,9 @@ final class AccountLedgerService extends Service
             $isReturn = $movementType === 'Customer advance returned';
             $isApplication = $movementType === 'Customer advance applied';
             $isAccountHolderReceipt = $movementType === 'Account-holder payment received';
+            $isAccountPayer = $isAccountHolderReceipt
+                && (string) ($movement['linked_payer_role'] ?? '') === 'account_holder';
+            $receiptAmount = $this->amount($movement['debit_amount'] ?? 0);
             $row = $this->movementRow(
                 $movement,
                 (string) ($movement['movement_date'] ?? ''),
@@ -324,15 +326,23 @@ final class AccountLedgerService extends Service
                     ? 'Customer advance applied to ' . (string) ($movement['target_booking_reference'] ?? 'invoice')
                     : ($isReturn ? 'Customer advance returned' : 'Customer advance received')),
                 (string) ($movement['customer_name'] ?? 'Customer'),
-                $this->amount($movement['debit_amount'] ?? 0),
-                $this->amount($movement['credit_amount'] ?? 0),
+                $isAccountPayer ? 0.0 : $receiptAmount,
+                $isAccountPayer ? $receiptAmount : $this->amount($movement['credit_amount'] ?? 0),
                 $isAccountHolderReceipt ? 10 : ($isApplication ? 14 : ($isReturn ? 12 : 11)),
                 $isAccountHolderReceipt ? 'Received' : ($isApplication ? 'Advance Applied' : ($isReturn ? 'Returned' : 'Received')),
-                $this->movementDetail($movement)
+                $isAccountHolderReceipt && (string) ($movement['linked_payer_name'] ?? '') !== ''
+                    ? 'Received from ' . (string) $movement['linked_payer_name'] . ' | ' . $this->movementDetail($movement)
+                    : $this->movementDetail($movement)
             );
             if ($isApplication) {
                 $row['is_internal_transfer'] = true;
                 $row['is_customer_advance_transfer'] = true;
+            }
+            if ($isAccountHolderReceipt) {
+                $row['running_balance_delta'] = $isAccountPayer ? -$receiptAmount : $receiptAmount;
+                $row['actual_money_received'] = $receiptAmount;
+                $row['linked_payer_role'] = (string) ($movement['linked_payer_role'] ?? '');
+                $row['linked_payer_name'] = (string) ($movement['linked_payer_name'] ?? '');
             }
             $rows[] = $row;
         }
@@ -615,8 +625,10 @@ final class AccountLedgerService extends Service
                 $positionSummaries[$summaryKey] = $this->emptySummary($row, $this->currency($row));
             }
             if (! (bool) ($row['is_internal_transfer'] ?? false) && ! (bool) ($row['is_financial_position_only'] ?? false)) {
-                $positionSummaries[$summaryKey]['cashDebit'] += (float) ($row['raw_debit_amount'] ?? 0);
-                $positionSummaries[$summaryKey]['cashCredit'] += (float) ($row['raw_credit_amount'] ?? 0);
+                $positionSummaries[$summaryKey]['cashDebit'] += (float) ($row['actual_money_received'] ?? $row['raw_debit_amount'] ?? 0);
+                if (! isset($row['actual_money_received'])) {
+                    $positionSummaries[$summaryKey]['cashCredit'] += (float) ($row['raw_credit_amount'] ?? 0);
+                }
             } elseif (
                 ! (bool) ($row['is_customer_advance_transfer'] ?? false)
                 && str_starts_with((string) ($row['ledger_entry'] ?? ''), 'Customer credit received from')
@@ -652,15 +664,11 @@ final class AccountLedgerService extends Service
                     $positionSummaries[$summaryKey]['customerRefundPaid'] += (float) ($row['raw_credit_amount'] ?? 0);
                     break;
             }
-            $bookingReference = trim((string) ($row['booking_reference'] ?? ''));
-            if ($bookingReference !== '' && ! in_array(strtoupper($bookingReference), ['ADVANCE', 'ACCOUNT-HOLDER'], true)) {
-                $positionSummaries[$summaryKey]['invoiceReferences'][$bookingReference] = true;
-            }
             unset($row['__row_id']);
         }
         unset($row);
 
-        $summaryRows = $this->summaryRows($positionSummaries);
+        $summaryRows = $this->summaryRows($positionSummaries, $rows);
         return [
             'rows' => $rows,
             'summaryRows' => $summaryRows,
@@ -685,6 +693,7 @@ final class AccountLedgerService extends Service
                     'received' => 0.0,
                     'outstanding' => 0.0,
                     'profit' => 0.0,
+                    'hasCustomerInvoice' => false,
                 ];
             }
 
@@ -692,12 +701,22 @@ final class AccountLedgerService extends Service
             $totalsByCurrency[$currency]['received'] += (float) ($summary['customerPaid'] ?? 0);
             $totalsByCurrency[$currency]['outstanding'] += (float) ($summary['customerReceivable'] ?? 0);
             $totalsByCurrency[$currency]['profit'] += (float) ($summary['recognizedProfit'] ?? 0);
+            $totalsByCurrency[$currency]['hasCustomerInvoice'] = $totalsByCurrency[$currency]['hasCustomerInvoice']
+                || (array) ($summary['invoiceReferences'] ?? []) !== [];
         }
 
         ksort($totalsByCurrency);
 
         $cards = [];
         foreach ($totalsByCurrency as $currency => $totals) {
+            if (! $totals['hasCustomerInvoice']
+                && abs($totals['sale']) < 0.005
+                && abs($totals['received']) < 0.005
+                && abs($totals['outstanding']) < 0.005
+                && abs($totals['profit']) < 0.005
+            ) {
+                continue;
+            }
             $cards[] = $this->card(
                 'Total Sale / ' . $currency,
                 $this->money(round($totals['sale'], 2)),
@@ -808,6 +827,7 @@ final class AccountLedgerService extends Service
             'booking_id' => (int) ($source['booking_id'] ?? 0),
             'branch_id' => (int) ($source['branch_id'] ?? 0),
             'branch_name' => (string) ($source['branch_name'] ?? ''),
+            'business_source_id' => (int) ($source['business_source_id'] ?? 0),
             'business_source_name' => (string) (($source['business_source_name'] ?? '') !== ''
                 ? $source['business_source_name']
                 : 'Unassigned Account'),
@@ -859,10 +879,33 @@ final class AccountLedgerService extends Service
         return $parts !== [] ? implode(' | ', $parts) : 'N/A';
     }
 
-    private function summaryRows(array $summaries): array
+    private function summaryRows(array $summaries, array $ledgerRows): array
     {
         $rows = [];
+        $detailKeys = [];
+        foreach ($ledgerRows as $ledgerRow) {
+            $detailKeys[(string) ($ledgerRow['summary_drilldown_key'] ?? '')] = true;
+        }
         foreach ($summaries as $summaryKey => $summary) {
+            $hasVisibleAmount = false;
+            foreach ([
+                'invoiceAmount', 'totalSaleAmount', 'customerReceivable', 'customerPaid',
+                'customerAdvanceReceived', 'customerAdvanceReturned', 'netSupplierCredit',
+                'supplierPaid', 'supplierRefundReceived', 'customerRefundPaid',
+                'recognizedProfit', 'cashDebit', 'cashCredit', 'customerCreditAppliedIn',
+                'accountSupplierSettlement',
+            ] as $field) {
+                if (abs((float) ($summary[$field] ?? 0)) > 0.005) {
+                    $hasVisibleAmount = true;
+                    break;
+                }
+            }
+            if (! $hasVisibleAmount
+                && (array) ($summary['invoiceReferences'] ?? []) === []
+                && ! isset($detailKeys[$summaryKey])
+            ) {
+                continue;
+            }
             $cashBalance = round(
                 (float) ($summary['cashDebit'] ?? 0)
                 - (float) ($summary['cashCredit'] ?? 0),
@@ -885,6 +928,7 @@ final class AccountLedgerService extends Service
                 'summary_drilldown_label' => (string) ($summary['accountName'] ?? '')
                     . ' / ' . (string) ($summary['customerName'] ?? '')
                     . ' / ' . (string) ($summary['currency'] ?? 'PKR'),
+                'business_source_id' => (int) ($summary['businessSourceId'] ?? 0),
                 'business_source_name' => (string) ($summary['accountName'] ?? ''),
                 'lead_traveler_name' => (string) ($summary['customerName'] ?? ''),
                 'contact_mobile' => (string) ($summary['contactMobile'] ?? 'N/A'),
@@ -902,6 +946,7 @@ final class AccountLedgerService extends Service
                 'total_debit' => $this->money(
                     (float) ($summary['customerPaid'] ?? 0)
                     + (float) ($summary['customerAdvanceReceived'] ?? 0)
+                    + (float) ($summary['customerCreditAppliedIn'] ?? 0)
                 ),
                 'total_credit' => $this->money(
                     (float) ($summary['netSupplierCredit'] ?? $summary['supplierPaid'] ?? 0)
@@ -909,6 +954,7 @@ final class AccountLedgerService extends Service
                 ),
                 'invoice_amount' => $this->money((float) ($summary['totalSaleAmount'] ?? $summary['invoiceAmount'] ?? 0)),
                 'outstanding_amount' => $this->money((float) ($summary['customerReceivable'] ?? 0)),
+                'raw_outstanding_amount' => round((float) ($summary['customerReceivable'] ?? 0), 2),
                 'customer_paid' => $this->money((float) ($summary['customerPaid'] ?? 0)),
                 'supplier_paid' => $this->money((float) ($summary['supplierPaid'] ?? 0)),
                 'supplier_refund_received' => $this->money((float) ($summary['supplierRefundReceived'] ?? 0)),
@@ -1010,6 +1056,7 @@ final class AccountLedgerService extends Service
     private function emptySummary(array $source, string $currency): array
     {
         return [
+            'businessSourceId' => (int) ($source['business_source_id'] ?? 0),
             'accountName' => (string) (($source['business_source_name'] ?? '') !== ''
                 ? $source['business_source_name']
                 : 'Unassigned Account'),
@@ -1043,8 +1090,11 @@ final class AccountLedgerService extends Service
 
     private function summaryKey(array $row): string
     {
+        $businessSourceId = (int) ($row['business_source_id'] ?? 0);
         return implode('|', [
-            mb_strtolower(trim((string) ($row['business_source_name'] ?? 'Unassigned Account'))),
+            $businessSourceId > 0
+                ? 'account:' . $businessSourceId
+                : mb_strtolower(trim((string) ($row['business_source_name'] ?? 'Unassigned Account'))),
             (string) ((int) ($row['lead_traveler_id'] ?? 0)),
             mb_strtolower(trim((string) ($row['customer_name'] ?? $row['lead_traveler_name'] ?? 'Booking Party'))),
             $this->currency($row),

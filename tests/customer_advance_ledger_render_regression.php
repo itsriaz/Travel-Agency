@@ -14,6 +14,7 @@ $app = (isset($app) && $app instanceof \App\Core\App)
 $_SERVER['REQUEST_URI'] = '/reports?report=customer_advance_ledger';
 
 $html = (new \App\Core\View($app))->render('reports/index', [
+    'isLinkedPartyLedger' => false,
     'selectedReport' => 'customer_advance_ledger',
     'reportOptions' => ['customer_advance_ledger' => 'Customer Advance Ledger'],
     'filters' => ['asOfDate' => '2026-07-16'],
@@ -33,7 +34,7 @@ if (! str_contains($html, 'name="_token"')) {
     $failures[] = 'Customer advance correction form has no CSRF input.';
 }
 if (! str_contains($html, 'report-stat-grid--customer-advance')) {
-    $failures[] = 'Customer advance summary does not use the compact one-row card grid.';
+    $failures[] = 'Customer advance summary does not use the grouped currency card grid.';
 }
 if (str_contains($html, 'Csrf::field')) {
     $failures[] = 'Invalid CSRF helper reference remains in rendered output.';

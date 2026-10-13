@@ -5,6 +5,7 @@ $selectedAccountAllocations = is_array($selectedAccountAllocations ?? null) ? $s
 $selectedPayableAllocations = is_array($selectedPayableAllocations ?? null) ? $selectedPayableAllocations : [];
 $accountHolderReceiptAccounts = is_array($accountHolderReceiptAccounts ?? null) ? $accountHolderReceiptAccounts : [];
 $accountHolderReceipts = is_array($accountHolderReceipts ?? null) ? $accountHolderReceipts : [];
+$linkedPartyOptions = is_array($linkedPartyOptions ?? null) ? $linkedPartyOptions : [];
 $money = static fn (mixed $value): string => number_format((float) $value, 2);
 $postedCount = count(array_filter($recentOffsets, static fn (array $row): bool => ($row['status'] ?? '') === 'posted'));
 $voidCount = count($recentOffsets) - $postedCount;
@@ -39,36 +40,52 @@ $displayVoidReason = static function (mixed $reason): string {
 
 <section class="panel compact-panel">
     <div class="panel-header"><h2>Linked Party Balance Reconciliation</h2></div>
-    <p class="panel-meta">Review open account-holder receivables and supplier payables. A linked pair may be matched manually across branches and currencies; no cash or bank money moves.</p>
+    <p class="panel-meta">One balance per linked account and supplier, per currency, across accessible branches. Net position is from our agency's perspective: receivable from the account holder or payable to the supplier. Cash received on account changes the net balance immediately; invoice matching remains a separate manual action.</p>
+    <form method="get" action="<?= e(url('/linked-party-settlements')) ?>" class="linked-party-open-form">
+        <label>Linked Party<select name="link_id" required>
+            <option value="">Select linked account and supplier</option>
+            <?php foreach ($linkedPartyOptions as $link): ?>
+                <option value="<?= e((string) $link['id']) ?>" <?= (int) ($manualPosition['link_id'] ?? 0) === (int) $link['id'] ? 'selected' : '' ?>><?= e((string) $link['business_source_name'] . ' / ' . (string) $link['supplier_name']) ?></option>
+            <?php endforeach; ?>
+        </select></label>
+        <label>Currency<select name="currency" required>
+            <?php foreach (['PKR', 'AED', 'USD'] as $currency): ?>
+                <option value="<?= e($currency) ?>" <?= (string) ($manualPosition['currency'] ?? '') === $currency ? 'selected' : '' ?>><?= e($currency) ?></option>
+            <?php endforeach; ?>
+        </select></label>
+        <button class="btn btn-primary" type="submit">Receive Payment</button>
+    </form>
     <div class="dense-table-wrap"><table class="dense-table">
-        <thead><tr><th>Account Holder</th><th>Supplier</th><th>Branch</th><th>Currency</th><th>Account Receivable</th><th>Supplier Payable</th><th>Action</th></tr></thead>
+        <thead><tr><th>Account Holder</th><th>Supplier</th><th>Currency</th><th>Open Account Invoices</th><th>Open Supplier Invoices</th><th>Direct Payments In Net</th><th>Net Position</th><th>Action</th></tr></thead>
         <tbody>
         <?php foreach (($positions ?? []) as $position): ?>
             <?php
             $receivable = round((float) ($position['receivable'] ?? 0), 2);
             $payable = round((float) ($position['payable'] ?? 0), 2);
+            $netBalance = $position['net_balance'] ?? null;
             $canMatchInvoices = array_key_exists('can_match_globally', $position)
                 ? ! empty($position['can_match_globally'])
                 : (float) ($position['available_offset'] ?? 0) > 0.005;
             ?>
             <tr>
                 <td><?= e($position['business_source_name']) ?></td><td><?= e($position['supplier_name']) ?></td>
-                <td><?= e($position['branch_name']) ?></td><td><?= e($position['currency']) ?></td>
+                <td><?= e($position['currency']) ?></td>
                 <td><?= e($money($receivable)) ?></td><td><?= e($money($payable)) ?></td>
+                <td><?= e($money($position['on_account_credit'] ?? 0)) ?></td>
                 <td>
-                    <?php if ($canMatchInvoices): ?>
-                        <a class="btn btn-sm" href="<?= e(url('/linked-party-settlements?' . http_build_query(['link_id' => $position['link_id'], 'branch_id' => $position['branch_id'], 'currency' => $position['currency']]))) ?>">Match Invoices</a>
-                    <?php elseif ($receivable <= 0.005 && $payable > 0.005): ?>
-                        <span class="panel-meta">No account receivable</span>
-                    <?php elseif ($payable <= 0.005 && $receivable > 0.005): ?>
-                        <span class="panel-meta">No supplier payable</span>
+                    <?php if ($netBalance === null): ?>
+                        <span class="form-warning">Ledger review needed</span>
                     <?php else: ?>
-                        <span class="panel-meta">No balance to match</span>
+                        <?= e((string) $position['currency'] . ' ' . $money(abs((float) $netBalance))) ?>
+                        <?= e((float) $netBalance > 0.005
+                            ? 'Receivable from ' . (string) $position['business_source_name']
+                            : ((float) $netBalance < -0.005 ? 'Payable to ' . (string) $position['supplier_name'] : 'Settled')) ?>
                     <?php endif; ?>
                 </td>
+                <td><a class="btn btn-sm" href="<?= e(url('/linked-party-settlements?' . http_build_query(['link_id' => $position['link_id'], 'currency' => $position['currency']]))) ?>"><?= $canMatchInvoices ? 'Open / Match' : 'Open / Receive' ?></a></td>
             </tr>
         <?php endforeach; ?>
-        <?php if (empty($positions)): ?><tr><td colspan="7">No linked balances available.</td></tr><?php endif; ?>
+        <?php if (empty($positions)): ?><tr><td colspan="8">No linked balances yet. Select a linked party and currency above to record a direct receipt.</td></tr><?php endif; ?>
         </tbody>
     </table></div>
 </section>
@@ -76,15 +93,19 @@ $displayVoidReason = static function (mixed $reason): string {
 <section class="panel compact-panel account-holder-receipt-panel">
     <div class="panel-header">
         <div>
-            <h2>Receive Net Payment</h2>
-            <p class="panel-meta">Record cash or bank money from <?= e($manualPosition['business_source_name']) ?> against the linked-party balance without selecting a ticket. Ticket-level allocation, if later required, remains a separate manual action.</p>
+            <h2>Receive Payment</h2>
+            <p class="panel-meta">Record money received from the linked party, whether paid as <?= e((string) $manualPosition['business_source_name']) ?> or <?= e((string) $manualPosition['supplier_name']) ?>. Select the cash/bank account that actually received it. This creates one shared linked-party receipt and reduces the <?= e((string) $manualPosition['currency']) ?> net balance across branches; it does not automatically pay a booking or supplier invoice.</p>
         </div>
     </div>
     <form method="post" action="<?= e(url('/linked-party-settlements/receipts/save')) ?>" class="account-holder-receipt-form" id="account-holder-receipt-form">
         <?= \App\Helpers\Csrf::input() ?>
         <input type="hidden" name="link_id" value="<?= e((string) $manualPosition['link_id']) ?>">
-        <input type="hidden" name="branch_id" value="<?= e((string) $manualPosition['branch_id']) ?>">
         <input type="hidden" name="currency" value="<?= e((string) $manualPosition['currency']) ?>">
+        <label>Received From<select name="payer_role" required>
+            <option value="">Select who paid</option>
+            <option value="account_holder"><?= e((string) $manualPosition['business_source_name']) ?> (Account)</option>
+            <option value="supplier"><?= e((string) $manualPosition['supplier_name']) ?> (Supplier)</option>
+        </select></label>
         <label>Amount (<?= e((string) $manualPosition['currency']) ?>)<input type="number" name="amount" min="0.01" step="0.01" required></label>
         <label>Date<input type="date" name="receipt_date" value="<?= e(date('Y-m-d')) ?>" required></label>
         <label>Method<select name="payment_method" id="account-holder-payment-method" required><option value="cash">Cash</option><option value="bank_transfer">Bank Transfer</option></select></label>
@@ -92,31 +113,37 @@ $displayVoidReason = static function (mixed $reason): string {
             <option value="">Select account</option>
             <?php foreach ($accountHolderReceiptAccounts as $account): ?>
                 <option value="<?= e((string) ($account['id'] ?? '')) ?>" data-account-type="<?= e((string) ($account['account_type'] ?? '')) ?>">
-                    <?= e((string) ($account['account_name'] ?? 'Account') . ' - ' . ucfirst((string) ($account['account_type'] ?? '')) . ' (' . (string) ($account['currency'] ?? '') . ')') ?>
+                    <?= e((string) ($account['account_name'] ?? 'Account') . ' - ' . (string) ($account['branch_name'] ?? 'Branch') . ' - ' . ucfirst((string) ($account['account_type'] ?? '')) . ' (' . (string) ($account['currency'] ?? '') . ')') ?>
                 </option>
             <?php endforeach; ?>
         </select></label>
         <label>Reference<input name="reference_number" maxlength="100"></label>
         <label>Remarks<input name="remarks" maxlength="4000"></label>
-        <button class="btn btn-primary" type="submit" <?= $accountHolderReceiptAccounts === [] ? 'disabled' : '' ?>>Record Net Payment</button>
+        <button class="btn btn-primary" type="submit" aria-label="Save received payment" <?= $accountHolderReceiptAccounts === [] ? 'disabled' : '' ?>>Save</button>
     </form>
-    <?php if ($accountHolderReceiptAccounts === []): ?><p class="panel-meta form-warning">No active <?= e((string) $manualPosition['currency']) ?> cash or bank account is configured for this branch.</p><?php endif; ?>
+    <?php if ($accountHolderReceiptAccounts === []): ?><p class="panel-meta form-warning">No active <?= e((string) $manualPosition['currency']) ?> cash or bank account is configured in an accessible branch.</p><?php endif; ?>
 
     <div class="dense-table-wrap account-holder-receipt-history"><table class="dense-table">
-        <thead><tr><th>Date</th><th>Receipt</th><th>Method</th><th>Cash / Bank</th><th>Amount</th><th>Status</th><th>Action</th></tr></thead>
+        <thead><tr><th>Date</th><th>Receipt</th><th>Received From</th><th>Branch</th><th>Method</th><th>Cash / Bank</th><th>Amount</th><th>Status</th><th>Action</th></tr></thead>
         <tbody>
         <?php if ($accountHolderReceipts === []): ?>
-            <tr><td colspan="7" class="empty-cell">No net cash or bank payment has been recorded for this branch and currency.</td></tr>
+            <tr><td colspan="9" class="empty-cell">No net cash or bank payment has been recorded in this currency.</td></tr>
         <?php else: ?>
             <?php foreach ($accountHolderReceipts as $receipt): ?>
                 <?php $receiptIsActive = (string) ($receipt['status'] ?? '') !== 'void'; ?>
                 <tr>
                     <td><?= e((string) ($receipt['receipt_date'] ?? '')) ?></td>
                     <td><strong><?= e((string) ($receipt['receipt_no'] ?? '')) ?></strong><?php if ((string) ($receipt['reference_number'] ?? '') !== ''): ?><br><small><?= e((string) $receipt['reference_number']) ?></small><?php endif; ?></td>
+                    <td><?= e(match ((string) ($receipt['linked_payer_role'] ?? '')) {
+                        'account_holder' => (string) $manualPosition['business_source_name'],
+                        'supplier' => (string) $manualPosition['supplier_name'],
+                        default => 'Not recorded (legacy)',
+                    }) ?></td>
+                    <td><?= e((string) ($receipt['branch_name'] ?? '')) ?></td>
                     <td><?= e(ucwords(str_replace('_', ' ', (string) ($receipt['payment_method'] ?? '')))) ?></td>
                     <td><?= e((string) ($receipt['treasury_account_name'] ?? '')) ?></td>
                     <td><?= e($money($receipt['received_amount'] ?? 0)) ?></td>
-                    <td><span class="admin-record-tag <?= $receiptIsActive ? 'is-custom' : 'is-system' ?>"><?= e($receiptIsActive ? 'Received on account' : 'Voided') ?></span></td>
+                    <td><span class="admin-record-tag <?= $receiptIsActive ? 'is-custom' : 'is-system' ?>"><?= e($receiptIsActive ? 'Included in linked balance' : 'Voided') ?></span></td>
                     <td>
                         <?php if ($receiptIsActive): ?>
                             <details class="linked-settlement-reverse">
@@ -124,7 +151,6 @@ $displayVoidReason = static function (mixed $reason): string {
                                 <form method="post" action="<?= e(url('/linked-party-settlements/receipts/void')) ?>">
                                     <?= \App\Helpers\Csrf::input() ?>
                                     <input type="hidden" name="link_id" value="<?= e((string) $manualPosition['link_id']) ?>">
-                                    <input type="hidden" name="branch_id" value="<?= e((string) $manualPosition['branch_id']) ?>">
                                     <input type="hidden" name="currency" value="<?= e((string) $manualPosition['currency']) ?>">
                                     <input type="hidden" name="customer_receipt_id" value="<?= e((string) ($receipt['id'] ?? 0)) ?>">
                                     <input type="text" name="void_reason" minlength="5" maxlength="1000" required placeholder="Reason for void">
@@ -146,7 +172,7 @@ $displayVoidReason = static function (mixed $reason): string {
     <div class="panel-header">
         <div>
             <h2>Manual Invoice Adjustment: <?= e($manualPosition['business_source_name']) ?> / <?= e($manualPosition['supplier_name']) ?></h2>
-            <p class="panel-meta">Choose the two invoices and enter the amount once. Add another pair only if you need to adjust more invoices. No invoices are selected automatically.</p>
+            <p class="panel-meta">Choose the two invoices and enter the amount once. Add another pair only if you need to adjust more invoices. No invoices are selected automatically, and no cash or bank money moves when invoices are matched.</p>
         </div>
     </div>
     <form method="post" action="<?= e(url('/linked-party-settlements/save')) ?>" class="manual-offset-form" id="manual-offset-form" data-currency="<?= e($manualPosition['currency']) ?>">
@@ -330,6 +356,10 @@ $displayVoidReason = static function (mixed $reason): string {
 </section>
 
 <style>
+    .linked-party-open-form { display: flex; align-items: end; flex-wrap: wrap; gap: 10px; margin: 10px 0 14px; }
+    .linked-party-open-form label { display: grid; gap: 4px; min-width: 150px; }
+    .linked-party-open-form label:first-child { min-width: min(420px, 100%); }
+    .linked-party-open-form select { width: 100%; }
     .account-holder-receipt-panel { border-left: 5px solid #138a72; }
     .account-holder-receipt-form { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; align-items: end; }
     .account-holder-receipt-form label { display: grid; gap: 4px; min-width: 0; }
@@ -359,6 +389,7 @@ $displayVoidReason = static function (mixed $reason): string {
         .manual-offset-confirmation { justify-content: space-between; }
     }
     @media (max-width: 650px) {
+        .linked-party-open-form, .linked-party-open-form label, .linked-party-open-form label:first-child { width: 100%; }
         .account-holder-receipt-form, .manual-offset-fields { grid-template-columns: 1fr; }
         .manual-pair { grid-template-columns: 1fr; }
         .manual-offset-confirmation { align-items: stretch; flex-direction: column; }

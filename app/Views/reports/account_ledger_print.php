@@ -98,7 +98,7 @@ $parseMoney = static function (string $value): ?float {
     return $negative ? -1 * abs($amount) : $amount;
 };
 
-$formatDebitNormalBalance = static function (string $value) use ($isLinkedPartyLedger): string {
+$formatDebitNormalBalance = static function (string $value): string {
     $text = trim($value);
     if ($text === '' || strtoupper($text) === 'N/A' || $text === '-') {
         return $value;
@@ -110,20 +110,11 @@ $formatDebitNormalBalance = static function (string $value) use ($isLinkedPartyL
     }
 
     $amount = (float) $numeric;
-    $precision = ($isLinkedPartyLedger ?? false) ? 0 : 2;
     if (abs($amount) < 0.005) {
-        return number_format(0, $precision);
+        return number_format(0, 2);
     }
 
-    return number_format(abs($amount), $precision) . ($amount > 0 ? ' Dr' : ' Cr');
-};
-$formatLinkedClosingBalance = static function (string $value): string {
-    $amount = (float) str_replace(',', '', $value);
-    if (abs($amount) < 0.005) {
-        return '0 Balance';
-    }
-
-    return number_format(abs($amount), 0) . ($amount > 0 ? ' Receivable' : ' Payable');
+    return number_format(abs($amount), 2) . ($amount > 0 ? ' Dr' : ' Cr');
 };
 
 $footerTotals = [];
@@ -150,7 +141,7 @@ if ($isAccountLedgerPrint) {
     $outstandingByCurrency = [];
     foreach ($summaryCards as $summaryCard) {
         $label = trim((string) ($summaryCard['label'] ?? ''));
-        if (preg_match('/^Total Outstanding \/ ([A-Z]{3})$/', $label, $matches) === 1) {
+        if (preg_match('/^(?:Total|Customer) Outstanding \/ ([A-Z]{3})$/', $label, $matches) === 1) {
             $outstandingByCurrency[] = $matches[1] . ' ' . (string) ($summaryCard['value'] ?? '0.00');
         }
     }
@@ -171,6 +162,17 @@ if (! $isAccountLedgerPrint && $summaryCards === [] && count($customerOutstandin
 $ledgerExportLabel = $selectedCustomerName !== ''
     ? $selectedCustomerName
     : ($selectedAccountLabel !== '' ? $selectedAccountLabel : 'Account Ledger');
+$printColumnWeights = [
+    'branch_name' => 5, 'lead_traveler_name' => 7, 'booking_date' => 5,
+    'booking_reference' => 6, 'transaction_reference' => 7, 'ledger_entry' => 8,
+    'counterparty' => 6, 'pnr' => 5, 'route' => 5, 'passenger_name' => 7,
+    'currency' => 3, 'settlement_status' => 5, 'debit_amount' => 6,
+    'credit_amount' => 6, 'balance_amount' => 7, 'transaction_note' => 12,
+];
+$printColumnTotal = array_sum(array_map(
+    static fn (array $column): int => $printColumnWeights[(string) ($column['key'] ?? '')] ?? 6,
+    $columns
+));
 ?>
 <style>
     .ledger-print-shell {
@@ -397,7 +399,7 @@ $ledgerExportLabel = $selectedCustomerName !== ''
 
     @media print {
         @page {
-            size: A4 landscape;
+            size: A3 landscape;
             margin: 6mm;
         }
 
@@ -501,6 +503,7 @@ $ledgerExportLabel = $selectedCustomerName !== ''
             table-layout: fixed;
             border-collapse: collapse;
             border-radius: 0;
+            overflow: visible;
         }
 
         .ledger-print-table thead {
@@ -518,7 +521,7 @@ $ledgerExportLabel = $selectedCustomerName !== ''
 
         .ledger-print-table thead th {
             padding: 1.4mm 1mm;
-            font-size: 6.8px;
+            font-size: 8px;
             line-height: 1.1;
             letter-spacing: 0.02em;
             white-space: normal;
@@ -528,7 +531,7 @@ $ledgerExportLabel = $selectedCustomerName !== ''
         .ledger-print-table tbody td,
         .ledger-print-table tfoot td {
             padding: 1.25mm 1mm;
-            font-size: 7.2px;
+            font-size: 8.5px;
             line-height: 1.15;
             white-space: normal;
             overflow-wrap: anywhere;
@@ -564,7 +567,7 @@ $ledgerExportLabel = $selectedCustomerName !== ''
             <div class="ledger-print-actions no-print">
                 <button class="btn btn-primary btn-sm" type="button" onclick="window.print()">Print / Save PDF</button>
                 <button class="btn btn-sm" type="button" onclick="window.close()">Close</button>
-                <span class="ledger-print-hint">Use A4 Landscape and disable browser headers and footers.</span>
+                <span class="ledger-print-hint">Use A3 Landscape and disable browser headers and footers.</span>
             </div>
         </header>
 
@@ -639,6 +642,11 @@ $ledgerExportLabel = $selectedCustomerName !== ''
         <?php endforeach; ?>
         <div class="ledger-print-table-wrap">
             <table class="ledger-print-table">
+                <colgroup>
+                    <?php foreach ($columns as $column): ?>
+                        <col style="width: <?= e(number_format(100 * ($printColumnWeights[(string) ($column['key'] ?? '')] ?? 6) / max(1, $printColumnTotal), 3, '.', '')) ?>%">
+                    <?php endforeach; ?>
+                </colgroup>
                 <thead>
                     <tr>
                         <?php foreach ($columns as $column): ?>
@@ -676,28 +684,7 @@ $ledgerExportLabel = $selectedCustomerName !== ''
                         </tr>
                     <?php endforeach; ?>
                 </tbody>
-                <?php if ($isAccountLedgerPrint && ($isLinkedPartyLedger ?? false) && $footerRows !== []): ?>
-                    <tfoot>
-                        <?php foreach ($footerRows as $footerRow): ?>
-                            <tr>
-                                <?php foreach ($columns as $index => $column): ?>
-                                    <?php $columnKey = (string) ($column['key'] ?? ''); ?>
-                                    <td data-column-key="<?= e($columnKey) ?>">
-                                        <?php if ($columnKey === 'currency'): ?>
-                                            <?= e((string) ($footerRow['currency'] ?? '')) ?>
-                                        <?php elseif (in_array($columnKey, ['debit_amount', 'credit_amount'], true)): ?>
-                                            <?= e((string) ($footerRow[$columnKey] ?? '')) ?>
-                                        <?php elseif ($columnKey === 'balance_amount'): ?>
-                                            <?= e($formatLinkedClosingBalance((string) ($footerRow[$columnKey] ?? ''))) ?>
-                                        <?php elseif ($columnKey === 'ledger_entry'): ?>
-                                            <?= e((string) ($footerRow['_label'] ?? 'Total')) ?>
-                                        <?php endif; ?>
-                                    </td>
-                                <?php endforeach; ?>
-                            </tr>
-                        <?php endforeach; ?>
-                    </tfoot>
-                <?php elseif (! $isAccountLedgerPrint): ?>
+                <?php if (! $isAccountLedgerPrint): ?>
                     <tfoot>
                         <tr>
                             <?php foreach ($columns as $index => $column): ?>

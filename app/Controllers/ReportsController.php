@@ -75,12 +75,15 @@ final class ReportsController extends BaseController
             exit;
         }
 
-        fputcsv($stream, array_map(static fn (array $column): string => (string) $column['label'], $state['columns']));
+        $cashBankLedger = (string) ($state['selectedReport'] ?? '') === 'cash_bank_ledger';
+        $headers = array_map(static fn (array $column): string => (string) $column['label'], $state['columns']);
+        fputcsv($stream, $cashBankLedger ? [...$headers, 'Booking'] : $headers);
         foreach ($state['rows'] as $row) {
-            fputcsv($stream, array_map(
+            $values = array_map(
                 static fn (array $column): string => (string) ($row[$column['key']] ?? ''),
                 $state['columns']
-            ));
+            );
+            fputcsv($stream, $cashBankLedger ? [...$values, (string) ($row['booking_reference'] ?? '')] : $values);
         }
 
         fclose($stream);

@@ -11,6 +11,9 @@ final class LauncherGateMiddleware extends Middleware
 {
     public function handle(): void
     {
+        if (class_exists(\App\Services\InvoiceSaveHttpTrace::class)) {
+            \App\Services\InvoiceSaveHttpTrace::checkpointActive('before_launcher_gate');
+        }
         if (! (bool) config('security.launcher_gate.enabled', false)) {
             return;
         }
@@ -333,7 +336,9 @@ final class LauncherGateMiddleware extends Middleware
 
     private function failClosed(int $statusCode, string $channel, array $context, string $title): void
     {
-        app_write_log($channel, 'Launcher gate is enabled but cannot complete verification.', $context);
+        app_write_log($channel, 'Launcher gate is enabled but cannot complete verification.', array_merge($context, [
+            'request_id' => app_request_id(),
+        ]));
 
         http_response_code($statusCode);
         echo View::make($this->app->basePath('/app/Views/errors/500.php'), ['title' => $title]);

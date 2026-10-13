@@ -47,7 +47,7 @@ $assert = static function (bool $ok, string $name): void {
 };
 $snapshot = static function () use ($db): array {
     $hashes = [];
-    foreach (['bookings','booking_services','booking_service_events','customer_receipts','customer_receipt_allocations',
+    foreach (['bookings','booking_services','booking_service_events','customer_receipts','customer_receipt_allocations','customer_receipt_allocation_movements',
         'customer_receivable_items','supplier_obligations','supplier_payments','supplier_payment_allocations',
         'supplier_advances','supplier_advance_applications','treasury_accounts','treasury_transactions',
         'journal_entries','journal_entry_lines','audit_logs'] as $table) {
@@ -101,6 +101,12 @@ try {
         'payment_method'=>'cash','receipt_status'=>'received','receipt_remarks'=>'Original customer payment',
     ],1,[1,2]);
     $cash = $treasury->defaultTreasuryAccountForPayment(2,'AED','cash');
+    $supplierBankId = $treasury->saveAccount([
+        'branch_id' => 2, 'account_type' => 'bank',
+        'account_name' => 'Refund recovery bank ' . strtoupper(bin2hex(random_bytes(4))),
+        'currency' => 'AED', 'opening_balance' => 0, 'is_active' => 1,
+        'created_by_user_id' => 1,
+    ], [1, 2]);
     $obligation = $suppliers->findObligationByServiceLine($reference,$line);
     $paymentNo = $suppliers->nextSupplierPaymentNumber();
     $paymentData = ['supplier_id'=>$service['supplier_id'],'branch_id'=>2,'booking_reference'=>$reference,
@@ -116,9 +122,32 @@ try {
         'entry_date'=>$today,'currency'=>'AED','actor_user_id'=>1]);
     $originalLedger = $ledger($reference);
     $originalCash = $treasury->currentBalanceForAccountId((int) $cash['id']);
+    $originalSupplierBank = $treasury->currentBalanceForAccountId($supplierBankId);
     $workspace->cancelService(['booking_id'=>$bookingId,'service_id'=>$id,'cancel_reason'=>'Wrong booking selected','cancel_event_date'=>$today],1,[1,2]);
     $workspace->settleCancellationFinancials(['booking_id'=>$bookingId,'service_id'=>$id,'settlement_reason'=>'Mistaken cancellation',
         'settlement_event_date'=>$today,'customer_penalty_amount'=>50,'expected_supplier_refund_amount'=>900],1,[1,2]);
+    $db->exec('SAVEPOINT automatic_supplier_credit_undo');
+    $workspace->refundService(['booking_id'=>$bookingId,'service_id'=>$id,
+        'refund_reason'=>'Mistaken customer payout with automatic supplier credit',
+        'refund_event_date'=>$today,'customer_refund_amount'=>175,'customer_refund_treatment'=>'pay_now',
+        'supplier_refund_amount'=>0,'refund_payment_method'=>'cash','refund_treasury_account_id'=>$cash['id']],1,[1,2]);
+    $automaticCancel = $events->latestPostedEvent($id,'cancel');
+    $automaticRefund = $events->latestPostedEvent($id,'refund');
+    $workspace->undoMistakenRefund(['booking_id'=>$bookingId,'service_id'=>$id,
+        'cancel_event_id'=>$automaticCancel['id'],'undo_last_refund_event_id'=>$automaticRefund['id'],
+        'undo_reason'=>'Rollback-only automatic supplier credit undo','undo_mistake_confirmed'=>1],1,[1,2]);
+    $automaticAr = $customers->findReceivableByServiceLine($reference,$line);
+    $automaticAp = $suppliers->findObligationByServiceLine($reference,$line);
+    $assert($ledger($reference)===$originalLedger
+        && $treasury->currentBalanceForAccountId((int)$cash['id'])===$originalCash
+        && $treasury->currentBalanceForAccountId($supplierBankId)===$originalSupplierBank
+        && (float)$automaticAr['outstanding_amount']===0.0
+        && (float)$automaticAp['net_payable_amount']===0.0
+        && $events->latestPostedEvent($id,'refund')===null
+        && $services->findServiceById($id)['service_status']==='Reserved',
+        'Current automatic supplier credit and customer payout undo restore original financial positions');
+    $db->exec('ROLLBACK TO SAVEPOINT automatic_supplier_credit_undo');
+    $db->exec('RELEASE SAVEPOINT automatic_supplier_credit_undo');
     // This fixture exercises an older cash-refund record, not the new
     // credit-by-default cancellation workflow.
     $legacyCancel = $events->latestPostedEvent($id, 'cancel');
@@ -154,7 +183,7 @@ try {
     }
     $workspace->refundService(['booking_id'=>$bookingId,'service_id'=>$id,'refund_reason'=>'Mistaken posted supplier receipt',
         'refund_event_date'=>$today,'customer_refund_amount'=>0,'supplier_refund_amount'=>100,
-        'supplier_refund_payment_method'=>'cash','supplier_refund_treasury_account_id'=>$cash['id']],1,[1,2]);
+        'supplier_refund_payment_method'=>'bank_transfer','supplier_refund_treasury_account_id'=>$supplierBankId],1,[1,2]);
     $cancel = $events->latestPostedEvent($id,'cancel'); $refund = $events->latestPostedEvent($id,'refund');
     $undo = ['booking_id'=>$bookingId,'service_id'=>$id,'cancel_event_id'=>$cancel['id'],
         'undo_last_refund_event_id'=>$refund['id'],'undo_reason'=>'Wrong booking; no money actually changed hands','undo_mistake_confirmed'=>1];
@@ -223,32 +252,34 @@ try {
         }
         $restoredAr = $customers->findReceivableByServiceLine($reference,$line);
         $restoredAp = $suppliers->findObligationByServiceLine($reference,$line);
-        $arOutstanding = $customerMoney === 'moved' ? 175.0 : 0.0;
-        $apOutstanding = $supplierMoney === 'moved' ? 100.0 : 0.0;
+        $arOutstanding = 0.0;
+        $apOutstanding = 0.0;
         $assert((float)$restoredAr['outstanding_amount'] === $arOutstanding && (float)$restoredAp['net_payable_amount'] === $apOutstanding,
-            'Actual money choices '.$customerMoney.'/'.$supplierMoney.' preserve invoice outstanding truth');
+            'Recorded refund reversal restores invoice and payable regardless of obsolete money fields '.$customerMoney.'/'.$supplierMoney);
         $assert($treasury->currentBalanceForAccountId((int)$cash['id']) === $originalCash - $arOutstanding + $apOutstanding,
-            'Actual money choices '.$customerMoney.'/'.$supplierMoney.' preserve cash truth');
+            'Recorded refund reversal restores the original cash balance');
+        $assert($treasury->currentBalanceForAccountId($supplierBankId) === $originalSupplierBank,
+            'Recorded supplier refund reversal removes money from its original bank account');
         $balances = array_column($ledger($reference),'balance','code');
         $assert((float)($balances['AR_CONTROL']??0) === $arOutstanding && -(float)($balances['AP_CONTROL']??0) === $apOutstanding,
-            'Actual money choices reconcile control journals to receivable/payable records');
+            'Recorded refund reversal reconciles control journals to receivable/payable records');
         $movements = $accountLedger->reportData([1,2],['bookingReference'=>$reference])['refundMovements'];
         $assert(abs(array_sum(array_column($movements,'customer_refund_amount'))-$arOutstanding)<0.005
             && abs(array_sum(array_column($movements,'supplier_refund_amount'))-$apOutstanding)<0.005,
-            'Account ledger includes genuine refund money and excludes reversed entry-only money');
+            'Account ledger excludes fully reversed refund movements');
         $supplierRows = $reports->supplierLedger([1,2],null,null,'AED','',(int)$service['supplier_id'],0,$reference);
         $supplierRefundRows = array_filter($supplierRows,static fn(array $r):bool => $r['entry_type']==='Supplier Refund Received');
         $assert(abs(array_sum(array_column($supplierRefundRows,'credit_amount'))-$apOutstanding)<0.005,
-            'Supplier ledger preserves genuine refund receipt after operational reversal');
+            'Supplier ledger excludes the reversed refund receipt');
         $customerRows = $reports->customerLedger([1,2],null,null,'AED',0,'',$reference);
         $assert(abs(array_sum(array_column($customerRows,'preserved_customer_refund_amount'))-$arOutstanding)<0.005
             && array_sum(array_column($customerRows,'refund_event_count')) == 0,
-            'Preserved cash is separate from active cancellation entitlement');
+            'Reversed cash is separate from active cancellation entitlement');
         [$customerReportRows] = $customerLedgerMethod->invoke($reportService,$customerRows,['AED'=>77,'PKR'=>1],'customer');
         $customerBalance = array_sum(array_column($customerReportRows,'raw_credit_amount'))
             - array_sum(array_column($customerReportRows,'raw_debit_amount'));
         $assert(abs($customerBalance-$arOutstanding)<0.005,
-            'Customer itemized ledger matches restored invoice outstanding with preserved cash');
+            'Customer itemized ledger matches restored invoice outstanding');
         $flow = $reports->cashFlow([2],$today,$today);
         $reversedEventIds = array_column($movements,'movement_id');
         $db->exec('SAVEPOINT preserved_cash_report');
@@ -260,10 +291,14 @@ try {
                 - array_sum(array_column($flow['receipts'],'cash_in_amount')) - $arOutstanding)<0.005
             && abs(array_sum(array_column($withoutPreserved['supplierPayments'],'cash_out_amount'))
                 - array_sum(array_column($flow['supplierPayments'],'cash_out_amount')) - $apOutstanding)<0.005,
-            'Cash-flow totals retain only verified genuine refund movements');
+            'Cash-flow totals exclude reversed refund movements');
         $db->exec('ROLLBACK TO SAVEPOINT preserved_cash_report'); $db->exec('RELEASE SAVEPOINT preserved_cash_report');
         $history = $recovery->history($id,$bookingId);
         $auditId = (int)$history[0]['id'];
+        $assert(($history[0]['reversal_mode'] ?? '') === 'recorded_transactions'
+            && ($history[0]['customer_money'] ?? null) === null
+            && ($history[0]['supplier_money'] ?? null) === null,
+            'Complete undo audit records automatic reversal without operator money choices');
         $restore = ['booking_id'=>$bookingId,'service_id'=>$id,'reversal_audit_id'=>$auditId,
             'restore_reason'=>'The full reversal was selected by mistake','restore_confirmed'=>1];
         $db->exec('SAVEPOINT later_change');
@@ -315,10 +350,24 @@ try {
     $ar = $customers->findReceivableByServiceLine($reference,$line);
     $ap = $suppliers->findObligationByServiceLine($reference,$line);
     $assert((float)$ar['due_amount']===1100.0 && (float)$ar['allocated_amount']===1100.0 && (float)$ar['outstanding_amount']===0.0,'Original invoice and customer payment allocations restored');
+    $history = $db->prepare('SELECT action, receivable_amount_before, receivable_amount_after, payment_amount_before, payment_amount_after
+        FROM customer_receipt_allocation_movements WHERE customer_receivable_item_id=? ORDER BY id');
+    $history->execute([(int)$ar['id']]);
+    $movements = $history->fetchAll(PDO::FETCH_ASSOC);
+    $releasedMovements = array_values(array_filter($movements, static fn (array $row): bool => $row['action'] === 'released'));
+    $lastMovement = $movements[count($movements) - 1] ?? [];
+    $assert(count($movements) === 3
+        && count($releasedMovements) === 1
+        && (float)$releasedMovements[0]['receivable_amount_before'] === 1100.0
+        && (float)$releasedMovements[0]['receivable_amount_after'] === 250.0
+        && ($lastMovement['action'] ?? '') === 'allocated'
+        && (float)($lastMovement['payment_amount_after'] ?? 0) === 850.0,
+        'Customer receipt allocation release and restoration retain immutable movement history');
     $assert((float)$ap['gross_amount']===1000.0 && (float)$ap['net_payable_amount']===0.0,'Original supplier cost and payment allocation restored');
     $assert($events->latestPostedEvent($id,'cancel')===null && $events->latestPostedEvent($id,'refund')===null,'All mistaken cancellation and partial customer/supplier refund events reversed');
     $assert($originalLedger===$ledger($reference),'Original booking ledger balances restored with reversal history');
     $assert($originalCash===$treasury->currentBalanceForAccountId((int) $cash['id']),'Recorded cash balance returns to pre-mistake value');
+    $assert($originalSupplierBank===$treasury->currentBalanceForAccountId($supplierBankId),'Recorded supplier bank balance returns to pre-mistake value');
     $after = $snapshot(); $workspace->undoMistakenRefund($undo,1,[1,2]);
     $assert($after===$snapshot(),'Repeated submit makes no additional entries or audit events');
 

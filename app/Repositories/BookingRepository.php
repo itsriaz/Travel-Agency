@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Repositories;
 
+use App\Helpers\AuditLog;
 use RuntimeException;
 
 final class BookingRepository extends BaseRepository
@@ -107,8 +108,23 @@ final class BookingRepository extends BaseRepository
             $targetBusinessSourceId = (int) ($bookingData['business_source_id'] ?? 0);
             $bookingReference = (string) ($currentBooking['booking_reference'] ?? '');
 
+            $cashCorrections = [];
             if ($priorBranchId !== $targetBranchId) {
-                $this->assertBranchCorrectionIsSafe($bookingReference, $targetBranchId);
+                $branchTrace = array_merge(app_request_log_context(), [
+                    'booking_id' => $bookingId,
+                    'booking_reference' => $bookingReference,
+                    'from_branch_id' => $priorBranchId,
+                    'to_branch_id' => $targetBranchId,
+                ]);
+                app_write_log('booking.branch_change.guard', 'Checking destination branch and linked money.', $branchTrace);
+                try {
+                    $cashCorrections = $this->prepareBranchCashCorrections($bookingReference, $priorBranchId, $targetBranchId);
+                    $this->assertBranchCorrectionIsSafe($bookingReference, $targetBranchId);
+                } catch (RuntimeException $exception) {
+                    app_write_log('booking.branch_change.blocked', $exception->getMessage(), $branchTrace);
+                    throw $exception;
+                }
+                app_write_log('booking.branch_change.guard_passed', 'Branch correction may proceed.', $branchTrace);
             }
             if ($priorBusinessSourceId !== $targetBusinessSourceId) {
                 $offsetStatement = $this->db->prepare(
@@ -159,7 +175,26 @@ final class BookingRepository extends BaseRepository
             ]);
 
             if ($priorBranchId !== $targetBranchId) {
-                $this->synchronizeBookingBranch($bookingId, $bookingReference, $targetBranchId);
+                $preservedJournalIds = $this->reverseBranchCashReceipts(
+                    $cashCorrections,
+                    $bookingReference,
+                    $priorBranchId,
+                    (int) $bookingData['actor_user_id']
+                );
+                $this->synchronizeBookingBranch($bookingId, $bookingReference, $targetBranchId, $preservedJournalIds);
+                $this->repostBranchCashReceipts(
+                    $cashCorrections,
+                    $bookingReference,
+                    $targetBranchId,
+                    (int) $bookingData['actor_user_id']
+                );
+                $this->reclassifyRetainedReceiptCredits(
+                    $cashCorrections,
+                    $bookingReference,
+                    $priorBranchId,
+                    $targetBranchId,
+                    (int) $bookingData['actor_user_id']
+                );
             }
 
             $this->upsertParty($bookingId, $partyData);
@@ -209,25 +244,23 @@ final class BookingRepository extends BaseRepository
             );
         }
 
-        $receiptConflict = $this->db->prepare(
-            "SELECT cr.receipt_no
-             FROM customer_receipts cr
-             LEFT JOIN treasury_accounts ta ON ta.id = cr.treasury_account_id
-             WHERE cr.booking_reference = :booking_reference
-               AND cr.status <> 'void'
-               AND ta.id IS NOT NULL
-               AND ta.branch_id <> :target_branch_id
-             LIMIT 1"
+        $advanceConflict = $this->db->prepare(
+            'SELECT sa.reference_no
+             FROM supplier_advance_applications saa
+             INNER JOIN supplier_obligations so ON so.id = saa.supplier_obligation_id
+             INNER JOIN supplier_advances sa ON sa.id = saa.supplier_advance_id
+             WHERE so.booking_reference = :booking_reference AND sa.branch_id <> :target_branch_id
+             LIMIT 1'
         );
-        $receiptConflict->execute([
+        $advanceConflict->execute([
             'booking_reference' => $bookingReference,
             'target_branch_id' => $targetBranchId,
         ]);
-        $receiptNo = $receiptConflict->fetchColumn();
-        if ($receiptNo !== false) {
+        $advanceReference = $advanceConflict->fetchColumn();
+        if ($advanceReference !== false) {
             throw new RuntimeException(
-                'Branch cannot be changed because active receipt ' . (string) $receiptNo
-                . ' belongs to a cash/bank account in another branch. Correct or void that receipt first.'
+                'Branch cannot be changed because supplier advance ' . (string) $advanceReference
+                . ' belongs to another branch. The shared supplier balance needs a separate reviewed correction.'
             );
         }
 
@@ -281,7 +314,287 @@ final class BookingRepository extends BaseRepository
         }
     }
 
-    private function synchronizeBookingBranch(int $bookingId, string $bookingReference, int $targetBranchId): void
+    private function prepareBranchCashCorrections(string $bookingReference, int $priorBranchId, int $targetBranchId): array
+    {
+        $statement = $this->db->prepare(
+            "SELECT cr.id, cr.receipt_no, cr.branch_id, cr.receipt_date, cr.currency,
+                    cr.received_amount, cr.charges_amount, cr.returned_amount, cr.payment_method, cr.treasury_account_id,
+                    ta.branch_id AS treasury_branch_id, ta.account_type, ta.linked_account_id
+             FROM customer_receipts cr
+             LEFT JOIN treasury_accounts ta ON ta.id = cr.treasury_account_id
+             WHERE cr.booking_reference = :booking_reference AND cr.status <> 'void'
+             FOR UPDATE"
+        );
+        $statement->execute(['booking_reference' => $bookingReference]);
+        $corrections = [];
+        foreach ($statement->fetchAll() ?: [] as $receipt) {
+            $receiptNo = (string) $receipt['receipt_no'];
+            $method = (string) $receipt['payment_method'];
+            $treasuryId = (int) ($receipt['treasury_account_id'] ?? 0);
+            if ($treasuryId <= 0) {
+                if (in_array($method, ['cash', 'bank_transfer', 'debit_card', 'credit_card'], true)) {
+                    throw new RuntimeException('Receipt ' . $receiptNo . ' has no linked cash/bank account; branch correction needs a reviewed account.');
+                }
+                continue;
+            }
+            if ((int) $receipt['branch_id'] !== $priorBranchId) {
+                throw new RuntimeException('Receipt ' . $receiptNo . ' does not belong to the current booking branch.');
+            }
+            if (! in_array($method, ['cash', 'bank_transfer'], true)
+                || (string) $receipt['account_type'] !== ($method === 'cash' ? 'cash' : 'bank')
+            ) {
+                throw new RuntimeException('Receipt ' . $receiptNo . ' has an unsupported funding method or account for branch correction.');
+            }
+            if (round((float) ($receipt['returned_amount'] ?? 0), 2) > 0) {
+                throw new RuntimeException('Receipt ' . $receiptNo . ' has money returned to the customer; review its funding before correcting branches.');
+            }
+
+            $allocationStatement = $this->db->prepare(
+                'SELECT cri.booking_reference
+                 FROM customer_receipt_allocations cra
+                 INNER JOIN customer_receivable_items cri ON cri.id = cra.customer_receivable_item_id
+                 WHERE cra.customer_receipt_id = :receipt_id AND cri.booking_reference <> :booking_reference
+                 LIMIT 1'
+            );
+            $allocationStatement->execute(['receipt_id' => (int) $receipt['id'], 'booking_reference' => $bookingReference]);
+            if ($allocationStatement->fetchColumn() !== false) {
+                throw new RuntimeException('Receipt ' . $receiptNo . ' also pays another booking; its branch cannot be inferred from this booking alone.');
+            }
+
+            $accountCorrection = $this->db->prepare(
+                'SELECT 1 FROM journal_entries je
+                 INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+                 WHERE jel.customer_receipt_id = :receipt_id
+                   AND je.source_type = "customer_receipt_account_corrected"
+                 LIMIT 1'
+            );
+            $accountCorrection->execute(['receipt_id' => (int) $receipt['id']]);
+            if ($method === 'bank_transfer' || (int) $receipt['treasury_branch_id'] !== $priorBranchId
+                || $accountCorrection->fetchColumn() !== false
+            ) {
+                $history = $this->db->prepare(
+                    'SELECT DISTINCT je.id, je.source_type
+                     FROM journal_entries je
+                     INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+                     WHERE jel.customer_receipt_id = :receipt_id
+                       AND je.source_type IN (
+                           "customer_receipt_recorded", "customer_receipt_amount_corrected",
+                           "customer_receipt_account_corrected", "booking_branch_credit_reclassified",
+                           "booking_branch_receipt_reversal"
+                       )'
+                );
+                $history->execute(['receipt_id' => (int) $receipt['id']]);
+                $historyRows = $history->fetchAll() ?: [];
+                if (! in_array('customer_receipt_recorded', array_column($historyRows, 'source_type'), true)) {
+                    throw new RuntimeException('Receipt ' . $receiptNo . ' has no original funding journal; review it before changing branches.');
+                }
+                $receipt['branch_correction_mode'] = 'retain_account';
+                $receipt['history_journal_ids'] = array_map('intval', array_column($historyRows, 'id'));
+                $corrections[] = $receipt;
+                continue;
+            }
+
+            $targetAccount = $this->db->prepare(
+                'SELECT id, is_default FROM treasury_accounts
+                 WHERE branch_id = :branch_id AND account_type = :account_type
+                   AND currency = :currency AND is_active = 1
+                 ORDER BY is_default DESC, id ASC'
+            );
+            $targetAccount->execute([
+                'branch_id' => $targetBranchId,
+                'account_type' => 'cash',
+                'currency' => (string) $receipt['currency'],
+            ]);
+            $accounts = $targetAccount->fetchAll() ?: [];
+            $defaults = array_values(array_filter($accounts, static fn (array $row): bool => (int) $row['is_default'] === 1));
+            $selected = count($defaults) === 1 ? $defaults[0] : (count($accounts) === 1 ? $accounts[0] : null);
+            if ($selected === null) {
+                throw new RuntimeException('No unique active ' . (string) $receipt['currency'] . ' cash account exists in the destination branch for receipt ' . $receiptNo . '.');
+            }
+
+            $cashJournal = $this->db->prepare(
+                'SELECT je.id, je.branch_id, je.currency, je.source_type, je.source_reference,
+                        MAX(CASE WHEN jel.account_id = :cash_account_id THEN 1 ELSE 0 END) AS uses_current_cash_account
+                 FROM journal_entries je
+                 INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+                 WHERE jel.customer_receipt_id = :receipt_id
+                 GROUP BY je.id, je.branch_id, je.currency, je.source_type, je.source_reference
+                 ORDER BY je.id ASC'
+            );
+            $cashJournal->execute([
+                'receipt_id' => (int) $receipt['id'],
+                'cash_account_id' => (int) $receipt['linked_account_id'],
+            ]);
+            $cashJournals = $cashJournal->fetchAll() ?: [];
+            $receiptJournals = [];
+            $reversedJournalIds = [];
+            $historyJournalIds = [];
+            foreach ($cashJournals as $journal) {
+                $type = (string) $journal['source_type'];
+                if ($type === 'customer_receipt_recorded') {
+                    $receiptJournals[] = $journal;
+                    $historyJournalIds[] = (int) $journal['id'];
+                } elseif ($type === 'booking_branch_receipt_reversal') {
+                    $prefix = $receiptNo . '-BRANCH-REV-';
+                    $reference = (string) ($journal['source_reference'] ?? '');
+                    if (! str_starts_with($reference, $prefix)
+                        || ! ctype_digit(substr($reference, strlen($prefix)))
+                    ) {
+                        throw new RuntimeException('Receipt ' . $receiptNo . ' has an unrecognized branch reversal.');
+                    }
+                    $reversedJournalIds[(int) substr($reference, strlen($prefix))] = true;
+                    $historyJournalIds[] = (int) $journal['id'];
+                } elseif ((int) $journal['uses_current_cash_account'] === 1) {
+                    throw new RuntimeException('Receipt ' . $receiptNo . ' has another cash correction; review it before changing branches.');
+                }
+            }
+            $activeJournals = array_values(array_filter(
+                $receiptJournals,
+                static fn (array $journal): bool => ! isset($reversedJournalIds[(int) $journal['id']])
+            ));
+            if (count($activeJournals) !== 1
+                || (int) $activeJournals[0]['branch_id'] !== $priorBranchId
+                || (string) $activeJournals[0]['currency'] !== (string) $receipt['currency']
+                || (int) $activeJournals[0]['uses_current_cash_account'] !== 1
+            ) {
+                throw new RuntimeException('Receipt ' . $receiptNo . ' has a nonstandard cash journal; review it before correcting branches.');
+            }
+            $receipt['old_journal_id'] = (int) $activeJournals[0]['id'];
+            $receipt['history_journal_ids'] = $historyJournalIds;
+            $receipt['target_treasury_account_id'] = (int) $selected['id'];
+            $receipt['branch_correction_mode'] = 'move_cash';
+            $corrections[] = $receipt;
+        }
+
+        return $corrections;
+    }
+
+    private function reverseBranchCashReceipts(array $corrections, string $bookingReference, int $priorBranchId, int $actorUserId): array
+    {
+        $accounting = new AccountingRepository($this->app);
+        $preserved = [];
+        foreach ($corrections as $receipt) {
+            if (($receipt['branch_correction_mode'] ?? '') === 'retain_account') {
+                array_push($preserved, ...$receipt['history_journal_ids']);
+                continue;
+            }
+            $oldJournalId = (int) $receipt['old_journal_id'];
+            $reversalId = $accounting->reverseJournalEntry($oldJournalId, [
+                'branch_id' => $priorBranchId,
+                'booking_reference' => $bookingReference,
+                'source_type' => 'booking_branch_receipt_reversal',
+                'source_reference' => (string) $receipt['receipt_no'] . '-BRANCH-REV-' . $oldJournalId,
+                'entry_date' => date('Y-m-d'),
+                'currency' => (string) $receipt['currency'],
+                'narration' => 'Reverse receipt recorded against the wrong booking branch',
+                'actor_user_id' => $actorUserId,
+            ]);
+            if ($reversalId === null) {
+                throw new RuntimeException('The receipt cash journal could not be reversed.');
+            }
+            array_push($preserved, ...$receipt['history_journal_ids']);
+            $preserved[] = $reversalId;
+        }
+
+        return array_values(array_unique($preserved));
+    }
+
+    private function repostBranchCashReceipts(array $corrections, string $bookingReference, int $targetBranchId, int $actorUserId): void
+    {
+        $accounting = new AccountingRepository($this->app);
+        $update = $this->db->prepare(
+            'UPDATE customer_receipts SET treasury_account_id = :treasury_account_id
+             WHERE id = :id AND branch_id = :branch_id'
+        );
+        foreach ($corrections as $receipt) {
+            if (($receipt['branch_correction_mode'] ?? '') !== 'move_cash') {
+                continue;
+            }
+            $update->execute([
+                'treasury_account_id' => (int) $receipt['target_treasury_account_id'],
+                'id' => (int) $receipt['id'],
+                'branch_id' => $targetBranchId,
+            ]);
+            if ($update->rowCount() !== 1) {
+                throw new RuntimeException('Receipt branch correction did not update exactly one receipt.');
+            }
+            $newJournalId = $accounting->postCustomerReceiptRecorded([
+                'branch_id' => $targetBranchId,
+                'booking_reference' => $bookingReference,
+                'customer_receipt_id' => (int) $receipt['id'],
+                'receipt_no' => (string) $receipt['receipt_no'],
+                'source_reference' => (string) $receipt['receipt_no'] . '-BRANCH-CORR-' . (int) $receipt['old_journal_id'],
+                'received_amount' => (float) $receipt['received_amount'],
+                'charges_amount' => (float) $receipt['charges_amount'],
+                'payment_method' => (string) $receipt['payment_method'],
+                'treasury_account_id' => (int) $receipt['target_treasury_account_id'],
+                'entry_date' => date('Y-m-d'),
+                'currency' => (string) $receipt['currency'],
+                'actor_user_id' => $actorUserId,
+                'narration' => 'Receipt reclassified to the corrected booking branch',
+            ]);
+            AuditLog::recordRequired($this->app, 'booking.branch_receipt_reclassified', [
+                'user_id' => $actorUserId,
+                'booking_reference' => $bookingReference,
+                'customer_receipt_id' => (int) $receipt['id'],
+                'from_branch_id' => (int) $receipt['branch_id'],
+                'to_branch_id' => $targetBranchId,
+                'from_treasury_account_id' => (int) $receipt['treasury_account_id'],
+                'to_treasury_account_id' => (int) $receipt['target_treasury_account_id'],
+                'old_journal_id' => (int) $receipt['old_journal_id'],
+                'new_journal_id' => $newJournalId,
+                'currency' => (string) $receipt['currency'],
+                'amount' => (string) $receipt['received_amount'],
+            ]);
+            app_write_log('booking.branch_change.receipt_reclassification_staged', 'Receipt cash posting staged in the booking transaction.', [
+                'booking_reference' => $bookingReference,
+                'receipt_id' => (int) $receipt['id'],
+                'from_treasury_account_id' => (int) $receipt['treasury_account_id'],
+                'to_treasury_account_id' => (int) $receipt['target_treasury_account_id'],
+                'old_journal_id' => (int) $receipt['old_journal_id'],
+                'new_journal_id' => $newJournalId,
+            ]);
+        }
+    }
+
+    private function reclassifyRetainedReceiptCredits(
+        array $corrections,
+        string $bookingReference,
+        int $priorBranchId,
+        int $targetBranchId,
+        int $actorUserId
+    ): void {
+        $accounting = new AccountingRepository($this->app);
+        foreach ($corrections as $receipt) {
+            if (($receipt['branch_correction_mode'] ?? '') !== 'retain_account') {
+                continue;
+            }
+            $journalIds = $accounting->postBookingBranchCreditReclassification([
+                'from_branch_id' => $priorBranchId,
+                'to_branch_id' => $targetBranchId,
+                'booking_reference' => $bookingReference,
+                'customer_receipt_id' => (int) $receipt['id'],
+                'source_reference' => (string) $receipt['receipt_no'] . '-BRANCH-CREDIT-' . strtoupper(bin2hex(random_bytes(4))),
+                'entry_date' => date('Y-m-d'),
+                'currency' => (string) $receipt['currency'],
+                'amount' => (float) $receipt['received_amount'],
+                'actor_user_id' => $actorUserId,
+            ]);
+            AuditLog::recordRequired($this->app, 'booking.branch_receipt_credit_reclassified', [
+                'user_id' => $actorUserId,
+                'booking_reference' => $bookingReference,
+                'customer_receipt_id' => (int) $receipt['id'],
+                'from_branch_id' => $priorBranchId,
+                'to_branch_id' => $targetBranchId,
+                'retained_treasury_account_id' => (int) $receipt['treasury_account_id'],
+                'amount' => (string) $receipt['received_amount'],
+                'currency' => (string) $receipt['currency'],
+                'journal_ids' => $journalIds,
+            ]);
+        }
+    }
+
+    private function synchronizeBookingBranch(int $bookingId, string $bookingReference, int $targetBranchId, array $preservedJournalIds = []): void
     {
         $bookingTables = [
             'booking_services' => 'booking_id',
@@ -337,10 +650,37 @@ final class BookingRepository extends BaseRepository
             'booking_reference' => $bookingReference,
         ]);
 
+        $excluded = [];
+        $journalParams = [
+            'branch_id' => $targetBranchId,
+            'booking_reference' => $bookingReference,
+            'booking_id' => $bookingId,
+        ];
+        foreach ($preservedJournalIds as $index => $journalId) {
+            $key = 'preserved_journal_' . $index;
+            $excluded[] = ':' . $key;
+            $journalParams[$key] = $journalId;
+        }
+        $exclusionSql = $excluded === [] ? '' : ' AND je.id NOT IN (' . implode(', ', $excluded) . ')';
         $journalStatement = $this->db->prepare(
             'UPDATE journal_entries je
              SET je.branch_id = :branch_id
              WHERE je.booking_reference = :booking_reference
+               ' . $exclusionSql . '
+               AND je.source_type NOT IN (
+                   "customer_receipt_recorded", "customer_receipt_amount_corrected",
+                   "customer_receipt_account_corrected", "booking_branch_credit_reclassified",
+                   "booking_branch_receipt_reversal", "customer_receipt_void_reversal",
+                   "customer_receipt_void_reversed", "customer_receipt_wrong_currency_reversed"
+               )
+               AND NOT EXISTS (
+                    SELECT 1 FROM journal_entry_lines treasury_line
+                    INNER JOIN treasury_accounts treasury_account
+                        ON treasury_account.linked_account_id = treasury_line.account_id
+                       AND treasury_account.branch_id = je.branch_id
+                       AND treasury_account.currency = je.currency
+                    WHERE treasury_line.journal_entry_id = je.id
+               )
                AND EXISTS (
                     SELECT 1
                     FROM booking_services bs
@@ -348,11 +688,7 @@ final class BookingRepository extends BaseRepository
                       AND (bs.currency = je.currency OR bs.cost_currency = je.currency)
                )'
         );
-        $journalStatement->execute([
-            'branch_id' => $targetBranchId,
-            'booking_reference' => $bookingReference,
-            'booking_id' => $bookingId,
-        ]);
+        $journalStatement->execute($journalParams);
     }
 
     public function closeReadinessTotals(int $bookingId): array

@@ -63,6 +63,10 @@ try {
     $check('Matching balances are not adjusted automatically', $settlements === []);
     $check('Customer receipt does not reduce the independent account-holder sale balance', abs((float) $receivable - 30000) <= 0.005);
     $check('Supplier payable remains PKR 100,000', abs((float) $payable - 100000) <= 0.005);
+    $matchablePositions = (new \App\Repositories\CounterpartyOffsetRepository($app))->positions([$branchId]);
+    $matchablePosition = current(array_filter($matchablePositions, static fn (array $row): bool => (int) ($row['business_source_id'] ?? 0) === $businessSourceId));
+    $check('Invoice matching offers PKR 30,000 outstanding, not the PKR 45,000 original due',
+        is_array($matchablePosition) && (float) ($matchablePosition['receivable'] ?? 0) === 30000.0);
     $linkRepository = new \App\Repositories\CounterpartyLinkRepository($app);
     $positions = $linkRepository->openLedgerPositions($businessSourceId, $supplierId, [$branchId], 'PKR');
     $check(
@@ -147,7 +151,7 @@ try {
         'Linked Supplier'
     );
     $check(
-        'Linked Supplier Ledger shows PKR 1,000 purchased and PKR 800 sold as PKR 200 payable',
+        'Linked Supplier Ledger shows PKR 1,000 debit and PKR 800 credit as PKR 200 receivable',
         count($linkedSupplierStatement['rows']) === 2
             && (float) str_replace(',', '', $linkedSupplierStatement['footerRows'][0]['debit_amount']) === 1000.0
             && (float) str_replace(',', '', $linkedSupplierStatement['footerRows'][0]['credit_amount']) === 800.0
@@ -179,9 +183,9 @@ try {
         'Linked Supplier'
     );
     $check(
-        'Linked Supplier Ledger calls a negative PKR 200 position receivable rather than supplier advance',
+        'Linked Supplier Ledger labels PKR 200 as receivable exceeding payable',
         (float) str_replace(',', '', $linkedSupplierReceivable['footerRows'][0]['balance_amount']) === -200.0
-            && str_contains((string) $linkedSupplierReceivable['summaryCards'][2]['value'], 'Receivable')
+            && (string) $linkedSupplierReceivable['summaryCards'][2]['label'] === 'Receivable exceeds payable / PKR'
             && ! str_contains((string) $linkedSupplierReceivable['summaryCards'][2]['value'], 'Advance')
     );
     $paymentStatement = (new \App\Services\LinkedPartyLedgerService($app))->buildReport(
@@ -335,7 +339,7 @@ try {
         'report' => 'customer_ledger',
         'business_source_id' => $businessSourceId,
     ], [$branchId], $actorId, 'print');
-    $check('Linked account uses the single-statement view', ($customerState['isLinkedPartyLedger'] ?? false) === true);
+    $check('Linked account exposes role summaries without merging supplier rows', ($customerState['isLinkedPartyLedger'] ?? false) === true);
     $check(
         'Linked account print uses the ordinary Account Ledger columns',
         in_array('transaction_reference', array_column($customerState['columns'], 'key'), true)
@@ -357,19 +361,26 @@ try {
     $linkedScreenHtml = (string) ob_get_clean();
     preg_match_all('/class="report-total-row"/', $linkedScreenHtml, $linkedFooterMatches);
     $check(
-        'Linked account screen renders only its currency-aware footer rows',
-        count($linkedFooterMatches[0]) === count($linkedScreenState['footerRows'])
+        'Linked account screen has no synthetic combined footer',
+        count($linkedFooterMatches[0]) === 0 && ($linkedScreenState['footerRows'] ?? []) === []
     );
     $ordinaryLinkedAccountSummary = (new \App\Services\AccountLedgerService($app))->report(
         $linkedScreenState['filters'],
         [$branchId]
     );
-    $check(
-        'Linked account preserves the ordinary Account Ledger summary data',
-        ($linkedScreenState['summaryCards'] ?? []) === ($ordinaryLinkedAccountSummary['summaryCards'] ?? [])
-            && ($linkedScreenState['customerOutstandingSummaryRows'] ?? []) === ($ordinaryLinkedAccountSummary['summaryRows'] ?? [])
-            && str_contains($linkedScreenHtml, '<section class="stat-grid report-stat-grid')
-    );
+    $linkedLabels = array_column((array) ($linkedScreenState['summaryCards'] ?? []), 'label');
+    $check('Linked account separately names account receivable', in_array('Receivable from QA Auto Account ' . $suffix . ' / PKR', $linkedLabels, true));
+    $check('Linked account separately names supplier payable', in_array('Payable to QA Auto Supplier ' . $suffix . ' / PKR', $linkedLabels, true));
+    $check('Linked account separately names net position', count(array_filter($linkedLabels, static fn (string $label): bool =>
+        str_starts_with($label, 'Net receivable from QA Auto Account ' . $suffix . ' / PKR')
+        || str_starts_with($label, 'Net payable to QA Auto Supplier ' . $suffix . ' / PKR')
+        || str_starts_with($label, 'Net payable to QA Auto Account ' . $suffix . ' / PKR')
+        || str_starts_with($label, 'Net balance zero / PKR'))) === 1);
+    $check('Linked account summary keeps customer rows', count((array) ($linkedScreenState['customerOutstandingSummaryRows'] ?? [])) === count((array) ($ordinaryLinkedAccountSummary['summaryRows'] ?? [])));
+    $check('Linked account screen renders role labels without old combined cards',
+        str_contains($linkedScreenHtml, 'Receivable from QA Auto Account ' . $suffix)
+            && str_contains($linkedScreenHtml, 'Payable to QA Auto Supplier ' . $suffix)
+            && ! str_contains($linkedScreenHtml, 'Linked Debit / PKR'));
     $standardCustomerState = $reportService->reportState([
         'report' => 'customer_ledger',
     ], [$branchId], $actorId, 'print');
@@ -392,13 +403,16 @@ try {
     };
     $linkedPrintHtml = $renderAccountPrint($customerState);
     $ordinaryPrintHtml = $renderAccountPrint($standardCustomerState);
-    $check(
-        'Ordinary and linked account print views retain the same summary layout',
+    $check('Ordinary and linked account print views retain the same summary layout',
         substr_count($linkedPrintHtml, '<section class="ledger-print-meta">') === 1
-            && substr_count($ordinaryPrintHtml, '<section class="ledger-print-meta">') === 1
-            && str_contains($linkedPrintHtml, 'Customers in Summary')
-            && str_contains($ordinaryPrintHtml, 'Customers in Summary')
-    );
+            && substr_count($ordinaryPrintHtml, '<section class="ledger-print-meta">') === 1);
+    $check('Linked account print identifies customers and account receivable',
+        str_contains($linkedPrintHtml, 'Customers in Summary')
+            && str_contains($linkedPrintHtml, 'Receivable from QA Auto Account ' . $suffix));
+    $check('Linked account print includes supplier role without old combined footer',
+        str_contains($linkedPrintHtml, 'Payable to QA Auto Supplier ' . $suffix)
+            && ! str_contains($linkedPrintHtml, 'Linked Net Balance')
+            && str_contains($ordinaryPrintHtml, 'Customers in Summary'));
     $supplierState = $reportService->reportState([
         'report' => 'supplier_ledger',
         'business_source_id' => $businessSourceId,
@@ -411,15 +425,20 @@ try {
         $ordinarySupplierState['filters'],
         [$branchId]
     );
+    $supplierCardValues = static function (array $cards): array {
+        $values = array_column($cards, 'value', 'label');
+        ksort($values);
+        return $values;
+    };
     $check(
         'Ordinary Supplier Ledger remains the unchanged service output',
         ($ordinarySupplierState['isLinkedPartyLedger'] ?? false) === false
             && count($ordinarySupplierState['rows']) === count($ordinarySupplierDirect['rows'])
-            && $ordinarySupplierState['summaryCards'] === $ordinarySupplierDirect['summaryCards']
+            && $supplierCardValues($ordinarySupplierState['summaryCards']) === $supplierCardValues($ordinarySupplierDirect['summaryCards'])
             && ($ordinarySupplierState['footerRows'] ?? []) === []
             && array_column($ordinarySupplierState['columns'], 'key') === [
                 'supplier_name', 'ledger_date', 'booking_reference', 'entry_type', 'passenger_name',
-                'route', 'currency', 'debit_amount', 'credit_amount', 'balance_amount',
+                'route', 'currency', 'debit_amount', 'credit_amount', 'balance_amount', 'trace',
             ]
     );
     $linkedSupplierState = $reportService->reportState([
@@ -427,41 +446,40 @@ try {
         'supplier_id' => $supplierId,
     ], [$branchId], $actorId, 'screen');
     $check(
-        'Selecting a linked supplier activates only the combined Supplier Ledger projection',
+        'Selecting a linked supplier shows the mirrored linked ledger and separate role balances',
         ($linkedSupplierState['isLinkedPartyLedger'] ?? false) === true
-            && ($linkedSupplierState['footerRows'] ?? []) !== []
+            && ($linkedSupplierState['footerRows'] ?? []) === []
+            && in_array('Payable to QA Auto Supplier ' . $suffix . ' / PKR', array_column((array) ($linkedSupplierState['summaryCards'] ?? []), 'label'), true)
+            && in_array('Receivable from QA Auto Account ' . $suffix . ' / PKR', array_column((array) ($linkedSupplierState['summaryCards'] ?? []), 'label'), true)
             && array_column($linkedSupplierState['columns'], 'key') === [
                 'supplier_name', 'ledger_date', 'booking_reference', 'entry_type', 'passenger_name',
                 'route', 'currency', 'debit_amount', 'credit_amount', 'balance_amount', 'trace',
             ]
     );
-    $linkedSupplierReceivableState = $linkedSupplierState;
-    $linkedSupplierReceivableState['rows'] = $linkedSupplierReceivable['rows'];
-    $linkedSupplierReceivableState['footerRows'] = $linkedSupplierReceivable['footerRows'];
-    $linkedSupplierReceivableState['summaryCards'] = $linkedSupplierReceivable['summaryCards'];
     ob_start();
     (static function (array $state): void {
         extract($state);
         require BASE_PATH . '/app/Views/reports/index.php';
-    })($linkedSupplierReceivableState);
-    $linkedSupplierReceivableScreen = (string) ob_get_clean();
-    $linkedSupplierReceivablePrintState = $linkedSupplierReceivableState;
-    $linkedSupplierReceivablePrintState['columns'] = array_values(array_filter(
-        $linkedSupplierReceivablePrintState['columns'],
+    })($linkedSupplierState);
+    $linkedSupplierScreen = (string) ob_get_clean();
+    $linkedSupplierPrintState = $linkedSupplierState;
+    $linkedSupplierPrintState['columns'] = array_values(array_filter(
+        $linkedSupplierPrintState['columns'],
         static fn (array $column): bool => (string) ($column['key'] ?? '') !== 'trace'
     ));
     ob_start();
     (static function (array $state): void {
         extract($state);
         require BASE_PATH . '/app/Views/reports/report_print.php';
-    })($linkedSupplierReceivablePrintState);
-    $linkedSupplierReceivablePrint = (string) ob_get_clean();
+    })($linkedSupplierPrintState);
+    $linkedSupplierPrint = (string) ob_get_clean();
     $check(
-        'Linked Supplier Ledger screen and print label PKR 200 as receivable, not advance',
-        str_contains($linkedSupplierReceivableScreen, '200 Receivable')
-            && ! str_contains($linkedSupplierReceivableScreen, '200 Advance')
-            && str_contains($linkedSupplierReceivablePrint, '200 Receivable')
-            && ! str_contains($linkedSupplierReceivablePrint, '200 Advance')
+        'Linked Supplier Ledger screen and print identify both roles without a duplicated footer',
+        str_contains($linkedSupplierScreen, 'Payable to QA Auto Supplier ' . $suffix)
+            && str_contains($linkedSupplierScreen, 'Receivable from QA Auto Account ' . $suffix)
+            && str_contains($linkedSupplierPrint, 'Payable to QA Auto Supplier ' . $suffix)
+            && str_contains($linkedSupplierPrint, 'Receivable from QA Auto Account ' . $suffix)
+            && ! str_contains($linkedSupplierPrint, 'Combined totals for the linked account')
     );
     $linkId = (int) $db->query('SELECT id FROM business_source_supplier_links WHERE business_source_id = ' . $businessSourceId)->fetchColumn();
     $check('Link reconciliation cannot auto-settle', $service->autoSettleLink($linkId, date('Y-m-d'), $actorId) === []);
@@ -477,6 +495,24 @@ try {
     $restoredReceivable = $db->query('SELECT outstanding_amount FROM customer_receivable_items WHERE id = ' . $receivableId)->fetchColumn();
     $restoredPayable = $db->query('SELECT net_payable_amount FROM supplier_obligations WHERE id = ' . $obligationId)->fetchColumn();
     $check('All automatic entry points leave supplier balance and customer due unchanged', abs((float) $restoredReceivable - 30000) <= 0.005 && abs((float) $restoredPayable - 100000) <= 0.005);
+    $otherBranchId = (int) $db->query('SELECT id FROM branches WHERE is_active = 1 AND id <> ' . $branchId . ' ORDER BY id LIMIT 1')->fetchColumn();
+    if ($otherBranchId > 0) {
+        $crossBranchBooking = 'QA-AUTO-X-' . $suffix;
+        $db->prepare('INSERT INTO bookings (booking_reference, branch_id, business_source_id, booking_status, booking_date, created_by_user_id, updated_by_user_id) VALUES (:reference, :branch, :business, "open", CURDATE(), :created_user, :updated_user)')
+            ->execute(['reference' => $crossBranchBooking, 'branch' => $otherBranchId, 'business' => $businessSourceId, 'created_user' => $actorId, 'updated_user' => $actorId]);
+        $db->prepare('INSERT INTO customer_receivable_items (branch_id, booking_reference, service_line_reference, currency, due_amount, allocated_amount, outstanding_amount, status, created_by_user_id) VALUES (:branch, :reference, "SV-001", "PKR", 500, 0, 500, "open", :user)')
+            ->execute(['branch' => $otherBranchId, 'reference' => $crossBranchBooking, 'user' => $actorId]);
+        $db->prepare('INSERT INTO supplier_obligations (supplier_id, branch_id, booking_reference, service_line_reference, currency, gross_amount, advance_applied_amount, net_payable_amount, status, created_by_user_id) VALUES (:supplier, :branch, :reference, "SV-001", "PKR", 200, 0, 200, "open", :user)')
+            ->execute(['supplier' => $supplierId, 'branch' => $otherBranchId, 'reference' => $crossBranchBooking, 'user' => $actorId]);
+        $pooledRows = array_values(array_filter(
+            (new \App\Repositories\CounterpartyOffsetRepository($app))->positions([$branchId, $otherBranchId]),
+            static fn (array $row): bool => (int) ($row['business_source_id'] ?? 0) === $businessSourceId && (string) ($row['currency'] ?? '') === 'PKR'
+        ));
+        $check('Same-currency open invoices from both branches form one matching position',
+            count($pooledRows) === 1
+            && (float) $pooledRows[0]['receivable'] === 30500.0
+            && (float) $pooledRows[0]['payable'] === 100200.0);
+    }
 } finally {
     if ($db->inTransaction()) $db->rollBack();
 }

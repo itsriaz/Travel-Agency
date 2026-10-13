@@ -679,7 +679,7 @@ foreach ($reissueEvents as $event) {
 
 $serviceInvoiceCandidateTotals = [];
 foreach ($services as $service) {
-    $serviceStatus = str_replace(' ', '_', mb_strtolower(trim((string) ($service['status'] ?? 'open'))));
+    $serviceStatus = str_replace(' ', '_', mb_strtolower(trim((string) ($service['service_status'] ?? $service['status'] ?? 'open'))));
     if ($serviceStatus === 'cancelled') {
         continue;
     }
@@ -988,6 +988,17 @@ $receiptServiceRows = [];
 $receiptSubtotalTotals = [];
 $receiptDiscountTotals = [];
 $receiptGrandTotals = [];
+$receiptCurrentDueByLineCurrency = [];
+foreach (($customerPaymentFoundation['serviceReceivables'] ?? []) as $serviceReceivable) {
+    $lineReference = trim((string) ($serviceReceivable['serviceLineReference'] ?? ''));
+    $currency = trim((string) ($serviceReceivable['currency'] ?? ''));
+    if ($lineReference === '' || $currency === '') {
+        continue;
+    }
+    $key = $lineReference . '|' . $currency;
+    $receiptCurrentDueByLineCurrency[$key] = ($receiptCurrentDueByLineCurrency[$key] ?? 0.0)
+        + (float) ($serviceReceivable['dueAmount'] ?? 0);
+}
 foreach ($services as $serviceIndex => $service) {
     $serviceLineReference = trim((string) ($service['line_reference'] ?? ''));
     if (
@@ -1016,8 +1027,13 @@ foreach ($services as $serviceIndex => $service) {
         $serviceDeparture = trim((string) ($service['due_date'] ?? ''));
     }
 
-    $serviceDiscountAmount = round((float) ($service['discount_amount'] ?? 0), 2);
-    $serviceLineTotal = round($serviceReceivableAmount($service), 2);
+    $serviceStatus = str_replace(' ', '_', mb_strtolower(trim((string) ($service['service_status'] ?? $service['status'] ?? 'open'))));
+    $isCancelledService = $serviceStatus === 'cancelled';
+    $serviceDiscountAmount = $isCancelledService ? 0.0 : round((float) ($service['discount_amount'] ?? 0), 2);
+    $receivableKey = $serviceLineReference . '|' . $serviceCurrency;
+    $serviceLineTotal = round($isCancelledService && array_key_exists($receivableKey, $receiptCurrentDueByLineCurrency)
+        ? $receiptCurrentDueByLineCurrency[$receivableKey]
+        : $serviceReceivableAmount($service), 2);
     $serviceLineSubtotal = round($serviceLineTotal + max(0, $serviceDiscountAmount), 2);
 
     $receiptSubtotalTotals[$serviceCurrency] = ($receiptSubtotalTotals[$serviceCurrency] ?? 0.0) + $serviceLineSubtotal;
@@ -1028,7 +1044,7 @@ foreach ($services as $serviceIndex => $service) {
 
     $receiptServiceRows[] = [
         'index' => count($receiptServiceRows) + 1,
-        'service' => ucwords((string) ($service['service_type'] ?? 'service')),
+        'service' => ucwords((string) ($service['service_type'] ?? 'service')) . ($isCancelledService ? ' (Cancelled)' : ''),
         'passenger' => $servicePassenger,
         'route' => $serviceRoute !== '' ? $serviceRoute : 'N/A',
         'referenceLabel' => $extractServiceReferenceLabel($service),
@@ -1258,6 +1274,9 @@ if ($totalPaidAgainstInvoiceDisplay !== []) {
         ), 0.0);
     }
 }
+if (! $receiptIsPassengerSpecific) {
+    $currentInvoiceBalanceDisplay = $nonZeroCurrencyTotals($invoiceOutstandingTotals);
+}
 
 $openSupplierHistoryUrl = null;
 if ($outputType === 'supplier_voucher' && (int) ($booking['id'] ?? 0) > 0) {
@@ -1439,7 +1458,7 @@ $usesReceiptLayout = in_array($outputType, ['customer_receipt', 'customer_settle
                             <td><?= e($cleanServiceDescription($service)) ?></td>
                             <td><?= e((string) ($service['currency'] ?? 'PKR')) ?></td>
                             <td><?= e($formatMoney($summaryServiceAmount)) ?></td>
-                            <td><?= e(ucwords((string) ($service['status'] ?? 'Open'))) ?></td>
+                            <td><?= e(ucwords((string) ($service['service_status'] ?? $service['status'] ?? 'Open'))) ?></td>
                         </tr>
                     <?php endforeach; ?>
                     <?php if ($services === []): ?>

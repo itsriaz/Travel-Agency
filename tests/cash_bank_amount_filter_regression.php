@@ -94,30 +94,36 @@ $check(
 );
 
 $datesAreOrdered = static function (array $rows, string $direction): bool {
-    $lastByAccount = [];
+    $lastDate = null;
     foreach ($rows as $row) {
-        $key = implode('|', [
-            (string) ($row['branch_name'] ?? ''),
-            (string) ($row['account_name'] ?? ''),
-            (string) ($row['currency'] ?? ''),
-        ]);
         $date = (string) ($row['entry_date'] ?? '');
-        if (isset($lastByAccount[$key])) {
-            if ($direction === 'desc' && $date > $lastByAccount[$key]) {
+        if ($lastDate !== null) {
+            if ($direction === 'desc' && $date > $lastDate) {
                 return false;
             }
-            if ($direction === 'asc' && $date < $lastByAccount[$key]) {
+            if ($direction === 'asc' && $date < $lastDate) {
                 return false;
             }
         }
-        $lastByAccount[$key] = $date;
+        $lastDate = $date;
     }
 
     return true;
 };
 
-$check('Newest-first date order is deterministic within each cash/bank account', $datesAreOrdered($newestRows, 'desc'));
-$check('Oldest-first date order is deterministic within each cash/bank account', $datesAreOrdered($oldestRows, 'asc'));
+$check('Newest-first date order applies across all cash/bank accounts', $datesAreOrdered($newestRows, 'desc'));
+$check('Oldest-first date order applies across all cash/bank accounts', $datesAreOrdered($oldestRows, 'asc'));
+
+$interleavedRows = [
+    ['treasury_account_id' => 1, 'branch_name' => 'Branch', 'account_group' => 'Cash', 'account_name' => 'Account A', 'entry_date' => '2026-10-01', 'currency' => 'AED', 'source_type' => 'direct_treasury_entry_posted', 'reference' => 'A-1', 'debit_amount' => 100, 'credit_amount' => 0, 'line_id' => 1],
+    ['treasury_account_id' => 1, 'branch_name' => 'Branch', 'account_group' => 'Cash', 'account_name' => 'Account A', 'entry_date' => '2026-10-03', 'currency' => 'AED', 'source_type' => 'direct_treasury_entry_posted', 'reference' => 'A-3', 'debit_amount' => 0, 'credit_amount' => 20, 'line_id' => 3],
+    ['treasury_account_id' => 2, 'branch_name' => 'Branch', 'account_group' => 'Cash', 'account_name' => 'Account B', 'entry_date' => '2026-10-02', 'currency' => 'AED', 'source_type' => 'direct_treasury_entry_posted', 'reference' => 'B-2', 'debit_amount' => 50, 'credit_amount' => 0, 'line_id' => 2],
+];
+[$interleavedNewest] = $reportMethod->invoke($service, $interleavedRows, 'desc');
+[$interleavedOldest] = $reportMethod->invoke($service, $interleavedRows, 'asc');
+$check('Newest-first interleaves accounts by date', array_column($interleavedNewest, 'reference') === ['A-3', 'B-2', 'A-1']);
+$check('Oldest-first interleaves accounts by date', array_column($interleavedOldest, 'reference') === ['A-1', 'B-2', 'A-3']);
+$check('Reordering preserves each account running balance', array_column($interleavedNewest, 'balance_amount') === ['80', '50', '100']);
 
 $view = file_get_contents(BASE_PATH . '/app/Views/reports/index.php') ?: '';
 $javascript = file_get_contents(BASE_PATH . '/public/assets/js/reports.js') ?: '';
@@ -128,7 +134,8 @@ $check(
         && str_contains($view, '<span>Debit Amount</span>')
         && str_contains($view, '<span>Credit Amount</span>')
 );
-$check('Cash / Bank report exposes date ordering', str_contains($view, 'name="cash_bank_date_order"'));
+$check('Cash / Bank report uses fixed newest-first ordering',
+    ! str_contains($view, 'name="cash_bank_date_order"') && str_contains($view, 'Date order: Newest first'));
 $check(
     'Amount changes refresh after the user finishes editing',
     str_contains($view, 'data-report-filter="debounced-amount"')

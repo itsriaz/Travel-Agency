@@ -31,11 +31,6 @@ final class SalaryRepository extends BaseRepository
             && $this->tableExists('employee_salary_payments');
     }
 
-    public function employeeLinkTableExists(): bool
-    {
-        return $this->tableExists('employee_business_source_links');
-    }
-
     public function recordRows(array $accessibleBranchIds): array
     {
         if ($accessibleBranchIds === [] || ! $this->tablesExist()) {
@@ -43,14 +38,6 @@ final class SalaryRepository extends BaseRepository
         }
 
         $placeholders = implode(', ', array_fill(0, count($accessibleBranchIds), '?'));
-        $hasEmployeeLinks = $this->employeeLinkTableExists();
-        $employeeSelect = $hasEmployeeLinks
-            ? 'COALESCE(u.name, bs.name) AS employee_name, bs.name AS business_source_name, u.id AS user_id,'
-            : 'bs.name AS employee_name, bs.name AS business_source_name, NULL AS user_id,';
-        $employeeJoin = $hasEmployeeLinks
-            ? 'LEFT JOIN employee_business_source_links ebl ON ebl.business_source_id = r.business_source_id AND ebl.is_active = 1
-             LEFT JOIN users u ON u.id = ebl.user_id'
-            : '';
         $statement = $this->db->prepare(
             "SELECT
                 r.id,
@@ -59,7 +46,8 @@ final class SalaryRepository extends BaseRepository
                 r.branch_id,
                 b.name AS branch_name,
                 r.business_source_id,
-                {$employeeSelect}
+                bs.name AS employee_name,
+                bs.name AS business_source_name,
                 r.currency,
                 r.basic_salary_amount,
                 r.bonus_amount,
@@ -77,7 +65,6 @@ final class SalaryRepository extends BaseRepository
              FROM employee_salary_records r
              INNER JOIN branches b ON b.id = r.branch_id
              INNER JOIN business_sources bs ON bs.id = r.business_source_id
-             {$employeeJoin}
              WHERE r.branch_id IN ({$placeholders})
              ORDER BY r.salary_month DESC, r.id DESC"
         );
@@ -93,14 +80,6 @@ final class SalaryRepository extends BaseRepository
         }
 
         $placeholders = implode(', ', array_fill(0, count($accessibleBranchIds), '?'));
-        $hasEmployeeLinks = $this->employeeLinkTableExists();
-        $employeeSelect = $hasEmployeeLinks
-            ? 'COALESCE(u.name, bs.name) AS employee_name, bs.name AS business_source_name, u.id AS user_id,'
-            : 'bs.name AS employee_name, bs.name AS business_source_name, NULL AS user_id,';
-        $employeeJoin = $hasEmployeeLinks
-            ? 'LEFT JOIN employee_business_source_links ebl ON ebl.business_source_id = r.business_source_id AND ebl.is_active = 1
-             LEFT JOIN users u ON u.id = ebl.user_id'
-            : '';
         $hasPaymentFx = $this->paymentFxColumnsExist();
         $hasPaymentStatus = $this->paymentStatusColumnExists();
         $paymentStatusSelect = $hasPaymentStatus
@@ -142,14 +121,14 @@ final class SalaryRepository extends BaseRepository
                 r.salary_month,
                 r.record_date,
                 r.business_source_id,
-                {$employeeSelect}
+                bs.name AS employee_name,
+                bs.name AS business_source_name,
                 rb.name AS record_branch_name
              FROM employee_salary_payments p
              INNER JOIN employee_salary_records r ON r.id = p.salary_record_id
              INNER JOIN business_sources bs ON bs.id = r.business_source_id
              INNER JOIN branches rb ON rb.id = r.branch_id
              INNER JOIN branches pb ON pb.id = p.branch_id
-             {$employeeJoin}
              LEFT JOIN payment_methods pm ON pm.code = p.payment_method
              LEFT JOIN treasury_accounts ta ON ta.id = p.treasury_account_id
              WHERE r.branch_id IN ({$placeholders})
@@ -167,14 +146,6 @@ final class SalaryRepository extends BaseRepository
         }
 
         $placeholders = implode(', ', array_fill(0, count($accessibleBranchIds), '?'));
-        $hasEmployeeLinks = $this->employeeLinkTableExists();
-        $employeeSelect = $hasEmployeeLinks
-            ? 'COALESCE(u.name, bs.name) AS employee_name, bs.name AS business_source_name, u.id AS user_id,'
-            : 'bs.name AS employee_name, bs.name AS business_source_name, NULL AS user_id,';
-        $employeeJoin = $hasEmployeeLinks
-            ? 'LEFT JOIN employee_business_source_links ebl ON ebl.business_source_id = r.business_source_id AND ebl.is_active = 1
-             LEFT JOIN users u ON u.id = ebl.user_id'
-            : '';
         $statement = $this->db->prepare(
             "SELECT
                 r.id,
@@ -182,7 +153,8 @@ final class SalaryRepository extends BaseRepository
                 r.branch_id,
                 b.name AS branch_name,
                 r.business_source_id,
-                {$employeeSelect}
+                bs.name AS employee_name,
+                bs.name AS business_source_name,
                 r.currency,
                 r.gross_debit_amount,
                 r.paid_credit_amount,
@@ -192,7 +164,6 @@ final class SalaryRepository extends BaseRepository
              FROM employee_salary_records r
              INNER JOIN branches b ON b.id = r.branch_id
              INNER JOIN business_sources bs ON bs.id = r.business_source_id
-             {$employeeJoin}
              WHERE r.branch_id IN ({$placeholders})
                AND LOWER(REPLACE(COALESCE(r.status, 'open'), ' ', '_')) <> 'void'
                AND r.outstanding_amount > 0.005
@@ -573,84 +544,9 @@ final class SalaryRepository extends BaseRepository
         ]);
     }
 
-    public function employeeLinkRows(): array
-    {
-        if (! $this->employeeLinkTableExists()) {
-            return [];
-        }
-
-        $statement = $this->db->query(
-            'SELECT
-                l.id,
-                l.user_id,
-                u.name AS user_name,
-                u.username,
-                l.business_source_id,
-                bs.name AS business_source_name,
-                bs.code AS business_source_code,
-                l.notes,
-                l.is_active
-             FROM employee_business_source_links l
-             INNER JOIN users u ON u.id = l.user_id
-             INNER JOIN business_sources bs ON bs.id = l.business_source_id
-             WHERE l.is_active = 1
-             ORDER BY u.name ASC, bs.name ASC, l.id ASC'
-        );
-
-        return $statement->fetchAll() ?: [];
-    }
-
-    public function employeeSelectionRows(): array
-    {
-        if (! $this->employeeLinkTableExists()) {
-            return [];
-        }
-
-        $statement = $this->db->query(
-            'SELECT
-                l.user_id,
-                u.name AS user_name,
-                l.business_source_id,
-                bs.name AS business_source_name,
-                bs.code AS business_source_code
-             FROM employee_business_source_links l
-             INNER JOIN users u ON u.id = l.user_id
-             INNER JOIN business_sources bs ON bs.id = l.business_source_id
-             WHERE l.is_active = 1
-               AND u.is_active = 1
-               AND bs.is_active = 1
-             ORDER BY u.name ASC, bs.name ASC, l.id ASC'
-        );
-
-        return $statement->fetchAll() ?: [];
-    }
-
-    public function linkedBusinessSourceRowsForUser(int $userId): array
-    {
-        if (! $this->employeeLinkTableExists() || $userId <= 0) {
-            return [];
-        }
-
-        $statement = $this->db->prepare(
-            'SELECT
-                bs.id,
-                bs.name,
-                bs.code
-             FROM employee_business_source_links l
-             INNER JOIN business_sources bs ON bs.id = l.business_source_id
-             WHERE l.user_id = :user_id
-               AND l.is_active = 1
-               AND bs.is_active = 1
-             ORDER BY bs.name ASC, bs.id ASC'
-        );
-        $statement->execute(['user_id' => $userId]);
-
-        return $statement->fetchAll() ?: [];
-    }
-
     public function employeePerformanceRows(array $accessibleBranchIds, string $monthStart, string $monthEnd): array
     {
-        if (! $this->employeeLinkTableExists() || $accessibleBranchIds === []) {
+        if ($accessibleBranchIds === []) {
             return [];
         }
 
@@ -706,8 +602,6 @@ final class SalaryRepository extends BaseRepository
 
         $statement = $this->db->prepare(
             'SELECT
-                l.user_id,
-                u.name AS user_name,
                 bs.id AS business_source_id,
                 bs.name AS business_source_name,
                 bs.code AS business_source_code,
@@ -717,9 +611,7 @@ final class SalaryRepository extends BaseRepository
                 COALESCE(month_metrics.month_sale, 0) AS month_sale,
                 COALESCE(month_metrics.month_outstanding, 0) AS month_outstanding,
                 COALESCE(month_profit.month_profit, 0) AS month_profit
-             FROM employee_business_source_links l
-             INNER JOIN users u ON u.id = l.user_id
-             INNER JOIN business_sources bs ON bs.id = l.business_source_id
+             FROM business_sources bs
              LEFT JOIN (
                 SELECT currency_rows.business_source_id, currency_rows.currency
                 FROM (
@@ -867,90 +759,12 @@ final class SalaryRepository extends BaseRepository
              ) month_profit
                 ON month_profit.business_source_id = bs.id
                AND month_profit.currency <=> cur.currency
-             WHERE l.is_active = 1
-               AND u.is_active = 1
-               AND bs.is_active = 1
-             ORDER BY u.name ASC, bs.name ASC, cur.currency ASC'
+             WHERE bs.is_active = 1
+             ORDER BY bs.name ASC, cur.currency ASC'
         );
         $statement->execute($params);
 
         return $statement->fetchAll() ?: [];
     }
 
-    public function unmappedBusinessSourceRows(): array
-    {
-        if (! $this->employeeLinkTableExists()) {
-            return [];
-        }
-
-        $statement = $this->db->query(
-            'SELECT bs.id, bs.name, bs.code
-             FROM business_sources bs
-             LEFT JOIN employee_business_source_links l
-               ON l.business_source_id = bs.id
-              AND l.is_active = 1
-             WHERE bs.is_active = 1
-               AND l.id IS NULL
-             ORDER BY bs.name ASC, bs.id ASC'
-        );
-
-        return $statement->fetchAll() ?: [];
-    }
-
-    public function saveEmployeeLink(array $payload): int
-    {
-        $statement = $this->db->prepare(
-            'INSERT INTO employee_business_source_links (
-                user_id,
-                business_source_id,
-                is_active,
-                notes,
-                linked_by_user_id
-            ) VALUES (
-                :user_id,
-                :business_source_id,
-                1,
-                :notes,
-                :linked_by_user_id
-            )
-            ON DUPLICATE KEY UPDATE
-                user_id = VALUES(user_id),
-                notes = VALUES(notes),
-                is_active = 1,
-                linked_by_user_id = VALUES(linked_by_user_id),
-                updated_at = CURRENT_TIMESTAMP'
-        );
-        $statement->execute($payload);
-
-        return (int) $this->db->lastInsertId();
-    }
-
-    public function findEmployeeLink(int $linkId): ?array
-    {
-        if (! $this->employeeLinkTableExists()) {
-            return null;
-        }
-
-        $statement = $this->db->prepare(
-            'SELECT *
-             FROM employee_business_source_links
-             WHERE id = :id
-             LIMIT 1'
-        );
-        $statement->execute(['id' => $linkId]);
-        $row = $statement->fetch();
-
-        return $row !== false ? $row : null;
-    }
-
-    public function deactivateEmployeeLink(int $linkId): void
-    {
-        $statement = $this->db->prepare(
-            'UPDATE employee_business_source_links
-             SET is_active = 0,
-                 updated_at = CURRENT_TIMESTAMP
-             WHERE id = :id'
-        );
-        $statement->execute(['id' => $linkId]);
-    }
 }

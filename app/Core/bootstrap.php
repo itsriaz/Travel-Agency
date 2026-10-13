@@ -173,4 +173,8 @@ register_shutdown_function(static function (): void {
     ]);
 });
 
+if (class_exists(\App\Services\InvoiceSaveHttpTrace::class)) {
+    \App\Services\InvoiceSaveHttpTrace::beginForCurrentRequest(BASE_PATH);
+}
+
 session_name('travel_ops_session');

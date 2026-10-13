@@ -158,7 +158,8 @@ final class AccountLedgerRepository extends BaseRepository
                     cr.receipt_no AS movement_reference, cr.receipt_date AS movement_date, cr.currency,
                     0 AS debit_amount, 0 AS credit_amount, "Customer advance applied" AS movement_type,
                     "internal_credit" AS payment_method, "Customer Advance" AS treasury_account_name,
-                    cr.receipt_no AS external_reference, "" AS target_booking_reference
+                    cr.receipt_no AS external_reference, "" AS target_booking_reference,
+                    NULL AS linked_payer_role
                 FROM customer_receipts cr WHERE 1 = 0';
         if ($this->tableExists('customer_receipt_allocations')) {
             $allocationAmountExpression = $this->columnExists('customer_receipt_allocations', 'receivable_amount_allocated')
@@ -172,7 +173,8 @@ final class AccountLedgerRepository extends BaseRepository
                     "Customer advance applied" AS movement_type,
                     "internal_credit" AS payment_method, "Customer Advance" AS treasury_account_name,
                     cr.receipt_no AS external_reference,
-                    COALESCE(NULLIF(cri.booking_reference, ""), "Invoice") AS target_booking_reference
+                    COALESCE(NULLIF(cri.booking_reference, ""), "Invoice") AS target_booking_reference,
+                    NULL AS linked_payer_role
                 FROM customer_receipt_allocations cra
                 INNER JOIN customer_receipts cr ON cr.id = cra.customer_receipt_id AND cr.status <> "void"
                 INNER JOIN customer_receivable_items cri ON cri.id = cra.customer_receivable_item_id
@@ -184,7 +186,7 @@ final class AccountLedgerRepository extends BaseRepository
                     cr.receipt_no AS movement_reference, cr.receipt_date AS movement_date, cr.currency,
                     0 AS debit_amount, 0 AS credit_amount, "Customer advance returned" AS movement_type,
                     cr.payment_method, "" AS treasury_account_name, "" AS external_reference,
-                    "" AS target_booking_reference
+                    "" AS target_booking_reference, NULL AS linked_payer_role
                 FROM customer_receipts cr WHERE 1 = 0';
         if ($this->tableExists('customer_advance_refunds')) {
             $refundSelect = 'SELECT car.id AS movement_id, car.branch_id, cr.business_source_id,
@@ -193,7 +195,7 @@ final class AccountLedgerRepository extends BaseRepository
                     "Customer advance returned" AS movement_type, car.payment_method,
                     COALESCE(NULLIF(ta.account_name, ""), "Treasury") AS treasury_account_name,
                     COALESCE(NULLIF(car.reference_number, ""), cr.receipt_no) AS external_reference,
-                    "" AS target_booking_reference
+                    "" AS target_booking_reference, NULL AS linked_payer_role
                 FROM customer_advance_refunds car
                 INNER JOIN customer_receipts cr ON cr.id = car.customer_receipt_id AND cr.status <> "void"
                 LEFT JOIN treasury_accounts ta ON ta.id = car.treasury_account_id';
@@ -206,14 +208,18 @@ final class AccountLedgerRepository extends BaseRepository
                     CASE WHEN movement_rows.movement_type = "Account-holder payment received" THEN "ACCOUNT-HOLDER" ELSE "ADVANCE" END AS booking_reference,
                     0 AS booking_id, movement_rows.lead_traveler_id,
                     CASE WHEN movement_rows.movement_type = "Account-holder payment received" THEN bs.name ELSE COALESCE(NULLIF(t.full_name, ""), "Customer") END AS passenger_name,
-                    "N/A" AS pnr, "N/A" AS route
+                    "N/A" AS pnr, "N/A" AS route,
+                    CASE WHEN movement_rows.linked_payer_role = "supplier"
+                        THEN COALESCE(NULLIF(s.name, ""), "Supplier")
+                        WHEN movement_rows.linked_payer_role = "account_holder" THEN bs.name
+                        ELSE NULL END AS linked_payer_name
              FROM (
                 SELECT cr.id AS movement_id, cr.branch_id, cr.business_source_id, cr.traveler_id AS lead_traveler_id,
                     cr.receipt_no AS movement_reference, cr.receipt_date AS movement_date, cr.currency,
                     cr.received_amount AS debit_amount, 0 AS credit_amount, "Customer advance received" AS movement_type,
                     cr.payment_method, COALESCE(NULLIF(ta.account_name, ""), "Treasury") AS treasury_account_name,
                     COALESCE(NULLIF(cr.reference_number, ""), cr.receipt_no) AS external_reference,
-                    "" AS target_booking_reference
+                    "" AS target_booking_reference, NULL AS linked_payer_role
                 FROM customer_receipts cr
                 LEFT JOIN treasury_accounts ta ON ta.id = cr.treasury_account_id
                 WHERE cr.status <> "void" AND cr.receipt_purpose = "customer_advance" AND cr.business_source_id IS NOT NULL
@@ -223,7 +229,7 @@ final class AccountLedgerRepository extends BaseRepository
                     cr.received_amount AS debit_amount, 0 AS credit_amount, "Account-holder payment received" AS movement_type,
                     cr.payment_method, COALESCE(NULLIF(ta.account_name, ""), "Treasury") AS treasury_account_name,
                     COALESCE(NULLIF(cr.reference_number, ""), cr.receipt_no) AS external_reference,
-                    "" AS target_booking_reference
+                    "" AS target_booking_reference, ' . ($this->columnExists('customer_receipts', 'linked_payer_role') ? 'cr.linked_payer_role' : 'NULL AS linked_payer_role') . '
                 FROM customer_receipts cr
                 LEFT JOIN treasury_accounts ta ON ta.id = cr.treasury_account_id
                 WHERE cr.status <> "void" AND cr.receipt_purpose = "account_holder_receipt" AND cr.business_source_id IS NOT NULL
@@ -234,6 +240,8 @@ final class AccountLedgerRepository extends BaseRepository
              ) movement_rows
              INNER JOIN branches br ON br.id = movement_rows.branch_id
              INNER JOIN business_sources bs ON bs.id = movement_rows.business_source_id
+             LEFT JOIN business_source_supplier_links bssl ON bssl.business_source_id = movement_rows.business_source_id
+             LEFT JOIN suppliers s ON s.id = bssl.supplier_id
              LEFT JOIN travelers t ON t.id = movement_rows.lead_traveler_id
              WHERE ' . implode(' AND ', $where) . '
              ORDER BY movement_rows.movement_date, movement_rows.movement_id',
@@ -247,7 +255,7 @@ final class AccountLedgerRepository extends BaseRepository
 
         return $this->fetchRows(
             'SELECT b.id AS booking_id, b.branch_id, br.name AS branch_name, b.booking_reference,
-                    b.booking_date, b.lead_traveler_id,
+                    b.booking_date, b.lead_traveler_id, b.business_source_id,
                     COALESCE(bs_src.name, "Unassigned Account") AS business_source_name,
                     COALESCE(NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Booking Party") AS customer_name,
                     COALESCE(NULLIF(bp.contact_mobile, ""), NULLIF(t_lead.mobile, ""), "") AS contact_mobile,
@@ -305,6 +313,7 @@ final class AccountLedgerRepository extends BaseRepository
                     b.booking_reference,
                     b.booking_date,
                     b.lead_traveler_id,
+                    b.business_source_id,
                     COALESCE(bs_src.name, "Unassigned Account") AS business_source_name,
                     COALESCE(NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Booking Party") AS customer_name,
                     COALESCE(NULLIF(bp.contact_mobile, ""), NULLIF(t_lead.mobile, ""), "") AS contact_mobile,
@@ -371,6 +380,7 @@ final class AccountLedgerRepository extends BaseRepository
                     b.booking_reference,
                     b.booking_date,
                     b.lead_traveler_id,
+                    b.business_source_id,
                     COALESCE(bs_src.name, "Unassigned Account") AS business_source_name,
                     COALESCE(NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Booking Party") AS customer_name,
                     COALESCE(NULLIF(bp.contact_mobile, ""), NULLIF(t_lead.mobile, ""), "") AS contact_mobile,
@@ -625,6 +635,7 @@ final class AccountLedgerRepository extends BaseRepository
                 b.booking_reference,
                 b.booking_date,
                 b.lead_traveler_id,
+                b.business_source_id,
                 COALESCE(bs_src.name, "Unassigned Account") AS business_source_name,
                 COALESCE(NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Booking Party") AS customer_name,
                 COALESCE(NULLIF(bp.contact_mobile, ""), NULLIF(t_lead.mobile, ""), "") AS contact_mobile,
@@ -670,6 +681,7 @@ final class AccountLedgerRepository extends BaseRepository
                 b.booking_reference,
                 b.booking_date,
                 b.lead_traveler_id,
+                b.business_source_id,
                 COALESCE(bs_src.name, "Unassigned Account") AS business_source_name,
                 COALESCE(NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Booking Party") AS customer_name,
                 COALESCE(NULLIF(bp.contact_mobile, ""), NULLIF(t_lead.mobile, ""), "") AS contact_mobile,

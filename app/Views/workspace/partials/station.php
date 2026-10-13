@@ -11,7 +11,6 @@ if ($requestedServiceId > 0) {
     }
 }
 $activeService = $serviceLines[$activeServiceIndex] ?? ($serviceLines[0] ?? []);
-$incomingBookingCredits = (array) ($customerPaymentFoundation['incomingBookingCredits'] ?? []);
 $outgoingBookingCredits = (array) ($customerPaymentFoundation['outgoingBookingCredits'] ?? []);
 $passengerSummaryRows = is_array($passengerSummaryRows ?? null) ? $passengerSummaryRows : [];
 if ($passengerSummaryRows === []) {
@@ -304,7 +303,7 @@ if ($currentInvoiceAmountValue <= 0.005 && $activeServicePaymentEligible && $inv
 $currentOutstandingAmountValue = (float) ($outstandingTotals[$invoiceCurrency] ?? 0.0);
 $currentReceivedPersistedAmount = (float) ($receivedTotals[$invoiceCurrency] ?? 0.0);
 $canUseDraftInvoiceDueFallback = ! $hasCustomerFinance && $activeServicePaymentEligible;
-$lockCurrentInvoiceBalance = $hasCustomerFinance && ! $activeServicePaymentEligible;
+$lockCurrentInvoiceBalance = ! $activeServicePaymentEligible;
 $activeServiceStatusKey = str_replace(' ', '_', mb_strtolower(trim((string) (
     $activeService['status']
     ?? $activeService['displayStatus']
@@ -1537,16 +1536,14 @@ Kept here in case manual service save is needed again later.
                         <label class="legacy-service-event-field legacy-service-event-field--refund-reason" data-service-refund-reason><span>Reason</span><input type="text" name="refund_reason" value="" placeholder="Refund reason / correction reason" minlength="5" maxlength="1000" required></label>
                         <div class="legacy-service-event-field legacy-service-event-field--customer-refund legacy-service-event-field--refund-money" data-customer-refund-pay-now-field hidden>
                             <span>Customer Refund</span>
-                            <div class="legacy-service-event-money-select legacy-service-event-money-select--fixed-currency">
-                                <input type="number" name="customer_refund_amount" value="0" min="0" step="1" aria-label="Customer refund amount in booking currency" disabled>
-                                <?php $customerRefundFixedCurrency = (string) ($activeService['customerRefundTruthCurrency'] ?? $activeService['currency'] ?? $invoiceCurrency); ?>
-                                <input type="hidden" name="customer_refund_currency" value="<?= e($customerRefundFixedCurrency) ?>">
-                                <span class="legacy-service-event-money-currency" aria-hidden="true"><?= e($customerRefundFixedCurrency) ?></span>
+                            <input type="hidden" name="customer_refund_amount" value="0" disabled>
+                            <div class="legacy-service-event-money-select">
+                                <input type="number" name="customer_refund_source_amount" value="" min="1" step="1" required disabled aria-label="Actual amount paid to customer">
+                                <select name="customer_refund_currency" data-refund-fx-currency-trigger="customer" disabled aria-label="Currency actually paid to customer"><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>" <?= $currencyOption === $settlementCustomerPenaltyCurrencyValue ? 'selected' : '' ?>><?= e($currencyOption) ?></option><?php endforeach; ?></select>
                             </div>
-                            <input type="hidden" name="customer_refund_source_amount" value="0">
                             <input type="hidden" name="customer_refund_exchange_rate" value="1">
                             <input type="hidden" name="customer_refund_rate_date" value="">
-                            <small data-refund-fx-summary="customer">Customer refund is paid in the settled due currency.</small>
+                            <small data-refund-fx-summary="customer"></small>
                         </div>
                         <label class="legacy-service-event-field legacy-service-event-field--customer-method" data-customer-refund-pay-now-field hidden><span>Customer Method</span><select name="refund_payment_method" aria-label="Customer refund payment method" data-service-refund-method disabled>
                             <?php foreach ($refundPaymentMethodOptions as $refundMethodValue => $refundMethodLabel): ?>
@@ -1575,7 +1572,6 @@ Kept here in case manual service save is needed again later.
                             <?php endforeach; ?>
                         </select></label>
                         <label class="legacy-service-event-field legacy-service-event-field--supplier-account" data-service-supplier-refund-treasury-row><span>Received In</span><select name="supplier_refund_treasury_account_id" data-service-supplier-refund-treasury-select aria-label="Supplier refund received in account" <?= $supplierRefundAlreadyReceived ? 'disabled' : '' ?>><option value="">Select receiving account</option></select></label>
-                        <button class="btn btn-sm legacy-service-event-action" type="submit" data-service-refund-button data-service-refund-submit onclick="this.form.querySelector('[data-service-refund-edit-scope]').value='';" <?= (int) ($activeService['serviceId'] ?? 0) > 0 ? '' : 'disabled' ?>>Save Refund</button>
                     </div>
                     <label class="legacy-service-event-field" data-service-refund-destination-row hidden><span>Customer Bank</span><input type="text" name="customer_bank_name" value="" maxlength="190" placeholder="Customer bank name" aria-label="Customer bank name"></label>
                     <label class="legacy-service-event-field" data-service-refund-destination-row hidden><span>Account Title</span><input type="text" name="customer_bank_account_title" value="" maxlength="190" placeholder="Account title" aria-label="Customer bank account title"></label>
@@ -1583,6 +1579,9 @@ Kept here in case manual service save is needed again later.
                     <label class="legacy-service-event-field" data-service-refund-destination-row hidden><span>IBAN</span><input type="text" name="customer_bank_iban" value="" maxlength="120" placeholder="IBAN" aria-label="Customer bank IBAN"></label>
                     <label class="legacy-service-event-field" data-service-refund-destination-row hidden><span>Transaction ID / Ref.</span><input type="text" name="transfer_reference" value="" maxlength="190" placeholder="Bank transaction ID, cheque no., or transfer reference" aria-label="Refund transaction ID or transfer reference"></label>
                     <label class="legacy-service-event-field" data-service-refund-destination-row hidden><span>Charges</span><input type="number" name="refund_charges" value="0" min="0" step="1" aria-label="Refund transfer charges"></label>
+                    <div class="legacy-service-event-bar__refund-actions">
+                        <button class="btn btn-sm legacy-service-event-action" type="submit" data-service-refund-button data-service-refund-submit onclick="this.form.querySelector('[data-service-refund-edit-scope]').value='';" <?= (int) ($activeService['serviceId'] ?? 0) > 0 ? '' : 'disabled' ?>>Save Refund</button>
+                    </div>
                 </form>
                 <form class="legacy-service-event-bar legacy-service-event-bar--refund-reverse legacy-service-event-bar--cancel-reopen<?= $initialServiceWorkflowTab !== 'settlement' ? ' service-workflow-panel--tab-hidden' : '' ?>" method="post" action="<?= e(url('/workspace/services/cancel/reopen')) ?>" data-service-event-bar="cancel-reopen" data-service-workflow-panel="settlement" <?= $showReopenCancelForm ? '' : 'hidden' ?>>
                     <?= \App\Helpers\Csrf::input() ?>
@@ -1737,11 +1736,16 @@ Kept here in case manual service save is needed again later.
             <header class="customer-picker-modal__header">
                 <div>
                     <strong id="service-penalty-refund-title">Edit Refund</strong>
-                    <span>Correct saved cancellation values or an existing posted refund.</span>
+                    <span data-refund-editor-subtitle>Correct saved cancellation values or an existing posted refund.</span>
                 </div>
                 <button class="btn btn-sm" type="button" data-service-penalty-refund-close>Close</button>
             </header>
             <div class="customer-picker-modal__body">
+                <nav class="refund-editor-tabs" role="tablist" aria-label="Refund actions" data-refund-editor-tabs>
+                    <button class="refund-editor-tab is-active" type="button" id="refund-editor-edit-tab" role="tab" aria-controls="refund-editor-edit-panel" aria-selected="true" tabindex="0" data-refund-editor-tab="edit">Edit Refund</button>
+                    <button class="refund-editor-tab refund-editor-tab--reverse" type="button" id="refund-editor-reverse-tab" role="tab" aria-controls="refund-editor-reverse-panel" aria-selected="false" tabindex="-1" data-refund-editor-tab="reverse" <?= $canPostServiceEvents && $activeServiceIsCancelled && (int) ($activeService['latestCancelEventId'] ?? 0) > 0 ? '' : 'disabled' ?>>Reverse Refund</button>
+                </nav>
+                <div class="refund-editor-panel" id="refund-editor-edit-panel" role="tabpanel" aria-labelledby="refund-editor-edit-tab" data-refund-editor-panel="edit">
                 <?php if (! $settlementSummaryVisible && ! $showRefundReverseForm): ?>
                     <div class="legacy-service-event-note">No posted settlement or refund exists yet for this service. Use <strong>Edit Booking</strong> for the main cancel / settle / refund workflow first.</div>
                 <?php endif; ?>
@@ -1812,8 +1816,9 @@ Kept here in case manual service save is needed again later.
                     <div class="legacy-service-event-field legacy-service-event-field--customer-refund legacy-service-event-field--refund-money legacy-service-correction-support-field legacy-service-correction-support-field--actual-amount legacy-service-event-field--settlement-money">
                         <span>Customer Refund</span>
                         <div class="settlement-money-control">
-                            <input type="number" name="customer_refund_source_amount" value="<?= e(number_format(round((float) ($latestCustomerRefundAmountOnlyValue), 0), 0, '.', '')) ?>" min="0" step="1" aria-label="Actual customer refund amount in selected currency" <?= $customerRefundWasPosted ? '' : 'disabled' ?>>
-                            <select name="customer_refund_currency" aria-label="Actual customer refund currency" <?= $customerRefundWasPosted ? '' : 'disabled' ?>><?php $latestCustomerRefundCurrency = (string) ($activeService['customerRefundTruthCurrency'] ?? $activeService['currency'] ?? $invoiceCurrency); ?><option value="<?= e($latestCustomerRefundCurrency) ?>" selected><?= e($latestCustomerRefundCurrency) ?></option></select>
+                            <input type="number" name="customer_refund_source_amount" value="<?= e(number_format(round((float) ($latestCustomerRefundDetail['refund_source_amount'] ?? $latestCustomerRefundAmountOnlyValue), 0), 0, '.', '')) ?>" min="0" step="1" aria-label="Actual customer refund amount in selected currency" <?= $customerRefundWasPosted ? '' : 'disabled' ?>>
+                            <?php $latestCustomerRefundCurrency = (string) ($latestCustomerRefundDetail['refund_currency'] ?? $activeService['customerRefundTruthCurrency'] ?? $activeService['currency'] ?? $invoiceCurrency); ?>
+                            <select name="customer_refund_currency" aria-label="Actual customer refund currency" <?= $customerRefundWasPosted ? '' : 'disabled' ?>><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>" <?= $currencyOption === $latestCustomerRefundCurrency ? 'selected' : '' ?>><?= e($currencyOption) ?></option><?php endforeach; ?></select>
                         </div>
                     </div>
                     <label class="legacy-service-event-field legacy-service-event-field--customer-fx-rate" hidden><span>Customer FX Rate</span><input type="number" name="customer_refund_exchange_rate" value="1.00000000" min="0.00000001" step="0.00000001" aria-label="Exchange rate from booking currency to actual customer refund currency" readonly <?= $customerRefundWasPosted ? '' : 'disabled' ?>></label>
@@ -1856,6 +1861,8 @@ Kept here in case manual service save is needed again later.
                         <a class="btn btn-sm legacy-service-event-action legacy-service-event-action--secondary legacy-service-event-action--print-refund" href="<?= e($latestRefundPrintUrl) ?>" target="_blank" rel="noopener">Print Refund</a>
                     <?php endif; ?>
                 </form>
+                </div>
+                <div class="refund-editor-panel refund-editor-panel--reverse" id="refund-editor-reverse-panel" role="tabpanel" aria-labelledby="refund-editor-reverse-tab" data-refund-editor-panel="reverse" hidden>
                 <form class="refund-complete-undo" method="post" action="<?= e(url('/workspace/services/refund/undo')) ?>" data-refund-complete-undo <?= $canPostServiceEvents && $activeServiceIsCancelled && (int) ($activeService['latestCancelEventId'] ?? 0) > 0 ? '' : 'hidden' ?>>
                     <?= \App\Helpers\Csrf::input() ?>
                     <input type="hidden" name="booking_id" value="<?= e((string) $workspaceBooking['id']) ?>">
@@ -1864,11 +1871,10 @@ Kept here in case manual service save is needed again later.
                     <input type="hidden" name="undo_last_refund_event_id" value="<?= e((string) ($activeService['latestRefundEventId'] ?? 0)) ?>">
                     <input type="hidden" name="undo_mistake_confirmed" value="0">
                     <label class="station-field"><span>Undo Reason</span><input type="text" name="undo_reason" placeholder="Refund entered by mistake / wrong booking" minlength="5" maxlength="1000" required></label>
-                    <label class="station-field"><span>Customer Refund Money</span><select name="undo_customer_money" required><option value="">Choose actual money status</option><option value="not_moved">Not paid / entry only</option><option value="moved">Actually paid - keep money record</option></select></label>
-                    <label class="station-field"><span>Supplier Refund Money</span><select name="undo_supplier_money" required><option value="">Choose actual money status</option><option value="not_moved">Not received / entry only</option><option value="moved">Actually received - keep money record</option></select></label>
                     <button class="btn btn-sm" type="submit">Reverse Entire Refund</button>
-                    <p class="muted-text">Restores the invoice and service. Actual money stays recorded and may leave an amount receivable/payable. Nothing is transferred to another booking automatically.</p>
+                    <p class="muted-text">Restores the service, invoice, and linked balances by reversing the recorded refund and cancellation. The original entries remain in audit history.</p>
                 </form>
+                </div>
             </div>
         </div>
     </section>
@@ -2133,9 +2139,6 @@ Kept here in case manual service save is needed again later.
                         <label><span>Invoice Currency</span><select id="commercial-invoice-currency" name="currency" form="legacy-service-form" data-service-field="currency"><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>" <?= $currencyOption === (string) ($activeService['currency'] ?? $invoiceCurrency) ? 'selected' : '' ?>><?= e($currencyOption) ?></option><?php endforeach; ?></select></label>
                         <label data-payment-current-invoice-row<?= $hasCurrentInvoiceAmount ? '' : ' hidden' ?>><span>Invoice Amount</span><input id="commercial-payment-current-invoice" type="number" step="1" value="<?= e(number_format(round($currentInvoiceAmountValue, 0), 0, '.', '')) ?>" data-payment-current-invoice="<?= e((string) $currentInvoiceAmountValue) ?>" data-payment-currency="<?= e($invoiceCurrency) ?>"></label>
                         <label data-payment-paid-current-invoice-row<?= $currentReceivedPersistedAmount > 0.005 ? '' : ' hidden' ?>><span>Paid on This Invoice</span><input id="commercial-payment-already-received" type="text" value="<?= e($paidOnCurrentInvoiceDisplay) ?>" data-payment-already-received data-payment-persisted-received="<?= e((string) $currentReceivedPersistedAmount) ?>" readonly></label>
-                        <?php foreach ($incomingBookingCredits as $creditTransfer): ?>
-                            <div class="legacy-payment-panel__full-row legacy-service-event-note">Credit applied from <?= e((string) ($creditTransfer['receiptBookingReference'] ?? '')) ?>, <?= e((string) ($creditTransfer['receiptNo'] ?? '')) ?>: <?= e((string) ($creditTransfer['paymentCurrency'] ?? $invoiceCurrency)) ?> <?= e($formatMoney((float) ($creditTransfer['paymentAmountConsumed'] ?? 0))) ?>. No new customer payment was received on this booking.</div>
-                        <?php endforeach; ?>
                         <label data-payment-current-balance-row<?= $hasCurrentInvoiceAmount ? '' : ' hidden' ?>><span>Invoice Balance</span><input id="commercial-payment-current-balance" class="legacy-red-text" type="text" value="<?= e($currentInvoiceBalance) ?>" data-payment-current-balance data-payment-persisted-invoice-balance="<?= e((string) $effectiveCurrentInvoiceDueValue) ?>" data-payment-saved-invoice-balance="<?= e((string) $effectiveCurrentInvoiceDueValue) ?>" data-payment-balance-locked="<?= $lockCurrentInvoiceBalance ? '1' : '0' ?>" readonly></label>
                         <label class="legacy-payment-credit-row" data-payment-customer-credit-row<?= $sameCurrencyCustomerCreditAmount > 0.005 ? '' : ' hidden' ?>><span>Available Customer Credit</span><input id="commercial-payment-customer-credit" class="legacy-payment-credit-value" type="text" value="<?= e($sameCurrencyCustomerCreditDisplay) ?>" data-payment-customer-credit="<?= e((string) $sameCurrencyCustomerCreditAmount) ?>" data-payment-customer-credit-map="<?= e($customerCreditTotalsJson) ?>" readonly></label>
                     </div>
@@ -2254,7 +2257,7 @@ Kept here in case manual service save is needed again later.
                             </div>
                         </label>
                         <label data-payment-treasury-row hidden>
-                            <span>Cash / Bank Account</span>
+                            <span data-payment-treasury-label>Cash / Bank Account</span>
                             <select name="treasury_account_id" data-payment-treasury-select data-initial-value="<?= e((string) $receiptDraftTreasuryAccountId) ?>">
                                 <option value="">Select account</option>
                             </select>
@@ -2896,6 +2899,8 @@ Kept here in case manual service save is needed again later.
                                                     data-receipt-allocated="<?= e((string) ($receiptRow['allocatedAmount'] ?? 0)) ?>"
                                                     data-receipt-returned="<?= e((string) $receiptReturnedAmount) ?>"
                                                     data-receipt-method="<?= e($receiptDisplayMethod) ?>"
+                                                    data-receipt-treasury-account-id="<?= e((string) ($receiptRow['treasuryAccountId'] ?? 0)) ?>"
+                                                    data-receipt-treasury-account-name="<?= e((string) ($receiptRow['treasuryAccountName'] ?? '')) ?>"
                                                     data-receipt-status="<?= e($receiptIsInternalAdjustment ? $receiptDisplayStatus : $formatStatusLabel($receiptDisplayStatus)) ?>"
                                                     data-receipt-status-raw="<?= e($receiptStatusRaw) ?>"
                                                     data-receipt-reference="<?= e((string) ($receiptRow['referenceNumber'] ?? '')) ?>"
@@ -3011,6 +3016,22 @@ Kept here in case manual service save is needed again later.
                                 <label class="payment-receipt-manager-grid__full"><span>Reason for correction</span><input type="text" name="correction_reason" minlength="5" maxlength="1000" required></label>
                             </div>
                             <div class="payment-receipt-manager-section__footer"><span>Creates a balancing journal and audit entry.</span><button class="btn btn-primary btn-sm" type="submit">Save Correction</button></div>
+                        </form>
+                    </section>
+
+                    <section class="payment-receipt-manager-section payment-receipt-manager-section--correction" data-payment-receipt-account-section>
+                        <div class="payment-receipt-manager-section__heading"><div><h3>Correct Receipt Account</h3><p>Use when the receipt was recorded against the wrong cash or bank account. The amount and allocations stay unchanged.</p></div><span class="payment-receipt-manager-section__badge">Financial correction</span></div>
+                        <form method="post" action="<?= e(url('/workspace/payments/receipts/account-correct')) ?>" data-payment-receipt-account-form>
+                            <?= \App\Helpers\Csrf::input() ?>
+                            <input type="hidden" name="booking_id" value="<?= e((string) ($workspaceBooking['id'] ?? 0)) ?>">
+                            <input type="hidden" name="customer_receipt_id" value="">
+                            <input type="hidden" name="expected_treasury_account_id" value="">
+                            <div class="payment-receipt-manager-grid">
+                                <label><span>Recorded account</span><input type="text" data-payment-receipt-recorded-account readonly></label>
+                                <label><span>Actual receiving account</span><select name="corrected_treasury_account_id" required data-payment-receipt-account-select><option value="">Select account</option></select></label>
+                                <label class="payment-receipt-manager-grid__full"><span>Reason for correction</span><input type="text" name="correction_reason" minlength="5" maxlength="1000" required></label>
+                            </div>
+                            <div class="payment-receipt-manager-section__footer"><span>Balances are reclassified with journals; this is not a physical transfer.</span><button class="btn btn-primary btn-sm" type="submit">Correct Account</button></div>
                         </form>
                     </section>
 

@@ -136,6 +136,39 @@ try {
     $firstObligation = $supplierRepository->findObligationByServiceLine($bookingReference, $firstLineReference);
     $firstJournals = $journalBalances($bookingReference, $firstLineReference);
 
+    $serviceCount = count($serviceRepository->servicesForBooking($bookingId));
+    $invalidNewServiceRejected = false;
+    $invalidNewServiceError = '';
+    try {
+        $serviceWorkspace->saveService([
+            'booking_id' => $bookingId,
+            'service_type' => 'air ticket',
+            'service_status' => 'Open',
+            'currency' => 'AED',
+            'cost_currency' => 'PKR',
+            'pricing_exchange_rate' => '1',
+            'pricing_rate_effective_date' => $today,
+            'service_charge_currency' => 'AED',
+            'service_charge_exchange_rate' => '1',
+            'supplier_id' => (int) ($firstStored['supplier_id'] ?? 0),
+            'supplier_name' => (string) ($firstStored['supplier_name_snapshot'] ?? ''),
+            'traveler_id' => (int) ($firstStored['traveler_id'] ?? 0),
+            'service_passenger_name' => (string) ($firstStored['passenger_name_snapshot'] ?? ''),
+            'sale_price' => '1000',
+            'purchase_cost' => '1000',
+            'service_charge' => '10',
+            'ticket_pnr' => 'MCFX-BAD',
+        ], $actorUserId, $accessibleBranchIds);
+    } catch (RuntimeException $exception) {
+        $invalidNewServiceError = $exception->getMessage();
+        $invalidNewServiceRejected = str_contains($exception->getMessage(), '1:1 rate');
+    }
+    $check(
+        $invalidNewServiceRejected && count($serviceRepository->servicesForBooking($bookingId)) === $serviceCount,
+        'Creating a service with PKR cost and AED invoice cannot use a 1:1 rate',
+        $invalidNewServiceError
+    );
+
     $check(
         ($firstStored['currency'] ?? '') === 'AED'
         && ($firstStored['cost_currency'] ?? '') === 'PKR'
@@ -164,6 +197,47 @@ try {
         && abs((float) ($firstJournals['PKR']['AP_CONTROL'] ?? 0) + 76000.00) <= 0.005,
         'AR/revenue use invoice currency while cost/AP use supplier currency',
         $firstJournals
+    );
+
+    $invalidRateRejected = false;
+    try {
+        $serviceWorkspace->correctFinancials([
+            'booking_id' => $bookingId,
+            'service_id' => (int) ($firstService['id'] ?? 0),
+            'corrected_invoice_currency' => 'AED',
+            'corrected_cost_currency' => 'PKR',
+            'corrected_cost_basis' => '76000',
+            'corrected_pricing_exchange_rate' => '1',
+            'corrected_aed_to_pkr_exchange_rate' => '1',
+            'corrected_final_sale_price' => '1367',
+            'financial_correction_reason' => 'Reject an identity rate across different currencies',
+        ], $actorUserId, $accessibleBranchIds);
+    } catch (RuntimeException $exception) {
+        $invalidRateRejected = str_contains($exception->getMessage(), '1:1 rate');
+    }
+    $afterInvalidRate = $serviceRepository->findServiceById((int) ($firstService['id'] ?? 0));
+    $check(
+        $invalidRateRejected
+        && abs((float) ($afterInvalidRate['pricing_exchange_rate'] ?? 0) - 0.01315789) <= 0.00000001
+        && abs((float) ($customerPayments->findReceivableByServiceLine($bookingReference, $firstLineReference)['due_amount'] ?? 0) - 1367.00) <= 0.005,
+        'Cross-currency identity rate is rejected before service or receivable changes'
+    );
+
+    $serviceWorkspace->correctFinancials([
+        'booking_id' => $bookingId,
+        'service_id' => (int) ($firstService['id'] ?? 0),
+        'corrected_invoice_currency' => 'AED',
+        'corrected_cost_currency' => 'PKR',
+        'corrected_cost_basis' => '76000',
+        'corrected_pricing_exchange_rate' => '1',
+        'corrected_aed_to_pkr_exchange_rate' => '77',
+        'corrected_final_sale_price' => '1367',
+        'financial_correction_reason' => 'Use the visible exchange quote rather than stale hidden form data',
+    ], $actorUserId, $accessibleBranchIds);
+    $afterVisibleRate = $serviceRepository->findServiceById((int) ($firstService['id'] ?? 0));
+    $check(
+        abs((float) ($afterVisibleRate['pricing_exchange_rate'] ?? 0) - round(1 / 77, 8)) <= 0.00000001,
+        'Visible AED-to-PKR quote is authoritative even if the hidden rate is stale'
     );
 
     $serviceWorkspace->correctFinancials([

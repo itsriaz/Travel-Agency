@@ -28,7 +28,9 @@ const context = { HTMLElement: Element, HTMLButtonElement: Element, HTMLFormElem
     line: { serviceId: 38, refundRecoveryAuditId: 500, refundRecoveryHistory: [{ id: 500,
         event_name: 'service.refund.complete_undo', created_at: '2026-09-28', actor_name: 'Operator',
         reason: '<img src=x onerror=alert(1)>', customer_money: 'moved', supplier_money: 'not_moved',
-        summary: [{ label: 'Outstanding Amount', currency: 'AED', before: 0, after: 600 }] }] },
+        summary: [{ label: 'Outstanding Amount', currency: 'AED', before: 0, after: 600 }] }, { id: 501,
+        event_name: 'service.refund.complete_undo', created_at: '2026-10-09', actor_name: 'Operator',
+        reason: 'Mistaken cancellation', reversal_mode: 'recorded_transactions', summary: [] }] },
 };
 vm.createContext(context);
 const start = source.indexOf('    const syncRefundRecovery = ');
@@ -36,9 +38,10 @@ const end = source.indexOf('    const servicePenaltyRefundCloseButtons', start);
 vm.runInContext(source.slice(start,end)+'\nsyncRefundRecovery(line,true);',context);
 assert.equal(open.disabled,false); assert.equal(restore.hidden,false);
 assert.equal(restore.fields.service_id.value,'38'); assert.equal(restore.fields.reversal_audit_id.value,'500');
-assert.equal(history.children.length,1);
+assert.equal(history.children.length,2);
 assert.ok(history.children[0].children.some(child => child.textContent?.includes('<img src=x')),'Audit text must remain literal text, never HTML');
 assert.ok(history.children[0].children.some(child => child.textContent?.includes('AED): 0 -> 600')));
+assert.ok(history.children[1].children.some(child => child.textContent?.includes('Recorded customer and supplier refund entries reversed')));
 const submitStart = source.indexOf('    refundRecoveryOpen?.addEventListener');
 const submitEnd = source.indexOf('    supplierSettlementCloseButtons.forEach',submitStart);
 vm.runInContext(source.slice(submitStart,submitEnd),context);
