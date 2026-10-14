@@ -165,6 +165,52 @@ try {
             && abs((float) ($obligationAfterFx['net_payable_amount'] ?? 0) - 0.00) < 0.005,
         'applied=' . number_format((float) ($fxResult['applied_amount'] ?? 0), 2)
     );
+
+    $paidBookingReference = 'BK-FX-PAID-' . random_int(10000, 99999);
+    $insertObligation->execute([
+        'supplier_id' => $bookingSupplierId,
+        'branch_id' => $branchId,
+        'booking_reference' => $paidBookingReference,
+    ]);
+    $paidObligationId = (int) $db->lastInsertId();
+    $paidPaymentId = $repository->createSupplierPayment([
+        'supplier_id' => $bookingSupplierId,
+        'branch_id' => $branchId,
+        'booking_reference' => $paidBookingReference,
+        'payment_no' => 'REG-FX-PAID-' . random_int(10000, 99999),
+        'payment_date' => date('Y-m-d'),
+        'currency' => 'PKR',
+        'paid_amount' => 75.00,
+        'payment_method' => 'cash',
+        'actor_user_id' => 1,
+    ]);
+    $repository->allocateSupplierPayment($paidPaymentId, $paidObligationId, 75.00, 1.0, 'Part-paid FX fixture', 1);
+    $beforePartPaidFx = $repository->findObligationById($paidObligationId);
+    $partPaidFx = $repository->applyCrossCurrencyAdvanceToObligation(
+        $advanceId, $paidObligationId, 150.00, 'AED', 'PKR', 75.00000000,
+        date('Y-m-d'), 'Use only the unpaid balance', 1
+    );
+    $afterPartPaidFx = $repository->findObligationById($paidObligationId);
+    $advanceAfterPartPaidFx = $repository->findAdvanceById($advanceId);
+    $check(
+        'Part-paid PKR 150 payable uses only PKR 75 of AED credit and preserves the PKR 75 payment',
+        abs((float) ($beforePartPaidFx['net_payable_amount'] ?? 0) - 75.00) < 0.005
+            && abs((float) ($partPaidFx['applied_amount'] ?? 0) - 75.00) < 0.005
+            && abs((float) ($partPaidFx['advance_amount_consumed'] ?? 0) - 1.00) < 0.005
+            && abs((float) ($afterPartPaidFx['advance_applied_amount'] ?? 0) - 75.00) < 0.005
+            && abs((float) ($afterPartPaidFx['net_payable_amount'] ?? 0)) < 0.005
+            && abs((float) ($advanceAfterPartPaidFx['available_amount'] ?? 0) - 597.00) < 0.005,
+        json_encode(['before' => $beforePartPaidFx, 'result' => $partPaidFx, 'after' => $afterPartPaidFx])
+    );
+    $repeatedPartPaidFx = $repository->applyCrossCurrencyAdvanceToObligation(
+        $advanceId, $paidObligationId, 150.00, 'AED', 'PKR', 75.00000000,
+        date('Y-m-d'), 'Repeated application must do nothing', 1
+    );
+    $check(
+        'A fully settled invoice cannot consume cross-currency supplier credit again',
+        abs((float) ($repeatedPartPaidFx['applied_amount'] ?? 0)) < 0.005
+            && abs((float) ($repository->findAdvanceById($advanceId)['available_amount'] ?? 0) - 597.00) < 0.005
+    );
 } finally {
     if ($db->inTransaction()) {
         $db->rollBack();

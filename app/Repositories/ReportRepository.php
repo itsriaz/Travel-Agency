@@ -3739,6 +3739,7 @@ final class ReportRepository extends BaseRepository
                     COALESCE(refund_summary.supplier_refund_expected, 0) AS refund_supplier_refund_expected,
                     COALESCE(refund_summary.supplier_refund_received, 0) AS refund_supplier_refund_received,
                     COALESCE(refund_summary.refund_event_date, b.booking_date) AS refund_event_date,
+                    COALESCE(refund_summary.cancellation_event_date, refund_summary.refund_event_date, b.booking_date) AS cancellation_event_date,
                     COALESCE(refund_summary.refund_event_count, 0) AS refund_event_count,
                     ' . $this->preservedRefundValue('customer_refund_amount') . ' AS preserved_customer_refund_amount,
                     ' . $this->preservedRefundValue('supplier_refund_amount') . ' AS preserved_supplier_refund_amount,
@@ -3811,6 +3812,7 @@ final class ReportRepository extends BaseRepository
                         bse.booking_service_id,
                         COUNT(*) AS refund_event_count,
                         MAX(bse.event_date) AS refund_event_date,
+                        MAX(CASE WHEN bse.event_type = "cancel" THEN bse.event_date END) AS cancellation_event_date,
                         SUM(CASE
                             WHEN bse.event_type = "cancel" THEN COALESCE(
                                 CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(bse.payload_json, "$.customer_refund_basis")), "") AS DECIMAL(18,2)),
@@ -4010,6 +4012,45 @@ final class ReportRepository extends BaseRepository
         }
 
         return $rows;
+    }
+
+    public function postedCustomerRefundsForBookings(array $bookingIds): array
+    {
+        $bookingIds = array_values(array_unique(array_filter(
+            array_map('intval', $bookingIds),
+            static fn (int $bookingId): bool => $bookingId > 0
+        )));
+        $refundsByService = [];
+
+        foreach (array_chunk($bookingIds, 500) as $chunk) {
+            $placeholders = implode(', ', array_fill(0, count($chunk), '?'));
+            $rows = $this->fetchRows(
+                'SELECT bse.booking_id, bse.service_line_reference, bse.id AS event_id,
+                        bse.event_date,
+                        COALESCE(NULLIF(refund_detail.refund_currency, ""), bse.currency) AS currency,
+                        COALESCE(refund_detail.refund_source_amount, bse.customer_refund_amount) AS amount
+                 FROM booking_service_events bse
+                 LEFT JOIN booking_service_refund_details refund_detail
+                   ON refund_detail.service_event_id = bse.id
+                 WHERE bse.booking_id IN (' . $placeholders . ')
+                   AND bse.event_type = "refund" AND bse.event_status = "posted"
+                   AND bse.customer_refund_amount > 0.005
+                 ORDER BY bse.booking_id, bse.service_line_reference, bse.event_date, bse.id',
+                $chunk
+            );
+
+            foreach ($rows as $row) {
+                $key = (int) $row['booking_id'] . '|' . (string) $row['service_line_reference'];
+                $refundsByService[$key][] = [
+                    'event_id' => (int) $row['event_id'],
+                    'event_date' => (string) $row['event_date'],
+                    'currency' => (string) $row['currency'],
+                    'amount' => (float) $row['amount'],
+                ];
+            }
+        }
+
+        return $refundsByService;
     }
 
     public function customerLedgerCustomers(array $branchIds, int $businessSourceId = 0): array
@@ -5309,9 +5350,16 @@ final class ReportRepository extends BaseRepository
                           OR (LOWER(COALESCE(bs.service_status, "")) = "open" AND je.currency = so.currency)
                       )
                       AND (jel.debit_amount > 0.005 OR jel.credit_amount > 0.005)
+                      /* Credit increases are in the cancellation snapshot; penalty increases also need their reapplication adjustment. */
                       AND NOT (
                           je.source_type = "supplier_payable_adjusted"
-                          AND je.narration LIKE "Cancellation supplier penalty adjustment%"
+                          AND (
+                              je.narration LIKE "Cancellation supplier penalty adjustment%"
+                              OR je.narration IN (
+                                  "Supplier penalty corrected after additional credit",
+                                  "Supplier penalty reduced by corrected refund"
+                              )
+                          )
                       )
                       AND NOT (
                           je.source_type = "supplier_payable_adjusted"

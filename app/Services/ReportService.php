@@ -1073,6 +1073,16 @@ final class ReportService extends Service
                     $filters['customerName'],
                     $filters['bookingReference']
                 );
+                $postedRefundsByService = $repository->postedCustomerRefundsForBookings(array_column($reportData, 'booking_id'));
+                foreach ($reportData as &$reportRow) {
+                    if (isset($reportRow['row_type'])) {
+                        continue;
+                    }
+                    $refundKey = (int) ($reportRow['booking_id'] ?? 0)
+                        . '|' . (string) ($reportRow['service_line_reference'] ?? '');
+                    $reportRow['posted_customer_refunds'] = $postedRefundsByService[$refundKey] ?? [];
+                }
+                unset($reportRow);
                 [$rows, $summaryCards] = $this->customerLedgerReport(
                     $reportData,
                     $this->reportingRateMapForRows($reportData, $conversionDate),
@@ -5678,7 +5688,9 @@ final class ReportService extends Service
         $customerRefundPosted = max((float) ($row['refund_customer_refund_posted'] ?? 0), 0.0);
         $customerRefundExpected = max((float) ($row['refund_customer_refund_expected'] ?? 0), 0.0);
         $customerRefundCurrency = strtoupper(trim((string) ($row['refund_customer_refund_currency'] ?? $row['currency'] ?? 'PKR'))) ?: 'PKR';
-        $ledgerDate = (string) (($row['refund_event_date'] ?? '') !== '' ? $row['refund_event_date'] : ($row['booking_date'] ?? ''));
+        $ledgerDate = (string) (($row['cancellation_event_date'] ?? '') !== ''
+            ? $row['cancellation_event_date']
+            : (($row['refund_event_date'] ?? '') !== '' ? $row['refund_event_date'] : ($row['booking_date'] ?? '')));
         $generatedRows = [];
         $serviceLabel = trim((string) ($row['service_type'] ?? 'Service'));
         $serviceLedgerLabel = $serviceLabel !== '' ? ucwords(str_replace('_', ' ', $serviceLabel)) : 'Service';
@@ -5778,7 +5790,26 @@ final class ReportService extends Service
             );
         }
 
-        if ($customerRefundPosted > 0.005) {
+        $postedRefunds = $row['posted_customer_refunds'] ?? [];
+        if (is_array($postedRefunds) && $postedRefunds !== []) {
+            foreach ($postedRefunds as $postedRefund) {
+                $amount = (float) ($postedRefund['amount'] ?? 0);
+                if ($amount <= 0.005) {
+                    continue;
+                }
+                $paymentRowSource = $refundRowSource;
+                $paymentRowSource['currency'] = (string) ($postedRefund['currency'] ?? $customerRefundCurrency);
+                $generatedRows[] = $this->customerLedgerReportRow(
+                    $paymentRowSource,
+                    $pkrRates,
+                    'Refund paid to customer',
+                    (string) ($postedRefund['event_date'] ?? $ledgerDate),
+                    0.0,
+                    $amount,
+                    50
+                );
+            }
+        } elseif ($customerRefundPosted > 0.005) {
             $generatedRows[] = $this->customerLedgerReportRow(
                 $refundRowSource,
                 $pkrRates,

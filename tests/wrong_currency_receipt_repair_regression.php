@@ -121,19 +121,31 @@ $check(
     $appliedCredit
 );
 
-$pendingStatement = $db->prepare(
-    'SELECT unallocated_amount, status FROM customer_receipts
-     WHERE booking_reference = :booking AND receipt_no = :receipt LIMIT 1'
+$unrelatedReceiptStatement = $db->prepare(
+    'SELECT r.id, r.status, r.currency, r.voided_at, je.source_type AS reversal_source_type,
+            c.id AS currency_correction_id
+     FROM customer_receipts r
+     LEFT JOIN customer_receipt_currency_corrections c
+       ON c.original_receipt_id = r.id OR c.replacement_receipt_id = r.id
+     LEFT JOIN journal_entries je ON je.id = r.reversal_journal_entry_id
+     WHERE r.booking_reference = :booking AND r.receipt_no = :receipt LIMIT 1'
 );
 foreach ([
-    ['BK-000221', 'RCPT-000219', 1330.00],
-    ['BK-000041', 'RCPT-000041', 10.00],
-] as [$booking, $receiptNo, $amount]) {
-    $pendingStatement->execute(['booking' => $booking, 'receipt' => $receiptNo]);
-    $row = $pendingStatement->fetch(PDO::FETCH_ASSOC) ?: [];
+    ['BK-000221', 'RCPT-000219'],
+    ['BK-000041', 'RCPT-000041'],
+] as [$booking, $receiptNo]) {
+    $unrelatedReceiptStatement->execute(['booking' => $booking, 'receipt' => $receiptNo]);
+    $row = $unrelatedReceiptStatement->fetch(PDO::FETCH_ASSOC) ?: [];
+    $independentVoid = ($row['status'] ?? '') !== 'void'
+        || (($row['reversal_source_type'] ?? '') === 'customer_receipt_void_reversed'
+            && ! empty($row['voided_at']));
     $check(
-        abs((float) ($row['unallocated_amount'] ?? 0) - $amount) <= 0.005 && ($row['status'] ?? '') !== 'void',
-        $booking . ' remains pending and untouched'
+        (int) ($row['id'] ?? 0) > 0
+        && ($row['currency'] ?? '') === 'AED'
+        && ($row['currency_correction_id'] ?? null) === null
+        && $independentVoid,
+        $receiptNo . ' is outside the currency repair; any later void has its own journal',
+        $row
     );
 }
 

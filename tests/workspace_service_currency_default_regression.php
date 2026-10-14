@@ -137,9 +137,10 @@ $check(
     str_contains($source, 'const hasSupplierOnlyServiceCorrectionPending = () => {')
         && str_contains($source, 'allowSupplierOnlyWithoutPricingRate = false')
         && str_contains($source, 'if (!(allowSupplierOnlyWithoutPricingRate && hasSupplierOnlyServiceCorrectionPending())) {')
-        && str_contains($source, 'bypassPricingRateValidation = false')
         && str_contains($source, "persistServiceAutosave({")
-        && str_contains($source, 'bypassPricingRateValidation: true')
+        && str_contains($source, 'allowSupplierOnlyWithoutPricingRate: true')
+        && str_contains($source, 'supplierCorrectionIntent: true')
+        && ! str_contains($source, 'bypassPricingRateValidation')
 );
 $check(
     'Workspace service submit waits for in-flight supplier autosave before posting the full form',

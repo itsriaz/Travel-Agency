@@ -105,6 +105,72 @@ if ($fixture === false) {
     );
 }
 
+$releasedFixture = $db->query(
+    'SELECT spa.id AS allocation_id,
+            sp.branch_id AS payment_branch_id,
+            event.id AS event_id,
+            release_je.id AS release_journal_id
+     FROM supplier_payment_allocations spa
+     INNER JOIN supplier_payments sp ON sp.id = spa.supplier_payment_id
+     INNER JOIN supplier_obligations so ON so.id = spa.supplier_obligation_id
+     INNER JOIN booking_service_events event
+        ON event.booking_reference = so.booking_reference
+       AND event.service_line_reference = so.service_line_reference
+       AND event.event_type = "cancel"
+       AND event.event_status = "posted"
+       AND JSON_CONTAINS(event.payload_json, CAST(sp.id AS CHAR), "$.released_supplier_payment_ids")
+     INNER JOIN journal_entries release_je
+        ON release_je.source_type = "supplier_settlement_released"
+       AND JSON_CONTAINS(event.payload_json, CAST(release_je.id AS CHAR), "$.journal_entry_ids")
+     WHERE sp.status <> "void"
+       AND sp.branch_id <> so.branch_id
+       AND sp.payment_no = "SPAY-000188"
+       AND so.booking_reference = "BK-000845"
+     LIMIT 1'
+)->fetch(PDO::FETCH_ASSOC);
+
+if ($releasedFixture === false) {
+    echo '[SKIP] Production-derived allocation/release history for SPAY-000188 is unavailable' . PHP_EOL;
+} else {
+    $check(
+        'Posted cancellation release reconciles the original allocation to its current amount',
+        $currentFailures === []
+    );
+
+    $db->beginTransaction();
+    try {
+        $voidEvent = $db->prepare('UPDATE booking_service_events SET event_status = "voided" WHERE id = :id');
+        $voidEvent->execute(['id' => (int) $releasedFixture['event_id']]);
+        $eventFailures = CrossBranchSupplierAllocationAudit::failures($db, 100);
+        $detected = array_filter(
+            $eventFailures,
+            static fn (array $row): bool => (int) ($row['allocation_id'] ?? 0) === (int) $releasedFixture['allocation_id']
+                && (string) ($row['failure_reason'] ?? '') === 'allocation_journal_missing_or_misattributed'
+        );
+        $check('A voided cancellation event cannot justify the allocation release', $detected !== []);
+    } finally {
+        $db->rollBack();
+    }
+
+    $db->beginTransaction();
+    try {
+        $wrongBranch = $db->prepare('UPDATE journal_entries SET branch_id = :branch_id WHERE id = :id');
+        $wrongBranch->execute([
+            'branch_id' => (int) $releasedFixture['payment_branch_id'],
+            'id' => (int) $releasedFixture['release_journal_id'],
+        ]);
+        $journalFailures = CrossBranchSupplierAllocationAudit::failures($db, 100);
+        $detected = array_filter(
+            $journalFailures,
+            static fn (array $row): bool => (int) ($row['allocation_id'] ?? 0) === (int) $releasedFixture['allocation_id']
+                && (string) ($row['failure_reason'] ?? '') === 'allocation_journal_missing_or_misattributed'
+        );
+        $check('A release journal posted to the wrong branch cannot reconcile the allocation', $detected !== []);
+    } finally {
+        $db->rollBack();
+    }
+}
+
 if ($failures !== []) {
     fwrite(STDERR, PHP_EOL . 'Cross-branch supplier allocation audit regression failed.' . PHP_EOL);
     exit(1);

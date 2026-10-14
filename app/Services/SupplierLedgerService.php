@@ -37,13 +37,18 @@ final class SupplierLedgerService extends Service
     public function buildReport(array $rows, string $currencyFilter = '', bool $bookingScoped = false): array
     {
         // The full supplier account already includes the original advance payment.
-        // A booking-only view excludes that payment, so it needs the application
-        // row to show how its invoice was settled.
+        // Applying, adjusting, or releasing that credit only moves it between
+        // bookings; none of those movements changes the supplier's total balance.
+        // A booking-only view needs them to show how its invoice was settled.
         $rows = array_values(array_filter(
             $rows,
             static fn (mixed $row): bool => ! is_array($row)
                 || (
-                    ($bookingScoped || ! in_array((string) ($row['entry_type'] ?? ''), ['Advance Applied', 'Advance Released'], true))
+                    ($bookingScoped || ! in_array((string) ($row['entry_type'] ?? ''), [
+                        'Advance Applied',
+                        'Advance Adjustment',
+                        'Advance Released',
+                    ], true))
                     && ! str_contains((string) ($row['source_reference'] ?? ''), '-HIST-CUR-RECON-')
                     && ! (
                         (string) ($row['entry_type'] ?? '') === 'Payable Adjustment'
@@ -355,12 +360,23 @@ final class SupplierLedgerService extends Service
                 $indexes,
                 fn (int $index): bool => $this->isAllocationDerivedPaymentRow($rows[$index] ?? [])
             ));
-            if ($allocationDerivedIndexes !== []) {
+            if (! array_key_exists($paymentId, $paymentCache)) {
+                $paymentCache[$paymentId] = $paymentRepository->findSupplierPaymentById($paymentId);
+            }
+            $payment = $paymentCache[$paymentId];
+            $grossPaymentAmount = round((float) ($payment['paid_amount'] ?? 0), 2);
+            $convertedToAdvance = round((float) ($payment['converted_advance_amount'] ?? 0), 2);
+            $historicalPaymentTotal = round(array_sum(array_map(
+                fn (int $index): float => $this->amount($rows[$index]['debit_amount'] ?? 0),
+                $indexes
+            )), 2);
+            // Released allocations remain part of the original money-out when converted to supplier credit.
+            $preserveGrossPayment = $convertedToAdvance > 0.005
+                && count($allocationDerivedIndexes) === count($indexes)
+                && $grossPaymentAmount > 0.005
+                && abs($historicalPaymentTotal - $grossPaymentAmount) <= 0.005;
+            if ($allocationDerivedIndexes !== [] && ! $preserveGrossPayment) {
                 if ($liveAllocationIds === []) {
-                    if (! array_key_exists($paymentId, $paymentCache)) {
-                        $paymentCache[$paymentId] = $paymentRepository->findSupplierPaymentById($paymentId);
-                    }
-                    $convertedToAdvance = round((float) ($paymentCache[$paymentId]['converted_advance_amount'] ?? 0), 2);
                     // Cancellation can remove the live allocation while moving
                     // that same paid money to reusable supplier credit. Its
                     // historical payment row must remain in the ledger.

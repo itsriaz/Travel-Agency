@@ -19740,7 +19740,6 @@ document.addEventListener('DOMContentLoaded', () => {
         const {
             allowCreate = false,
             allowSupplierOnlyWithoutPricingRate = false,
-            bypassPricingRateValidation = false,
             supplierCorrectionIntent = false,
         } = options;
 
@@ -19787,7 +19786,7 @@ document.addEventListener('DOMContentLoaded', () => {
             syncAutoBookingFields();
             syncServiceTravelerIdFromName();
             ensureCurrentServiceVersionToken();
-            if (!bypassPricingRateValidation && !(allowSupplierOnlyWithoutPricingRate && hasSupplierOnlyServiceCorrectionPending())) {
+            if (!(allowSupplierOnlyWithoutPricingRate && hasSupplierOnlyServiceCorrectionPending())) {
                 const pricingReady = await ensurePricingExchangeRateReady({
                     reason: 'service-save',
                     allowPrompt: false,
@@ -19897,7 +19896,6 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             const payload = await persistServiceAutosave({
                 allowSupplierOnlyWithoutPricingRate: true,
-                bypassPricingRateValidation: true,
                 supplierCorrectionIntent: true,
             });
             if (payload) {

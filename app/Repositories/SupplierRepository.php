@@ -5103,7 +5103,8 @@ final class SupplierRepository extends BaseRepository
             $advance = $advanceStatement->fetch();
 
             $obligationStatement = $this->db->prepare(
-                'SELECT o.id, o.supplier_id, o.currency, o.gross_amount, o.advance_applied_amount, s.name AS supplier_name
+                'SELECT o.id, o.supplier_id, o.currency, o.gross_amount, o.advance_applied_amount,
+                        o.net_payable_amount, s.name AS supplier_name
                  FROM supplier_obligations o
                  INNER JOIN suppliers s ON s.id = o.supplier_id
                  WHERE o.id = :obligation_id
@@ -5142,7 +5143,8 @@ final class SupplierRepository extends BaseRepository
                 throw new \RuntimeException('Exchange rate must be greater than zero.');
             }
 
-            $remainingObligation = max(0, (float) $obligation['gross_amount'] - (float) $obligation['advance_applied_amount']);
+            // The remaining payable already excludes supplier payments and prior credit applications.
+            $remainingObligation = max(0, (float) $obligation['net_payable_amount']);
             $obligationAmountApplied = round(min($obligationAmount, $remainingObligation), 2);
             if ($obligationAmountApplied <= 0) {
                 return [
@@ -5167,20 +5169,19 @@ final class SupplierRepository extends BaseRepository
                 'advance_id' => $advanceId,
             ]);
 
+            $newAdvanceAppliedAmount = round((float) $obligation['advance_applied_amount'] + $obligationAmountApplied, 2);
+            $newNetPayableAmount = round(max(0, $remainingObligation - $obligationAmountApplied), 2);
             $updateObligation = $this->db->prepare(
                 'UPDATE supplier_obligations
-                 SET advance_applied_amount = advance_applied_amount + :obligation_amount_applied,
-                     net_payable_amount = GREATEST(0, gross_amount - (advance_applied_amount + :net_payable_reduction)),
-                     status = CASE
-                         WHEN gross_amount - (advance_applied_amount + :status_reduction_amount) <= 0 THEN "covered_by_advance"
-                         ELSE "partially_covered"
-                     END
+                 SET advance_applied_amount = :advance_applied_amount,
+                     net_payable_amount = :net_payable_amount,
+                     status = :status
                  WHERE id = :obligation_id'
             );
             $updateObligation->execute([
-                'obligation_amount_applied' => $obligationAmountApplied,
-                'net_payable_reduction' => $obligationAmountApplied,
-                'status_reduction_amount' => $obligationAmountApplied,
+                'advance_applied_amount' => $newAdvanceAppliedAmount,
+                'net_payable_amount' => $newNetPayableAmount,
+                'status' => $newNetPayableAmount <= 0.005 ? 'covered_by_advance' : 'partially_covered',
                 'obligation_id' => $obligationId,
             ]);
 

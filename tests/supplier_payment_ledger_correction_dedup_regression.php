@@ -337,11 +337,76 @@ if ($actorId <= 0 || $branchId <= 0) {
         );
 
         $db->prepare(
+            'UPDATE supplier_payments
+             SET allocated_amount = 90, converted_advance_amount = 10, unallocated_amount = 0
+             WHERE id = :payment_id'
+        )->execute(['payment_id' => $paymentId]);
+        $db->prepare('UPDATE supplier_payment_allocations SET allocated_amount = 20 WHERE id = :id')
+            ->execute(['id' => $newAllocationA]);
+        $db->prepare('UPDATE supplier_payment_allocations SET allocated_amount = 70 WHERE id = :id')
+            ->execute(['id' => $newAllocationB]);
+        $releasedAllocationRows = [
+            [
+                'branch_id' => $branchId,
+                'supplier_payment_id' => $paymentId,
+                'supplier_id' => $supplierId,
+                'supplier_name' => 'Ledger Dedup ' . $token,
+                'booking_reference' => 'BK-LIVE-20',
+                'currency' => 'PKR',
+                'entry_type' => 'Supplier Payment',
+                'journal_entry_id' => 9201,
+                'source_reference' => 'SPAY-DEDUP-' . $token . '-ALLOC-0',
+                'narration' => 'Supplier account payment reconciled internally',
+                'debit_amount' => 20.00,
+                'credit_amount' => 0.00,
+            ],
+            [
+                'branch_id' => $branchId + 1,
+                'supplier_payment_id' => $paymentId,
+                'supplier_id' => $supplierId,
+                'supplier_name' => 'Ledger Dedup ' . $token,
+                'booking_reference' => 'BK-RELEASED-10',
+                'currency' => 'PKR',
+                'entry_type' => 'Supplier Payment',
+                'journal_entry_id' => 9202,
+                'source_reference' => 'SPAY-DEDUP-' . $token . '-ALLOC-0',
+                'narration' => 'Supplier account payment reconciled internally',
+                'debit_amount' => 10.00,
+                'credit_amount' => 0.00,
+            ],
+            [
+                'branch_id' => $branchId + 1,
+                'supplier_payment_id' => $paymentId,
+                'supplier_id' => $supplierId,
+                'supplier_name' => 'Ledger Dedup ' . $token,
+                'booking_reference' => 'BK-LIVE-70',
+                'currency' => 'PKR',
+                'entry_type' => 'Supplier Payment',
+                'journal_entry_id' => 9203,
+                'source_reference' => 'SPAY-DEDUP-' . $token . '-ALLOC-0',
+                'narration' => 'Supplier account payment reconciled internally',
+                'debit_amount' => 70.00,
+                'credit_amount' => 0.00,
+            ],
+        ];
+        $releasedAllocationReport = $ledger->buildReport($releasedAllocationRows);
+        $releasedPaymentRows = array_values(array_filter(
+            $releasedAllocationReport['rows'] ?? [],
+            static fn (array $row): bool => (int) ($row['supplier_payment_id'] ?? 0) === $paymentId
+        ));
+        $check(
+            'Released allocation converted to advance does not erase another branch payment from the full ledger',
+            count($releasedPaymentRows) === 1
+                && abs((float) ($releasedPaymentRows[0]['raw_credit_amount'] ?? 0) - 100.00) <= 0.005,
+            json_encode($releasedPaymentRows, JSON_UNESCAPED_SLASHES)
+        );
+
+        $db->prepare(
             'DELETE FROM supplier_payment_allocations WHERE supplier_payment_id = :payment_id'
         )->execute(['payment_id' => $paymentId]);
         $db->prepare(
             'UPDATE supplier_payments
-             SET allocated_amount = 0, unallocated_amount = 100, status = "paid"
+             SET allocated_amount = 0, converted_advance_amount = 0, unallocated_amount = 100, status = "paid"
              WHERE id = :payment_id'
         )->execute(['payment_id' => $paymentId]);
 

@@ -20,28 +20,34 @@ $check = static function (string $label, bool $passed, string $detail = '') use 
 
 echo 'Supplier prepaid payment details regression' . PHP_EOL;
 
-$fixture = $db->query(
-    'SELECT ta.id AS treasury_account_id, ta.branch_id, ta.currency, ta.account_type,
-            s.id AS supplier_id, s.name AS supplier_name,
-            u.id AS actor_user_id
-     FROM treasury_accounts ta
-     INNER JOIN suppliers s ON s.is_active = 1
-     INNER JOIN users u ON u.is_active = 1
-     WHERE ta.is_active = 1
-       AND ta.account_type IN ("cash", "bank")
-     ORDER BY ta.is_default DESC, ta.id ASC, s.id ASC, u.id ASC
-     LIMIT 1'
-)->fetch(PDO::FETCH_ASSOC);
+$treasury = new \App\Repositories\TreasuryRepository($app);
+$supplier = $db->query('SELECT id AS supplier_id, name AS supplier_name FROM suppliers WHERE is_active = 1 ORDER BY id LIMIT 1')
+    ->fetch(PDO::FETCH_ASSOC);
+$actorUserId = (int) $db->query('SELECT id FROM users WHERE is_active = 1 ORDER BY id LIMIT 1')->fetchColumn();
+$fixture = false;
+foreach ($db->query(
+    'SELECT id AS treasury_account_id, branch_id, currency, account_type
+     FROM treasury_accounts
+     WHERE is_active = 1 AND account_type IN ("cash", "bank")
+     ORDER BY is_default DESC, id ASC',
+    PDO::FETCH_ASSOC
+) as $account) {
+    $balance = $treasury->currentBalanceForAccountId((int) $account['treasury_account_id']);
+    if ($balance >= 12) {
+        $fixture = $account + (array) $supplier + ['actor_user_id' => $actorUserId, 'source_balance' => $balance];
+        break;
+    }
+}
 
-if ($fixture === false) {
-    $check('Fixture is available', false, 'No active treasury account, supplier, or user exists.');
+if ($fixture === false || $supplier === false || $actorUserId <= 0) {
+    $check('Fixture is available', false, 'No funded active treasury account, supplier, or user exists.');
 } else {
     $service = new \App\Services\SupplierSettlementWorkspaceService($app);
     $method = (string) $fixture['account_type'] === 'bank' ? 'bank_transfer' : 'cash';
     $branchId = (int) $fixture['branch_id'];
     $treasuryAccountId = (int) $fixture['treasury_account_id'];
     $actorUserId = (int) $fixture['actor_user_id'];
-    $balance = (new \App\Repositories\TreasuryRepository($app))->currentBalanceForAccountId($treasuryAccountId);
+    $balance = (float) $fixture['source_balance'];
     $amount = round(min(max($balance / 10, 1), 10), 2);
     $replacementSupplierStatement = $db->prepare(
         'SELECT id

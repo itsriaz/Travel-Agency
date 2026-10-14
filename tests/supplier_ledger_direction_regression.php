@@ -150,6 +150,55 @@ if (
     $failures[] = 'A PKR 3,000 supplier advance consumed by invoices of 502, 1,743, and 561 must appear once and close at PKR 194 Advance.';
 }
 
+// Moving already-paid supplier credit between bookings must not change the full supplier balance.
+$reallocatedAdvanceRows = [
+    array_merge($row('2026-08-06', 'Supplier Payment', 545.00, 0.00), ['booking_reference' => 'BK-CREDIT-OLD']),
+    array_merge($row('2026-08-18', 'Supplier Advance / Overpayment', 529.00, 0.00), [
+        'booking_id' => 0,
+        'booking_reference' => 'SPAY-CREDIT',
+    ]),
+    array_merge($row('2026-08-08', 'Payable Created', 0.00, 549.00), ['booking_reference' => 'BK-CREDIT-OLD']),
+    array_merge($row('2026-08-29', 'Advance Applied', 529.00, 0.00), ['booking_reference' => 'BK-CREDIT-OLD']),
+    array_merge($row('2026-10-10', 'Advance Adjustment', 0.00, 525.00), ['booking_reference' => 'BK-CREDIT-OLD']),
+    array_merge($row('2026-10-10', 'Payable Created', 0.00, 608.00), ['booking_reference' => 'BK-CREDIT-NEW']),
+    array_merge($row('2026-10-10', 'Advance Applied', 525.00, 0.00), ['booking_reference' => 'BK-CREDIT-NEW']),
+];
+$reallocatedFull = $service->buildReport($reallocatedAdvanceRows);
+$reallocatedFullCards = array_column((array) ($reallocatedFull['summaryCards'] ?? []), 'value', 'label');
+$reallocatedFullTypes = array_column((array) ($reallocatedFull['rows'] ?? []), 'source_entry_type');
+if (
+    ($reallocatedFullCards['Supplier bills and adjustments / PKR'] ?? '') !== 'PKR 1,157.00'
+    || ($reallocatedFullCards['Payments to suppliers / PKR'] ?? '') !== 'PKR 1,074.00'
+    || ($reallocatedFullCards['Supplier Balance / PKR'] ?? '') !== 'PKR 83.00 Payable'
+    || in_array('Advance Applied', $reallocatedFullTypes, true)
+    || in_array('Advance Adjustment', $reallocatedFullTypes, true)
+) {
+    $failures[] = 'Reallocating PKR 525 of existing supplier credit must not add PKR 525 to the full supplier balance.';
+}
+$oldBookingRows = array_values(array_filter(
+    $reallocatedAdvanceRows,
+    static fn (array $ledgerRow): bool => (string) ($ledgerRow['booking_reference'] ?? '') === 'BK-CREDIT-OLD'
+));
+$oldBooking = $service->buildReport($oldBookingRows, '', true);
+$oldBookingCards = array_column((array) ($oldBooking['summaryCards'] ?? []), 'value', 'label');
+$oldBookingTypes = array_column((array) ($oldBooking['rows'] ?? []), 'source_entry_type');
+if (
+    ($oldBookingCards['Supplier Balance / PKR'] ?? '') !== 'PKR 0.00'
+    || ! in_array('Advance Applied', $oldBookingTypes, true)
+    || ! in_array('Advance Adjustment', $oldBookingTypes, true)
+) {
+    $failures[] = 'The original booking must retain its application and reversal history and close at zero.';
+}
+$newBookingRows = array_values(array_filter(
+    $reallocatedAdvanceRows,
+    static fn (array $ledgerRow): bool => (string) ($ledgerRow['booking_reference'] ?? '') === 'BK-CREDIT-NEW'
+));
+$newBooking = $service->buildReport($newBookingRows, '', true);
+$newBookingCards = array_column((array) ($newBooking['summaryCards'] ?? []), 'value', 'label');
+if (($newBookingCards['Supplier Balance / PKR'] ?? '') !== 'PKR 83.00 Payable') {
+    $failures[] = 'The receiving booking must show only its PKR 83 remaining supplier payable.';
+}
+
 $pendingRefund = $service->buildReport(array_slice($settledRows, 0, 4));
 $pendingRefundRows = (array) ($pendingRefund['rows'] ?? []);
 if ((string) ($pendingRefundRows[3]['balance_amount'] ?? '') !== '653.00 Advance') {
@@ -256,14 +305,32 @@ if (is_array($bk38)) {
         }
     }
     if ($bk38ObligationCurrency === 'PKR') {
-        $pkrAmounts = array_column($bk38AllCurrencyReport['rows'] ?? [], 'raw_debit_amount', 'entry_type');
-        $pkrCredits = array_column($bk38AllCurrencyReport['rows'] ?? [], 'raw_credit_amount', 'entry_type');
+        $cancelStatement = $db->prepare('SELECT payload_json FROM booking_service_events
+            WHERE booking_reference = :reference AND event_type = "cancel" AND event_status = "posted"
+            ORDER BY id DESC LIMIT 1');
+        $cancelStatement->execute(['reference' => 'BK-000038']);
+        $cancelPayload = json_decode((string) ($cancelStatement->fetchColumn() ?: '{}'), true, 512, JSON_THROW_ON_ERROR);
+        $supplierCost = round((float) ($cancelPayload['supplier_cost_basis'] ?? 0), 2);
+        $supplierPenalty = round((float) ($cancelPayload['supplier_penalty_source_amount'] ?? 0), 2);
+        $supplierCredit = round((float) ($cancelPayload['expected_supplier_refund_source_amount'] ?? 0), 2);
+        $pkrRows = [];
+        foreach ((array) ($bk38AllCurrencyReport['rows'] ?? []) as $ledgerRow) {
+            if (($ledgerRow['currency'] ?? '') === 'PKR') {
+                $pkrRows[(string) ($ledgerRow['entry_type'] ?? '')] = $ledgerRow;
+            }
+        }
         if ($bk38Rows !== []
             || ($bk38Cards['Supplier Balance / AED'] ?? '') !== 'AED 0.00'
             || isset($bk38AllCards['Supplier Balance / AED'])
-            || ($bk38AllCards['Supplier Balance / PKR'] ?? '') !== 'PKR 50,242.00 Advance'
-            || abs((float) ($pkrAmounts['Supplier cancellation charge'] ?? 0) - 40700) > 0.005
-            || abs((float) ($pkrCredits['Supplier invoice reversed on cancellation'] ?? 0) - 90942) > 0.005) {
+            || $supplierCost <= 0
+            || $supplierCredit <= 0
+            || abs($supplierCost - $supplierPenalty - $supplierCredit) > 0.005
+            || ($bk38AllCards['Supplier Balance / PKR'] ?? '') !== 'PKR ' . number_format($supplierCredit, 2) . ' Advance'
+            || abs((float) ($pkrRows['Supplier invoice recorded']['raw_debit_amount'] ?? 0) - $supplierCost) > 0.005
+            || abs((float) ($pkrRows['Supplier invoice recorded']['raw_credit_amount'] ?? 0)) > 0.005
+            || abs((float) ($pkrRows['Supplier payment made']['raw_credit_amount'] ?? 0) - $supplierCost) > 0.005
+            || abs((float) ($pkrRows['Supplier invoice reversed on cancellation']['raw_credit_amount'] ?? 0) - $supplierCost) > 0.005
+            || abs((float) ($pkrRows['Supplier cancellation charge']['raw_debit_amount'] ?? 0) - $supplierPenalty) > 0.005) {
             $failures[] = 'Live BK-000038 must show only the corrected PKR supplier settlement.';
         }
 

@@ -18,6 +18,7 @@ $suppliers = new \App\Repositories\SupplierRepository($app);
 $accounting = new \App\Repositories\AccountingRepository($app);
 $treasury = new \App\Repositories\TreasuryRepository($app);
 $events = new \App\Repositories\BookingServiceEventRepository($app);
+$supplierLedger = new \App\Services\SupplierLedgerService($app);
 $today = date('Y-m-d');
 $supplierName = 'Bidirectional credit supplier ' . bin2hex(random_bytes(4));
 $assert = static function (bool $valid, string $message): void {
@@ -147,6 +148,12 @@ try {
     $assert((float) $afterIncrease['expected_supplier_refund_source_amount'] === 50942.0
         && (float) $afterIncrease['expected_supplier_refund_booking_amount'] === 661.0,
         'PKR and AED supplier credit amounts increased independently');
+    $increasedLedger = $supplierLedger->report([
+        'bookingReference' => $reference, 'supplierId' => (int) $service['supplier_id'], 'currency' => 'PKR',
+    ], [2]);
+    $increasedCards = array_column($increasedLedger['summaryCards'], 'value', 'label');
+    $assert(($increasedCards['Supplier Balance / PKR'] ?? '') === 'PKR 700.00 Advance',
+        'Increasing supplier credit adds only the new PKR 700 to the booking ledger after the original credit was moved to advance');
 
     $services->correctPenaltyRefundWorkflow(array_replace($correction, [
         'expected_supplier_refund_amount' => 50242,
@@ -162,6 +169,12 @@ try {
         && (float) ($lineState['supplier_refund_total_source_amount'] ?? 0) === 50242.0
         && (float) ($lineState['supplier_refund_total_amount'] ?? 0) === 653.0,
         'One Save restores PKR 50,242 and AED 653 without changing customer cash refund');
+    $decreasedLedger = $supplierLedger->report([
+        'bookingReference' => $reference, 'supplierId' => (int) $service['supplier_id'], 'currency' => 'PKR',
+    ], [2]);
+    $decreasedCards = array_column($decreasedLedger['summaryCards'], 'value', 'label');
+    $assert(($decreasedCards['Supplier Balance / PKR'] ?? '') === 'PKR 0.00',
+        'Decreasing supplier credit by PKR 700 removes the new booking-ledger advance');
     $assert((float) $suppliers->findObligationByServiceLine($reference, $line)['gross_amount'] === 40700.0
         && (float) $treasury->currentBalanceForAccountId((int) $cash['id']) === (float) $beforeCash
         && (float) $treasury->currentBalanceForAccountId((int) $customerCash['id']) === (float) $beforeCustomerCash,

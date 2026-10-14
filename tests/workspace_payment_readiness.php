@@ -162,9 +162,16 @@ $check(
         'syncOperatingBranchControl',
         'bookingBranchField.dispatchEvent(new Event(\'change\'',
         'Move ${bookingReference} from ${previousName} to ${nextName}?',
-        'A conflicting cash/bank transaction will block the save.',
-        'currentBookingId() <= 0',
+        'const confirmed = window.confirm(',
+        'const transitioned = await transitionBranchCurrencies(previousBranchId, nextBranchId);',
+        'const saved = await persistInvoiceAutosave({ force: true });',
+        'branchInputSnapshot.forEach(({ field, value }) => { field.value = value; });',
+        'Branch change was not saved. The previous branch and entered amounts were restored.',
     ])
+        && $containsAll($bookingRepository, [
+            'prepareBranchCashCorrections($bookingReference, $priorBranchId, $targetBranchId)',
+            'assertBranchCorrectionIsSafe($bookingReference, $targetBranchId)',
+        ])
 );
 $check(
     'Branch currency changes preserve manual selections and reject raw amount relabelling',
@@ -172,11 +179,16 @@ $check(
         'markBranchCurrencyDefault',
         'markBranchCurrencyManual',
         'initializeBranchCurrencyModes',
+        'protectEnteredBranchCurrencies',
+        'followsBranchCurrency',
         'validateBranchCurrencyTransition',
         'transitionBranchCurrencies',
         "mode: 'branch-currency-transition'",
         'remained identical or suspiciously close',
-        'Default currencies and entered amounts were converted safely; manually selected currencies were retained.',
+        'const currencySnapshots = [',
+        'const moneySnapshots = moneyFields.map(',
+        'restoreCurrencySnapshots();',
+        'Entered draft amounts will require a confirmed exchange rate.',
     ])
         && $containsAll($workspaceView, [
             'data-pricing-exchange-title',

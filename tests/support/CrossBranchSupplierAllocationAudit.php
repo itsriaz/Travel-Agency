@@ -86,9 +86,125 @@ final class CrossBranchSupplierAllocationAudit
              ) audited
              WHERE audited.failure_reason IS NOT NULL
              ORDER BY audited.allocation_id
-             LIMIT ' . $limit
+             '
         );
 
-        return $statement instanceof PDOStatement ? ($statement->fetchAll(PDO::FETCH_ASSOC) ?: []) : [];
+        if (! $statement instanceof PDOStatement) {
+            return [];
+        }
+
+        $failures = [];
+        while (($row = $statement->fetch(PDO::FETCH_ASSOC)) !== false) {
+            if ($row['failure_reason'] === 'allocation_journal_missing_or_misattributed'
+                && self::hasLinkedNetAllocationHistory($db, $row)) {
+                continue;
+            }
+
+            $failures[] = $row;
+            if (count($failures) >= $limit) {
+                break;
+            }
+        }
+
+        return $failures;
+    }
+
+    private static function hasLinkedNetAllocationHistory(PDO $db, array $allocation): bool
+    {
+        $paymentId = (int) $allocation['supplier_payment_id'];
+        $obligationId = (int) $allocation['supplier_obligation_id'];
+        $branchId = (int) $allocation['obligation_branch_id'];
+        $currency = (string) $allocation['obligation_currency'];
+
+        $released = $db->prepare(
+            'SELECT je.id,
+                    SUM(CASE WHEN coa.code = "AP_CONTROL" THEN jel.debit_amount ELSE 0 END) AS ap_debit,
+                    SUM(CASE WHEN coa.code = "AP_CONTROL" THEN jel.credit_amount ELSE 0 END) AS ap_credit,
+                    SUM(CASE WHEN coa.code = "SUPPLIER_ADVANCES" THEN jel.debit_amount ELSE 0 END) AS advance_debit,
+                    SUM(CASE WHEN coa.code = "SUPPLIER_ADVANCES" THEN jel.credit_amount ELSE 0 END) AS advance_credit,
+                    (
+                        SELECT CAST(JSON_UNQUOTE(JSON_EXTRACT(event.payload_json, "$.released_supplier_payment_credit")) AS DECIMAL(18,2))
+                        FROM booking_service_events event
+                        INNER JOIN supplier_obligations linked_so ON linked_so.id = :event_obligation_id
+                        WHERE event.booking_reference = linked_so.booking_reference
+                          AND event.service_line_reference = linked_so.service_line_reference
+                          AND event.event_type = "cancel"
+                          AND event.event_status = "posted"
+                          AND JSON_CONTAINS(event.payload_json, CAST(:event_payment_id AS CHAR), "$.released_supplier_payment_ids")
+                          AND JSON_LENGTH(JSON_EXTRACT(event.payload_json, "$.released_supplier_payment_ids")) = 1
+                          AND JSON_CONTAINS(event.payload_json, CAST(je.id AS CHAR), "$.journal_entry_ids")
+                        LIMIT 1
+                    ) AS linked_event_amount
+             FROM journal_entries je
+             INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+             INNER JOIN chart_of_accounts coa ON coa.id = jel.account_id
+             WHERE je.source_type = "supplier_settlement_released"
+               AND je.branch_id = :branch_id
+               AND je.currency = :currency
+               AND jel.supplier_obligation_id = :obligation_id
+             GROUP BY je.id'
+        );
+        $released->execute([
+            'event_obligation_id' => $obligationId,
+            'event_payment_id' => $paymentId,
+            'branch_id' => $branchId,
+            'currency' => $currency,
+            'obligation_id' => $obligationId,
+        ]);
+
+        $releasedAmount = 0.0;
+        foreach ($released->fetchAll(PDO::FETCH_ASSOC) as $journal) {
+            if ($journal['linked_event_amount'] === null) {
+                continue;
+            }
+            $amount = (float) $journal['ap_credit'];
+            if ($amount <= 0.005
+                || abs((float) $journal['linked_event_amount'] - $amount) > 0.005
+                || abs((float) $journal['ap_debit']) > 0.005
+                || abs((float) $journal['advance_debit'] - $amount) > 0.005
+                || abs((float) $journal['advance_credit']) > 0.005) {
+                return false;
+            }
+            $releasedAmount += $amount;
+        }
+
+        if ($releasedAmount <= 0.005) {
+            return false;
+        }
+
+        $original = $db->prepare(
+            'SELECT je.id,
+                    SUM(CASE WHEN coa.code = "AP_CONTROL" THEN jel.debit_amount ELSE 0 END) AS ap_debit,
+                    SUM(CASE WHEN coa.code = "AP_CONTROL" THEN jel.credit_amount ELSE 0 END) AS ap_credit,
+                    SUM(CASE WHEN coa.code = "SUPPLIER_ADVANCES" THEN jel.debit_amount ELSE 0 END) AS advance_debit,
+                    SUM(CASE WHEN coa.code = "SUPPLIER_ADVANCES" THEN jel.credit_amount ELSE 0 END) AS advance_credit
+             FROM journal_entries je
+             INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+             INNER JOIN chart_of_accounts coa ON coa.id = jel.account_id
+             WHERE je.source_type = "supplier_payment_allocated"
+               AND je.branch_id = :branch_id
+               AND je.currency = :currency
+               AND jel.supplier_payment_id = :payment_id
+               AND jel.supplier_obligation_id = :obligation_id
+             GROUP BY je.id'
+        );
+        $original->execute([
+            'branch_id' => $branchId,
+            'currency' => $currency,
+            'payment_id' => $paymentId,
+            'obligation_id' => $obligationId,
+        ]);
+        foreach ($original->fetchAll(PDO::FETCH_ASSOC) as $journal) {
+            $amount = (float) $journal['ap_debit'];
+            if ($amount > 0.005
+                && abs((float) $journal['ap_credit']) <= 0.005
+                && abs((float) $journal['advance_debit']) <= 0.005
+                && abs((float) $journal['advance_credit'] - $amount) <= 0.005
+                && abs($amount - $releasedAmount - (float) $allocation['allocated_amount']) <= 0.005) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }
