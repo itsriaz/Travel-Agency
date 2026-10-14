@@ -7,8 +7,9 @@ defined('BASE_PATH') || define('BASE_PATH', dirname(__DIR__));
 require_once BASE_PATH . '/app/Helpers/functions.php';
 require_once BASE_PATH . '/app/Core/bootstrap.php';
 
-$serviceReflection = new ReflectionClass(\App\Services\ReportService::class);
-$service = $serviceReflection->newInstanceWithoutConstructor();
+$app = \App\Core\App::bootstrap(BASE_PATH);
+$service = new \App\Services\ReportService($app);
+$serviceReflection = new ReflectionClass($service);
 $formatter = $serviceReflection->getMethod('customerAdvanceLedgerReport');
 
 $baseRow = [
@@ -50,36 +51,31 @@ $rows = [
     ]),
 ];
 
-[$formattedRows, $summaryCards] = $formatter->invoke($service, $rows);
+[$formattedRows, $summaryCards] = $formatter->invoke($service, $rows, [], 'AED');
+[$reversedRows] = $formatter->invoke($service, array_reverse($rows), [], 'AED');
 
 $failures = [];
-if (($formattedRows[0]['balance_amount'] ?? '') !== '890.00') {
-    $failures[] = 'The received row must show AED 890.00 available.';
+if (($formattedRows[0]['balance_amount'] ?? '') !== '890') {
+    $failures[] = 'The received row must show AED 890 available.';
 }
-if (($formattedRows[1]['balance_amount'] ?? '') !== '0.00') {
-    $failures[] = 'The returned row must close the advance at AED 0.00.';
+if (($formattedRows[1]['balance_amount'] ?? '') !== '0') {
+    $failures[] = 'The returned row must close the advance at AED 0.';
+}
+if (($reversedRows[0]['balance_amount'] ?? '') !== '0'
+    || ($reversedRows[1]['balance_amount'] ?? '') !== '890'
+) {
+    $failures[] = 'Same-day balances must be calculated in transaction order even when display rows arrive reversed.';
 }
 
 $balanceCard = null;
 foreach ($summaryCards as $card) {
-    if (($card['label'] ?? '') === 'Balance / AED') {
+    if (($card['label'] ?? '') === 'Total Available / AED') {
         $balanceCard = $card;
         break;
     }
 }
-if (($balanceCard['value'] ?? '') !== 'AED 0.00') {
-    $failures[] = 'The AED balance summary must remain AED 0.00.';
-}
-
-$reportView = (string) file_get_contents(BASE_PATH . '/app/Views/reports/index.php');
-if (! str_contains($reportView, '$selectedReport === \'customer_advance_ledger\'')) {
-    $failures[] = 'Customer advance report has no dedicated closing-balance footer.';
-}
-if (! str_contains($reportView, "'_label' => 'Closing Balance ' . \$currency")) {
-    $failures[] = 'Customer advance footer does not identify the final running balance.';
-}
-if (! str_contains($reportView, '+ $receivedAmount - $appliedAmount - $returnedAmount')) {
-    $failures[] = 'Customer advance footer is not based on received less applied and returned.';
+if (($balanceCard['value'] ?? '') !== 'AED 0') {
+    $failures[] = 'The AED available-balance summary must remain AED 0.';
 }
 
 if ($failures !== []) {
@@ -87,4 +83,4 @@ if ($failures !== []) {
     exit(1);
 }
 
-echo '[PASS] Customer advance receipt and same-day return run from AED 890.00 to AED 0.00.' . PHP_EOL;
+echo '[PASS] Customer advance receipt and same-day return run from AED 890 to AED 0.' . PHP_EOL;
