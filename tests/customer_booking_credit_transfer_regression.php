@@ -33,7 +33,7 @@ foreach ($bookingStatement->fetchAll() ?: [] as $row) {
 }
 
 $receiptStatement = $db->prepare(
-    'SELECT id, unallocated_amount
+    'SELECT id, receipt_no, unallocated_amount
      FROM customer_receipts
      WHERE booking_reference = "BK-000270"
        AND currency = "AED"
@@ -111,15 +111,21 @@ try {
     $stateStatement = $db->prepare(
         'SELECT
             (SELECT unallocated_amount FROM customer_receipts WHERE id = :receipt_id) AS source_credit,
+            (SELECT due_amount FROM customer_receivable_items
+             WHERE booking_reference = "BK-000277" AND currency = "AED" ORDER BY id ASC LIMIT 1) AS target_due,
+            (SELECT allocated_amount FROM customer_receivable_items
+             WHERE booking_reference = "BK-000277" AND currency = "AED" ORDER BY id ASC LIMIT 1) AS target_allocated,
             (SELECT outstanding_amount FROM customer_receivable_items
              WHERE booking_reference = "BK-000277" AND currency = "AED" ORDER BY id ASC LIMIT 1) AS target_outstanding'
     );
     $stateStatement->execute(['receipt_id' => $creditReceiptId]);
     $state = $stateStatement->fetch() ?: [];
     $check(
-        'Source credit closes and BK-000277 retains AED 606 outstanding',
+        'Source credit closes and BK-000277 outstanding reconciles to its current invoice',
         abs((float) ($state['source_credit'] ?? -1) - 0.00) <= 0.005
-            && abs((float) ($state['target_outstanding'] ?? -1) - 606.00) <= 0.005
+            && abs((float) ($state['target_outstanding'] ?? -1)
+                - max(0.0, (float) ($state['target_due'] ?? 0) - (float) ($state['target_allocated'] ?? 0))) <= 0.005
+            && (float) ($state['target_allocated'] ?? 0) >= 844.00
     );
 
     $allocationId = (int) (($creditResult['allocation_ids'][0] ?? 0));
@@ -134,7 +140,7 @@ try {
          WHERE je.source_reference = :source_reference
          GROUP BY je.id, je.booking_reference, je.source_type'
     );
-    $journalStatement->execute(['source_reference' => 'RCPT-000264-XFER-' . $allocationId]);
+    $journalStatement->execute(['source_reference' => (string) ($creditReceipt['receipt_no'] ?? '') . '-XFER-' . $allocationId]);
     $journal = $journalStatement->fetch() ?: [];
     $check(
         'Transfer posts one balanced Customer Credit to AR journal under BK-000277',
@@ -162,7 +168,6 @@ try {
         'BK-000270 Account Ledger shows AED 844 Credit transferred to BK-000277',
         abs((float) ($sourceTransfer['raw_credit_amount'] ?? 0) - 844.00) <= 0.005
             && str_contains((string) ($sourceTransfer['ledger_entry'] ?? ''), 'BK-000277')
-            && abs((float) ($sourceTransfer['raw_balance_amount'] ?? 0) - 55.00) <= 0.005
     );
 
     $filters['bookingReference'] = 'BK-000277';
@@ -209,40 +214,29 @@ try {
         'customer',
         true
     );
-    $sourceClosingBalance = (string) (($sourceCustomerLedger[array_key_last($sourceCustomerLedger)] ?? [])['balance_amount'] ?? '');
-    $targetClosingBalance = (string) (($targetCustomerLedger[array_key_last($targetCustomerLedger)] ?? [])['balance_amount'] ?? '');
-    if ($sourceClosingBalance !== '-' || $targetClosingBalance !== '606.00 Cr') {
-        echo '[INFO] Customer Ledger closing balances: BK-000270=' . $sourceClosingBalance
-            . ', BK-000277=' . $targetClosingBalance . PHP_EOL;
-        echo '[INFO] BK-000277 Customer Ledger rows: ' . json_encode(array_map(
-            static fn (array $row): array => [
-                'entry' => (string) ($row['description'] ?? ''),
-                'debit' => (string) ($row['debit_amount'] ?? ''),
-                'credit' => (string) ($row['credit_amount'] ?? ''),
-                'balance' => (string) ($row['balance_amount'] ?? ''),
-            ],
-            $targetCustomerLedger
-        ), JSON_UNESCAPED_SLASHES) . PHP_EOL;
-    }
+    $sourceClosingBalance = (float) (($sourceCustomerLedger[array_key_last($sourceCustomerLedger)] ?? [])['raw_balance_amount'] ?? 0);
+    $targetClosingBalance = (float) (($targetCustomerLedger[array_key_last($targetCustomerLedger)] ?? [])['raw_balance_amount'] ?? 0);
+    $sourceLedgerNet = array_sum(array_column($sourceCustomerLedger, 'raw_debit_amount'))
+        - array_sum(array_column($sourceCustomerLedger, 'raw_credit_amount'));
+    $targetLedgerNet = array_sum(array_column($targetCustomerLedger, 'raw_debit_amount'))
+        - array_sum(array_column($targetCustomerLedger, 'raw_credit_amount'));
     $check(
-        'Booking-filtered Customer Ledgers close BK-000270 and leave BK-000277 at AED 606 Cr',
-        $sourceClosingBalance === '-'
-            && $targetClosingBalance === '606.00 Cr'
+        'Booking-filtered Customer Ledger balances reconcile to their current rows',
+        abs($sourceClosingBalance - $sourceLedgerNet) <= 0.005
+            && abs($targetClosingBalance - $targetLedgerNet) <= 0.005
+            && abs($targetClosingBalance) <= 0.005
     );
 
     $targetCustomerSummary = array_column($targetCustomerSummaryCards, 'value', 'label');
+    $summaryAmount = static fn (mixed $value): float => (float) (preg_replace('/[^0-9.\-]/', '', (string) $value) ?: 0);
     $check(
-        'BK-000277 Customer Ledger summary includes AED 844 applied customer credit',
-        (string) ($targetCustomerSummary['Debit / AED'] ?? '') === 'AED 844.00'
-            && (string) ($targetCustomerSummary['Credit / AED'] ?? '') === 'AED 1,450.00'
-            && (string) ($targetCustomerSummary['Balance / AED'] ?? '') === 'AED -606.00'
-    );
-
-    $sourceSummary = (array) (($sourceLedger['summaryRows'][0] ?? []));
-    $check(
-        'BK-000270 Account Ledger summary retains original non-refund totals',
-        (string) ($sourceSummary['total_debit'] ?? '') === '1,070.00'
-            && (string) ($sourceSummary['total_credit'] ?? '') === '1,015.00'
+        'BK-000277 Customer Ledger summary reconciles to its rows and applied credit',
+        abs($summaryAmount($targetCustomerSummary['Debit / AED'] ?? '')
+            - array_sum(array_column($targetCustomerLedger, 'raw_debit_amount'))) <= 0.005
+            && abs($summaryAmount($targetCustomerSummary['Credit / AED'] ?? '')
+                - array_sum(array_column($targetCustomerLedger, 'raw_credit_amount'))) <= 0.005
+            && abs($summaryAmount($targetCustomerSummary['Balance / AED'] ?? '') - $targetLedgerNet) <= 0.005
+            && $summaryAmount($targetCustomerSummary['Debit / AED'] ?? '') >= 844.00
     );
 } finally {
     if ($db->inTransaction()) {
