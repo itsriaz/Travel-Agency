@@ -11968,25 +11968,6 @@ document.addEventListener('DOMContentLoaded', () => {
             openSupplierPaymentEdit(button.dataset.supplierPaymentEditOpen || '');
         }
     });
-    globalPaymentManagerResults?.addEventListener('submit', (event) => {
-        const form = event.target instanceof HTMLFormElement
-            ? event.target
-            : null;
-        if (!(form instanceof HTMLFormElement)) {
-            return;
-        }
-
-        if (form.classList.contains('global-payment-manager-correction-form')) {
-            event.preventDefault();
-            void submitGlobalPaymentManagerForm(form, 'change_supplier');
-            return;
-        }
-
-        if (form.classList.contains('global-payment-manager-void-form')) {
-            event.preventDefault();
-            void submitGlobalPaymentManagerForm(form, 'void');
-        }
-    });
     supplierPaymentEditCloseButtons.forEach((button) => button.addEventListener('click', () => closeSupplierPaymentEdit()));
     supplierPaymentEditForm?.addEventListener('submit', (event) => void submitSupplierPaymentEdit(event));
     supplierPaymentEditVoidButton?.addEventListener('click', submitSupplierPaymentVoid);
@@ -21343,7 +21324,7 @@ document.addEventListener('DOMContentLoaded', () => {
         return /imdad\s+international/i.test(label) ? 'Imdad Int' : label;
     };
 
-    const renderGlobalPaymentManager = (rows = [], canCorrect = false, correctionSuppliers = []) => {
+    const renderGlobalPaymentManager = (rows = [], canCorrect = false) => {
         if (!(globalPaymentManagerResults instanceof HTMLElement)) {
             return;
         }
@@ -21355,47 +21336,10 @@ document.addEventListener('DOMContentLoaded', () => {
         globalPaymentManagerResults.innerHTML = rows.map((row) => {
             const isVoid = String(row?.status || '').toLowerCase() === 'void';
             const paymentId = Number.parseInt(String(row?.id || 0), 10) || 0;
-            const supplierId = Number.parseInt(String(row?.supplier_id || 0), 10) || 0;
-            const correctionFormId = `supplier-payment-correction-${paymentId}`;
             const action = canCorrect
                 ? (isVoid
                     ? `<span class="global-payment-manager-void-note">${escapeHtml(String(row?.void_reason || 'Voided'))}</span>`
-                    : `<div class="global-payment-manager-row-actions">
-                            <form method="post" action="${escapeHtml(globalPaymentSupplierCorrectionUrl || globalPaymentCorrectionUrl)}" class="global-payment-manager-correction-form" id="${correctionFormId}">
-                                <input type="hidden" name="_token" value="${escapeHtml(csrfToken)}">
-                                <input type="hidden" name="supplier_payment_id" value="${paymentId}">
-                                <input type="hidden" name="branch_id" value="${Number.parseInt(String(row?.branch_id || 0), 10) || 0}">
-                                <input type="hidden" name="supplier_id" value="${supplierId}">
-                                <input type="hidden" name="currency" value="${escapeHtml(String(row?.currency || 'PKR'))}">
-                            </form>
-                            <div class="global-payment-manager-top-row">
-                                <select name="replacement_supplier_id" required form="${correctionFormId}" aria-label="Correct supplier for ${escapeHtml(String(row?.payment_no || 'payment'))}">
-                                    <option value="">Correct supplier...</option>
-                                    ${Array.isArray(correctionSuppliers) ? correctionSuppliers.map((supplier) => {
-                                        const correctionSupplierId = Number.parseInt(String(supplier?.id || 0), 10) || 0;
-                                        if (correctionSupplierId <= 0) {
-                                            return '';
-                                        }
-
-                                        return `<option value="${correctionSupplierId}"${correctionSupplierId === supplierId ? ' disabled' : ''}>${escapeHtml(String(supplier?.name || 'Supplier'))}</option>`;
-                                    }).join('') : ''}
-                                </select>
-                                <button class="btn btn-primary btn-sm" type="submit" form="${correctionFormId}" name="correction_action" value="change_supplier">Change Supplier</button>
-                            </div>
-                            <div class="global-payment-manager-bottom-row">
-                                <input type="text" name="correction_reason" value="" form="${correctionFormId}" placeholder="Remarks" maxlength="500" aria-label="Reason for supplier change">
-                                <button class="btn btn-primary btn-sm" type="button" data-supplier-payment-edit-open="${paymentId}">Edit</button>
-                                <form method="post" action="${escapeHtml(globalPaymentCorrectionUrl)}" class="global-payment-manager-void-form">
-                                    <input type="hidden" name="_token" value="${escapeHtml(csrfToken)}">
-                                    <input type="hidden" name="supplier_payment_id" value="${paymentId}">
-                                    <input type="hidden" name="branch_id" value="${Number.parseInt(String(row?.branch_id || 0), 10) || 0}">
-                                    <input type="hidden" name="supplier_id" value="${supplierId}">
-                                    <input type="hidden" name="currency" value="${escapeHtml(String(row?.currency || 'PKR'))}">
-                                    <input type="hidden" name="void_reason" value="">
-                                    <button class="btn btn-danger btn-sm" type="submit" name="correction_action" value="void" formnovalidate>Void Payment</button>
-                                </form>
-                            </div>
-                        </div>`)
+                    : `<button class="btn btn-primary btn-sm" type="button" data-supplier-payment-edit-open="${paymentId}">Edit</button>`)
                 : '<span class="muted">—</span>';
 
             return `<tr class="global-payment-manager-summary-row">
@@ -21463,11 +21407,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 }).join('');
                 globalPaymentManagerSupplier.value = selectedSupplierId;
             }
-            renderGlobalPaymentManager(
-                globalPaymentManagerRows,
-                payload.can_correct === true,
-                globalPaymentManagerCorrectionSuppliers
-            );
+            renderGlobalPaymentManager(globalPaymentManagerRows, payload.can_correct === true);
             setGlobalPaymentManagerFeedback(String(payload.message || ''));
         } catch (error) {
             if (globalPaymentManagerRequestToken !== requestToken) {
@@ -21603,6 +21543,7 @@ document.addEventListener('DOMContentLoaded', () => {
         syncSupplierPaymentEditAccounts();
         updateSupplierPaymentEditPreview();
         setSupplierPaymentEditFeedback('', false);
+        supplierPaymentEditModal.style.removeProperty('display');
         supplierPaymentEditModal.hidden = false;
         supplierPaymentEditModal.setAttribute('aria-hidden', 'false');
         window.setTimeout(() => supplierPaymentEditSupplier?.focus(), 40);
@@ -21688,31 +21629,12 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (requestAction === 'void') {
-            const supplierPaymentId = String(form.elements.namedItem('supplier_payment_id')?.value || '').trim();
-            const correctionForm = supplierPaymentId !== ''
-                ? document.getElementById(`supplier-payment-correction-${supplierPaymentId}`)
-                : null;
-            const sharedReasonField = correctionForm instanceof HTMLFormElement
-                ? correctionForm.elements.namedItem('correction_reason')
-                : null;
-            const sharedReasonValue = sharedReasonField instanceof HTMLInputElement
-                ? String(sharedReasonField.value || '').trim()
-                : '';
             const voidReasonField = form.elements.namedItem('void_reason');
-
-            if (sharedReasonValue.length < 5) {
-                setGlobalPaymentManagerFeedback('Enter remarks of at least 5 characters before voiding the payment.');
-                if (sharedReasonField instanceof HTMLInputElement) {
-                    sharedReasonField.focus();
-                    sharedReasonField.select();
-                }
-                window.alert('Please enter at least 5 characters in Remarks before voiding the payment.');
+            if (!(voidReasonField instanceof HTMLInputElement) || String(voidReasonField.value || '').trim().length < 5) {
+                setGlobalPaymentManagerFeedback('Enter a reason of at least 5 characters before voiding the payment.');
                 return;
             }
-
-            if (voidReasonField instanceof HTMLInputElement) {
-                voidReasonField.value = sharedReasonValue;
-            }
+            voidReasonField.value = voidReasonField.value.trim();
         }
 
         const formData = new FormData(form);
@@ -21748,11 +21670,19 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             const message = String(payload.message || options.successMessage || 'Supplier payment updated.');
+            const returnsToPrepaidViewer = options.source === 'edit-modal'
+                && prepaidPaymentManagerModal instanceof HTMLElement
+                && !prepaidPaymentManagerModal.hidden;
             if (options.source === 'edit-modal') {
                 closeSupplierPaymentEdit();
             }
-            setGlobalPaymentManagerFeedback(message);
-            await loadGlobalPaymentManager();
+            if (returnsToPrepaidViewer) {
+                setPrepaidPaymentManagerFeedback(message);
+                await loadPrepaidPaymentManager();
+            } else {
+                setGlobalPaymentManagerFeedback(message);
+                await loadGlobalPaymentManager();
+            }
         } catch (error) {
             const message = error instanceof Error ? error.message : 'The supplier payment could not be updated.';
             if (options.source === 'edit-modal') {

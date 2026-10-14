@@ -42,10 +42,10 @@ $checks = [
     'Prepaid supplier JavaScript hook remains intact' => str_contains($view, 'data-global-prepaid-supplier-form'),
     'Supplier payment actions are consolidated in the finder header' => str_contains($view, 'data-workspace-action="supplier-history-finder">Supplier Payment</button>')
         && preg_match_all('/<button[^>]+data-global-prepaid-supplier-open/', $view) === 0
-        && str_contains($view, 'data-prepaid-payment-manager-open>Supplier Advances</button>')
+        && str_contains($view, 'data-prepaid-payment-manager-open>View Advances</button>')
         && !str_contains($view, 'View / Edit Prepaid Payments'),
     'Prepaid supplier payment has a searchable correction window' => str_contains($view, 'data-prepaid-payment-manager-modal')
-        && str_contains($view, '<strong id="prepaid-payment-manager-title">Supplier Advances</strong>')
+        && str_contains($view, '<strong id="prepaid-payment-manager-title">View Advances</strong>')
         && str_contains($view, 'data-prepaid-payment-manager-results')
         && str_contains($view, 'data-prepaid-payment-edit-form')
         && str_contains($javascript, 'loadPrepaidPaymentManager')
@@ -93,6 +93,10 @@ $checks = [
         && str_contains($javascript, 'data-supplier-payment-edit-open')
         && !str_contains($javascript, '>Change Supplier</button>')
         && !str_contains($javascript, 'Correct supplier...</option>'),
+    'Unified editor reopens after closing' => str_contains($javascript, "supplierPaymentEditModal.style.removeProperty('display');"),
+    'Unified editor void uses its own reason and refreshes the originating viewer' => str_contains($javascript, "form.elements.namedItem('void_reason')")
+        && !str_contains($javascript, 'supplier-payment-correction-${supplierPaymentId}')
+        && str_contains($javascript, 'await loadPrepaidPaymentManager();'),
     'Dialog styling is scoped to financial finder classes' => str_contains($css, '.financial-finder-dialog'),
     'Financial field focus styling is present' => str_contains($css, '.financial-finder-toolbar input:focus'),
     'Financial table readability styling is present' => str_contains($css, '.financial-finder-card .legacy-table th'),
