@@ -509,9 +509,9 @@ try {
             break;
         }
     }
-    $check('Supplier ledger trace is visible only in the on-screen report',
+    $check('Supplier ledger trace remains visible on screen and in print',
         in_array('trace', $screenColumns, true)
-        && ! in_array('trace', $printColumns, true)
+        && in_array('trace', $printColumns, true)
         && $traceRow !== null
         && trim((string) ($traceRow['trace'] ?? '')) !== '',
         json_encode([
