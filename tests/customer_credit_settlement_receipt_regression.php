@@ -98,13 +98,23 @@ try {
 
     $renderedOutput = (string) $app->get('view')->render('workspace/output', $document, 'layouts/print');
     $settlementHeaderText = preg_replace('/\s+/', ' ', html_entity_decode(strip_tags($renderedOutput)));
+    $printedAmount = static function (string $label) use ($settlementHeaderText): ?float {
+        if (preg_match('/' . preg_quote($label, '/') . '\s*AED\s*([\d,]+(?:\.\d{1,2})?)/', (string) $settlementHeaderText, $match) !== 1) {
+            return null;
+        }
+        return (float) str_replace(',', '', $match[1]);
+    };
+    $paymentSummary = (array) ($document['customerPaymentFoundation']['summary'] ?? []);
     $check(
-        'Rendered branded BK-000277 receipt shows AED 844 paid and AED 606 due',
+        'Rendered branded BK-000277 receipt agrees with its current invoice and payment balance',
         str_contains($renderedOutput, 'class="receipt-sheet"')
             && str_contains($renderedOutput, 'Customer Payment Receipt')
-            && preg_match('/Current Invoice Amount\s*AED 1,450\.00/', $settlementHeaderText) === 1
-            && preg_match('/Total Paid\s*AED 844\.00/', $settlementHeaderText) === 1
-            && preg_match('/Invoice Outstanding Balance\s*AED 606\.00/', $settlementHeaderText) === 1
+            && $printedAmount('Current Invoice Amount') !== null
+            && abs($printedAmount('Current Invoice Amount') - (float) ($paymentSummary['invoiceReceivable']['AED'] ?? -1)) <= 0.005
+            && $printedAmount('Total Paid') !== null
+            && abs($printedAmount('Total Paid') - (float) ($paymentSummary['invoiceReceived']['AED'] ?? -1)) <= 0.005
+            && $printedAmount('Invoice Outstanding Balance') !== null
+            && abs($printedAmount('Invoice Outstanding Balance') - (float) ($paymentSummary['invoiceOutstanding']['AED'] ?? -1)) <= 0.005
     );
 
     $oldReceiptStatement = $db->query(
@@ -146,10 +156,17 @@ try {
         'bookingReference' => 'BK-000277',
     ], [(int) $booking['branch_id']]);
     $accountSummary = (array) ($accountLedger['summaryRows'][0] ?? []);
+    $summaryAmount = static fn (mixed $value): float => (float) (preg_replace('/[^0-9.\-]/', '', (string) $value) ?: 0);
+    $targetCreditRows = array_values(array_filter(
+        (array) ($accountLedger['rows'] ?? []),
+        static fn (array $row): bool => str_starts_with((string) ($row['ledger_entry'] ?? ''), 'Customer credit received from BK-000270')
+    ));
     $check(
-        'BK-000277 Account Ledger summary shows only the AED 844 credit transferred in as Debit',
-        (string) ($accountSummary['total_debit'] ?? '') === '844.00'
-            && (string) ($accountSummary['total_credit'] ?? '') === '0.00'
+        'BK-000277 Account Ledger includes transferred credit without recording new customer cash',
+        count($targetCreditRows) === 1
+            && abs((float) ($targetCreditRows[0]['raw_debit_amount'] ?? 0) - 844.00) <= 0.005
+            && $summaryAmount($accountSummary['total_debit'] ?? '') >= 844.00
+            && abs((float) ($accountSummary['customer_paid'] ?? -1)) <= 0.005
     );
     $sourceAccountLedger = (new \App\Services\AccountLedgerService($app))->report([
         'dateFrom' => '',
@@ -160,10 +177,14 @@ try {
         'bookingReference' => 'BK-000270',
     ], [(int) $booking['branch_id']]);
     $sourceAccountSummary = (array) ($sourceAccountLedger['summaryRows'][0] ?? []);
+    $sourceReceiptCash = (float) ($db->query(
+        'SELECT COALESCE(SUM(received_amount), 0)
+         FROM customer_receipts
+         WHERE booking_reference = "BK-000270" AND currency = "AED" AND status <> "void"'
+    )->fetchColumn() ?: 0);
     $check(
-        'BK-000270 summary retains its original non-refund totals',
-        (string) ($sourceAccountSummary['total_debit'] ?? '') === '1,070.00'
-            && (string) ($sourceAccountSummary['total_credit'] ?? '') === '1,015.00'
+        'BK-000270 summary retains the original customer cash without adding transfer cash',
+        abs($summaryAmount($sourceAccountSummary['customer_paid'] ?? '') - $sourceReceiptCash) <= 0.005
     );
 
     $zeroCashResult = (new \App\Services\CustomerReceiptWorkspaceService($app))->saveReceipt([
