@@ -96,11 +96,11 @@ $check(
 );
 
 $check(
-    'Dashboard expense chart includes all recorded valid expenses',
+    'Current-month expense chart includes active and posted expenses',
     str_contains($reportRepository, 'be.expense_status IN ("active", "posted")')
-        && str_contains($reportService, "'allTimeBranchRows'")
-        && str_contains($dashboardView, '$branchExpenseChartRows')
-        && str_contains($dashboardView, 'Total recorded branch expenses')
+        && str_contains($reportService, "'monthlyBranchRows'")
+        && str_contains($dashboardView, "\$analytics['monthlyBranchRows']")
+        && str_contains($dashboardView, 'Current month branch expenses')
 );
 
 if ($failures !== []) {
