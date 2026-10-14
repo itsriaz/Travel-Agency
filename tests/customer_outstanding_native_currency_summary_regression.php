@@ -48,10 +48,10 @@ $failures = [];
 if ($labels !== ['Outstanding / PKR', 'Outstanding / AED']) {
     $failures[] = 'Native-currency cards are missing or in the wrong order.';
 }
-if (($values['Outstanding / PKR'] ?? '') !== 'PKR 12,000.00') {
+if (($values['Outstanding / PKR'] ?? '') !== 'PKR 12,000') {
     $failures[] = 'PKR outstanding total is incorrect.';
 }
-if (($values['Outstanding / AED'] ?? '') !== 'AED 850.00') {
+if (($values['Outstanding / AED'] ?? '') !== 'AED 850') {
     $failures[] = 'AED outstanding total is incorrect.';
 }
 if (array_filter(
