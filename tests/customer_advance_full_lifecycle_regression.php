@@ -237,16 +237,45 @@ try {
         $failures[] = 'The customer-wide ledger exposed an internal advance-to-invoice application line.';
     }
 
-    $runningBalance = 0.0;
-    foreach ((array) ($customerWideState['rows'] ?? []) as $ledgerRow) {
-        $runningBalance = round(
-            $runningBalance
+    $customerWideRows = (array) ($customerWideState['rows'] ?? []);
+    $lastDisplayedDate = null;
+    foreach ($customerWideRows as $ledgerRow) {
+        $ledgerDate = (string) ($ledgerRow['booking_date'] ?? '');
+        if ($lastDisplayedDate !== null && $ledgerDate > $lastDisplayedDate) {
+            $failures[] = 'The Customer Detail Ledger is not displayed newest-first.';
+            break;
+        }
+        $lastDisplayedDate = $ledgerDate;
+    }
+
+    usort($customerWideRows, static fn (array $left, array $right): int => strcmp(
+        (string) ($left['booking_date'] ?? ''),
+        (string) ($right['booking_date'] ?? '')
+    ));
+    $runningBalances = [];
+    foreach ($customerWideRows as $ledgerRow) {
+        $ledgerKey = (string) ($ledgerRow['summary_drilldown_key'] ?? '');
+        $ledgerDate = (string) ($ledgerRow['booking_date'] ?? '');
+        if ($ledgerKey === '') {
+            $failures[] = 'The Customer Detail Ledger row has no customer/account balance key.';
+            break;
+        }
+        $runningBalances[$ledgerKey] = round(
+            ($runningBalances[$ledgerKey] ?? 0.0)
             + (float) ($ledgerRow['raw_debit_amount'] ?? 0)
             - (float) ($ledgerRow['raw_credit_amount'] ?? 0),
             2
         );
-        if (abs((float) ($ledgerRow['raw_balance_amount'] ?? 0) - $runningBalance) > 0.005) {
-            $failures[] = 'The Customer Detail Ledger running balance was not chronological and cumulative.';
+        if (abs((float) ($ledgerRow['raw_balance_amount'] ?? 0) - $runningBalances[$ledgerKey]) > 0.005) {
+            $failures[] = sprintf(
+                'The Customer Detail Ledger running balance differs for %s on %s: debit %.2f, credit %.2f, expected %.2f, displayed %.2f.',
+                $ledgerKey,
+                $ledgerDate,
+                (float) ($ledgerRow['raw_debit_amount'] ?? 0),
+                (float) ($ledgerRow['raw_credit_amount'] ?? 0),
+                $runningBalances[$ledgerKey],
+                (float) ($ledgerRow['raw_balance_amount'] ?? 0)
+            );
             break;
         }
     }
@@ -394,7 +423,7 @@ if ($failures !== []) {
 }
 
 echo '[PASS] Advance receipt retained its Account Holder and conserved value.' . PHP_EOL;
-echo '[PASS] Recording the advance automatically closed the oldest matching customer receivable.' . PHP_EOL;
+echo '[PASS] Manually applying the advance closed the selected customer receivable.' . PHP_EOL;
 echo '[PASS] Customer Detail Ledger shows the advance once and maintains a chronological running balance.' . PHP_EOL;
 echo '[PASS] Applied/returned advance closed in the Customer Advance Ledger and is no longer selectable.' . PHP_EOL;
 echo '[PASS] Account Ledger shows receipt, internal application, and return without inflating summary cash.' . PHP_EOL;
