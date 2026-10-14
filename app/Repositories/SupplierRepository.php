@@ -3542,6 +3542,9 @@ final class SupplierRepository extends BaseRepository
             if (! $isGlobalPayment && (string) $payment['booking_reference'] !== (string) $obligation['booking_reference']) {
                 throw new \RuntimeException('Supplier payment and obligation booking mismatch.');
             }
+            if (! $isGlobalPayment && (int) $payment['branch_id'] !== (int) $obligation['branch_id']) {
+                throw new \RuntimeException('Supplier payment and obligation branch mismatch.');
+            }
 
             $paymentCurrency = (string) $payment['currency'];
             $obligationCurrency = (string) $obligation['currency'];

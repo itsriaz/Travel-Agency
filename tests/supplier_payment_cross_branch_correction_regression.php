@@ -92,6 +92,28 @@ try {
         $obligationIds[] = (int) $db->lastInsertId();
     }
 
+    $bookingScopedPaymentId = $repository->createSupplierPayment([
+        'supplier_id' => $supplierId,
+        'branch_id' => $paymentBranchId,
+        'booking_reference' => 'XBC-' . $token . '-2',
+        'payment_scope' => 'booking',
+        'payment_no' => 'SPAY-XBC-BOOK-' . $token,
+        'payment_date' => date('Y-m-d'),
+        'currency' => 'PKR',
+        'paid_amount' => 10,
+        'payment_method' => 'cash',
+        'treasury_account_id' => $treasuryAccountId,
+        'status' => 'paid',
+        'actor_user_id' => $actorId,
+    ]);
+    $branchMismatchRejected = false;
+    try {
+        $repository->allocateSupplierPayment($bookingScopedPaymentId, $obligationIds[1], 10);
+    } catch (RuntimeException $exception) {
+        $branchMismatchRejected = str_contains($exception->getMessage(), 'branch mismatch');
+    }
+    $check('Booking-scoped payment cannot allocate to another branch even with a matching booking reference', $branchMismatchRejected);
+
     $paymentNo = 'SPAY-XBC-' . $token;
     $paymentId = $repository->createSupplierPayment([
         'supplier_id' => $supplierId,

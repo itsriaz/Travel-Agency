@@ -88,6 +88,7 @@ $renderedCountScopeView = \App\Core\View::make(
         'selectedCurrency' => 'PKR',
     ]
 );
+$renderedCountScopeText = preg_replace('/\s+/', ' ', strip_tags($renderedCountScopeView));
 $renderedPaymentConfirmationView = \App\Core\View::make(
     BASE_PATH . '/app/Views/reports/global_supplier_settlement.php',
     [
@@ -171,6 +172,10 @@ $availableAdvanceBalancesByNameMethod = '';
 if (preg_match('/public function availableAdvanceBalancesForSupplierName\(.*?(?=^\s*public function)/ms', $repository, $matches) === 1) {
     $availableAdvanceBalancesByNameMethod = (string) $matches[0];
 }
+$availableAdvanceRowsByNameMethod = '';
+if (preg_match('/public function availableAdvanceRowsForSupplierName\(.*?(?=^\s*public function)/ms', $repository, $matches) === 1) {
+    $availableAdvanceRowsByNameMethod = (string) $matches[0];
+}
 $traceAdvancesMethod = '';
 if (preg_match('/public function traceAvailableSupplierAdvances\(.*?(?=^\s*public function)/ms', $repository, $matches) === 1) {
     $traceAdvancesMethod = (string) $matches[0];
@@ -252,8 +257,8 @@ $check(
     str_contains($globalView, '$selectedCurrencyPayableCount = count($openObligations)')
         && str_contains($globalView, '$payableCountScope = $isSelectedSupplier')
         && str_contains($globalView, "' total'")
-        && str_contains($renderedCountScopeView, 'AirBlue / 1 PKR payable(s)')
-        && ! str_contains($renderedCountScopeView, 'AirBlue / 28 payable(s)')
+        && str_contains($renderedCountScopeText, 'AirBlue / 1 PKR payable(s)')
+        && ! str_contains($renderedCountScopeText, 'AirBlue / 28 payable(s)')
 );
 $check(
     'Global supplier settlement filters auto-load without a manual Load button',
@@ -317,11 +322,10 @@ $check(
         && ! str_contains($service, '$this->assertSupplierAllowedForBranch($supplier, $branchId);' . PHP_EOL . '        $supplierId')
 );
 $check(
-    'Supplier master visibility is shared across branches while transaction rows stay branch-scoped',
-    str_contains($activeSuppliersMethod, 'WHERE is_active = 1')
-        && ! str_contains($activeSuppliersMethod, 'branch_id IS NULL OR branch_id IN')
+    'Supplier options and transaction rows stay branch-scoped while name lookup supports shared suppliers',
+    str_contains($activeSuppliersMethod, 's.branch_id IN')
         && str_contains($findSupplierByNameMethod, 'WHERE is_active = 1')
-        && ! str_contains($findSupplierByNameMethod, 'branch_id IS NULL OR branch_id IN')
+        && str_contains($findSupplierByNameMethod, 'name = ?')
         && str_contains($repository, 'supplier_id, branch_id, currency, deposit_amount')
         && str_contains($repository, "'branch_id' => \$data['branch_id']")
         && str_contains($repository, 'WHERE o.branch_id = :branch_id')
@@ -332,10 +336,10 @@ $check(
         && ! str_contains($availableAdvanceMethod, 'AND branch_id = :branch_id')
         && str_contains($traceAdvancesMethod, 'WHERE supplier_id = :supplier_id')
         && ! str_contains($traceAdvancesMethod, 'AND branch_id = :branch_id')
-        && str_contains($autoApplyAdvanceMethod, 'WHERE supplier_id = :supplier_id')
-        && ! str_contains($autoApplyAdvanceMethod, 'AND branch_id = :branch_id')
+        && str_contains($availableAdvanceRowsByNameMethod, 's.name = :supplier_name')
+        && ! str_contains($availableAdvanceRowsByNameMethod, 'a.branch_id')
+        && str_contains($autoApplyAdvanceMethod, 'availableAdvanceRowsForSupplierPool($supplierId, $obligationCurrency)')
         && str_contains($autoApplyAdvanceMethod, 'supplier_shared_same_currency_advance_pool')
-        && ! str_contains($autoApplyAdvanceMethod, 'supplier_and_branch_match_only')
 );
 $check(
     'Service-section prepaid lookup can resolve shared supplier balance by supplier name',
@@ -345,16 +349,18 @@ $check(
         && ! str_contains($availableAdvanceByNameMethod, 'a.branch_id')
         && str_contains($availableAdvanceBalancesByNameMethod, 'GROUP BY a.currency')
         && ! str_contains($availableAdvanceBalancesByNameMethod, 'a.branch_id')
-        && str_contains($workspaceController, 'availableAdvanceBalanceForSupplierName($supplierName, $currency)')
+        && str_contains($workspaceController, 'availableAdvanceBalanceForSupplierName($resolvedSupplierName, $currency)')
         && str_contains($workspaceController, 'availableAdvanceBalancesForSupplierName')
         && str_contains($workspaceController, 'available_balances')
 );
 $check(
-    'Supplier prepaid reports show the shared advance pool across branches',
+    'Supplier prepaid reports include advances only from accessible branches',
     str_contains($supplierPrepaidPaymentsMethod, 'FROM supplier_advances a')
-        && ! str_contains($supplierPrepaidPaymentsMethod, 'WHERE a.branch_id')
+        && str_contains($supplierPrepaidPaymentsMethod, 'WHERE a.branch_id')
+        && str_contains($supplierPrepaidPaymentsMethod, 'branchScope($branchIds')
         && str_contains($prepaidLedgerMethod, 'FROM supplier_advances a')
-        && ! str_contains($prepaidLedgerMethod, 'WHERE a.branch_id')
+        && str_contains($prepaidLedgerMethod, 'WHERE a.branch_id')
+        && str_contains($prepaidLedgerMethod, 'branchScope($branchIds')
 );
 $check(
     'Workspace supplier summary displays remaining prepaid supplier balance',
@@ -363,9 +369,9 @@ $check(
         && str_contains($workspaceStationView, "['advanceBalance']")
 );
 $check(
-    'Supplier finder includes prepaid advances from the shared supplier pool',
+    'Supplier finder includes prepaid advances only from accessible branches',
     str_contains($supplierHistoryFinderMethod, 'FROM supplier_advances a')
-        && ! str_contains($supplierHistoryFinderMethod, 'WHERE a.branch_id IN')
+        && str_contains($supplierHistoryFinderMethod, 'WHERE a.branch_id IN')
         && str_contains($supplierHistoryFinderMethod, 'WHERE b.branch_id IN')
 );
 $check(
@@ -432,7 +438,7 @@ if ($failures !== []) {
         echo ' - ' . $failure . PHP_EOL;
     }
 
-    return 1;
+    exit(1);
 }
 
 echo PHP_EOL . 'Supplier global settlement readiness passed.' . PHP_EOL;
