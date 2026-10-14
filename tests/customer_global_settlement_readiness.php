@@ -94,9 +94,9 @@ $check(
         && str_contains($globalView, 'treasury_account_id')
 );
 $check(
-    'Lumpsum customer payment report uses the simplified user-facing name',
-    str_contains($globalView, 'Lumpsum Customer Payment')
-        && str_contains($globalView, 'Post Lumpsum Customer Payment')
+    'Lumpsum customer payment page clearly saves a new payment',
+    str_contains($globalView, '<h1>Lumpsum Customer Payment</h1>')
+        && str_contains($globalView, '>Save Payment</button>')
         && ! str_contains($globalView, 'Global Customer Payment')
 );
 $check(
@@ -106,11 +106,13 @@ $check(
         && ! str_contains($globalView, '>Load</button>')
 );
 $check(
-    'Global customer payment supports customer advances',
-    str_contains($globalView, 'Apply Advance')
-        && str_contains($globalView, 'advance_receipt_id')
+    'Lumpsum payment keeps advance application in the existing advance/payment screen',
+    ! str_contains($globalView, 'Apply Advance')
+        && ! str_contains($globalView, 'advance_receipt_id')
         && ! str_contains($globalView, 'Record Advance')
         && ! str_contains($globalView, 'Refund Customer Advance')
+        && str_contains($workspaceStationView, 'data-payment-advance-row')
+        && str_contains($workspaceStationView, 'advance_receipt_id')
 );
 $check(
     'Repository can load and lock global customer receivables',
@@ -227,8 +229,8 @@ if ($failures !== []) {
         echo ' - ' . $failure . PHP_EOL;
     }
 
-    return 1;
+    exit(1);
 }
 
 echo PHP_EOL . 'Customer global settlement readiness passed.' . PHP_EOL;
-return 0;
+exit(0);
