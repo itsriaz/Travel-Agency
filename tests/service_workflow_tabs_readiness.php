@@ -70,7 +70,8 @@ $check(
     'Cancellation settlement supports zero, partial, or full agency fee refund with live customer refund calculation',
     substr_count($view, 'name="agency_fee_refund_amount"') >= 2
         && str_contains($view, 'data-settlement-customer-refund-due')
-        && str_contains($javascript, 'liveExpectedSupplierRefundAmount - liveCustomerPenaltyAmount + liveAgencyFeeRefundAmount')
+        && str_contains($javascript, 'settlementCustomerSummary(serviceLine, liveExpectedSupplierRefundAmount, liveCustomerPenaltyAmount, liveAgencyFeeRefundAmount)')
+        && str_contains($javascript, 'calculateCancellationCustomerRefund({')
         && str_contains($service, 'Agency fee refund cannot exceed the agency service fee charged on this service.')
         && str_contains($service, '$expectedSupplierRefundAmount - $customerPenaltyAmount + $agencyFeeRefundAmount')
 );
@@ -87,17 +88,17 @@ $check(
 );
 $check(
     'Refund entry distinguishes actual customer payment from retained transferable credit',
-    str_contains($view, 'Paid to Customer Now')
+    str_contains($view, '<span>Customer Refund</span>')
         && str_contains($view, 'Keep as Available Credit')
         && str_contains($view, 'Pay Customer Now')
         && ! str_contains($view, 'customer_refund_payment_confirmed')
         && substr_count($view, 'data-customer-refund-pay-now-field') >= 3
-        && str_contains($view, 'aria-label="Amount actually paid to customer now"')
+        && str_contains($view, 'aria-label="Actual amount paid to customer"')
         && str_contains($javascript, 'syncCustomerRefundTreatment')
         && str_contains($javascript, 'serviceCustomerRefundPayNowFields')
         && str_contains($javascript, "classList.toggle('legacy-service-event-bar--retain-credit', !payNow)")
         && str_contains($css, '.legacy-service-event-bar--retain-credit .legacy-service-event-bar__row--refund-customer')
-        && str_contains($css, 'grid-template-columns: 150px minmax(420px, 1fr);')
+        && str_contains($css, 'grid-template-areas: "date reason reason reason";')
         && str_contains($view, '<legend>Customer Refund</legend>')
         && ! str_contains($view, 'Customer Refund Treatment')
         && str_contains($javascript, "? 'Save'")
@@ -155,7 +156,7 @@ if ($failures !== []) {
     foreach ($failures as $failure) {
         echo ' - ' . $failure . PHP_EOL;
     }
-    return 1;
+    exit(1);
 }
 
 echo PHP_EOL . 'Service workflow tabs readiness passed.' . PHP_EOL;
