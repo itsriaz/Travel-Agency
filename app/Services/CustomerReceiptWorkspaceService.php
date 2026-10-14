@@ -1969,9 +1969,11 @@ final class CustomerReceiptWorkspaceService extends Service
         try {
             $refund = $repository->findCustomerAdvanceRefundById($refundId);
             if ($refund === null
-                || (int) ($refund['branch_id'] ?? 0) !== $branchId
-                || (int) ($refund['traveler_id'] ?? 0) !== $travelerId
-                || strtoupper((string) ($refund['currency'] ?? '')) !== $currency
+                || (string) ($refund['receipt_purpose'] ?? '') !== 'customer_advance'
+                || (string) ($refund['receipt_status'] ?? '') === 'void'
+                || (int) ($refund['receipt_branch_id'] ?? 0) !== $branchId
+                || (int) ($refund['receipt_traveler_id'] ?? 0) !== $travelerId
+                || strtoupper((string) ($refund['receipt_currency'] ?? '')) !== $currency
             ) {
                 throw new RuntimeException('The selected returned advance does not match this customer, branch, and currency.');
             }
@@ -1984,12 +1986,10 @@ final class CustomerReceiptWorkspaceService extends Service
             }
             $reversalJournalId = $oldJournalId !== null
                 ? $accountingRepository->reverseJournalEntry($oldJournalId, [
-                    'branch_id' => $branchId,
                     'booking_reference' => null,
                     'source_type' => 'customer_advance_return_correction_reversal',
                     'source_reference' => (string) ($refund['receipt_no'] ?? 'ADV') . '-REF-REV-' . date('YmdHis'),
                     'entry_date' => $entryDate,
-                    'currency' => $currency,
                     'narration' => 'Customer advance return correction reversal',
                     'actor_user_id' => $actorUserId,
                     'line_description_prefix' => 'Correction reversal: ',
@@ -2041,6 +2041,8 @@ final class CustomerReceiptWorkspaceService extends Service
                 'old_entry_date' => (string) ($old['refund_date'] ?? ''),
                 'new_entry_date' => $entryDate,
                 'currency' => $currency,
+                'old_currency' => (string) ($old['currency'] ?? $currency),
+                'new_currency' => $currency,
                 'old_amount' => (float) ($old['amount'] ?? 0),
                 'new_amount' => $amount,
                 'old_payment_method' => (string) ($old['payment_method'] ?? ''),

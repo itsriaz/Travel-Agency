@@ -157,6 +157,24 @@ try {
         'id' => $refundId,
     ]);
 
+    $rejectedOtherCustomer = false;
+    try {
+        $workspace->correctCustomerAdvanceRefund([
+            'customer_advance_refund_id' => $refundId,
+            'branch_id' => $branchId,
+            'traveler_id' => $travelerId + 1000000,
+            'receipt_currency' => $currency,
+            'advance_refund_amount' => $refundAmount,
+            'advance_refund_date' => date('Y-m-d'),
+            'advance_refund_method' => $paymentMethod,
+            'advance_refund_treasury_account_id' => $alternateTreasuryAccountId,
+            'correction_reason' => 'Unauthorized customer probe',
+        ], $userId, [$branchId]);
+    } catch (RuntimeException $exception) {
+        $rejectedOtherCustomer = str_contains($exception->getMessage(), 'does not match this customer');
+    }
+    $check('A different customer cannot correct the returned advance', $rejectedOtherCustomer);
+
     $workspace->correctCustomerAdvanceRefund([
         'customer_advance_refund_id' => $refundId,
         'branch_id' => $branchId,
@@ -203,6 +221,26 @@ try {
            ORDER BY id DESC
            LIMIT 1'
     )->fetch(PDO::FETCH_ASSOC);
+    $journalRows = $db->query(
+        'SELECT id, branch_id, currency FROM journal_entries
+         WHERE id IN (' . implode(', ', array_map('intval', [
+             $refundJournalEntryId,
+             (int) ($audit['reversal_journal_entry_id'] ?? 0),
+             (int) ($audit['new_journal_entry_id'] ?? 0),
+         ])) . ')'
+    )->fetchAll(PDO::FETCH_ASSOC);
+    $journalRowsById = array_column($journalRows, null, 'id');
+    $journalMetadataValid = true;
+    foreach ([$refundJournalEntryId, (int) ($audit['reversal_journal_entry_id'] ?? 0), (int) ($audit['new_journal_entry_id'] ?? 0)] as $journalId) {
+        $journal = $journalRowsById[$journalId] ?? null;
+        if (! is_array($journal)
+            || (int) ($journal['branch_id'] ?? 0) !== $branchId
+            || strtoupper((string) ($journal['currency'] ?? '')) !== $currency
+        ) {
+            $journalMetadataValid = false;
+        }
+    }
+    $check('Original, reversal, and corrected journals remain in the real branch/currency', $journalMetadataValid);
     $check(
         'Returned advance correction keeps the reversal/new journal audit trail complete',
         is_array($audit)
@@ -239,4 +277,4 @@ echo empty($failures)
     ? 'Customer advance refund saved-truth correction regression passed.' . PHP_EOL
     : 'Failures:' . PHP_EOL . ' - ' . implode(PHP_EOL . ' - ', $failures) . PHP_EOL;
 
-return empty($failures) ? 0 : 1;
+exit(empty($failures) ? 0 : 1);

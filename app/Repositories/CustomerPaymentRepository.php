@@ -1326,7 +1326,10 @@ final class CustomerPaymentRepository extends BaseRepository
             'SELECT car.id, car.customer_receipt_id, car.branch_id, car.traveler_id, car.refund_date,
                     car.currency, car.amount, car.payment_method, car.treasury_account_id,
                     car.reference_number, car.reason, car.remarks, car.journal_entry_id,
-                    cr.receipt_no, COALESCE(t.full_name, "Customer") AS customer_name,
+                    cr.receipt_no, cr.branch_id AS receipt_branch_id,
+                    cr.traveler_id AS receipt_traveler_id, cr.currency AS receipt_currency,
+                    cr.receipt_purpose, cr.status AS receipt_status,
+                    COALESCE(t.full_name, "Customer") AS customer_name,
                     ta.account_name AS treasury_account_name
              FROM customer_advance_refunds car
              INNER JOIN customer_receipts cr ON cr.id = car.customer_receipt_id
@@ -1510,7 +1513,10 @@ final class CustomerPaymentRepository extends BaseRepository
                 'SELECT car.id, car.customer_receipt_id, car.branch_id, car.traveler_id, car.refund_date,
                         car.currency, car.amount, car.payment_method, car.treasury_account_id,
                         car.reference_number, car.reason, car.remarks, car.journal_entry_id,
-                        cr.receipt_no, cr.allocated_amount, cr.unallocated_amount, cr.returned_amount
+                        cr.receipt_no, cr.branch_id AS receipt_branch_id,
+                        cr.traveler_id AS receipt_traveler_id, cr.currency AS receipt_currency,
+                        cr.receipt_purpose, cr.status AS receipt_status,
+                        cr.allocated_amount, cr.unallocated_amount, cr.returned_amount
                  FROM customer_advance_refunds car
                  INNER JOIN customer_receipts cr ON cr.id = car.customer_receipt_id
                  WHERE car.id = :refund_id
@@ -1522,9 +1528,11 @@ final class CustomerPaymentRepository extends BaseRepository
                 throw new RuntimeException('The selected customer advance return could not be found.');
             }
 
-            if ((int) ($refund['branch_id'] ?? 0) !== (int) ($data['branch_id'] ?? 0)
-                || (int) ($refund['traveler_id'] ?? 0) !== (int) ($data['traveler_id'] ?? 0)
-                || strtoupper((string) ($refund['currency'] ?? '')) !== strtoupper((string) ($data['currency'] ?? ''))
+            if ((string) ($refund['receipt_purpose'] ?? '') !== 'customer_advance'
+                || (string) ($refund['receipt_status'] ?? '') === 'void'
+                || (int) ($refund['receipt_branch_id'] ?? 0) !== (int) ($data['branch_id'] ?? 0)
+                || (int) ($refund['receipt_traveler_id'] ?? 0) !== (int) ($data['traveler_id'] ?? 0)
+                || strtoupper((string) ($refund['receipt_currency'] ?? '')) !== strtoupper((string) ($data['currency'] ?? ''))
             ) {
                 throw new RuntimeException('The selected advance return does not match this customer, branch, and currency.');
             }
@@ -1556,7 +1564,10 @@ final class CustomerPaymentRepository extends BaseRepository
 
             $refundUpdate = $this->db->prepare(
                 'UPDATE customer_advance_refunds
-                 SET refund_date = :refund_date,
+                 SET branch_id = :branch_id,
+                     traveler_id = :traveler_id,
+                     currency = :currency,
+                     refund_date = :refund_date,
                      amount = :amount,
                      payment_method = :payment_method,
                      treasury_account_id = :treasury_account_id,
@@ -1566,6 +1577,9 @@ final class CustomerPaymentRepository extends BaseRepository
                  WHERE id = :refund_id'
             );
             $refundUpdate->execute([
+                'branch_id' => $data['branch_id'],
+                'traveler_id' => $data['traveler_id'],
+                'currency' => $data['currency'],
                 'refund_date' => $data['entry_date'],
                 'amount' => $newAmount,
                 'payment_method' => $data['payment_method'],
@@ -1579,6 +1593,9 @@ final class CustomerPaymentRepository extends BaseRepository
             return [
                 'old' => $refund,
                 'new' => array_merge($refund, [
+                    'branch_id' => $data['branch_id'],
+                    'traveler_id' => $data['traveler_id'],
+                    'currency' => $data['currency'],
                     'refund_date' => $data['entry_date'],
                     'amount' => $newAmount,
                     'payment_method' => $data['payment_method'],
