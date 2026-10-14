@@ -45,6 +45,7 @@ if (! is_array($fixture)) {
 }
 
 $branchId = (int) $fixture['branch_id'];
+$receivableId = (int) $fixture['receivable_id'];
 $travelerId = (int) $fixture['traveler_id'];
 $businessSourceId = (int) $fixture['business_source_id'];
 $currency = (string) $fixture['currency'];
@@ -97,9 +98,22 @@ try {
     ], $userId, [$branchId]);
 
     $receiptId = (int) ($advance['receipt_id'] ?? 0);
+    $applied = $workspace->applyCustomerAdvance([
+        'branch_id' => $branchId,
+        'traveler_id' => $travelerId,
+        'receipt_currency' => $currency,
+        'advance_receipt_id' => $receiptId,
+        'global_customer_receivable_id' => [$receivableId],
+        'allocation_date' => date('Y-m-d'),
+    ], $userId, [$branchId]);
+    $check(
+        'Fixture advance is genuinely used before correction',
+        (int) ($applied['allocation_count'] ?? 0) === 1
+            && abs((float) ($applied['allocated_amount'] ?? 0) - (float) $fixture['outstanding_amount']) <= 0.005
+    );
     $before = $payments->findReceiptById($receiptId) ?? [];
 
-    $accountChangeRejected = false;
+    $accountChangeSucceeded = false;
     $accountChangeMessage = '';
     try {
         $workspace->correctCustomerAdvance([
@@ -111,20 +125,54 @@ try {
             'advance_date' => date('Y-m-d'),
             'payment_method' => $paymentMethod,
             'treasury_account_id' => $alternateTreasuryAccountId,
-            'correction_reason' => 'Regression tries to move used advance to another account',
+            'correction_reason' => 'Regression moves used advance to the correct cash account',
         ], $userId, [$branchId]);
+        $accountChangeSucceeded = true;
     } catch (RuntimeException $exception) {
-        $accountChangeRejected = str_contains($exception->getMessage(), 'Advance treasury account cannot be changed');
         $accountChangeMessage = $exception->getMessage();
     }
 
     $afterAccountAttempt = $payments->findReceiptById($receiptId) ?? [];
     $check(
-        'Used customer advance rejects treasury-account reassignment and keeps the original saved account',
-        $accountChangeRejected
-            && (int) ($afterAccountAttempt['treasury_account_id'] ?? 0) === (int) ($before['treasury_account_id'] ?? 0),
+        'Used customer advance moves to the corrected cash account without changing the applied amount',
+        $accountChangeSucceeded
+            && (int) ($afterAccountAttempt['treasury_account_id'] ?? 0) === $alternateTreasuryAccountId
+            && abs((float) ($afterAccountAttempt['allocated_amount'] ?? 0) - (float) ($before['allocated_amount'] ?? 0)) <= 0.005
+            && abs((float) ($afterAccountAttempt['unallocated_amount'] ?? 0) - (float) ($before['unallocated_amount'] ?? 0)) <= 0.005,
         $accountChangeMessage
     );
+
+    $receivableAfter = $db->query('SELECT outstanding_amount FROM customer_receivable_items WHERE id = ' . $receivableId)->fetch(PDO::FETCH_ASSOC);
+    $check('Correcting the cash account does not reopen the settled customer invoice',
+        is_array($receivableAfter) && abs((float) ($receivableAfter['outstanding_amount'] ?? 0)) <= 0.005);
+
+    $audit = $db->query(
+        'SELECT old_journal_entry_id, reversal_journal_entry_id, new_journal_entry_id
+         FROM customer_advance_corrections
+         WHERE customer_receipt_id = ' . $receiptId . '
+           AND correction_type = "advance_received"
+         ORDER BY id DESC LIMIT 1'
+    )->fetch(PDO::FETCH_ASSOC);
+    $oldJournalId = (int) ($audit['old_journal_entry_id'] ?? 0);
+    $reversalJournalId = (int) ($audit['reversal_journal_entry_id'] ?? 0);
+    $newJournalId = (int) ($audit['new_journal_entry_id'] ?? 0);
+    $assetLine = $db->prepare(
+        'SELECT account_id FROM journal_entry_lines
+         WHERE journal_entry_id = :journal_entry_id AND line_description = :description
+         LIMIT 1'
+    );
+    $assetLine->execute(['journal_entry_id' => $oldJournalId, 'description' => 'Customer receipt captured']);
+    $oldAssetAccountId = (int) ($assetLine->fetchColumn() ?: 0);
+    $assetLine->execute(['journal_entry_id' => $reversalJournalId, 'description' => 'Correction reversal: Customer receipt captured']);
+    $reversedAssetAccountId = (int) ($assetLine->fetchColumn() ?: 0);
+    $assetLine->execute(['journal_entry_id' => $newJournalId, 'description' => 'Customer receipt captured']);
+    $newAssetAccountId = (int) ($assetLine->fetchColumn() ?: 0);
+    $check('The correction reverses the old cash journal and posts to a different cash account',
+        $oldJournalId > 0 && $reversalJournalId > 0 && $newJournalId > 0
+            && $oldAssetAccountId > 0
+            && $reversedAssetAccountId === $oldAssetAccountId
+            && $newAssetAccountId > 0
+            && $newAssetAccountId !== $oldAssetAccountId);
 
 } catch (Throwable $exception) {
     $check('Used-advance correction guard probe completed without exception', false, $exception->getMessage());
@@ -139,4 +187,4 @@ echo empty($failures)
     ? 'Customer advance used-receipt correction guard regression passed.' . PHP_EOL
     : 'Failures:' . PHP_EOL . ' - ' . implode(PHP_EOL . ' - ', $failures) . PHP_EOL;
 
-return empty($failures) ? 0 : 1;
+exit(empty($failures) ? 0 : 1);
