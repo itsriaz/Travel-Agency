@@ -247,6 +247,12 @@ final class SupplierLedgerService extends Service
                         $advanceUsedSummary[$currency] = round(($advanceUsedSummary[$currency] ?? 0.0) + $effectiveCreditAmount, 2);
                     }
                     break;
+                case 'Advance Adjustment':
+                    if ($bookingScoped) {
+                        $advanceUsedSummary[$currency] = round(($advanceUsedSummary[$currency] ?? 0.0)
+                            + $effectiveCreditAmount - $effectiveDebitAmount, 2);
+                    }
+                    break;
                 case 'Supplier Credit Moved to Advance':
                 case 'Advance Released':
                     if ($bookingScoped) {

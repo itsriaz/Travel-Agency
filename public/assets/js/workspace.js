@@ -5317,6 +5317,25 @@ document.addEventListener('DOMContentLoaded', () => {
                 && Math.abs(expected - toNumber(serviceLine.latestCancelExpectedSupplierRefundAmount)) > 0.005;
             const penaltyChanged = serviceLine.latestCancelCustomerPenaltyAmount != null
                 && Math.abs(penalty - toNumber(serviceLine.latestCancelCustomerPenaltyAmount)) > 0.005;
+            if ((expectedChanged || penaltyChanged || feeDelta !== 0)
+                && (serviceLine.latestCustomerRefundEventId || serviceLine.latestSupplierRefundEventId)
+                && (saved.currency || serviceLine.currency) === serviceLine.currency) {
+                const change = (expectedChanged
+                    ? expected - toNumber(serviceLine.latestCancelExpectedSupplierRefundAmount) : 0)
+                    - (penaltyChanged
+                        ? penalty - toNumber(serviceLine.latestCancelCustomerPenaltyAmount) : 0) + feeDelta;
+                const projectedNet = toNumber(saved.remaining || 0) - toNumber(saved.outstanding || 0) + change;
+                return {
+                    ...saved,
+                    entitlement: Math.max(toNumber(saved.entitlement || 0) + change, 0),
+                    remaining: Math.max(Math.round(projectedNet), 0),
+                    outstanding: Math.max(Math.round(-projectedNet), 0),
+                    currency: saved.currency || serviceLine.currency,
+                    paid: Math.max(toNumber(saved.paid || 0), 0),
+                    draft: true,
+                    saved: true,
+                };
+            }
             const canPreview = saved.basis_verified === true && toNumber(saved.paid || 0) === 0
                 && !serviceLine.latestCustomerRefundEventId && !serviceLine.latestSupplierRefundEventId
                 && (saved.currency || serviceLine.currency) === serviceLine.currency;
@@ -5404,19 +5423,10 @@ document.addEventListener('DOMContentLoaded', () => {
         return { currency, amount: sourceRefund > cost + 0.005 ? null : Math.round(cost - sourceRefund) };
     };
 
-    const supplierRefundEquivalentRate = (source, target, booking, amount, equivalent, penaltyRate) => {
+    const supplierRefundEquivalentRate = (source, booking, amount, equivalent) => {
         if (source === booking) return 1;
-        if (amount === 0) return 0;
-        const targetRate = target === booking ? 1 : penaltyRate;
-        return Number.isFinite(targetRate) && targetRate > 0 && Number.isFinite(equivalent) && equivalent > 0
-            ? roundExchangeRate(equivalent / amount * targetRate) : 0;
-    };
-
-    const supplierRefundRecordedRate = (line, source, target, booking, penalty) => {
-        const rate = toNumber(line?.pricingExchangeRate || 0);
-        return !line?.latestCancelCustomerSettlementPending
-            && source !== target && target === booking && line?.currency === booking && line?.costCurrency === source
-            && toNumber(penalty) === 0 && Number.isFinite(rate) && rate > 0.00000001 ? rate : 0;
+        return amount > 0 && Number.isFinite(equivalent) && equivalent > 0
+            ? roundExchangeRate(equivalent / amount) : 0;
     };
 
     const settlementExpectedRefundError = (state, supplierCurrency, supplierSourceCost) => {
@@ -5471,6 +5481,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const expectedSupplierRefundCurrencyField = form.elements.namedItem('expected_supplier_refund_currency');
         const expectedSupplierRefundExchangeRateField = form.elements.namedItem('expected_supplier_refund_exchange_rate');
         const agencyFeeRefundField = form.elements.namedItem('agency_fee_refund_amount');
+        const agencyFeeRefundCurrencyField = form.elements.namedItem('agency_fee_refund_currency');
         const supplierPenaltyField = form.elements.namedItem('supplier_penalty_amount');
         const supplierPenaltyCurrencyField = form.elements.namedItem('supplier_penalty_currency');
         const supplierPenaltyExchangeRateField = form.elements.namedItem('supplier_penalty_exchange_rate');
@@ -5478,6 +5489,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const moneyLabelNodes = Array.from(form.querySelectorAll('[data-settlement-money-label]'));
         const chargedLabelNodes = Array.from(form.querySelectorAll('[data-settlement-charged-label]'));
         const bookingCurrency = String(options.bookingCurrency || currentInvoiceSnapshot().invoiceCurrency || 'PKR').trim().toUpperCase() || 'PKR';
+        if (agencyFeeRefundCurrencyField instanceof HTMLInputElement) {
+            agencyFeeRefundCurrencyField.value = bookingCurrency;
+        }
         const supplierCostAmount = Math.max(toNumber(options.supplierCostAmount || 0), 0);
         const agencyFeeChargedAmount = Math.max(toNumber(options.agencyFeeChargedAmount || 0), 0);
         if (!(currencySelect instanceof HTMLSelectElement) || !(exchangeRateField instanceof HTMLInputElement)) {
@@ -5809,9 +5823,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
             const source = expectedSupplierRefundCurrencyState.selectedCurrency();
-            const target = customerPenaltyCurrencyState?.selectedCurrency() || bookingCurrency;
+            const target = bookingCurrency;
             const amount = toNumber(expectedSupplierRefundCurrencyState.amountField.value || 0);
-            const recordedRate = supplierRefundRecordedRate(options.serviceLine, source, target, bookingCurrency, customerPenaltyField?.value);
             review.hidden = source === target;
             const date = review.querySelector('input[name="expected_supplier_refund_rate_date"]');
             if (date instanceof HTMLInputElement) {
@@ -5828,7 +5841,7 @@ document.addEventListener('DOMContentLoaded', () => {
             input.disabled = source === target;
             input.required = !input.disabled && amount > 0;
             input.setAttribute('aria-label', `Supplier Refund in ${target}`);
-            const signature = `${options.serviceId}:${source}:${target}:${amount}:${recordedRate}`;
+            const signature = `${options.serviceId}:${source}:${target}:${amount}`;
             if (input.dataset.equivalentSignature !== signature) {
                 input.value = '';
                 input.dataset.equivalentSignature = signature;
@@ -5845,18 +5858,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     input.value = String(Math.round(toNumber(saved.latestCancelExpectedSupplierRefundAmount || 0)));
                 }
             }
-            if (recordedRate > 0 && input.value === '') {
-                input.value = String(Math.round(amount * recordedRate));
-            }
             const equivalent = source === target ? amount : toNumber(input.value || 0);
-            if (source === bookingCurrency && source !== target && equivalent > 0 && amount > 0 && customerPenaltyCurrencyState) {
-                customerPenaltyCurrencyState.exchangeRateField.value = String(roundExchangeRate(amount / equivalent));
-            }
-            const penaltyRate = customerPenaltyCurrencyState?.rateToBooking() || 0;
-            const keepRecordedRate = recordedRate > 0 && Math.round(equivalent) === Math.round(amount * recordedRate);
             expectedSupplierRefundCurrencyState.exchangeRateField.value = String(
-                keepRecordedRate ? recordedRate
-                    : supplierRefundEquivalentRate(source, target, bookingCurrency, amount, equivalent, penaltyRate)
+                supplierRefundEquivalentRate(source, bookingCurrency, amount, equivalent)
             );
             if (input.disabled || amount === 0) input.setCustomValidity('');
         };
@@ -6505,7 +6509,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const refundDateField = serviceCorrectionRefundForm.elements.namedItem('refund_event_date')
             || serviceCorrectionRefundForm.elements.namedItem('correction_event_date');
         const customerRefundAmount = toNumber(serviceLine?.latestCustomerRefundAmountOnly || 0);
-        const supplierRefundAmount = toNumber(serviceLine?.latestSupplierRefundAmountOnly || 0);
+        const supplierRefundAmount = toNumber(serviceLine?.supplierRefundTotalAmount ?? serviceLine?.latestSupplierRefundAmountOnly ?? 0);
         const customerRefundPosted = (Number.parseInt(String(serviceLine?.latestCustomerRefundEventId || 0), 10) || 0) > 0;
         const supplierRefundPosted = (Number.parseInt(String(serviceLine?.latestSupplierRefundEventId || 0), 10) || 0) > 0;
         const customerRefundDetail = serviceLine?.latestCustomerRefundDetail && typeof serviceLine.latestCustomerRefundDetail === 'object'
@@ -6550,7 +6554,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
         serviceCorrectionSupplierRefundPostedFields.forEach((fieldRow) => {
             if (fieldRow instanceof HTMLElement) {
-                fieldRow.hidden = !supplierRefundPosted;
+                fieldRow.hidden = !supplierRefundPosted || String(serviceLine?.latestSupplierRefundPaymentMethod || '') === 'supplier_credit';
             }
         });
 
@@ -6581,10 +6585,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (serviceCorrectionSupplierRefundSourceAmountInput instanceof HTMLInputElement) {
             if (switchedServiceLine || String(serviceCorrectionSupplierRefundSourceAmountInput.dataset.refundBound || '') !== '1') {
-                serviceCorrectionSupplierRefundSourceAmountInput.value = formatWholeNumberInputValue(toNumber(supplierRefundDetail.refund_source_amount || supplierRefundAmount));
+                serviceCorrectionSupplierRefundSourceAmountInput.value = formatWholeNumberInputValue(toNumber(serviceLine?.supplierRefundTotalSourceAmount ?? supplierRefundDetail.refund_source_amount ?? supplierRefundAmount));
+                serviceCorrectionSupplierRefundSourceAmountInput.dataset.originalSourceAmount = serviceCorrectionSupplierRefundSourceAmountInput.value;
             }
             serviceCorrectionSupplierRefundSourceAmountInput.dataset.refundBound = '1';
             serviceCorrectionSupplierRefundSourceAmountInput.disabled = !supplierRefundPosted;
+        }
+        if (serviceCorrectionSupplierRefundEquivalentInput instanceof HTMLInputElement) {
+            if (switchedServiceLine || serviceCorrectionSupplierRefundEquivalentInput.dataset.refundBound !== '1') {
+                serviceCorrectionSupplierRefundEquivalentInput.value = formatWholeNumberInputValue(supplierRefundAmount);
+            }
+            serviceCorrectionSupplierRefundEquivalentInput.dataset.refundBound = '1';
         }
 
         if (serviceCorrectionCustomerRefundCurrencySelect instanceof HTMLSelectElement) {
@@ -6635,9 +6646,6 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             serviceCorrectionSupplierRefundRateInput.dataset.refundBound = '1';
             serviceCorrectionSupplierRefundRateInput.disabled = !supplierRefundPosted;
-            syncRefundRateVisibility(serviceCorrectionSupplierRefundRateInput,
-                supplierRefundDetail.booking_currency || serviceLine?.currency,
-                serviceCorrectionSupplierRefundCurrencySelect?.value, supplierRefundPosted);
         }
 
         for (const [role, detail] of [['customer', customerRefundDetail], ['supplier', supplierRefundDetail]]) {
@@ -6661,6 +6669,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 serviceCorrectionSupplierRefundMethodSelect.value = method;
             }
             serviceCorrectionSupplierRefundMethodSelect.disabled = !supplierRefundPosted;
+            const methodRow = serviceCorrectionSupplierRefundMethodSelect.closest('.legacy-service-event-field');
+            if (methodRow instanceof HTMLElement) methodRow.hidden = !supplierRefundPosted || method === 'supplier_credit';
+            const sourceRow = serviceCorrectionSupplierRefundSourceAmountInput?.closest('.legacy-service-event-field');
+            if (sourceRow instanceof HTMLElement) sourceRow.hidden = !supplierRefundPosted || method === 'supplier_credit';
         }
         if (serviceCorrectionRefundTreasurySelect instanceof HTMLSelectElement) {
             serviceCorrectionRefundTreasurySelect.dataset.preferredAccountId = String(customerRefundDetail.treasury_account_id || '');
@@ -6720,7 +6732,36 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const sourceAmount = Math.max(toNumber(sourceField.value || 0), 0);
         const selectedCurrency = String(currencyField?.value || bookingCurrency).trim().toUpperCase() || bookingCurrency;
-        const fxRate = Math.max(toNumber(rateField?.value || 0), 0);
+
+        if (role === 'supplier' && !serviceCorrectionSupplierRefundMethodSelect?.disabled
+            && serviceCorrectionSupplierRefundMethodSelect?.value === 'supplier_credit') {
+            const expectedSource = serviceCorrectionRefundForm?.elements?.namedItem('expected_supplier_refund_amount');
+            const expectedCurrency = serviceCorrectionRefundForm?.elements?.namedItem('expected_supplier_refund_currency');
+            const expectedEquivalent = serviceCorrectionRefundForm?.elements?.namedItem('expected_supplier_refund_equivalent_amount');
+            const confirmedSource = Math.max(toNumber(expectedSource?.value || 0), 0);
+            const confirmedCurrency = String(expectedCurrency?.value || bookingCurrency).trim().toUpperCase() || bookingCurrency;
+            const invoiceEquivalent = confirmedCurrency === bookingCurrency
+                ? confirmedSource : Math.max(toNumber(expectedEquivalent?.value || 0), 0);
+            sourceField.value = formatWholeNumberInputValue(confirmedSource);
+            if (currencyField instanceof HTMLSelectElement) currencyField.value = confirmedCurrency;
+            amountField.value = formatWholeNumberInputValue(invoiceEquivalent);
+            if (rateField instanceof HTMLInputElement) {
+                rateField.value = invoiceEquivalent > 0 ? String(roundExchangeRate(confirmedSource / invoiceEquivalent)) : '';
+            }
+            const sourceRow = sourceField.closest('.legacy-service-event-field');
+            if (sourceRow instanceof HTMLElement) sourceRow.hidden = true;
+            const equivalentRow = serviceCorrectionSupplierRefundEquivalentInput?.closest('.legacy-service-event-field');
+            if (equivalentRow instanceof HTMLElement) equivalentRow.hidden = true;
+            if (serviceCorrectionSupplierRefundEquivalentInput instanceof HTMLInputElement) {
+                serviceCorrectionSupplierRefundEquivalentInput.disabled = true;
+                serviceCorrectionSupplierRefundEquivalentInput.required = false;
+            }
+            return;
+        }
+        if (role === 'supplier') {
+            const sourceRow = sourceField.closest('.legacy-service-event-field');
+            if (sourceRow instanceof HTMLElement) sourceRow.hidden = sourceField.disabled;
+        }
 
         if (role === 'customer') {
             if (sourceAmount <= 0.005) {
@@ -6744,6 +6785,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (sourceAmount <= 0.005) {
             amountField.value = '0';
+            const equivalentRow = serviceCorrectionSupplierRefundEquivalentInput?.closest('.legacy-service-event-field');
+            if (equivalentRow instanceof HTMLElement) equivalentRow.hidden = true;
+            if (serviceCorrectionSupplierRefundEquivalentInput instanceof HTMLInputElement) {
+                serviceCorrectionSupplierRefundEquivalentInput.disabled = true;
+            }
             if (rateField instanceof HTMLInputElement && selectedCurrency === bookingCurrency) {
                 rateField.value = '1';
             }
@@ -6752,18 +6798,39 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (selectedCurrency === bookingCurrency) {
             amountField.value = formatNumberInputValue(sourceAmount);
+            const equivalentRow = serviceCorrectionSupplierRefundEquivalentInput?.closest('.legacy-service-event-field');
+            if (equivalentRow instanceof HTMLElement) equivalentRow.hidden = true;
+            if (serviceCorrectionSupplierRefundEquivalentInput instanceof HTMLInputElement) {
+                serviceCorrectionSupplierRefundEquivalentInput.disabled = true;
+            }
             if (rateField instanceof HTMLInputElement) {
                 rateField.value = '1';
             }
             return;
         }
 
-        if (!(rateField instanceof HTMLInputElement) || fxRate <= 0.00000001) {
-            amountField.value = '0';
-            return;
+        const expectedSource = serviceCorrectionRefundForm?.elements?.namedItem('expected_supplier_refund_amount');
+        const expectedCurrency = serviceCorrectionRefundForm?.elements?.namedItem('expected_supplier_refund_currency');
+        const expectedEquivalent = serviceCorrectionRefundForm?.elements?.namedItem('expected_supplier_refund_equivalent_amount');
+        const useExpectedEquivalent = expectedSource instanceof HTMLInputElement
+            && expectedCurrency instanceof HTMLSelectElement
+            && expectedEquivalent instanceof HTMLInputElement
+            && expectedCurrency.value === selectedCurrency
+            && Math.abs(toNumber(expectedSource.value) - sourceAmount) < 0.005;
+        const equivalentField = serviceCorrectionSupplierRefundEquivalentInput;
+        const equivalentRow = equivalentField?.closest('.legacy-service-event-field');
+        if (equivalentRow instanceof HTMLElement) equivalentRow.hidden = useExpectedEquivalent;
+        if (equivalentField instanceof HTMLInputElement) {
+            equivalentField.disabled = useExpectedEquivalent;
+            equivalentField.required = !useExpectedEquivalent;
         }
-
-        amountField.value = formatNumberInputValue(Math.round(sourceAmount / fxRate));
+        const equivalent = useExpectedEquivalent
+            ? Math.max(toNumber(expectedEquivalent.value || 0), 0)
+            : Math.max(toNumber(equivalentField?.value || 0), 0);
+        amountField.value = equivalent > 0 ? formatWholeNumberInputValue(equivalent) : '0';
+        if (rateField instanceof HTMLInputElement) {
+            rateField.value = equivalent > 0 ? String(roundExchangeRate(sourceAmount / equivalent)) : '';
+        }
     };
 
     const syncCorrectionRefundBookedAmounts = () => {
@@ -6970,6 +7037,12 @@ document.addEventListener('DOMContentLoaded', () => {
         if (serviceRefundCurrencyField instanceof HTMLInputElement) {
             serviceRefundCurrencyField.value = invoiceCurrency;
         }
+        if (serviceSupplierCreditEquivalentRow instanceof HTMLElement) {
+            const costCurrency = String(serviceLine?.costCurrency || invoiceCurrency).trim().toUpperCase();
+            serviceSupplierCreditEquivalentRow.dataset.creditCurrency = costCurrency;
+            const label = serviceSupplierCreditEquivalentRow.querySelector('span');
+            if (label) label.textContent = `Supplier Payment Equivalent (${costCurrency})`;
+        }
 
         if (serviceCustomerRefundCurrencyInput instanceof HTMLSelectElement) {
             const selectedCustomerRefundCurrency = String(
@@ -6987,7 +7060,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (serviceCustomerRefundAmount instanceof HTMLInputElement) serviceCustomerRefundAmount.value = '0';
         }
 
-        if (serviceSupplierRefundCurrencyInput instanceof HTMLInputElement) {
+        if (serviceSupplierRefundCurrencyInput instanceof HTMLSelectElement) {
             const selectedSupplierRefundCurrency = String(
                 supplierRefundPosted
                     ? (supplierRefundDetail.refund_currency || invoiceCurrency)
@@ -7020,6 +7093,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         syncRefundProgressNote(serviceLine);
+        syncPartialSupplierRefundEquivalent(serviceLine);
     };
 
     const currentActiveServiceLineForRefund = () => {
@@ -7262,7 +7336,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 serviceCustomerRefundCurrencyInput.dataset.lastCurrency = payoutCurrency;
             }
         }
-        if (serviceSupplierRefundCurrencyInput instanceof HTMLInputElement) {
+        if (serviceSupplierRefundCurrencyInput instanceof HTMLSelectElement) {
             serviceSupplierRefundCurrencyInput.dataset.preferredCurrency = supplierDisplay.currency;
             serviceSupplierRefundCurrencyInput.value = supplierDisplay.currency;
             if (serviceSupplierRefundLabel instanceof HTMLElement) {
@@ -12420,7 +12494,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const serviceSupplierRefundAmount = serviceRefundForm?.elements?.namedItem('supplier_refund_amount') instanceof HTMLInputElement
         ? serviceRefundForm.elements.namedItem('supplier_refund_amount')
         : null;
-    const serviceSupplierRefundCurrencyInput = serviceRefundForm?.elements?.namedItem('supplier_refund_currency') instanceof HTMLInputElement
+    const serviceSupplierPartialEquivalentRow = serviceRefundForm?.querySelector('[data-supplier-refund-partial-equivalent]') || null;
+    const serviceSupplierPartialEquivalentInput = serviceRefundForm?.elements?.namedItem('supplier_refund_equivalent_amount') instanceof HTMLInputElement
+        ? serviceRefundForm.elements.namedItem('supplier_refund_equivalent_amount')
+        : null;
+    const serviceSupplierCreditEquivalentRow = serviceRefundForm?.querySelector('[data-supplier-credit-equivalent]') || null;
+    const serviceSupplierCreditEquivalentInput = serviceRefundForm?.elements?.namedItem('supplier_credit_equivalent_amount') instanceof HTMLInputElement
+        ? serviceRefundForm.elements.namedItem('supplier_credit_equivalent_amount') : null;
+    const serviceSupplierRefundCurrencyInput = serviceRefundForm?.elements?.namedItem('supplier_refund_currency') instanceof HTMLSelectElement
         ? serviceRefundForm.elements.namedItem('supplier_refund_currency')
         : null;
     const serviceSupplierRefundLabel = serviceRefundForm?.querySelector('[data-service-supplier-refund-label]') || null;
@@ -12479,6 +12560,9 @@ document.addEventListener('DOMContentLoaded', () => {
         : null;
     const serviceCorrectionSupplierRefundSourceAmountInput = serviceCorrectionRefundForm?.elements?.namedItem('supplier_refund_source_amount') instanceof HTMLInputElement
         ? serviceCorrectionRefundForm.elements.namedItem('supplier_refund_source_amount')
+        : null;
+    const serviceCorrectionSupplierRefundEquivalentInput = serviceCorrectionRefundForm?.elements?.namedItem('supplier_refund_equivalent_amount') instanceof HTMLInputElement
+        ? serviceCorrectionRefundForm.elements.namedItem('supplier_refund_equivalent_amount')
         : null;
     const serviceCorrectionSupplierRefundRateInput = serviceCorrectionRefundForm?.elements?.namedItem('supplier_refund_exchange_rate') instanceof HTMLInputElement
         ? serviceCorrectionRefundForm.elements.namedItem('supplier_refund_exchange_rate')
@@ -16564,7 +16648,7 @@ document.addEventListener('DOMContentLoaded', () => {
             quoted = document.createElement('input');
             quoted.type = 'number';
             quoted.min = '0.00000001';
-            quoted.step = '0.01';
+            quoted.step = 'any';
             quoted.dataset.refundRateQuote = '1';
             row.append(quoted);
             quoted.addEventListener('input', () => {
@@ -17077,6 +17161,30 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    const syncPartialSupplierRefundEquivalent = (serviceLine = null) => {
+        if (!(serviceSupplierPartialEquivalentRow instanceof HTMLElement)
+            || !(serviceSupplierPartialEquivalentInput instanceof HTMLInputElement)) return;
+        const sourceAmount = Math.max(toNumber(serviceSupplierRefundAmount?.value || 0), 0);
+        const invoiceCurrency = refundFxBookingCurrencyCode();
+        const actualCurrency = String(serviceSupplierRefundCurrencyInput?.value || invoiceCurrency).toUpperCase();
+        const costCurrency = String(serviceSupplierCreditEquivalentRow?.dataset.creditCurrency || invoiceCurrency).toUpperCase();
+        const needsEquivalent = actualCurrency !== invoiceCurrency && sourceAmount > 0.005;
+        const needsCreditEquivalent = sourceAmount > 0.005
+            && serviceSupplierRefundMethodSelect?.value !== 'supplier_credit'
+            && costCurrency !== invoiceCurrency && costCurrency !== actualCurrency;
+        serviceSupplierPartialEquivalentRow.hidden = !needsEquivalent;
+        serviceSupplierPartialEquivalentInput.disabled = !needsEquivalent;
+        serviceSupplierPartialEquivalentInput.required = needsEquivalent;
+        if (!needsEquivalent) serviceSupplierPartialEquivalentInput.value = '';
+        if (serviceSupplierCreditEquivalentRow instanceof HTMLElement
+            && serviceSupplierCreditEquivalentInput instanceof HTMLInputElement) {
+            serviceSupplierCreditEquivalentRow.hidden = !needsCreditEquivalent;
+            serviceSupplierCreditEquivalentInput.disabled = !needsCreditEquivalent;
+            serviceSupplierCreditEquivalentInput.required = needsCreditEquivalent;
+            if (!needsCreditEquivalent) serviceSupplierCreditEquivalentInput.value = '';
+        }
+    };
+
     const syncCustomerRefundTreatment = () => {
         const payNow = customerRefundWillBePaidNow();
         const supplierRefundAmount = Math.max(toNumber(serviceSupplierRefundAmount?.value || 0), 0);
@@ -17107,6 +17215,7 @@ document.addEventListener('DOMContentLoaded', () => {
             syncRefundFxSummary('customer');
         }
         syncRefundFxDefaults('supplier');
+        syncPartialSupplierRefundEquivalent();
         syncRefundTreasurySelector();
     };
     serviceCustomerRefundTreatmentInputs.forEach((input) => {
@@ -17119,6 +17228,10 @@ document.addEventListener('DOMContentLoaded', () => {
     serviceSupplierRefundAmount?.addEventListener('input', () => {
         syncCustomerRefundTreatment();
     });
+    serviceSupplierRefundCurrencyInput?.addEventListener('change', () => {
+        syncPartialSupplierRefundEquivalent();
+        syncSupplierRefundTreasurySelector();
+    });
     if (serviceRefundForm) {
         serviceRefundForm.addEventListener('submit', (event) => {
             syncRefundFxDefaults('customer');
@@ -17129,9 +17242,9 @@ document.addEventListener('DOMContentLoaded', () => {
             const customerRefundCurrency = String(serviceCustomerRefundCurrencyInput?.value || bookingCurrency).trim().toUpperCase() || bookingCurrency;
             const supplierRefundCurrency = String(serviceSupplierRefundCurrencyInput?.value || bookingCurrency).trim().toUpperCase() || bookingCurrency;
             if (supplierRefundAmount > 0.005 && supplierRefundCurrency !== bookingCurrency
-                && serviceSupplierRefundMethodSelect?.value !== 'supplier_credit') {
+                && Math.max(toNumber(serviceSupplierPartialEquivalentInput?.value || 0), 0) <= 0.005) {
                 event.preventDefault();
-                showFeedback('Different-currency supplier money refunds need a treasury FX journal. Use supplier credit only if the supplier kept the value as credit.');
+                showFeedback(`Enter the confirmed supplier refund equivalent in ${bookingCurrency}.`);
                 return;
             }
             if (serviceCustomerRefundSourceAmountInput instanceof HTMLInputElement) {
@@ -17195,7 +17308,10 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     };
     if (serviceSupplierRefundMethodSelect) {
-        serviceSupplierRefundMethodSelect.addEventListener('change', syncSupplierRefundTreasurySelector);
+        serviceSupplierRefundMethodSelect.addEventListener('change', () => {
+            syncPartialSupplierRefundEquivalent();
+            syncSupplierRefundTreasurySelector();
+        });
     }
     if (serviceSupplierRefundTreasurySelect instanceof HTMLSelectElement) {
         const rememberSupplierRefundAccount = () => {
@@ -17307,13 +17423,31 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     };
     if (serviceCorrectionSupplierRefundMethodSelect) {
-        serviceCorrectionSupplierRefundMethodSelect.addEventListener('change', syncCorrectionSupplierRefundTreasurySelector);
+        serviceCorrectionSupplierRefundMethodSelect.addEventListener('change', () => {
+            syncCorrectionRefundBookedAmount('supplier');
+            syncCorrectionSupplierRefundTreasurySelector();
+        });
     }
     serviceCorrectionSupplierRefundCurrencySelect?.addEventListener('change', () => {
         syncCorrectionRefundBookedAmount('supplier');
         syncCorrectionSupplierRefundTreasurySelector();
     });
     serviceCorrectionSupplierRefundSourceAmountInput?.addEventListener('input', () => {
+        if (serviceCorrectionSupplierRefundEquivalentInput instanceof HTMLInputElement
+            && serviceCorrectionSupplierRefundSourceAmountInput.value !== serviceCorrectionSupplierRefundSourceAmountInput.dataset.originalSourceAmount) {
+            serviceCorrectionSupplierRefundEquivalentInput.value = '';
+        }
+        syncCorrectionRefundBookedAmount('supplier');
+    });
+    serviceCorrectionSupplierRefundEquivalentInput?.addEventListener('input', () => {
+        syncCorrectionRefundBookedAmount('supplier');
+    });
+    serviceCorrectionRefundForm?.addEventListener('input', (event) => {
+        if (['expected_supplier_refund_amount', 'expected_supplier_refund_equivalent_amount'].includes(event.target?.name)) {
+            syncCorrectionRefundBookedAmount('supplier');
+        }
+    });
+    serviceCorrectionRefundForm?.elements?.namedItem('expected_supplier_refund_currency')?.addEventListener('change', () => {
         syncCorrectionRefundBookedAmount('supplier');
     });
     serviceCorrectionSupplierRefundRateInput?.addEventListener('input', () => {

@@ -3664,7 +3664,8 @@ final class CustomerPaymentRepository extends BaseRepository
         }
 
         $newReceiptAllocatedAmount = round($receiptAllocatedAmount + $paymentAmountConsumed, 2);
-        $newReceiptUnallocatedAmount = round(max($receiptReceivedAmount - $newReceiptAllocatedAmount, 0), 2);
+        // Returned cash is no longer available for allocation.
+        $newReceiptUnallocatedAmount = round(max($receiptUnallocatedAmount - $paymentAmountConsumed, 0), 2);
         $newReceivableAllocatedAmount = round($receivableAllocatedAmount + $requestedReceivableAmount, 2);
         $newReceivableOutstandingAmount = round(max($receivableDueAmount - $newReceivableAllocatedAmount, 0), 2);
 

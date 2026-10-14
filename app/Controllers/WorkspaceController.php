@@ -3319,6 +3319,8 @@ final class WorkspaceController extends BaseController
             'customerRefundTruthCurrency' => (string) ($serviceRow['customer_refund_truth_currency'] ?? $invoiceCurrency),
             'latestSupplierRefundEventId' => (int) ($serviceRow['latest_supplier_refund_event_id'] ?? 0),
             'latestSupplierRefundAmountOnly' => (float) ($serviceRow['latest_supplier_refund_amount_only'] ?? 0),
+            'supplierRefundTotalAmount' => (float) ($serviceRow['supplier_refund_total_amount'] ?? 0),
+            'supplierRefundTotalSourceAmount' => $serviceRow['supplier_refund_total_source_amount'] ?? null,
             'customerRefundableCreditAmount' => round((float) ($serviceRow['customer_refundable_credit_amount'] ?? 0), 2),
             'customerRefundReceivedAmount' => round((float) ($serviceRow['customer_refund_received_amount'] ?? 0), 2),
             'customerRefundSummary' => (array) ($serviceRow['customer_refund_summary'] ?? []),

@@ -2800,6 +2800,111 @@ final class SupplierRepository extends BaseRepository
         });
     }
 
+    public function releaseRetainedRefundApplications(array $advanceIds, ?int $actorUserId = null, ?string $reason = null): array
+    {
+        return $this->transaction(function () use ($advanceIds, $actorUserId, $reason): array {
+            $advanceIds = array_values(array_unique(array_filter(array_map('intval', $advanceIds),
+                static fn (int $id): bool => $id > 0)));
+            if ($advanceIds === []) return [];
+            sort($advanceIds);
+            $lockAdvance = $this->db->prepare(
+                'SELECT id, currency, deposit_amount, available_amount FROM supplier_advances WHERE id = :id FOR UPDATE'
+            );
+            $applicationsForAdvance = $this->db->prepare(
+                'SELECT aa.id, aa.supplier_advance_id, aa.supplier_obligation_id, aa.application_type,
+                        aa.applied_amount, COALESCE(aa.advance_amount_consumed, aa.applied_amount) AS advance_consumed,
+                        COALESCE(aa.obligation_amount_applied, aa.applied_amount) AS obligation_applied,
+                        o.branch_id, o.booking_reference, o.service_line_reference, o.currency,
+                        o.gross_amount, o.advance_applied_amount, o.net_payable_amount
+                 FROM supplier_advance_applications aa
+                 INNER JOIN supplier_obligations o ON o.id = aa.supplier_obligation_id
+                 WHERE aa.supplier_advance_id = :id ORDER BY aa.id FOR UPDATE'
+            );
+            $deleteApplication = $this->db->prepare('DELETE FROM supplier_advance_applications WHERE id = :id');
+            $restoreAdvance = $this->db->prepare(
+                'UPDATE supplier_advances SET available_amount = available_amount + :amount WHERE id = :id'
+            );
+            $affected = [];
+            foreach ($advanceIds as $advanceId) {
+                $lockAdvance->execute(['id' => $advanceId]);
+                $advance = $lockAdvance->fetch();
+                if ($advance === false) throw new RuntimeException('The retained supplier credit no longer exists.');
+                $applicationsForAdvance->execute(['id' => $advanceId]);
+                $rows = $applicationsForAdvance->fetchAll() ?: [];
+                $released = 0.0;
+                foreach ($rows as $row) {
+                    $amount = round((float) $row['obligation_applied'], 2);
+                    if (strtoupper((string) $row['currency']) !== strtoupper((string) $advance['currency'])
+                        || abs((float) $row['advance_consumed'] - $amount) > 0.005
+                        || abs((float) $row['applied_amount'] - $amount) > 0.005) {
+                        throw new RuntimeException('A cross-currency supplier credit application needs its recorded FX settlement reversed separately. Nothing was changed.');
+                    }
+                    $deleteApplication->execute(['id' => (int) $row['id']]);
+                    $released = round($released + $amount, 2);
+                    $affected[] = [
+                        'application_id' => (int) $row['id'], 'advance_id' => $advanceId,
+                        'obligation_id' => (int) $row['supplier_obligation_id'],
+                        'branch_id' => (int) $row['branch_id'],
+                        'booking_reference' => (string) $row['booking_reference'],
+                        'service_line_reference' => (string) $row['service_line_reference'],
+                        'currency' => (string) $row['currency'], 'amount' => $amount,
+                    ];
+                }
+                if ($released > 0.005) $restoreAdvance->execute(['id' => $advanceId, 'amount' => $released]);
+                if (abs((float) $advance['available_amount'] + $released - (float) $advance['deposit_amount']) > 0.005) {
+                    throw new RuntimeException('Retained supplier credit applications do not reconcile. Nothing was changed.');
+                }
+            }
+            $obligationIds = array_values(array_unique(array_column($affected, 'obligation_id')));
+            $lockObligation = $this->db->prepare(
+                'SELECT id, gross_amount, advance_applied_amount, net_payable_amount
+                 FROM supplier_obligations WHERE id = :id FOR UPDATE'
+            );
+            $updateObligation = $this->db->prepare(
+                'UPDATE supplier_obligations SET advance_applied_amount = :applied,
+                    net_payable_amount = :payable, status = :status WHERE id = :id'
+            );
+            foreach ($obligationIds as $obligationId) {
+                $lockObligation->execute(['id' => $obligationId]);
+                $obligation = $lockObligation->fetch();
+                if ($obligation === false) throw new RuntimeException('A later supplier payable no longer exists. Nothing was changed.');
+                $released = round(array_sum(array_map(static fn (array $row): float =>
+                    (int) $row['obligation_id'] === (int) $obligationId ? (float) $row['amount'] : 0, $affected)), 2);
+                $newApplied = round((float) $obligation['advance_applied_amount'] - $released, 2);
+                $newPayable = round((float) $obligation['net_payable_amount'] + $released, 2);
+                if ($newApplied < -0.005 || $newPayable > (float) $obligation['gross_amount'] + 0.005) {
+                    throw new RuntimeException('A later supplier payable cannot be reopened safely. Nothing was changed.');
+                }
+                $otherSettled = round($this->paymentAllocatedAmountForObligation((int) $obligationId)
+                    + $this->linkedPartyOffsetAmountForObligation((int) $obligationId), 2);
+                $updateObligation->execute([
+                    'id' => $obligationId, 'applied' => max($newApplied, 0), 'payable' => $newPayable,
+                    'status' => $this->obligationStatus((float) $obligation['gross_amount'],
+                        max($newApplied, 0), $otherSettled, $newPayable),
+                ]);
+            }
+            AuditLog::recordRequired($this->app, 'supplier.refund.used_advance_released', [
+                'user_id' => $actorUserId, 'reason' => $reason,
+                'advance_ids' => $advanceIds, 'applications' => $affected,
+            ]);
+            return $affected;
+        });
+    }
+
+    public function retainedRefundAdvanceHasApplications(array $advanceIds): bool
+    {
+        $advanceIds = array_values(array_unique(array_filter(array_map('intval', $advanceIds),
+            static fn (int $id): bool => $id > 0)));
+        if ($advanceIds === []) return false;
+        $placeholders = implode(', ', array_fill(0, count($advanceIds), '?'));
+        $statement = $this->db->prepare(
+            'SELECT 1 FROM supplier_advance_applications
+             WHERE supplier_advance_id IN (' . $placeholders . ') LIMIT 1'
+        );
+        $statement->execute($advanceIds);
+        return $statement->fetchColumn() !== false;
+    }
+
     public function findObligationByBookingAndServiceLine(string $bookingReference, string $serviceLineReference): ?array
     {
         $statement = $this->db->prepare(
@@ -4671,6 +4776,122 @@ final class SupplierRepository extends BaseRepository
     public function applyAdvanceToObligation(int $advanceId, int $obligationId, float $amount, ?int $actorUserId = null): float
     {
         return $this->applyAdvanceToObligationWithType($advanceId, $obligationId, $amount, 'same_currency_manual', $actorUserId);
+    }
+
+    public function advanceApplicationAmountsForObligation(int $obligationId, array $advanceIds): array
+    {
+        $advanceIds = array_values(array_unique(array_filter(array_map('intval', $advanceIds), static fn (int $id): bool => $id > 0)));
+        if ($obligationId <= 0 || $advanceIds === []) {
+            return [];
+        }
+
+        $placeholders = implode(', ', array_fill(0, count($advanceIds), '?'));
+        $statement = $this->db->prepare(
+            'SELECT supplier_advance_id, applied_amount, application_type FROM supplier_advance_applications
+             WHERE supplier_obligation_id = ? AND supplier_advance_id IN (' . $placeholders . ')'
+        );
+        $statement->execute(array_merge([$obligationId], $advanceIds));
+        $amounts = [];
+        foreach ($statement->fetchAll() ?: [] as $row) {
+            if ((string) ($row['application_type'] ?? '') !== 'same_currency_auto') {
+                throw new \RuntimeException('Cancellation correction cannot merge with an unrelated supplier advance application.');
+            }
+            $amounts[(int) $row['supplier_advance_id']] = round((float) $row['applied_amount'], 2);
+        }
+
+        return $amounts;
+    }
+
+    public function releaseCancellationCorrectionAdvances(int $obligationId, array $amountsByAdvance, ?int $actorUserId = null): float
+    {
+        return $this->transaction(function () use ($obligationId, $amountsByAdvance, $actorUserId): float {
+            $amounts = [];
+            foreach ($amountsByAdvance as $advanceId => $amount) {
+                $advanceId = (int) $advanceId;
+                $amount = round((float) $amount, 2);
+                if ($advanceId > 0 && $amount > 0.005) {
+                    $amounts[$advanceId] = $amount;
+                }
+            }
+            if ($amounts === []) {
+                return 0.0;
+            }
+            ksort($amounts);
+
+            $advanceQuery = $this->db->prepare(
+                'SELECT id, supplier_id, currency, deposit_amount, available_amount
+                 FROM supplier_advances WHERE id = :id FOR UPDATE'
+            );
+            $advances = [];
+            foreach ($amounts as $advanceId => $amount) {
+                $advanceQuery->execute(['id' => $advanceId]);
+                $advance = $advanceQuery->fetch();
+                if ($advance === false || (float) $advance['available_amount'] + $amount > (float) $advance['deposit_amount'] + 0.005) {
+                    throw new \RuntimeException('Cancellation correction supplier advance cannot be safely released.');
+                }
+                $advances[$advanceId] = $advance;
+            }
+
+            $obligationQuery = $this->db->prepare(
+                'SELECT id, supplier_id, currency, gross_amount, advance_applied_amount, net_payable_amount
+                 FROM supplier_obligations WHERE id = :id FOR UPDATE'
+            );
+            $obligationQuery->execute(['id' => $obligationId]);
+            $obligation = $obligationQuery->fetch();
+            if ($obligation === false) {
+                throw new \RuntimeException('Cancellation correction supplier obligation was not found.');
+            }
+
+            $applicationQuery = $this->db->prepare(
+                'SELECT id, applied_amount, application_type FROM supplier_advance_applications
+                 WHERE supplier_advance_id = :advance_id AND supplier_obligation_id = :obligation_id FOR UPDATE'
+            );
+            $deleteApplication = $this->db->prepare('DELETE FROM supplier_advance_applications WHERE id = :id');
+            $restoreAdvance = $this->db->prepare(
+                'UPDATE supplier_advances SET available_amount = available_amount + :amount WHERE id = :id'
+            );
+            $total = 0.0;
+            foreach ($amounts as $advanceId => $amount) {
+                $advance = $advances[$advanceId];
+                if ((int) $advance['supplier_id'] !== (int) $obligation['supplier_id']
+                    || (string) $advance['currency'] !== (string) $obligation['currency']) {
+                    throw new \RuntimeException('Cancellation correction supplier advance and obligation do not match.');
+                }
+                $applicationQuery->execute(['advance_id' => $advanceId, 'obligation_id' => $obligationId]);
+                $application = $applicationQuery->fetch();
+                if ($application === false || (string) $application['application_type'] !== 'same_currency_auto'
+                    || abs((float) $application['applied_amount'] - $amount) > 0.005) {
+                    throw new \RuntimeException('Cancellation correction supplier advance was changed by another application; reversal was not posted.');
+                }
+                $deleteApplication->execute(['id' => (int) $application['id']]);
+                $restoreAdvance->execute(['id' => $advanceId, 'amount' => $amount]);
+                $total = round($total + $amount, 2);
+            }
+
+            $newAdvanceApplied = round((float) $obligation['advance_applied_amount'] - $total, 2);
+            $newPayable = round((float) $obligation['net_payable_amount'] + $total, 2);
+            if ($newAdvanceApplied < -0.005 || $newPayable > (float) $obligation['gross_amount'] + 0.005) {
+                throw new \RuntimeException('Cancellation correction supplier obligation does not reconcile to its advance applications.');
+            }
+            $otherSettled = round($this->paymentAllocatedAmountForObligation($obligationId)
+                + $this->linkedPartyOffsetAmountForObligation($obligationId), 2);
+            $status = $this->obligationStatus((float) $obligation['gross_amount'], max($newAdvanceApplied, 0), $otherSettled, $newPayable);
+            $updateObligation = $this->db->prepare(
+                'UPDATE supplier_obligations SET advance_applied_amount = :applied, net_payable_amount = :payable,
+                 status = :status WHERE id = :id'
+            );
+            $updateObligation->execute([
+                'applied' => max($newAdvanceApplied, 0), 'payable' => $newPayable,
+                'status' => $status, 'id' => $obligationId,
+            ]);
+
+            AuditLog::record($this->app, 'supplier.cancellation_correction_advance.released', [
+                'user_id' => $actorUserId, 'supplier_obligation_id' => $obligationId,
+                'amounts_by_advance' => $amounts, 'released_amount' => $total,
+            ]);
+
+            return $total;
+        });
     }
 
     public function applyAdvanceToObligationWithType(

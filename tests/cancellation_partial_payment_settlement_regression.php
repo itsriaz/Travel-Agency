@@ -317,6 +317,7 @@ try {
                 $legacyChangeRejected
                 && $journalCountBeforeNoop === (int) $db->query('SELECT COUNT(*) FROM journal_entries')->fetchColumn());
             $statement->execute([(string) $legacyCancelEvent['payload_json'], (int) $legacyCancelEvent['id']]);
+            $correctionInput['expected_supplier_refund_equivalent_amount'] = '288';
             $serviceWorkspace->correctPenaltyRefundWorkflow($correctionInput, $actorUserId, $accessibleBranchIds);
         }
 

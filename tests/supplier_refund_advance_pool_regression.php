@@ -244,10 +244,10 @@ try {
     $editedCancel = $events->latestPostedEvent((int) $sourceService['id'], 'cancel');
     $editedPayload = json_decode((string) $editedCancel['payload_json'], true, 512, JSON_THROW_ON_ERROR);
     $newAdvanceId = (int) ($editedPayload['supplier_credit_converted_advance_ids'][0] ?? 0);
-    $assert($newAdvanceId > 0 && $newAdvanceId !== $advanceId
-        && (float) ($suppliers->findAdvanceById($advanceId)['available_amount'] ?? -1) === 0.0
-        && (float) ($suppliers->findAdvanceById($newAdvanceId)['available_amount'] ?? -1) === 500.0,
-        'Editing the settlement duplicated or lost the supplier credit');
+    $assert($newAdvanceId === $advanceId
+        && (float) ($suppliers->findAdvanceById($advanceId)['available_amount'] ?? -1) === 500.0
+        && (float) ($editedPayload['supplier_credit_recorded_source_amount'] ?? -1) === 500.0,
+        'An unchanged settlement must retain its original supplier advance without duplicating credit');
     $advanceId = $newAdvanceId;
 
     [$futureBooking, $futureService] = $createService('Future Supplier Payable', 200);

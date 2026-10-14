@@ -1645,6 +1645,48 @@ final class AccountingRepository extends BaseRepository
         return ['credit_journal_id' => $creditJournalId, 'cash_journal_id' => $cashJournalId];
     }
 
+    public function postCrossCurrencySupplierRefund(array $data): array
+    {
+        if (! $this->db->inTransaction()) {
+            throw new RuntimeException('Cross-currency supplier refund requires an enclosing transaction.');
+        }
+        $creditAmount = round((float) ($data['supplier_credit_amount'] ?? 0), 2);
+        $cashAmount = round((float) ($data['refund_source_amount'] ?? 0), 2);
+        $creditCurrency = strtoupper((string) ($data['credit_currency'] ?? ''));
+        $cashCurrency = strtoupper((string) ($data['refund_currency'] ?? ''));
+        if ($creditAmount <= 0 || $cashAmount <= 0 || $creditCurrency === $cashCurrency
+            || $creditCurrency === '' || $cashCurrency === '') {
+            throw new RuntimeException('Supplier refund needs confirmed credit and cash amounts in different currencies.');
+        }
+
+        $assetAccount = $this->paymentMethodAssetAccount($data);
+        $clearing = $this->ensureAccountByCode('SUPPLIER_REFUND_FX_CLEARING', 'Supplier Refund FX Clearing', 'asset', 'debit');
+        $reference = (string) ($data['source_reference'] ?? 'SUPPLIER-REFUND-FX');
+        $header = [
+            'branch_id' => $data['branch_id'], 'booking_reference' => $data['booking_reference'],
+            'entry_date' => $data['entry_date'], 'actor_user_id' => $data['actor_user_id'] ?? null,
+        ];
+        $creditJournalId = $this->postJournalEntry(array_merge($header, [
+            'source_type' => 'service_refund_posted', 'source_reference' => $reference,
+            'currency' => $creditCurrency, 'narration' => 'Supplier credit settled by cash refund in another currency',
+        ]), [
+            ['account_code' => 'SUPPLIER_ADVANCES', 'service_line_reference' => $data['service_line_reference'],
+                'line_description' => 'Supplier credit reduced', 'debit_amount' => 0, 'credit_amount' => $creditAmount],
+            ['account_id' => $clearing['account_id'], 'service_line_reference' => $data['service_line_reference'],
+                'line_description' => 'Supplier refund clearing', 'debit_amount' => $creditAmount, 'credit_amount' => 0],
+        ]);
+        $cashJournalId = $this->postJournalEntry(array_merge($header, [
+            'source_type' => 'service_refund_treasury_posted', 'source_reference' => $reference . '-CASH',
+            'currency' => $cashCurrency, 'narration' => 'Supplier refund received in actual currency',
+        ]), [
+            ['account_id' => $assetAccount['account_id'], 'service_line_reference' => $data['service_line_reference'],
+                'line_description' => 'Supplier cash refund received', 'debit_amount' => $cashAmount, 'credit_amount' => 0],
+            ['account_id' => $clearing['account_id'], 'service_line_reference' => $data['service_line_reference'],
+                'line_description' => 'Supplier refund clearing', 'debit_amount' => 0, 'credit_amount' => $cashAmount],
+        ]);
+        return ['credit_journal_id' => $creditJournalId, 'cash_journal_id' => $cashJournalId];
+    }
+
     public function postServiceRefundReversal(array $data): ?int
     {
         $originalJournalEntryId = (int) ($data['journal_entry_id'] ?? 0);

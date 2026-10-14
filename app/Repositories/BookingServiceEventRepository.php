@@ -255,7 +255,7 @@ final class BookingServiceEventRepository extends BaseRepository
         ]);
     }
 
-    public function latestPostedEvent(int $bookingServiceId, string $eventType): ?array
+    public function latestPostedEvent(int $bookingServiceId, string $eventType, bool $forUpdate = false): ?array
     {
         $statement = $this->db->prepare(
             'SELECT *,
@@ -265,7 +265,7 @@ final class BookingServiceEventRepository extends BaseRepository
                AND event_type = :event_type
                AND event_status = "posted"
              ORDER BY event_date DESC, id DESC
-             LIMIT 1'
+             LIMIT 1' . ($forUpdate ? ' FOR UPDATE' : '')
         );
         $statement->execute([
             'booking_service_id' => $bookingServiceId,
@@ -355,6 +355,9 @@ final class BookingServiceEventRepository extends BaseRepository
         }
         if (isset($data['payload_patch']) && is_array($data['payload_patch'])) {
             $payload = array_replace_recursive($payload, $data['payload_patch']);
+        }
+        if (isset($data['payload_replace']) && is_array($data['payload_replace'])) {
+            $payload = $data['payload_replace'];
         }
 
         $statement = $this->db->prepare(

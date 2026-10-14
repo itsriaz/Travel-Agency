@@ -52,13 +52,11 @@ assert.equal(date.value, '2026-06-26');
 amount.value = '50243'; state.syncFxReview();
 assert.equal(input.value, '', 'Changing source amount invalidates entered equivalent');
 penaltyCurrency = 'PKR'; penaltyRate.value = String(1 / 77); state.syncFxReview();
-assert.equal(review.hidden, true); assert.equal(input.disabled, true); assert.equal(input.required, false);
+assert.equal(review.hidden, false); assert.equal(input.disabled, false); assert.equal(input.required, true);
 sourceCurrency = 'AED'; amount.value = '653'; state.syncFxReview();
-assert.equal(caption.textContent, 'Supplier Refund in PKR');
-assert.equal(review.hidden, false, 'Condition compares penalty currency, not invoice currency');
-input.value = '50242'; state.syncFxReview();
+assert.equal(caption.textContent, 'Supplier Refund in AED');
+assert.equal(review.hidden, true, 'No equivalent is needed when supplier refund matches the booking currency');
 assert.equal(Number(expectedRate.value), 1);
-assert.ok(Math.abs(Number(penaltyRate.value) - 653 / 50242) < 1e-8);
 sourceCurrency = 'PKR'; penaltyCurrency = 'AED'; amount.value = '50242';
 options.serviceLine = { latestCancelExpectedSupplierRefundCurrency: 'PKR', latestCancelExpectedSupplierRefundSourceAmount: 50242,
     latestCancelExpectedSupplierRefundEquivalentCurrency: 'AED', latestCancelExpectedSupplierRefundEquivalentAmount: 653 };
@@ -75,13 +73,15 @@ options.serviceLine.currency = 'AED'; options.serviceLine.costCurrency = 'PKR'; 
 customerPenaltyField.value = '0'; state.syncFxReview();
 assert.equal(review.hidden, false, 'Different currencies show supplier comparison even with zero penalty');
 assert.equal(input.required, true);
-assert.equal(input.value, '1180');
-assert.equal(Number(expectedRate.value), 0.01302083, 'Original recorded rate is preserved, not rederived from rounded equivalent');
-assert.equal(context.validate(state, 'PKR', 90605), '');
+assert.equal(input.value, '', 'The pricing rate cannot silently choose the supplier refund equivalent');
+assert.match(context.validate(state, 'PKR', 90605), /supplier refund in AED/i);
 input.value = '1190'; state.syncFxReview();
-assert.equal(input.value, '1190', 'Staff-entered supplier comparison is not overwritten by the saved booking rate');
+assert.equal(input.value, '1190', 'Staff-entered supplier comparison is retained');
+assert.ok(Math.abs(Number(expectedRate.value) - 1190 / 90605) < 1e-8);
+assert.equal(context.validate(state, 'PKR', 90605), '');
 customerPenaltyField.value = '53'; state.syncFxReview();
-assert.equal(review.hidden, false, 'Nonzero customer penalty restores explicit equivalent requirement');
+assert.equal(review.hidden, false, 'Nonzero customer penalty still requires the equivalent');
+assert.equal(input.value, '1190', 'Changing customer penalty does not erase the entered supplier equivalent');
 customerPenaltyField.value = '0'; options.serviceLine.pricingExchangeRate = 0; state.syncFxReview();
 assert.equal(review.hidden, false, 'No valid recorded conversion means zero penalty cannot waive currency validation');
 options.serviceId = 64; options.serviceLine = { currency: 'AED', costCurrency: 'PKR',
@@ -112,4 +112,4 @@ for (const role of ['customer', 'supplier']) {
 }
 const change = source.slice(source.indexOf('            const convertDisplayedValue = async'), source.indexOf('                const previousRateToBooking =', source.indexOf('            const convertDisplayedValue = async')));
 assert.ok(change.includes("fieldKey === 'expected_supplier_refund'"));
-console.log('[PASS] Penalty-currency comparison, zero-penalty visibility, manual override, same-currency hiding and reload');
+console.log('[PASS] Booking-currency equivalent, manual override, penalty edits, same-currency hiding and reload');

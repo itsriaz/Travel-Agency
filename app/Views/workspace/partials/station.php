@@ -1276,7 +1276,7 @@ Kept here in case manual service save is needed again later.
             ? implode('; ', $supplierSettlementStatusParts) . '.'
             : 'No supplier credit or payable reduction was needed.';
         $latestCustomerRefundAmountOnlyValue = (float) ($activeService['latestCustomerRefundAmountOnly'] ?? 0);
-        $latestSupplierRefundAmountOnlyValue = (float) ($activeService['latestSupplierRefundAmountOnly'] ?? 0);
+        $latestSupplierRefundAmountOnlyValue = (float) ($activeService['supplierRefundTotalAmount'] ?? $activeService['latestSupplierRefundAmountOnly'] ?? 0);
         $settlementDisplayCustomerReleasedCreditValue = max(
             $settlementReleasedCustomerCreditValue,
             $latestCustomerRefundAmountOnlyValue + $settlementRemainingCustomerRefundCreditValue
@@ -1322,7 +1322,7 @@ Kept here in case manual service save is needed again later.
             return $normalized . ' ' . number_format(round($amount, 0), 0, '.', ',');
         };
         $customerPostedSourceAmount = (float) ($latestCustomerRefundDetail['refund_source_amount'] ?? $latestCustomerRefundAmountOnlyValue);
-        $supplierPostedSourceAmount = (float) ($latestSupplierRefundDetail['refund_source_amount'] ?? $latestSupplierRefundAmountOnlyValue);
+        $supplierPostedSourceAmount = (float) ($activeService['supplierRefundTotalSourceAmount'] ?? $latestSupplierRefundDetail['refund_source_amount'] ?? $latestSupplierRefundAmountOnlyValue);
         $customerProgressAvailableValue = $settlementRemainingCustomerRefundCreditValue;
         $supplierProgressExpectedValue = $settlementRemainingSupplierRefundCreditValue;
         if ($settlementExpectedSupplierRefundCurrencyValue === $refundProgressSupplierCurrency) {
@@ -1471,6 +1471,7 @@ Kept here in case manual service save is needed again later.
                     <input type="hidden" name="service_id" value="<?= e((string) ($activeService['serviceId'] ?? 0)) ?>" data-service-settlement-id>
                     <input type="hidden" name="settlement_edit_mode" value="<?= $showSettlementEditForm ? '1' : '0' ?>">
                     <input type="hidden" name="settlement_exchange_rate" value="1" data-settlement-exchange-rate>
+                    <input type="hidden" name="supplier_refund_conversion_mode" value="manual_equivalent">
                     <div class="legacy-service-event-note legacy-service-event-note--settlement-overview">
                         <span>Invoice Amount: <strong><?= e(number_format(round($settlementInvoiceHintAmount, 2), 2) . ' ' . $invoiceCurrency) ?></strong></span>
                         <span>Received: <strong><?= e(number_format(round($settlementPaidHintAmount, 2), 2) . ' ' . $invoiceCurrency) ?></strong></span>
@@ -1498,6 +1499,7 @@ Kept here in case manual service save is needed again later.
                         <span class="settlement-money-control settlement-money-control--single">
                             <input type="number" name="agency_fee_refund_amount" value="<?= e(number_format(round($settlementAgencyFeeRefundValue, 0), 0, '.', '')) ?>" min="0" max="<?= e(number_format(round($settlementAgencyFeeChargedValue, 0), 0, '.', '')) ?>" step="1" aria-label="Service amount returned to customer">
                         </span>
+                        <input type="hidden" name="agency_fee_refund_currency" value="<?= e($invoiceCurrency) ?>">
                     </label>
                     <label class="legacy-service-event-field legacy-service-event-field--calculated settlement-support-field settlement-support-field--total">
                         <span data-settlement-money-label="customer_refund_due">Remaining Customer Refund Due (<?= e($settlementCustomerRefundCurrency) ?>)</span>
@@ -1558,14 +1560,15 @@ Kept here in case manual service save is needed again later.
                     <div class="legacy-service-event-bar__row legacy-service-event-bar__row--refund-supplier" data-service-supplier-refund-entry-row <?= $supplierCreditAutoRecording ? 'hidden' : '' ?>>
                         <div class="legacy-service-event-field legacy-service-event-field--supplier-refund legacy-service-event-field--refund-money">
                             <?php $supplierRefundFixedCurrency = $settlementExpectedSupplierRefundCurrencyValue; ?>
-                            <span data-service-supplier-refund-label>Supplier Refund / Credit (<?= e($supplierRefundFixedCurrency) ?>)</span>
-                            <div class="legacy-service-event-money-select legacy-service-event-money-select--fixed-currency">
-                                <input type="number" name="supplier_refund_amount" value="0" min="0" step="1" aria-label="Supplier refund or retained credit in expected supplier currency" <?= $supplierRefundAlreadyReceived ? 'readonly' : '' ?>>
-                                <span class="legacy-service-event-money-currency" data-service-supplier-refund-currency aria-hidden="true"><?= e($supplierRefundFixedCurrency) ?></span>
+                            <span data-service-supplier-refund-label>Supplier Refund / Credit</span>
+                            <div class="legacy-service-event-money-select">
+                                <input type="number" name="supplier_refund_amount" value="0" min="0" step="1" aria-label="Actual supplier refund or retained credit amount" <?= $supplierRefundAlreadyReceived ? 'readonly' : '' ?>>
+                                <select name="supplier_refund_currency" aria-label="Actual supplier refund currency" <?= $supplierRefundAlreadyReceived ? 'disabled' : '' ?>><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>" <?= $currencyOption === $supplierRefundFixedCurrency ? 'selected' : '' ?>><?= e($currencyOption) ?></option><?php endforeach; ?></select>
                             </div>
-                            <input type="hidden" name="supplier_refund_currency" value="<?= e($supplierRefundFixedCurrency) ?>" <?= $supplierRefundAlreadyReceived ? 'disabled' : '' ?>>
                             <input type="hidden" name="supplier_refund_amount_basis" value="expected_source" <?= $supplierRefundAlreadyReceived ? 'disabled' : '' ?>>
                         </div>
+                        <label class="legacy-service-event-field" data-supplier-refund-partial-equivalent hidden><span>Invoice Equivalent (<?= e($invoiceCurrency) ?>)</span><input type="number" name="supplier_refund_equivalent_amount" min="1" step="1" aria-label="Confirmed supplier refund equivalent in invoice currency" disabled></label>
+                        <label class="legacy-service-event-field" data-supplier-credit-equivalent data-credit-currency="<?= e((string) ($activeService['costCurrency'] ?? $invoiceCurrency)) ?>" hidden><span>Supplier Payment Equivalent (<?= e((string) ($activeService['costCurrency'] ?? $invoiceCurrency)) ?>)</span><input type="number" name="supplier_credit_equivalent_amount" min="1" step="1" aria-label="Confirmed equivalent in original supplier payment currency" disabled></label>
                         <label class="legacy-service-event-field legacy-service-event-field--supplier-method"><span>Supplier Method</span><select name="supplier_refund_payment_method" aria-label="Supplier refund received method" data-service-supplier-refund-method <?= $supplierRefundAlreadyReceived ? 'disabled' : '' ?>>
                             <?php foreach ($newSupplierRefundMethodOptions as $refundMethodValue => $refundMethodLabel): ?>
                                 <option value="<?= e($refundMethodValue) ?>" selected><?= e($refundMethodLabel) ?></option>
@@ -1756,6 +1759,7 @@ Kept here in case manual service save is needed again later.
                     <input type="hidden" name="refund_branch_id" value="<?= e((string) $workspaceBooking['branchId']) ?>" data-service-correction-refund-branch-id>
                     <input type="hidden" name="refund_currency" value="<?= e((string) ($activeService['customerRefundTruthCurrency'] ?? $activeService['currency'] ?? $invoiceCurrency)) ?>" data-service-correction-refund-currency>
                     <input type="hidden" name="settlement_exchange_rate" value="1" data-settlement-exchange-rate>
+                    <input type="hidden" name="supplier_refund_conversion_mode" value="manual_equivalent">
                     <label class="legacy-service-event-field legacy-service-event-field--refund-date"><span>Date</span><input type="date" name="correction_event_date" value="<?= e($settlementEventDateValue) ?>" aria-label="Correction date"></label>
                     <select name="settlement_currency" data-settlement-currency aria-label="Settlement currency" hidden><?php foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>" <?= $currencyOption === (string) ($activeService['currency'] ?? $invoiceCurrency) ? 'selected' : '' ?>><?= e($currencyOption) ?></option><?php endforeach; ?></select>
                     <div class="legacy-service-event-field legacy-service-event-field--customer-penalty legacy-service-event-field--settlement-money">
@@ -1779,6 +1783,7 @@ Kept here in case manual service save is needed again later.
                         <span class="settlement-money-control settlement-money-control--single">
                             <input type="number" name="agency_fee_refund_amount" value="<?= e(number_format(round($settlementAgencyFeeRefundValue, 0), 0, '.', '')) ?>" min="0" max="<?= e(number_format(round($settlementAgencyFeeChargedValue, 0), 0, '.', '')) ?>" step="1" aria-label="Service amount returned to customer">
                         </span>
+                        <input type="hidden" name="agency_fee_refund_currency" value="<?= e($invoiceCurrency) ?>">
                     </label>
                     <label class="legacy-service-event-field legacy-service-event-field--calculated">
                         <span data-settlement-money-label="customer_refund_due">Remaining Customer Refund Due (<?= e($settlementCustomerRefundCurrency) ?>)</span>
@@ -1834,16 +1839,17 @@ Kept here in case manual service save is needed again later.
                         <button class="btn btn-sm" type="button" data-open-refund-workflow="supplier" <?= $cancellationSupplierRefundPending && ! $supplierCreditAutoRecording ? '' : 'hidden' ?>>Record Supplier Credit</button>
                     </div>
                     <input type="hidden" name="supplier_refund_amount" value="<?= e(number_format(round($latestSupplierRefundAmountOnlyValue, 2), 2, '.', '')) ?>">
-                    <div class="legacy-service-event-field legacy-service-event-field--supplier-refund legacy-service-event-field--refund-money legacy-service-correction-support-field legacy-service-correction-support-field--actual-amount legacy-service-event-field--settlement-money">
+                    <div class="legacy-service-event-field legacy-service-event-field--supplier-refund legacy-service-event-field--refund-money legacy-service-correction-support-field legacy-service-correction-support-field--actual-amount legacy-service-event-field--settlement-money" data-correction-supplier-refund-source-row <?= $supplierRefundWasPosted && $latestSupplierRefundMethod !== 'supplier_credit' ? '' : 'hidden' ?>>
                         <span>Supplier Refund / Credit</span>
                         <div class="settlement-money-control">
-                            <input type="number" name="supplier_refund_source_amount" value="<?= e(number_format(round((float) ($latestSupplierRefundDetail['refund_source_amount'] ?? $latestSupplierRefundAmountOnlyValue), 0), 0, '.', '')) ?>" min="0" step="1" aria-label="Actual supplier refund amount in selected currency" <?= $supplierRefundWasPosted ? '' : 'disabled' ?>>
+                            <input type="number" name="supplier_refund_source_amount" value="<?= e(number_format(round($supplierPostedSourceAmount, 0), 0, '.', '')) ?>" min="0" step="1" aria-label="Actual supplier refund amount in selected currency" <?= $supplierRefundWasPosted ? '' : 'disabled' ?>>
                             <select name="supplier_refund_currency" aria-label="Actual supplier refund currency" <?= $supplierRefundWasPosted ? '' : 'disabled' ?>><?php $latestSupplierRefundCurrency = (string) ($latestSupplierRefundDetail['refund_currency'] ?? ($activeService['latestCancelExpectedSupplierRefundCurrency'] ?? ($activeService['supplierTruthCurrency'] ?? ($activeService['costCurrency'] ?? ($activeService['currency'] ?? $invoiceCurrency))))); foreach (['PKR', 'AED', 'USD'] as $currencyOption): ?><option value="<?= e($currencyOption) ?>" <?= $currencyOption === $latestSupplierRefundCurrency ? 'selected' : '' ?>><?= e($currencyOption) ?></option><?php endforeach; ?></select>
                         </div>
                     </div>
-                    <label class="legacy-service-event-field legacy-service-event-field--supplier-fx-rate" <?= $supplierRefundWasPosted && $latestSupplierRefundCurrency !== (string) ($latestSupplierRefundDetail['booking_currency'] ?? $activeService['currency'] ?? $invoiceCurrency) ? '' : 'hidden' ?>><span>Supplier FX Rate</span><input type="number" name="supplier_refund_exchange_rate" value="<?= e(number_format((float) ($latestSupplierRefundDetail['refund_exchange_rate_to_booking'] ?? 1), 8, '.', '')) ?>" min="0.00000001" step="0.00000001" aria-label="Exchange rate from booking currency to actual supplier refund currency" <?= $supplierRefundWasPosted ? '' : 'disabled' ?>></label>
+                    <label class="legacy-service-event-field legacy-service-event-field--supplier-refund-equivalent legacy-service-correction-support-field" hidden><span>Actual Supplier Refund Equivalent (<?= e($invoiceCurrency) ?>)</span><input type="number" name="supplier_refund_equivalent_amount" value="" min="1" step="1" aria-label="Confirmed actual supplier refund equivalent in invoice currency" <?= $supplierRefundWasPosted ? '' : 'disabled' ?>></label>
+                    <input type="hidden" name="supplier_refund_exchange_rate" value="<?= e(number_format((float) ($latestSupplierRefundDetail['refund_exchange_rate_to_booking'] ?? 1), 8, '.', '')) ?>" <?= $supplierRefundWasPosted ? '' : 'disabled' ?>>
                     <input type="hidden" name="supplier_refund_rate_date" value="<?= e((string) ($latestSupplierRefundDetail['refund_rate_date'] ?? '')) ?>">
-                    <label class="legacy-service-event-field legacy-service-event-field--supplier-method" data-correction-supplier-refund-posted-field <?= $supplierRefundWasPosted ? '' : 'hidden' ?>><span>Supplier Method</span><select name="supplier_refund_payment_method" aria-label="Supplier refund received method" data-service-correction-supplier-refund-method <?= $supplierRefundWasPosted ? '' : 'disabled' ?>>
+                    <label class="legacy-service-event-field legacy-service-event-field--supplier-method" data-correction-supplier-refund-posted-field <?= $supplierRefundWasPosted && $latestSupplierRefundMethod !== 'supplier_credit' ? '' : 'hidden' ?>><span>Supplier Method</span><select name="supplier_refund_payment_method" aria-label="Supplier refund received method" data-service-correction-supplier-refund-method <?= $supplierRefundWasPosted ? '' : 'disabled' ?>>
                         <?php foreach ($supplierRefundMethodOptions as $refundMethodValue => $refundMethodLabel): ?>
                             <option value="<?= e($refundMethodValue) ?>" <?= (string) $refundMethodValue === $latestSupplierRefundMethod ? 'selected' : '' ?>><?= e($refundMethodLabel) ?></option>
                         <?php endforeach; ?>

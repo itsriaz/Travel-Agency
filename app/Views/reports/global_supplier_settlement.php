@@ -505,7 +505,7 @@ $clearHistoryUrl = url('/suppliers/settlements/global?' . http_build_query(array
                                             </option>
                                         <?php endforeach; ?>
                                     </select>
-                                    <input type="text" name="void_reason" maxlength="500" placeholder="Optional note" aria-label="Optional correction note for <?= e((string) ($payment['payment_no'] ?? 'payment')) ?>">
+                                    <input type="text" name="void_reason" maxlength="500" placeholder="Remarks" aria-label="Remarks for <?= e((string) ($payment['payment_no'] ?? 'payment')) ?>">
                                     <button class="btn btn-primary btn-sm" type="submit" formaction="<?= e(url('/suppliers/settlements/global/supplier-correct')) ?>">Change Supplier</button>
                                     <?php if ($isBulkPayment): ?>
                                         <button class="btn btn-sm" type="submit" name="correction_action" value="edit" formnovalidate onclick="return confirm('Reverse this payment and reopen its payables for correction?')">Edit</button>

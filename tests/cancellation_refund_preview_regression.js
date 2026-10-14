@@ -84,8 +84,14 @@ assert.equal(proposed.draft, true);
 assert.match(context.render(form, proposed), /Unsaved correction preview/);
 assert.match(label.textContent, /Projected Customer Refund Due \(AED, unsaved\)/);
 assert.equal(context.summary(bk1041, 0, 0, 0).remaining, 0, 'Unchanged saved cancellation remains AED0');
-assert.equal(context.summary({ ...bk1041, latestCustomerRefundEventId: 1 }, 10, 3, 0).remaining, 0,
-    'An already-posted customer payout cannot be represented as an unpaid draft refund');
+const postedPreview = context.summary({
+    ...bk1041,
+    latestCustomerRefundEventId: 1,
+    customerRefundSummary: { currency: 'AED', entitlement: 5, paid: 5, remaining: 0, outstanding: 0 },
+}, 10, 3, 0);
+assert.equal(postedPreview.remaining, 7, 'A posted payout stays paid while a changed settlement previews only the additional credit');
+assert.equal(postedPreview.paid, 5);
+assert.equal(postedPreview.draft, true);
 assert.equal(context.summary({ ...bk1041, latestCancelCustomerRefundBasisAmount: 0 }, 10, 3, 0).remaining, 0,
     'No verified customer payment means no projected customer refund');
 console.log('[PASS] BK-001041 Edit Refund previews AED7 without changing the saved or paid balance');
@@ -100,8 +106,13 @@ assert.equal(feePreview.draft, true);
 assert.match(context.render(form, feePreview), /save the correction before paying/);
 assert.equal(context.summary(feeLine, 90605, 0, 500).remaining, 1280, 'Preview cannot exceed confirmed settled funds');
 assert.equal(context.summary(feeLine, 1180, 0, 0).remaining, 1180, 'Removing draft restores saved balance');
-assert.equal(context.summary({ ...feeLine, customerRefundSummary: { ...feeLine.customerRefundSummary, paid: 600, remaining: 580 } }, 1180, 0, 100).remaining, 580, 'Posted refund remains protected');
-assert.equal(context.summary({ ...feeLine, latestSupplierRefundEventId: 1 }, 1180, 0, 100).remaining, 1180, 'Posted supplier refund also blocks settlement change preview');
+assert.equal(context.summary({ ...feeLine, latestCustomerRefundEventId: 1,
+    customerRefundSummary: { ...feeLine.customerRefundSummary, paid: 600, remaining: 580 } }, 1180, 0, 100).remaining,
+680, 'Posted customer refund stays paid while the fee correction adds only AED100 of credit');
+assert.equal(context.summary({ ...feeLine, latestSupplierRefundEventId: 1 }, 1180, 0, 100).remaining,
+1280, 'Posted supplier refund does not double-count an absent historical expected-refund field');
+assert.equal(context.summary({ ...feeLine, latestSupplierRefundEventId: 1, latestCancelAgencyFeeRefundAmount: 100 }, 1180, 0, 0).remaining,
+1080, 'Decreasing a posted fee refund reduces remaining credit by AED100');
 console.log('[PASS] Unpaid service-charge refund preview is bounded, reversible and explicitly unsaved');
 // Run the actual form-update closure with a supplier-side display currency/rate.
 const updateStart = source.indexOf('        const syncSettlementCorrectionDerivedAmounts = () => {');

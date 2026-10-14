@@ -46,6 +46,8 @@ context.visibility(field, 'PKR', 'AED', true);
 assert.equal(field.row.hidden, false);
 assert.equal(field.hidden, true, 'Canonical rate is hidden; only clearly quoted rate is shown');
 assert.equal(field.row.children[0].value, '77');
+assert.equal(field.row.children[0].min, '0.00000001');
+assert.equal(field.row.children[0].step, 'any', 'A positive whole-number quote such as 77 must not fail browser step validation');
 assert.equal(field.row.caption.textContent, '1 AED equals (PKR)');
 field.value = String(653 / 50242);
 context.visibility(field, 'PKR', 'AED', true);
@@ -73,6 +75,10 @@ assert.ok(expectationControls.includes("date.type = 'hidden'"), 'Expectation FX 
 assert.ok(expectationControls.includes("date.value = options.expectedRefundRateDate || effectiveDate()"), 'Reopening must retain the saved rate date');
 assert.ok(expectationControls.includes("review.className = 'supplier-refund-fx-review'"));
 assert.ok(expectationControls.includes('review.append(caption, input, unit)'));
+assert.ok(expectationControls.includes('const target = bookingCurrency;'),
+    'Supplier equivalent must always use the customer invoice currency');
+assert.ok(!expectationControls.includes('input.value = String(Math.round(amount * recordedRate))'),
+    'Supplier AED equivalent must never be filled from a saved rate');
 const moneyStart = source.indexOf('    const formatMoney =');
 const moneyEnd = source.indexOf('    const escapeHtml =', moneyStart);
 vm.runInContext(source.slice(moneyStart, moneyEnd) + '\nthis.moneyResult = formatCurrencyAmount;', context);
@@ -82,16 +88,33 @@ assert.ok(source.includes('agencyFeeRefundField.value = formatWholeNumberInputVa
 assert.ok(source.includes('serviceCorrectionSupplierRefundSourceAmountInput.value = formatWholeNumberInputValue('));
 assert.ok(refundView.includes('name="supplier_refund_amount_basis" value="expected_source"'));
 assert.ok(refundView.includes('$supplierRefundFixedCurrency = $settlementExpectedSupplierRefundCurrencyValue;'));
-assert.ok(refundView.includes('data-service-supplier-refund-currency'));
+assert.ok(refundView.includes('<select name="supplier_refund_currency"'),
+    'Actual supplier refund currency must be selectable');
+assert.ok(refundView.includes('name="supplier_refund_equivalent_amount"'));
+assert.ok(refundView.includes('data-supplier-refund-partial-equivalent'));
+assert.equal((refundView.match(/name="supplier_refund_conversion_mode" value="manual_equivalent"/g) || []).length, 2,
+    'Both settlement and correction forms submit the manual-equivalent contract');
+assert.ok(refundView.includes('type="hidden" name="supplier_refund_exchange_rate"'));
+assert.ok(!source.includes('syncRefundRateVisibility(serviceCorrectionSupplierRefundRateInput,'),
+    'Supplier correction must use the confirmed equivalent instead of showing a rate quote');
 assert.ok(!refundView.includes('data-open-supplier-refund-fx'));
 assert.ok(!source.includes("serviceSupplierRefundFxButton?.addEventListener('click', () => openRefundFxModal('supplier'))"));
 assert.ok(source.includes('serviceSupplierRefundCurrencyLabel.textContent = selectedSupplierRefundCurrency'));
-assert.ok(source.includes('serviceSupplierRefundCurrencyInput instanceof HTMLInputElement'));
+assert.ok(source.includes('serviceSupplierRefundCurrencyInput instanceof HTMLSelectElement'));
+assert.ok(source.includes('const needsEquivalent = actualCurrency !== invoiceCurrency && sourceAmount > 0.005;'));
+assert.ok(refundView.includes('data-correction-supplier-refund-source-row'));
+assert.ok(source.includes("fieldRow.hidden = !supplierRefundPosted || String(serviceLine?.latestSupplierRefundPaymentMethod || '') === 'supplier_credit';"));
+assert.ok(source.includes("sourceRow.hidden = !supplierRefundPosted || method === 'supplier_credit';"));
+assert.ok(source.includes("sourceField.value = formatWholeNumberInputValue(confirmedSource);"));
+assert.ok(source.includes("currencyField.value = confirmedCurrency;"));
+assert.ok(source.includes("const invoiceEquivalent = confirmedCurrency === bookingCurrency"));
+assert.ok(source.includes("if (sourceRow instanceof HTMLElement) sourceRow.hidden = true;"));
 console.log('[PASS] Same-currency FX hidden; cross-currency quote direction and internal conventions preserved');
 console.log('[PASS] Refund confirmation retains its rate date without changing shared FX');
 assert.ok(expectationControls.includes('Supplier Refund in ${target}'));
 assert.ok(expectationControls.includes('review.hidden = source === target'));
-console.log('[PASS] Supplier comparison uses selected penalty currency and keeps its audit date hidden');
+console.log('[PASS] Supplier equivalent uses invoice currency and keeps its audit date hidden');
 console.log('[PASS] FX quotes display at most two decimals without changing untouched precise rates');
 console.log('[PASS] Resulting refund amounts round to whole figures with no decimal suffix');
-console.log('[PASS] Supplier refund form uses the expected supplier currency without a separate review popup');
+console.log('[PASS] Supplier refund form accepts actual currency and a confirmed invoice equivalent');
+console.log('[PASS] Credit correction hides duplicate source fields and follows expected source amount/currency');

@@ -196,7 +196,7 @@ final class BookingEditTraceService
             'cancel_event_date', 'refund_event_date', 'correction_event_date', 'settlement_event_date',
             'settlement_currency', 'settlement_exchange_rate', 'settlement_edit_mode',
             'customer_penalty_amount', 'customer_penalty_currency', 'customer_penalty_source_amount',
-            'customer_penalty_exchange_rate', 'agency_fee_refund_amount',
+            'customer_penalty_exchange_rate', 'agency_fee_refund_amount', 'agency_fee_refund_currency',
             'expected_supplier_refund_amount', 'expected_supplier_refund_currency',
             'expected_supplier_refund_source_amount', 'expected_supplier_refund_exchange_rate',
             'expected_supplier_refund_equivalent_amount', 'expected_supplier_refund_rate_date',

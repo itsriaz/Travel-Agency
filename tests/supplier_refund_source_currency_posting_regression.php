@@ -93,10 +93,12 @@ try {
     ];
     $cancelSnapshot = json_decode((string) $events->latestPostedEvent($serviceId, 'cancel')['payload_json'], true, 512, JSON_THROW_ON_ERROR);
     $deriveExpectedSource = new ReflectionMethod(\App\Services\ServiceWorkspaceService::class, 'normalizeExpectedSourceSupplierRefundInput');
-    $partial = $deriveExpectedSource->invoke($workspace, array_replace($refundInput, ['supplier_refund_amount' => 25000]), $cancelSnapshot, 'AED', 'AED');
+    $partial = $deriveExpectedSource->invoke($workspace, array_replace($refundInput, [
+        'supplier_refund_amount' => 25000, 'supplier_refund_equivalent_amount' => 325,
+    ]), $cancelSnapshot, 'AED', 'AED');
     $assert((float) $partial['supplier_refund_amount'] === 325.0
         && (float) $partial['supplier_refund_source_amount'] === 25000.0,
-        'Partial PKR supplier recovery did not derive its AED bookkeeping equivalent');
+        'Partial PKR supplier recovery did not retain the manually confirmed AED equivalent');
     $missingEquivalent = $cancelSnapshot;
     unset(
         $missingEquivalent['expected_supplier_refund_booking_amount'],
@@ -116,16 +118,18 @@ try {
     } catch (RuntimeException $error) {
         $assert(str_contains($error->getMessage(), 'Invalid supplier refund amount basis'), $error->getMessage());
     }
+    $db->exec('SAVEPOINT supplier_actual_differs_from_expected');
     try {
         $workspace->refundService(array_replace($refundInput, [
-            'supplier_refund_currency' => 'AED',
+            'supplier_refund_currency' => 'AED', 'supplier_refund_amount' => 653,
         ]), 1, [1, 2]);
-        throw new RuntimeException('Unexpected AED supplier source was accepted without confirmation');
-    } catch (RuntimeException $error) {
-        $assert(str_contains($error->getMessage(), 'differs from the saved expected currency'), $error->getMessage());
+        $assert((string) ($events->latestPostedEvent($serviceId, 'refund')['currency'] ?? '') === 'AED',
+            'Actual supplier refund currency may differ from saved expected currency');
+    } finally {
+        $db->exec('ROLLBACK TO SAVEPOINT supplier_actual_differs_from_expected');
     }
     $assert((int) $db->query('SELECT COUNT(*) FROM booking_service_events')->fetchColumn() === $before,
-        'Rejected AED source wrote an event');
+        'Refund currency trial left no posted event');
     try {
         $workspace->refundService(array_replace($refundInput, ['supplier_refund_amount' => 50243]), 1, [1, 2]);
         throw new RuntimeException('Supplier source amount above the saved expectation was accepted');
@@ -142,6 +146,44 @@ try {
     }
     $assert((int) $db->query('SELECT COUNT(*) FROM booking_service_events')->fetchColumn() === $before,
         'Rejected cross-currency supplier money wrote an event');
+    $pkrFxCashId = $treasury->saveAccount([
+        'branch_id' => 2, 'account_type' => 'cash', 'account_name' => 'FX ' . random_int(100000, 999999) . ' PKR refund fixture',
+        'currency' => 'PKR', 'is_active' => 1, 'is_default' => 0, 'opening_balance' => 0,
+        'created_by_user_id' => 1,
+    ], [1, 2]);
+    $db->exec('SAVEPOINT supplier_cross_currency_cash_trial');
+    try {
+        $workspace->refundService(array_replace($refundInput, [
+            'supplier_refund_payment_method' => 'cash',
+            'supplier_refund_treasury_account_id' => $pkrFxCashId,
+            'supplier_refund_equivalent_amount' => 653,
+        ]), 1, [1, 2]);
+        $crossEvent = $events->latestPostedEvent($serviceId, 'refund');
+        $crossPayload = json_decode((string) $crossEvent['payload_json'], true, 512, JSON_THROW_ON_ERROR);
+        $creditJournal = (int) ($crossEvent['journal_entry_id'] ?? 0);
+        $cashJournal = (int) ($crossPayload['supplier_refund_treasury_journal_id'] ?? 0);
+        $journalCurrency = static function (PDO $db, int $journalId): string {
+            $statement = $db->prepare('SELECT currency FROM journal_entries WHERE id = ?');
+            $statement->execute([$journalId]);
+            return (string) $statement->fetchColumn();
+        };
+        $assert($creditJournal > 0 && $cashJournal > 0
+            && $journalCurrency($db, $creditJournal) === 'AED'
+            && $journalCurrency($db, $cashJournal) === 'PKR'
+            && (float) ($crossPayload['cash_refund_credit_consumption_amount'] ?? 0) === 653.0,
+            'AED supplier credit falls by AED 653 while PKR 50,242 cash is received');
+        $workspace->reverseRefundService([
+            'booking_id' => $bookingId, 'service_id' => $serviceId,
+            'refund_event_id' => (int) $crossEvent['id'], 'refund_scope' => 'supplier',
+            'refund_reverse_reason' => 'Rollback-only cross-currency supplier refund reversal',
+        ], 1, [1, 2]);
+        $reversal = $events->findPostedEventById((int) $crossEvent['id'], 'refund');
+        $assert($reversal === null && $suppliers->availableRefundableCreditForService(
+            (int) $service['supplier_id'], $reference, 'AED') >= 653.0,
+            'Cross-currency supplier refund reverses both journals and restores AED credit');
+    } finally {
+        $db->exec('ROLLBACK TO SAVEPOINT supplier_cross_currency_cash_trial');
+    }
     $suppliers->createSupplierPayment([
         'supplier_id' => (int) $service['supplier_id'], 'branch_id' => 2,
         'booking_reference' => 'GLOBAL', 'payment_no' => $suppliers->nextSupplierPaymentNumber(),
@@ -211,12 +253,15 @@ try {
         $cashEvent = $events->latestPostedEvent($serviceId, 'refund');
         $cashDetail = (new \App\Repositories\BookingServiceRefundDetailRepository($app))
             ->findByServiceEventId((int) $cashEvent['id']);
-        $cashJournal = $db->query('SELECT currency FROM journal_entries WHERE id = '
+        $cashPayload = json_decode((string) $cashEvent['payload_json'], true, 512, JSON_THROW_ON_ERROR);
+        $creditJournal = $db->query('SELECT currency FROM journal_entries WHERE id = '
             . (int) ($cashEvent['journal_entry_id'] ?? 0))->fetchColumn();
-        $assert($cashJournal === 'PKR'
+        $cashJournal = $db->query('SELECT currency FROM journal_entries WHERE id = '
+            . (int) ($cashPayload['supplier_refund_treasury_journal_id'] ?? 0))->fetchColumn();
+        $assert($creditJournal === 'AED' && $cashJournal === 'PKR'
             && ($cashDetail['refund_currency'] ?? '') === 'PKR'
             && (float) ($cashDetail['refund_source_amount'] ?? 0) === 50242.0,
-            'Actual PKR supplier cash refund posted in the AED booking currency');
+            'Actual PKR supplier cash and AED credit posted in their own currencies');
     } finally {
         $db->exec('ROLLBACK TO SAVEPOINT supplier_source_cash_trial');
     }
