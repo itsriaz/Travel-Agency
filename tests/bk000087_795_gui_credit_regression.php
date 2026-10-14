@@ -23,6 +23,51 @@ $sourceBooking = $db->query('SELECT branch_id, lead_traveler_id FROM bookings WH
 $eligible = $payments->availableBookingCredits(2, $customerId, 'AED', 'BK-000795');
 $receiptIds = array_map(static fn (array $row): int => (int) $row['id'], $eligible);
 $wrongCustomer = $payments->availableBookingCredits(2, $customerId + 1000000, 'AED', 'BK-000795');
+if ((float) ($source['unallocated_amount'] ?? 0) <= 0.005) {
+    $transferStatement = $db->prepare('SELECT COUNT(*) AS transfer_count,
+            COALESCE(SUM(cra.payment_amount_consumed), 0) AS transferred_amount
+        FROM customer_receipt_allocations cra
+        INNER JOIN customer_receivable_items cri ON cri.id = cra.customer_receivable_item_id
+        WHERE cra.customer_receipt_id = :receipt_id
+          AND cri.booking_reference = :target_booking_reference');
+    $transferStatement->execute([
+        'receipt_id' => 92,
+        'target_booking_reference' => 'BK-000795',
+    ]);
+    $transfer = $transferStatement->fetch(PDO::FETCH_ASSOC) ?: [];
+    $transferred = (float) ($transfer['transferred_amount'] ?? 0);
+    $sourcePreview = (new \App\Services\CustomerPaymentFoundationService($app))
+        ->buildWorkspacePreview('BK-000087', $customerId, [2]);
+    $targetPreview = (new \App\Services\CustomerPaymentFoundationService($app))
+        ->buildWorkspacePreview('BK-000795', $customerId, [2]);
+    $outgoing = array_values(array_filter($sourcePreview['outgoingBookingCredits'] ?? [],
+        static fn (array $row): bool => (int) ($row['receiptId'] ?? 0) === 92
+            && ($row['bookingReference'] ?? '') === 'BK-000795'));
+    $incoming = array_values(array_filter($targetPreview['incomingBookingCredits'] ?? [],
+        static fn (array $row): bool => (int) ($row['receiptId'] ?? 0) === 92
+            && ($row['receiptBookingReference'] ?? '') === 'BK-000087'));
+    $usedInPreview = static fn (array $rows): float => array_reduce($rows,
+        static fn (float $sum, array $row): float => $sum + (float) ($row['paymentAmountConsumed'] ?? 0), 0.0);
+    if ((int) ($source['traveler_id'] ?? 0) !== 0
+        || (int) ($sourceBooking['lead_traveler_id'] ?? 0) !== $customerId
+        || (int) ($sourceBooking['branch_id'] ?? 0) !== (int) $booking['branch_id']
+        || (string) ($source['status'] ?? '') !== 'fully_allocated'
+        || (int) ($transfer['transfer_count'] ?? 0) < 1
+        || abs($transferred - (float) ($source['received_amount'] ?? 0)) > 0.005
+        || abs($transferred - (float) ($source['allocated_amount'] ?? 0)) > 0.005
+        || (float) ($source['returned_amount'] ?? 0) !== 0.0
+        || in_array(92, $receiptIds, true)
+        || in_array(92, array_map(static fn (array $row): int => (int) $row['id'], $wrongCustomer), true)
+        || abs((float) ($sourcePreview['summary']['customerCredit']['AED'] ?? 0)) > 0.005
+        || abs($usedInPreview($outgoing) - $transferred) > 0.005
+        || abs($usedInPreview($incoming) - $transferred) > 0.005) {
+        fwrite(STDERR, '[FAIL] Fully transferred legacy credit is missing from history or offered again.' . PHP_EOL);
+        exit(1);
+    }
+    echo '[PASS] Legacy AED ' . number_format($transferred, 0)
+        . ' credit transferred to BK-000795 is traced once and cannot be spent again.' . PHP_EOL;
+    exit(0);
+}
 if ((int) ($source['traveler_id'] ?? 0) !== 0
     || (int) ($sourceBooking['lead_traveler_id'] ?? 0) !== $customerId
     || (int) ($sourceBooking['branch_id'] ?? 0) !== (int) $booking['branch_id']
