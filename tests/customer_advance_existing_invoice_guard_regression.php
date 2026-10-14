@@ -4,7 +4,26 @@ declare(strict_types=1);
 
 $root = dirname(__DIR__);
 $repositorySource = (string) file_get_contents($root . '/app/Repositories/CustomerPaymentRepository.php');
-$reportSource = (string) file_get_contents($root . '/app/Services/ReportService.php');
+defined('BASE_PATH') || define('BASE_PATH', $root);
+require_once BASE_PATH . '/app/Helpers/functions.php';
+require_once BASE_PATH . '/app/Core/bootstrap.php';
+
+$app = \App\Core\App::bootstrap(BASE_PATH);
+$report = new \App\Services\ReportService($app);
+$ledgerRows = new ReflectionMethod($report, 'customerLedgerRowsForCustomer');
+$transfer = [
+    'row_type' => 'customer_credit_transfer',
+    'receipt_purpose' => 'customer_advance',
+    'suppress_customer_movement' => true,
+    'transfer_direction' => 'target',
+    'transfer_amount' => 500,
+    'currency' => 'AED',
+    'booking_date' => '2026-10-14',
+    'counterpart_booking_reference' => 'BK-TEST',
+];
+$advanceRows = $ledgerRows->invoke($report, $transfer, ['AED' => 77.0]);
+$creditRows = $ledgerRows->invoke($report,
+    array_replace($transfer, ['receipt_purpose' => 'booking_payment']), ['AED' => 77.0]);
 
 $checks = [
     'Automatic advance allocation is limited to actual service-sale invoices' =>
@@ -17,7 +36,9 @@ $checks = [
         str_contains($repositorySource, 'AND cri.status IN ("open", "partially_paid")')
         && str_contains($repositorySource, 'AND cri.outstanding_amount > 0'),
     'Customer-wide ledger omits internal advance-to-invoice application rows' =>
-        str_contains($reportSource, "if (\$suppressMovement) {\n                return [];\n            }"),
+        $advanceRows === []
+        && count($creditRows) === 1
+        && abs((float) ($creditRows[0]['raw_debit_amount'] ?? 0) - 500.0) < 0.005,
 ];
 
 $failed = false;
