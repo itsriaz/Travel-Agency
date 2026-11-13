@@ -1,0 +1,25 @@
+{
+    "supplier_id": 349,
+    "correction_reference": "AIRBLUE-SPAY267-75277-ATOMIC",
+    "audit_log_id": 58246,
+    "supplier_ledger": {
+        "branch_1": {"row_count": 75, "debit_total": 4313974, "credit_total": 6558477, "net_advance": 2244503},
+        "branch_2": {"row_count": 142, "debit_total": 10859359, "credit_total": 8732719, "net_advance": -2126640},
+        "all_branches": {"row_count": 203, "debit_total": 15173333, "credit_total": 15291196, "net_advance": 117863}
+    },
+    "customer_receivables": [
+        {"branch_id": 1, "currency": "PKR", "row_count": 319, "due_amount": "33784026.00", "allocated_amount": "31678456.00", "outstanding_amount": "2105570.00"},
+        {"branch_id": 2, "currency": "AED", "row_count": 867, "due_amount": "1064225.11", "allocated_amount": "891266.72", "outstanding_amount": "172958.39"},
+        {"branch_id": 2, "currency": "PKR", "row_count": 2, "due_amount": "171000.00", "allocated_amount": "171000.00", "outstanding_amount": "0.00"}
+    ],
+    "cash_swt_pkr": {"row_count": 550, "debit": "68383219.01", "credit": "72318063.00", "net": "-3934843.99"},
+    "supplier_payment": {"payment_no": "SPAY-000267", "paid_amount": 1090171, "direct_allocations": 1089899, "converted_advance": 272},
+    "supplier_advances": {
+        "36": {"deposit": 400000, "used": 314440, "available": 85560},
+        "69": {"deposit": 272, "used": 272, "available": 0}
+    },
+    "supplier_account_net": {"net": 117863, "bills": 13762659, "payments": 13880522},
+    "correction_journal_count": 15,
+    "unbalanced_correction_journals": 0,
+    "affected_supplier_payables_open": 0
+}

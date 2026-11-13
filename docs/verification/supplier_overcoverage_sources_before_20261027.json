@@ -1,0 +1,484 @@
+{
+    "positions": {
+        "371": [
+            {
+                "currency": "AED",
+                "expected_net_position": 631,
+                "actual_net_position": -4027,
+                "ledger_net_position": 631,
+                "difference": 4658
+            },
+            {
+                "currency": "PKR",
+                "expected_net_position": -49982,
+                "actual_net_position": -49982,
+                "ledger_net_position": -49982,
+                "difference": 0
+            }
+        ],
+        "418": [
+            {
+                "currency": "PKR",
+                "expected_net_position": 137152,
+                "actual_net_position": 124172,
+                "ledger_net_position": 137152,
+                "difference": 12980
+            }
+        ],
+        "419": [
+            {
+                "currency": "AED",
+                "expected_net_position": 0,
+                "actual_net_position": -740,
+                "ledger_net_position": 0,
+                "difference": 740
+            }
+        ],
+        "422": [
+            {
+                "currency": "AED",
+                "expected_net_position": 985,
+                "actual_net_position": 0,
+                "ledger_net_position": 985,
+                "difference": 985
+            }
+        ]
+    },
+    "obligations": [
+        {
+            "id": 136,
+            "supplier_id": 419,
+            "branch_id": 2,
+            "booking_reference": "BK-000136",
+            "currency": "AED",
+            "gross_amount": "740.00",
+            "advance_applied_amount": "0.00",
+            "net_payable_amount": "0.00",
+            "status": "paid"
+        },
+        {
+            "id": 183,
+            "supplier_id": 371,
+            "branch_id": 2,
+            "booking_reference": "BK-000184",
+            "currency": "AED",
+            "gross_amount": "668.00",
+            "advance_applied_amount": "50.00",
+            "net_payable_amount": "0.00",
+            "status": "paid"
+        },
+        {
+            "id": 250,
+            "supplier_id": 422,
+            "branch_id": 2,
+            "booking_reference": "BK-000252",
+            "currency": "AED",
+            "gross_amount": "1000.00",
+            "advance_applied_amount": "0.00",
+            "net_payable_amount": "0.00",
+            "status": "paid"
+        },
+        {
+            "id": 441,
+            "supplier_id": 418,
+            "branch_id": 1,
+            "booking_reference": "BK-000450",
+            "currency": "PKR",
+            "gross_amount": "251784.00",
+            "advance_applied_amount": "12980.00",
+            "net_payable_amount": "0.00",
+            "status": "paid"
+        },
+        {
+            "id": 464,
+            "supplier_id": 371,
+            "branch_id": 2,
+            "booking_reference": "BK-000472",
+            "currency": "AED",
+            "gross_amount": "641.00",
+            "advance_applied_amount": "641.00",
+            "net_payable_amount": "0.00",
+            "status": "paid"
+        },
+        {
+            "id": 474,
+            "supplier_id": 371,
+            "branch_id": 2,
+            "booking_reference": "BK-000478",
+            "currency": "AED",
+            "gross_amount": "1680.00",
+            "advance_applied_amount": "1680.00",
+            "net_payable_amount": "0.00",
+            "status": "paid"
+        },
+        {
+            "id": 492,
+            "supplier_id": 371,
+            "branch_id": 2,
+            "booking_reference": "BK-000493",
+            "currency": "AED",
+            "gross_amount": "665.00",
+            "advance_applied_amount": "665.00",
+            "net_payable_amount": "0.00",
+            "status": "paid"
+        },
+        {
+            "id": 558,
+            "supplier_id": 371,
+            "branch_id": 2,
+            "booking_reference": "BK-000550",
+            "currency": "AED",
+            "gross_amount": "1625.00",
+            "advance_applied_amount": "1625.00",
+            "net_payable_amount": "0.00",
+            "status": "paid"
+        }
+    ],
+    "payment_allocations": [
+        {
+            "id": 1,
+            "supplier_obligation_id": 136,
+            "supplier_payment_id": 1,
+            "payment_no": "SPAY-000001",
+            "paid_amount": "740.00",
+            "payment_allocated_amount": "740.00",
+            "unallocated_amount": "0.00",
+            "status": "fully_allocated",
+            "allocated_amount": "740.00"
+        },
+        {
+            "id": 4,
+            "supplier_obligation_id": 250,
+            "supplier_payment_id": 4,
+            "payment_no": "SPAY-000004",
+            "paid_amount": "985.00",
+            "payment_allocated_amount": "985.00",
+            "unallocated_amount": "0.00",
+            "status": "fully_allocated",
+            "allocated_amount": "985.00"
+        },
+        {
+            "id": 5,
+            "supplier_obligation_id": 250,
+            "supplier_payment_id": 5,
+            "payment_no": "SPAY-000005",
+            "paid_amount": "15.00",
+            "payment_allocated_amount": "15.00",
+            "unallocated_amount": "0.00",
+            "status": "void",
+            "allocated_amount": "15.00"
+        },
+        {
+            "id": 105,
+            "supplier_obligation_id": 183,
+            "supplier_payment_id": 36,
+            "payment_no": "SPAY-000028",
+            "paid_amount": "3000.00",
+            "payment_allocated_amount": "3000.00",
+            "unallocated_amount": "0.00",
+            "status": "fully_allocated",
+            "allocated_amount": "665.00"
+        },
+        {
+            "id": 152,
+            "supplier_obligation_id": 464,
+            "supplier_payment_id": 48,
+            "payment_no": "SPAY-000040",
+            "paid_amount": "2500.00",
+            "payment_allocated_amount": "2500.00",
+            "unallocated_amount": "0.00",
+            "status": "fully_allocated",
+            "allocated_amount": "108.00"
+        },
+        {
+            "id": 153,
+            "supplier_obligation_id": 464,
+            "supplier_payment_id": 49,
+            "payment_no": "SPAY-000041",
+            "paid_amount": "4000.00",
+            "payment_allocated_amount": "4000.00",
+            "unallocated_amount": "0.00",
+            "status": "fully_allocated",
+            "allocated_amount": "533.00"
+        },
+        {
+            "id": 156,
+            "supplier_obligation_id": 474,
+            "supplier_payment_id": 49,
+            "payment_no": "SPAY-000041",
+            "paid_amount": "4000.00",
+            "payment_allocated_amount": "4000.00",
+            "unallocated_amount": "0.00",
+            "status": "fully_allocated",
+            "allocated_amount": "1680.00"
+        },
+        {
+            "id": 161,
+            "supplier_obligation_id": 492,
+            "supplier_payment_id": 50,
+            "payment_no": "SPAY-000042",
+            "paid_amount": "4000.00",
+            "payment_allocated_amount": "2542.00",
+            "unallocated_amount": "0.00",
+            "status": "fully_allocated",
+            "allocated_amount": "665.00"
+        },
+        {
+            "id": 200,
+            "supplier_obligation_id": 250,
+            "supplier_payment_id": 53,
+            "payment_no": "SPAY-000045",
+            "paid_amount": "1000.00",
+            "payment_allocated_amount": "1000.00",
+            "unallocated_amount": "0.00",
+            "status": "fully_allocated",
+            "allocated_amount": "1000.00"
+        },
+        {
+            "id": 201,
+            "supplier_obligation_id": 136,
+            "supplier_payment_id": 54,
+            "payment_no": "SPAY-000046",
+            "paid_amount": "740.00",
+            "payment_allocated_amount": "740.00",
+            "unallocated_amount": "0.00",
+            "status": "void",
+            "allocated_amount": "740.00"
+        },
+        {
+            "id": 217,
+            "supplier_obligation_id": 558,
+            "supplier_payment_id": 65,
+            "payment_no": "SPAY-000053",
+            "paid_amount": "5000.00",
+            "payment_allocated_amount": "5000.00",
+            "unallocated_amount": "0.00",
+            "status": "fully_allocated",
+            "allocated_amount": "1625.00"
+        },
+        {
+            "id": 284,
+            "supplier_obligation_id": 441,
+            "supplier_payment_id": 90,
+            "payment_no": "SPAY-000078",
+            "paid_amount": "300000.00",
+            "payment_allocated_amount": "300000.00",
+            "unallocated_amount": "0.00",
+            "status": "fully_allocated",
+            "allocated_amount": "251784.00"
+        },
+        {
+            "id": 862,
+            "supplier_obligation_id": 136,
+            "supplier_payment_id": 230,
+            "payment_no": "SPAY-000218",
+            "paid_amount": "3920.00",
+            "payment_allocated_amount": "3920.00",
+            "unallocated_amount": "0.00",
+            "status": "fully_allocated",
+            "allocated_amount": "740.00"
+        }
+    ],
+    "advance_applications": [
+        {
+            "id": 3,
+            "supplier_obligation_id": 464,
+            "supplier_advance_id": 4,
+            "applied_amount": "641.00",
+            "advance_amount_consumed": "641.00",
+            "obligation_amount_applied": "641.00",
+            "deposit_amount": "3000.00",
+            "available_amount": "0.00"
+        },
+        {
+            "id": 4,
+            "supplier_obligation_id": 474,
+            "supplier_advance_id": 4,
+            "applied_amount": "1680.00",
+            "advance_amount_consumed": "1680.00",
+            "obligation_amount_applied": "1680.00",
+            "deposit_amount": "3000.00",
+            "available_amount": "0.00"
+        },
+        {
+            "id": 13,
+            "supplier_obligation_id": 183,
+            "supplier_advance_id": 4,
+            "applied_amount": "50.00",
+            "advance_amount_consumed": "50.00",
+            "obligation_amount_applied": "50.00",
+            "deposit_amount": "3000.00",
+            "available_amount": "0.00"
+        },
+        {
+            "id": 17,
+            "supplier_obligation_id": 492,
+            "supplier_advance_id": 11,
+            "applied_amount": "388.00",
+            "advance_amount_consumed": "388.00",
+            "obligation_amount_applied": "388.00",
+            "deposit_amount": "3000.00",
+            "available_amount": "0.00"
+        },
+        {
+            "id": 18,
+            "supplier_obligation_id": 492,
+            "supplier_advance_id": 12,
+            "applied_amount": "277.00",
+            "advance_amount_consumed": "277.00",
+            "obligation_amount_applied": "277.00",
+            "deposit_amount": "3000.00",
+            "available_amount": "0.00"
+        },
+        {
+            "id": 36,
+            "supplier_obligation_id": 558,
+            "supplier_advance_id": 16,
+            "applied_amount": "1625.00",
+            "advance_amount_consumed": "1625.00",
+            "obligation_amount_applied": "1625.00",
+            "deposit_amount": "4000.00",
+            "available_amount": "0.00"
+        },
+        {
+            "id": 64,
+            "supplier_obligation_id": 441,
+            "supplier_advance_id": 22,
+            "applied_amount": "12980.00",
+            "advance_amount_consumed": "12980.00",
+            "obligation_amount_applied": "12980.00",
+            "deposit_amount": "12980.00",
+            "available_amount": "0.00"
+        }
+    ],
+    "coverage_failures": [
+        {
+            "obligation_id": 136,
+            "supplier_id": 419,
+            "branch_id": 2,
+            "booking_reference": "BK-000136",
+            "currency": "AED",
+            "gross_amount": "740.00",
+            "advance_applied_amount": "0.00",
+            "advance_application_ids": "",
+            "payment_allocated_amount": "1480.00",
+            "payment_allocation_ids": "862,1",
+            "linked_offset_amount": "0.00",
+            "linked_offset_ids": "",
+            "actual_open_amount": "0.00",
+            "expected_open_amount": "-740.00"
+        },
+        {
+            "obligation_id": 183,
+            "supplier_id": 371,
+            "branch_id": 2,
+            "booking_reference": "BK-000184",
+            "currency": "AED",
+            "gross_amount": "668.00",
+            "advance_applied_amount": "50.00",
+            "advance_application_ids": "13",
+            "payment_allocated_amount": "665.00",
+            "payment_allocation_ids": "105",
+            "linked_offset_amount": "0.00",
+            "linked_offset_ids": "",
+            "actual_open_amount": "0.00",
+            "expected_open_amount": "-47.00"
+        },
+        {
+            "obligation_id": 250,
+            "supplier_id": 422,
+            "branch_id": 2,
+            "booking_reference": "BK-000252",
+            "currency": "AED",
+            "gross_amount": "1000.00",
+            "advance_applied_amount": "0.00",
+            "advance_application_ids": "",
+            "payment_allocated_amount": "1985.00",
+            "payment_allocation_ids": "4,200",
+            "linked_offset_amount": "0.00",
+            "linked_offset_ids": "",
+            "actual_open_amount": "0.00",
+            "expected_open_amount": "-985.00"
+        },
+        {
+            "obligation_id": 441,
+            "supplier_id": 418,
+            "branch_id": 1,
+            "booking_reference": "BK-000450",
+            "currency": "PKR",
+            "gross_amount": "251784.00",
+            "advance_applied_amount": "12980.00",
+            "advance_application_ids": "64",
+            "payment_allocated_amount": "251784.00",
+            "payment_allocation_ids": "284",
+            "linked_offset_amount": "0.00",
+            "linked_offset_ids": "",
+            "actual_open_amount": "0.00",
+            "expected_open_amount": "-12980.00"
+        },
+        {
+            "obligation_id": 464,
+            "supplier_id": 371,
+            "branch_id": 2,
+            "booking_reference": "BK-000472",
+            "currency": "AED",
+            "gross_amount": "641.00",
+            "advance_applied_amount": "641.00",
+            "advance_application_ids": "3",
+            "payment_allocated_amount": "641.00",
+            "payment_allocation_ids": "152,153",
+            "linked_offset_amount": "0.00",
+            "linked_offset_ids": "",
+            "actual_open_amount": "0.00",
+            "expected_open_amount": "-641.00"
+        },
+        {
+            "obligation_id": 474,
+            "supplier_id": 371,
+            "branch_id": 2,
+            "booking_reference": "BK-000478",
+            "currency": "AED",
+            "gross_amount": "1680.00",
+            "advance_applied_amount": "1680.00",
+            "advance_application_ids": "4",
+            "payment_allocated_amount": "1680.00",
+            "payment_allocation_ids": "156",
+            "linked_offset_amount": "0.00",
+            "linked_offset_ids": "",
+            "actual_open_amount": "0.00",
+            "expected_open_amount": "-1680.00"
+        },
+        {
+            "obligation_id": 492,
+            "supplier_id": 371,
+            "branch_id": 2,
+            "booking_reference": "BK-000493",
+            "currency": "AED",
+            "gross_amount": "665.00",
+            "advance_applied_amount": "665.00",
+            "advance_application_ids": "17,18",
+            "payment_allocated_amount": "665.00",
+            "payment_allocation_ids": "161",
+            "linked_offset_amount": "0.00",
+            "linked_offset_ids": "",
+            "actual_open_amount": "0.00",
+            "expected_open_amount": "-665.00"
+        },
+        {
+            "obligation_id": 558,
+            "supplier_id": 371,
+            "branch_id": 2,
+            "booking_reference": "BK-000550",
+            "currency": "AED",
+            "gross_amount": "1625.00",
+            "advance_applied_amount": "1625.00",
+            "advance_application_ids": "36",
+            "payment_allocated_amount": "1625.00",
+            "payment_allocation_ids": "217",
+            "linked_offset_amount": "0.00",
+            "linked_offset_ids": "",
+            "actual_open_amount": "0.00",
+            "expected_open_amount": "-1625.00"
+        }
+    ]
+}

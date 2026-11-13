@@ -2634,7 +2634,8 @@ final class ReportRepository extends BaseRepository
         ?string $dateTo = null,
         int $businessSourceId = 0,
         string $customerName = '',
-        string $bookingReference = ''
+        string $bookingReference = '',
+        string $currency = ''
     ): array
     {
         [$clause, $params] = $this->branchScope($branchIds);
@@ -2656,9 +2657,14 @@ final class ReportRepository extends BaseRepository
             $filters[] = 'cri.booking_reference LIKE :booking_reference';
             $params['booking_reference'] = '%' . $bookingReference . '%';
         }
+        if ($currency !== '') {
+            $filters[] = 'cri.currency = :aging_currency';
+            $params['aging_currency'] = $currency;
+        }
         $sql = 'SELECT
                     b.id AS booking_id,
                     b.branch_id,
+                    b.business_source_id,
                     br.name AS branch_name,
                     b.booking_date,
                     cri.booking_reference,
@@ -4136,7 +4142,8 @@ final class ReportRepository extends BaseRepository
                 FROM customer_receipts cr
                 LEFT JOIN bookings b ON b.booking_reference = cr.booking_reference
                 LEFT JOIN booking_parties bp ON bp.booking_id = b.id
-                LEFT JOIN travelers t ON t.id = COALESCE(NULLIF(cr.traveler_id, 0), b.lead_traveler_id)
+                LEFT JOIN travelers t ON t.id = CASE WHEN cr.receipt_purpose = "customer_advance"
+                    THEN cr.traveler_id ELSE COALESCE(NULLIF(b.lead_traveler_id, 0), NULLIF(cr.traveler_id, 0)) END
                 WHERE cr.branch_id ' . $clause . '
                   AND cr.status <> "void"
                   AND (cr.receipt_purpose = "customer_advance"
@@ -4169,7 +4176,7 @@ final class ReportRepository extends BaseRepository
             'cr.unallocated_amount > 0.005',
             '(cr.receipt_purpose = "customer_advance"
               OR (b.id IS NOT NULL AND b.branch_id = cr.branch_id
-                  AND COALESCE(NULLIF(cr.traveler_id, 0), b.lead_traveler_id) > 0))',
+                  AND COALESCE(NULLIF(b.lead_traveler_id, 0), NULLIF(cr.traveler_id, 0)) > 0))',
         ];
         if ($currency !== '') {
             $where[] = 'cr.currency = :credit_currency';
@@ -4186,7 +4193,10 @@ final class ReportRepository extends BaseRepository
 
         return $this->fetchRows(
             'SELECT cr.id AS receipt_id, cr.receipt_no, cr.receipt_date, cr.branch_id,
-                    br.name AS branch_name, cr.traveler_id, cr.currency, cr.receipt_purpose,
+                    br.name AS branch_name,
+                    CASE WHEN cr.receipt_purpose = "customer_advance" THEN cr.traveler_id
+                         ELSE COALESCE(NULLIF(b.lead_traveler_id, 0), NULLIF(cr.traveler_id, 0)) END AS traveler_id,
+                    cr.currency, cr.receipt_purpose,
                     cr.unallocated_amount AS available_amount, cr.payment_method,
                     cr.treasury_account_id, COALESCE(ta.account_name, "") AS treasury_account_name,
                     cr.booking_reference, COALESCE(b.id, 0) AS booking_id,
@@ -4197,7 +4207,8 @@ final class ReportRepository extends BaseRepository
              INNER JOIN branches br ON br.id = cr.branch_id
              LEFT JOIN bookings b ON b.booking_reference = cr.booking_reference
              LEFT JOIN booking_parties bp ON bp.booking_id = b.id
-             LEFT JOIN travelers t ON t.id = COALESCE(NULLIF(cr.traveler_id, 0), b.lead_traveler_id)
+             LEFT JOIN travelers t ON t.id = CASE WHEN cr.receipt_purpose = "customer_advance"
+                 THEN cr.traveler_id ELSE COALESCE(NULLIF(b.lead_traveler_id, 0), NULLIF(cr.traveler_id, 0)) END
              LEFT JOIN business_sources bs ON bs.id = COALESCE(cr.business_source_id, b.business_source_id)
              LEFT JOIN treasury_accounts ta ON ta.id = cr.treasury_account_id
              WHERE ' . implode(' AND ', $where) . '
@@ -4887,6 +4898,14 @@ final class ReportRepository extends BaseRepository
     {
         [$clause, $params] = $this->branchScope($branchIds);
         $dateSql = $this->bookingDateWindow('ledger_rows.ledger_date', $dateFrom, $dateTo, $params, 'ledger_');
+        // A posted journal that exactly reverses a payable adjustment removes
+        // that adjustment from the current account position. Keep the original
+        // visible in reports ending before the reversal was posted.
+        $payableReversalDateSql = '';
+        if ($dateTo !== null) {
+            $payableReversalDateSql = ' AND je_payable_reversal.entry_date <= :payable_reversal_date_to';
+            $params['payable_reversal_date_to'] = $dateTo;
+        }
         $currencySql = '';
         $currency = strtoupper(trim($currency));
         if ($currency !== '') {
@@ -4936,8 +4955,16 @@ final class ReportRepository extends BaseRepository
         $bookingReferenceSql = '';
         $bookingReference = trim($bookingReference);
         if ($bookingReference !== '') {
-            $bookingReferenceSql = ' AND ledger_rows.booking_reference COLLATE utf8mb4_unicode_ci LIKE :ledger_booking_reference';
+            $bookingReferenceSql = ' AND (
+                ledger_rows.booking_reference COLLATE utf8mb4_unicode_ci LIKE :ledger_booking_reference
+                OR EXISTS (
+                    SELECT 1 FROM supplier_payments payment_filter
+                    WHERE payment_filter.id = ledger_rows.supplier_payment_id
+                      AND payment_filter.payment_no COLLATE utf8mb4_unicode_ci LIKE :ledger_payment_reference
+                )
+            )';
             $params['ledger_booking_reference'] = '%' . $bookingReference . '%';
+            $params['ledger_payment_reference'] = '%' . $bookingReference . '%';
         }
 
         $serviceContextSql = '
@@ -4952,6 +4979,57 @@ final class ReportRepository extends BaseRepository
                AND bs.line_reference = so.service_line_reference
             LEFT JOIN service_air_ticket sat ON sat.booking_service_id = bs.id
             LEFT JOIN travelers t ON t.id = bs.traveler_id';
+
+        $hasSupplierSnapshot = $this->columnExists('journal_entry_lines', 'supplier_id_snapshot');
+        $supplierSnapshotJoin = $hasSupplierSnapshot
+            ? 'LEFT JOIN suppliers journal_supplier ON journal_supplier.id = jel.supplier_id_snapshot'
+            : '';
+        $supplierSnapshotId = $hasSupplierSnapshot ? 'journal_supplier.id' : 'NULL';
+        $supplierSnapshotName = $hasSupplierSnapshot ? 'journal_supplier.name' : 'NULL';
+        $legacyAllocationOnly = $hasSupplierSnapshot ? 'AND jel.supplier_id_snapshot IS NULL' : '';
+
+        $priorPeriodSupplierAdjustmentSql = $hasSupplierSnapshot ? '
+
+                    UNION ALL
+
+                    SELECT
+                        je.branch_id,
+                        br.name AS branch_name,
+                        0 AS booking_id,
+                        je.source_reference AS booking_reference,
+                        "" AS service_line_reference,
+                        je.currency,
+                        0 AS business_source_id,
+                        "Unassigned Account" AS business_source_name,
+                        s.id AS supplier_id,
+                        s.name AS supplier_name,
+                        "Historical supplier account" AS customer_name,
+                        "Supplier account" AS passenger_name,
+                        "N/A" AS route,
+                        "N/A" AS airline,
+                        NULL AS supplier_payment_id,
+                        je.id AS journal_entry_id,
+                        je.source_reference,
+                        COALESCE(NULLIF(u.name, ""), NULLIF(u.username, ""), "System") AS posted_by_name,
+                        je.narration,
+                        je.entry_date AS ledger_date,
+                        jel.debit_amount,
+                        jel.credit_amount,
+                        "Prior-Period Supplier Charge" AS entry_type,
+                        5 AS sort_order,
+                        CAST(je.id AS CHAR) AS sort_reference
+                    FROM journal_entries je
+                    INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+                    INNER JOIN chart_of_accounts coa ON coa.id = jel.account_id
+                    INNER JOIN suppliers s ON s.id = jel.supplier_id_snapshot
+                    INNER JOIN branches br ON br.id = je.branch_id
+                    LEFT JOIN users u ON u.id = je.posted_by_user_id
+                    WHERE je.source_type IN (
+                        "supplier_prior_period_adjustment",
+                        "supplier_prior_period_adjustment_reversed"
+                    )
+                      AND coa.code = "SUPPLIER_ADVANCES"
+                      AND (jel.debit_amount > 0.005 OR jel.credit_amount > 0.005)' : '';
 
         $baseSelect = '
                     b.branch_id,
@@ -5268,18 +5346,18 @@ final class ReportRepository extends BaseRepository
                         je.currency,
                         COALESCE(b.business_source_id, 0) AS business_source_id,
                         COALESCE(bs_src.name, "Unassigned Account") AS business_source_name,
-                        CASE
+                        COALESCE(' . $supplierSnapshotId . ', CASE
                             WHEN je.source_type IN ("supplier_payment_allocated", "supplier_payment_void_reversed")
                              AND source_payment_supplier.id IS NOT NULL
                                 THEN source_payment_supplier.id
                             ELSE s.id
-                        END AS supplier_id,
-                        CASE
+                        END) AS supplier_id,
+                        COALESCE(' . $supplierSnapshotName . ', CASE
                             WHEN je.source_type IN ("supplier_payment_allocated", "supplier_payment_void_reversed")
                              AND source_payment_supplier.id IS NOT NULL
                                 THEN source_payment_supplier.name
                             ELSE s.name
-                        END AS supplier_name,
+                        END) AS supplier_name,
                         COALESCE(NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Customer") AS customer_name,
                         COALESCE(NULLIF(t.full_name, ""), NULLIF(bs.passenger_name_snapshot, ""), "Passenger") AS passenger_name,
                         COALESCE(NULLIF(CONCAT_WS("/", NULLIF(sat.sector_from, ""), NULLIF(sat.sector_to, "")), ""), "N/A") AS route,
@@ -5295,8 +5373,11 @@ final class ReportRepository extends BaseRepository
                         CASE je.source_type
                             WHEN "supplier_payable_created" THEN "Payable Created"
                             WHEN "supplier_payable_adjusted" THEN "Payable Adjustment"
+                            WHEN "supplier_payable_transferred" THEN "Payable Transfer"
                             WHEN "supplier_payment_allocated" THEN
                                 CASE
+                                    WHEN je.narration = "Existing supplier payment credit applied against payable"
+                                        THEN "Advance Applied"
                                     WHEN source_payment.id IS NOT NULL
                                      AND UPPER(COALESCE(source_payment.booking_reference, "")) NOT IN ("", "GLOBAL")
                                      AND source_payment.booking_reference COLLATE utf8mb4_unicode_ci <> so.booking_reference COLLATE utf8mb4_unicode_ci
@@ -5318,6 +5399,7 @@ final class ReportRepository extends BaseRepository
                         CASE je.source_type
                             WHEN "supplier_payable_created" THEN 10
                             WHEN "supplier_payable_adjusted" THEN 15
+                            WHEN "supplier_payable_transferred" THEN 17
                             WHEN "supplier_payment_allocated" THEN 20
                             WHEN "customer_direct_supplier_payment" THEN 20
                             WHEN "supplier_payment_void_reversed" THEN 25
@@ -5335,9 +5417,11 @@ final class ReportRepository extends BaseRepository
                     LEFT JOIN users posted_by ON posted_by.id = je.posted_by_user_id
                     LEFT JOIN supplier_payments source_payment ON source_payment.id = jel.supplier_payment_id
                     LEFT JOIN suppliers source_payment_supplier ON source_payment_supplier.id = source_payment.supplier_id
+                    ' . $supplierSnapshotJoin . '
                     WHERE je.source_type IN (
                         "supplier_payable_created",
                         "supplier_payable_adjusted",
+                        "supplier_payable_transferred",
                         "supplier_payment_allocated",
                         "supplier_advance_applied",
                         "supplier_advance_adjusted",
@@ -5350,6 +5434,28 @@ final class ReportRepository extends BaseRepository
                           OR (LOWER(COALESCE(bs.service_status, "")) = "open" AND je.currency = so.currency)
                       )
                       AND (jel.debit_amount > 0.005 OR jel.credit_amount > 0.005)
+                      AND NOT (
+                          je.source_type = "supplier_payment_allocated"
+                          ' . $legacyAllocationOnly . '
+                          AND source_payment.id IS NOT NULL
+                          AND source_payment.supplier_id <> so.supplier_id
+                          AND je.source_reference LIKE CONCAT(source_payment.payment_no, "-ALLOC-%")
+                          AND EXISTS (
+                              SELECT 1
+                              FROM journal_entries correction_release
+                              INNER JOIN journal_entry_lines correction_line
+                                  ON correction_line.journal_entry_id = correction_release.id
+                                 AND correction_line.supplier_obligation_id = jel.supplier_obligation_id
+                                 AND correction_line.account_id = jel.account_id
+                              WHERE correction_release.source_type = "supplier_settlement_released"
+                                AND correction_release.id > je.id
+                                AND correction_release.branch_id = je.branch_id
+                                AND correction_release.currency = je.currency
+                                AND correction_release.source_reference LIKE CONCAT("SUPPLIER-CORRECTION-", source_payment.payment_no, "-RELEASE-%")
+                                AND ABS(correction_line.debit_amount - jel.credit_amount) < 0.005
+                                AND ABS(correction_line.credit_amount - jel.debit_amount) < 0.005
+                          )
+                      )
                       /* Credit increases are in the cancellation snapshot; penalty increases also need their reapplication adjustment. */
                       AND NOT (
                           je.source_type = "supplier_payable_adjusted"
@@ -5372,12 +5478,40 @@ final class ReportRepository extends BaseRepository
                                 AND je_data_reversal.narration LIKE CONCAT("% journal ", je.id)
                           )
                       )
+                      AND NOT (
+                          je.source_type = "supplier_payable_adjusted"
+                          AND EXISTS (
+                              SELECT 1
+                              FROM journal_entries je_payable_reversal
+                              INNER JOIN journal_entry_lines jel_payable_reversal
+                                  ON jel_payable_reversal.journal_entry_id = je_payable_reversal.id
+                                 AND jel_payable_reversal.supplier_obligation_id = jel.supplier_obligation_id
+                                 AND jel_payable_reversal.account_id = jel.account_id
+                              WHERE je_payable_reversal.id > je.id
+                                AND je_payable_reversal.branch_id = je.branch_id
+                                AND je_payable_reversal.currency = je.currency
+                                AND je_payable_reversal.booking_reference = je.booking_reference
+                                AND (
+                                    je_payable_reversal.source_type LIKE "%reversal%"
+                                    OR je_payable_reversal.source_type LIKE "%reversed%"
+                                )
+                                AND (
+                                    je_payable_reversal.source_reference LIKE CONCAT("%-REV-", je.id)
+                                    OR je_payable_reversal.source_reference LIKE CONCAT("%-REV-JE-", je.id)
+                                )
+                                AND ABS(jel_payable_reversal.debit_amount - jel.credit_amount) < 0.005
+                                AND ABS(jel_payable_reversal.credit_amount - jel.debit_amount) < 0.005
+                                ' . $payableReversalDateSql . '
+                          )
+                      )
 
                     ' . $convertedAdvanceSql . '
 
                     ' . $standaloneSupplierAdvanceSql . '
 
                     ' . $linkedPartyOffsetSql . '
+
+                    ' . $priorPeriodSupplierAdjustmentSql . '
 
                     ' . $bookingAdvanceTransferSql . '
 
@@ -5587,6 +5721,22 @@ final class ReportRepository extends BaseRepository
             $params['voucher_booking_reference'] = '%' . $bookingReference . '%';
         }
 
+        $hasSupplierSnapshot = $this->columnExists('journal_entry_lines', 'supplier_id_snapshot');
+        $journalSupplierJoin = $hasSupplierSnapshot
+            ? 'LEFT JOIN suppliers journal_supplier ON journal_supplier.id = jel.supplier_id_snapshot'
+            : '';
+        $journalSupplierId = $hasSupplierSnapshot ? 'journal_supplier.id' : 'NULL';
+        $journalSupplierName = $hasSupplierSnapshot ? 'NULLIF(journal_supplier.name, "")' : 'NULL';
+        $supplierAccount = 'coa.code IN ("AP_CONTROL", "SUPPLIER_ADVANCES")';
+        $voucherSupplierId = 'CASE WHEN ' . $supplierAccount . '
+            THEN COALESCE(' . $journalSupplierId . ', sp_s.id, sa_s.id, so_s.id, s.id, 0)
+            ELSE COALESCE(s.id, sp_s.id, so_s.id, sa_s.id, 0) END';
+        $voucherSupplierName = 'CASE WHEN ' . $supplierAccount . '
+            THEN COALESCE(' . $journalSupplierName . ', NULLIF(sp_s.name, ""), NULLIF(sa_s.name, ""),
+                NULLIF(so_s.name, ""), NULLIF(s.name, ""), NULLIF(bs.supplier_name_snapshot, ""), "Supplier pending")
+            ELSE COALESCE(NULLIF(s.name, ""), NULLIF(sp_s.name, ""), NULLIF(so_s.name, ""),
+                NULLIF(sa_s.name, ""), NULLIF(bs.supplier_name_snapshot, ""), "Supplier pending") END';
+
         $sql = 'SELECT
                     voucher_rows.branch_id,
                     voucher_rows.branch_name,
@@ -5608,12 +5758,12 @@ final class ReportRepository extends BaseRepository
                         COALESCE(b.business_source_id, 0) AS business_source_id,
                         COALESCE(NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Booking Party") AS customer_name,
                         COALESCE(NULLIF(t_service.full_name, ""), NULLIF(bs.passenger_name_snapshot, ""), NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Passenger") AS passenger_name,
-                        COALESCE(s.id, sp_s.id, so_s.id, sa_s.id, 0) AS supplier_id,
-                        COALESCE(NULLIF(s.name, ""), NULLIF(sp_s.name, ""), NULLIF(so_s.name, ""), NULLIF(sa_s.name, ""), NULLIF(bs.supplier_name_snapshot, ""), "Supplier pending") AS supplier_name,
+                        ' . $voucherSupplierId . ' AS supplier_id,
+                        ' . $voucherSupplierName . ' AS supplier_name,
                         je.entry_date AS ledger_date,
                         je.currency,
                         CASE
-                            WHEN coa.code IN ("AP_CONTROL", "SUPPLIER_ADVANCES") THEN COALESCE(NULLIF(s.name, ""), NULLIF(sp_s.name, ""), NULLIF(so_s.name, ""), NULLIF(bs.supplier_name_snapshot, ""), "Supplier pending")
+                            WHEN coa.code IN ("AP_CONTROL", "SUPPLIER_ADVANCES") THEN ' . $voucherSupplierName . '
                             ELSE COALESCE(NULLIF(bp.lead_traveler_name, ""), NULLIF(t_lead.full_name, ""), "Booking Party")
                         END AS party_name,
                         CASE
@@ -5621,6 +5771,9 @@ final class ReportRepository extends BaseRepository
                             WHEN je.source_type = "service_receivable_adjusted" AND coa.code = "AR_CONTROL" THEN "Customer Invoice Adjustment"
                             WHEN je.source_type = "supplier_payable_created" AND coa.code = "AP_CONTROL" THEN "Supplier Payable"
                             WHEN je.source_type = "supplier_payable_adjusted" AND coa.code = "AP_CONTROL" THEN "Supplier Payable Adjustment"
+                            WHEN je.source_type = "supplier_payable_transferred" AND coa.code = "AP_CONTROL"
+                                THEN CASE WHEN jel.debit_amount > 0 THEN "Supplier Payable Transferred Out"
+                                    ELSE "Supplier Payable Transferred In" END
                             WHEN je.source_type = "customer_receipt_recorded" AND coa.code = "CUSTOMER_CREDIT" THEN "Customer Receipt Credit"
                             WHEN je.source_type = "customer_receipt_allocated" AND coa.code = "CUSTOMER_CREDIT" THEN "Customer Credit Applied"
                             WHEN je.source_type = "customer_receipt_allocated" AND coa.code = "AR_CONTROL" THEN "Customer Payment Applied"
@@ -5645,7 +5798,7 @@ final class ReportRepository extends BaseRepository
                         CASE
                             WHEN je.source_type LIKE "%_reversed" OR je.source_type LIKE "%reversal%" THEN 90
                             WHEN je.source_type IN ("service_receivable_created", "service_receivable_adjusted") THEN 10
-                            WHEN je.source_type IN ("supplier_payable_created", "supplier_payable_adjusted") THEN 20
+                            WHEN je.source_type IN ("supplier_payable_created", "supplier_payable_adjusted", "supplier_payable_transferred") THEN 20
                             WHEN je.source_type LIKE "customer_receipt%" THEN 30
                             WHEN je.source_type LIKE "supplier_payment%" THEN 40
                             WHEN je.source_type IN ("customer_receipt_allocation_released", "supplier_settlement_released") THEN 50
@@ -5671,6 +5824,7 @@ final class ReportRepository extends BaseRepository
                     LEFT JOIN supplier_advances sa ON sa.journal_entry_id = je.id
                     LEFT JOIN suppliers sa_s ON sa_s.id = sa.supplier_id
                     LEFT JOIN suppliers s ON s.id = bs.supplier_id
+                    ' . $journalSupplierJoin . '
                     WHERE coa.code IN ("AR_CONTROL", "AP_CONTROL", "CUSTOMER_CREDIT", "SUPPLIER_ADVANCES")
                       AND (ROUND(COALESCE(jel.debit_amount, 0), 2) > 0 OR ROUND(COALESCE(jel.credit_amount, 0), 2) > 0)
                 ) AS voucher_rows
@@ -6563,8 +6717,28 @@ final class ReportRepository extends BaseRepository
         $releasedSource = 'CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(' . $payload . ', "$.released_supplier_credit_source_amount")), "") AS DECIMAL(18,2))';
         $releasedBooking = 'CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(' . $payload . ', "$.released_supplier_credit")), "") AS DECIMAL(18,2))';
 
-        return 'COALESCE(' . $recorded . ', ROUND(COALESCE(' . $releasedAdvance . ', 0)
-            * COALESCE(' . $releasedBooking . ', 0) / NULLIF(' . $releasedSource . ', 0), 2), 0)';
+        // Legacy cancellations can release a supplier payment (rather than an
+        // existing advance) into SUPPLIER_ADVANCES. Count that credit only when
+        // the cancellation names the posted release journal that created it.
+        $journalRecorded = '(SELECT ROUND(COALESCE(SUM(CASE
+                WHEN release_je.currency = ' . $eventAlias . '.currency THEN release_jel.debit_amount
+                ELSE release_jel.debit_amount * COALESCE(' . $releasedBooking . ', 0)
+                    / NULLIF(' . $releasedSource . ', 0)
+            END), 0), 2)
+            FROM journal_entries release_je
+            INNER JOIN journal_entry_lines release_jel ON release_jel.journal_entry_id = release_je.id
+            INNER JOIN chart_of_accounts release_coa ON release_coa.id = release_jel.account_id
+                AND release_coa.code = "SUPPLIER_ADVANCES"
+            WHERE release_je.source_type = "supplier_settlement_released"
+              AND release_jel.service_line_reference = ' . $eventAlias . '.service_line_reference
+              AND release_jel.debit_amount > 0.005
+              AND JSON_CONTAINS(' . $payload . ', CAST(release_je.id AS CHAR), "$.journal_entry_ids") = 1)';
+
+        return 'COALESCE(' . $recorded . ', GREATEST(
+            COALESCE(ROUND(COALESCE(' . $releasedAdvance . ', 0)
+                * COALESCE(' . $releasedBooking . ', 0) / NULLIF(' . $releasedSource . ', 0), 2), 0),
+            LEAST(COALESCE(' . $releasedBooking . ', 0), ' . $journalRecorded . ')
+        ), 0)';
     }
 
     private function fetchRows(string $sql, array $params): array

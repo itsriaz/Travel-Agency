@@ -6,6 +6,7 @@ $root = dirname(__DIR__);
 $view = (string) file_get_contents($root . '/app/Views/workspace/partials/station.php');
 $reportsView = (string) file_get_contents($root . '/app/Views/reports/index.php');
 $globalSupplierPaymentView = (string) file_get_contents($root . '/app/Views/reports/global_supplier_settlement.php');
+$supplierVoidImpactView = (string) file_get_contents($root . '/app/Views/reports/supplier_payment_void_impact.php');
 $css = (string) file_get_contents($root . '/public/assets/css/app.css');
 $javascript = (string) file_get_contents($root . '/public/assets/js/workspace.js');
 
@@ -94,9 +95,18 @@ $checks = [
         && !str_contains($javascript, '>Change Supplier</button>')
         && !str_contains($javascript, 'Correct supplier...</option>'),
     'Unified editor reopens after closing' => str_contains($javascript, "supplierPaymentEditModal.style.removeProperty('display');"),
-    'Unified editor void uses its own reason and refreshes the originating viewer' => str_contains($javascript, "form.elements.namedItem('void_reason')")
-        && !str_contains($javascript, 'supplier-payment-correction-${supplierPaymentId}')
-        && str_contains($javascript, 'await loadPrepaidPaymentManager();'),
+    'Supplier payment void opens review with its own required reason' => str_contains($view, "data-supplier-payment-void-impact-url=\"<?= e(url('/suppliers/payments/void-impact')) ?>\"")
+        && str_contains($view, 'data-supplier-payment-edit-void>Review &amp; Void</a>')
+        && str_contains($javascript, 'supplierPaymentEditVoidLink.href = `${supplierPaymentVoidImpactUrl}?supplier_payment_id=${encodeURIComponent(String(normalizedId))}`;')
+        && !str_contains($javascript, 'submitSupplierPaymentVoid')
+        && !str_contains($javascript, "window.prompt('Enter the reason for voiding this supplier payment:")
+        && str_contains($supplierVoidImpactView, 'Reason for void (required)<input type="text" name="void_reason"')
+        && str_contains($supplierVoidImpactView, 'name="impact_token"')
+        && str_contains($supplierVoidImpactView, 'name="confirm_reopen_payables"'),
+    'Other supplier void actions cannot bypass impact review' => !str_contains($globalSupplierPaymentView, 'name="correction_action" value="void"')
+        && !str_contains($view, 'action="<?= e(url(\'/workspace/suppliers/payments/void\')) ?>" onsubmit=')
+        && str_contains($globalSupplierPaymentView, '>Review &amp; Void</a>')
+        && str_contains($view, '>Review &amp; Void</a>'),
     'Dialog styling is scoped to financial finder classes' => str_contains($css, '.financial-finder-dialog'),
     'Financial field focus styling is present' => str_contains($css, '.financial-finder-toolbar input:focus'),
     'Financial table readability styling is present' => str_contains($css, '.financial-finder-card .legacy-table th'),

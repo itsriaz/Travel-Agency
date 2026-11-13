@@ -10,6 +10,7 @@ use App\Repositories\BookingRepository;
 use App\Repositories\ExchangeRateRepository;
 use App\Repositories\MasterDataRepository;
 use App\Repositories\SupplierRepository;
+use App\Repositories\SupplierPaymentVoidImpactRepository;
 use App\Repositories\TreasuryRepository;
 use PDO;
 use RuntimeException;
@@ -555,7 +556,9 @@ final class SupplierSettlementWorkspaceService extends Service
         }
 
         try {
-            $neutralizedAdvance = $repository->neutralizeUnusedConvertedAdvanceForPaymentVoid($paymentId, $actorUserId);
+            $sourceCreditVoid = $this->releaseSourceCreditsForPaymentVoid(
+                $repository, $payment, $input, $actorUserId, $accessibleIds, $voidReason
+            );
             $reversalReference = 'VOID-' . (string) ($payment['payment_no'] ?? ('P-' . $paymentId));
             $reversalJournalEntryId = (new AccountingRepository($this->app))->postSupplierPaymentVoidReversal([
                 'branch_id' => (int) ($payment['branch_id'] ?? 0),
@@ -568,6 +571,11 @@ final class SupplierSettlementWorkspaceService extends Service
                 'narration' => 'Supplier payment void reversal for ' . (string) ($payment['payment_no'] ?? $paymentId),
                 'actor_user_id' => $actorUserId,
             ]);
+            if ($reversalJournalEntryId === null) {
+                throw new RuntimeException('The original supplier payment journal is missing. Nothing was voided.');
+            }
+            $paymentReversalJournalIds = (new AccountingRepository($this->app))
+                ->supplierPaymentVoidReversalJournalIds($paymentId);
 
             $voidResult = $repository->voidSupplierPayment(
                 $paymentId,
@@ -577,7 +585,11 @@ final class SupplierSettlementWorkspaceService extends Service
                 $reversalJournalEntryId
             );
 
-            AuditLog::record($this->app, 'supplier.global_payment.voided', [
+            $replacement = $this->applyConfirmedVoidReplacements(
+                $repository, $sourceCreditVoid['replacement_plan'], $input, $actorUserId, $accessibleIds
+            );
+
+            AuditLog::recordRequired($this->app, 'supplier.global_payment.voided', [
                 'user_id' => $actorUserId,
                 'supplier_payment_id' => $paymentId,
                 'payment_no' => (string) ($voidResult['payment_no'] ?? ''),
@@ -589,21 +601,60 @@ final class SupplierSettlementWorkspaceService extends Service
                 'allocation_count_reversed' => (int) ($voidResult['allocation_count_reversed'] ?? 0),
                 'total_allocated_amount_reversed' => (float) ($voidResult['total_allocated_amount_reversed'] ?? 0),
                 'affected_supplier_obligation_ids' => $voidResult['affected_supplier_obligation_ids'] ?? [],
-                'neutralized_supplier_advance' => $neutralizedAdvance,
+                'neutralized_supplier_advances' => array_column($sourceCreditVoid['advances'], 'id'),
+                'reopened_advance_application_ids' => array_column($sourceCreditVoid['applications'], 'application_id'),
+                'source_credit_journal_entry_ids' => $sourceCreditVoid['journal_entry_ids'] ?? [],
+                'payment_reversal_journal_entry_ids' => $paymentReversalJournalIds,
+                'replacement_applications' => $replacement['applications'],
+                'replacement_obligations' => $replacement['obligations'],
             ]);
 
             if ($startedTransaction && $db->inTransaction()) {
                 $db->commit();
             }
 
+            if ($startedTransaction) {
+                app_write_log('supplier.payment.void.completed', 'Global supplier payment void committed.', [
+                    'request_id' => app_request_id(),
+                    'actor_user_id' => $actorUserId,
+                    'supplier_payment_id' => $paymentId,
+                    'payment_no' => (string) ($voidResult['payment_no'] ?? ''),
+                    'branch_id' => (int) ($voidResult['branch_id'] ?? 0),
+                    'currency' => (string) ($voidResult['currency'] ?? ''),
+                    'paid_amount' => (float) ($voidResult['paid_amount'] ?? 0),
+                    'reopened_obligation_ids' => $voidResult['affected_supplier_obligation_ids'] ?? [],
+                    'released_application_ids' => array_column($sourceCreditVoid['applications'], 'application_id'),
+                    'neutralized_advance_ids' => array_column($sourceCreditVoid['advances'], 'id'),
+                    'journal_entry_ids' => $sourceCreditVoid['journal_entry_ids'] ?? [],
+                    'payment_reversal_journal_entry_id' => $reversalJournalEntryId,
+                    'payment_reversal_journal_entry_ids' => $paymentReversalJournalIds,
+                    'replacement_applications' => $replacement['applications'],
+                    'replacement_obligations' => $replacement['obligations'],
+                    'outcome' => 'committed',
+                ]);
+            }
+
             return array_merge($voidResult, [
                 'reversal_journal_entry_id' => $reversalJournalEntryId,
-                'neutralized_supplier_advance' => $neutralizedAdvance,
+                'source_credit_void' => $sourceCreditVoid,
+                'replacement' => $replacement,
             ]);
         } catch (\Throwable $exception) {
             if ($startedTransaction && $db->inTransaction()) {
                 $db->rollBack();
             }
+
+            app_write_log('supplier.payment.void.failed', 'Global supplier payment void failed.', [
+                'request_id' => app_request_id(),
+                'actor_user_id' => $actorUserId,
+                'supplier_payment_id' => $paymentId,
+                'payment_no' => (string) ($payment['payment_no'] ?? ''),
+                'branch_id' => (int) ($payment['branch_id'] ?? 0),
+                'currency' => (string) ($payment['currency'] ?? ''),
+                'error' => $exception->getMessage(),
+                'previous_error' => $exception->getPrevious()?->getMessage(),
+                'outcome' => $startedTransaction ? 'rolled_back' : 'failed_in_outer_transaction',
+            ]);
 
             if ($exception instanceof RuntimeException) {
                 throw $exception;
@@ -611,6 +662,185 @@ final class SupplierSettlementWorkspaceService extends Service
 
             throw new RuntimeException('Supplier payment could not be voided.', 0, $exception);
         }
+    }
+
+    private function releaseSourceCreditsForPaymentVoid(
+        SupplierRepository $repository,
+        array $payment,
+        array $input,
+        int $actorUserId,
+        array $accessibleBranchIds,
+        string $voidReason
+    ): array {
+        $paymentId = (int) $payment['id'];
+        $preview = (new SupplierPaymentVoidImpactService($this->app))->preview($paymentId, $accessibleBranchIds);
+        if ((string) ($input['apply_replacement_advances'] ?? '') === '1') {
+            if ((string) ($input['confirm_reopen_payables'] ?? '') !== '1'
+                || ! hash_equals((string) $preview['impact_token'], (string) ($input['impact_token'] ?? ''))
+                || ! hash_equals((string) $preview['replacement']['token'], (string) ($input['replacement_token'] ?? ''))
+                || ! $preview['replacement']['can_apply']) {
+                throw new RuntimeException('Available advances or affected payables changed during review. Reload Review Void Impact; nothing was voided.');
+            }
+        }
+        $hasUsedCredit = $preview['advance_applications'] !== [];
+        if ($hasUsedCredit && ((string) ($input['confirm_reopen_payables'] ?? '') !== '1'
+            || ! hash_equals((string) $preview['impact_token'], (string) ($input['impact_token'] ?? '')))) {
+            throw new RuntimeException('Open Review & Void for this payment and confirm reopening every affected supplier payable before voiding.');
+        }
+        $cancellationVoid = new SupplierCancellationCreditVoidService($this->app);
+        if ($preview['cancellation_events'] !== []
+            && ! hash_equals((string) $preview['impact_token'], (string) ($input['impact_token'] ?? ''))) {
+            throw new RuntimeException('Cancellation credit changed during review. Reload Void Impact; nothing was voided.');
+        }
+        $preparedCancellationCredits = $cancellationVoid->prepare($preview, $input, $accessibleBranchIds);
+        if ($preview['linked_advances'] !== [] && (! $preview['totals']['credit_reconciles']
+            || (! $preview['totals']['mixed_currencies'] && ! $preview['totals']['source_reconciles']))) {
+            throw new RuntimeException('This payment and its linked credits do not reconcile. Nothing was voided.');
+        }
+
+        $sourceCreditVoid = $repository->releasePaymentSourcedAdvancesForVoid(
+            $paymentId, $actorUserId, $voidReason, $preparedCancellationCredits !== []
+        );
+        $lockedPayment = $sourceCreditVoid['payment'];
+        foreach (['status', 'paid_amount', 'allocated_amount', 'unallocated_amount', 'returned_amount'] as $field) {
+            if ((string) ($lockedPayment[$field] ?? '') !== (string) ($preview['payment'][$field] ?? '')) {
+                throw new RuntimeException('The payment changed during review. Reload Void Impact; nothing was voided.');
+            }
+        }
+        $normalizeAdvances = static function (array $rows): array {
+            $normalized = [];
+            foreach ($rows as $row) {
+                $normalized[(int) $row['id']] = [
+                    (int) $row['source_supplier_payment_id'],
+                    (int) $row['supplier_id'],
+                    (int) $row['branch_id'],
+                    strtoupper((string) $row['currency']),
+                    round((float) $row['deposit_amount'], 2),
+                    round((float) $row['available_amount'], 2),
+                ];
+            }
+            ksort($normalized);
+            return $normalized;
+        };
+        if ($normalizeAdvances($sourceCreditVoid['advances']) !== $normalizeAdvances($preview['linked_advances'])) {
+            throw new RuntimeException('The supplier credit changed during review. Reload Void Impact; nothing was voided.');
+        }
+        $normalizeApplications = static function (array $rows, bool $actual): array {
+            $normalized = [];
+            foreach ($rows as $row) {
+                $id = (int) $row['application_id'];
+                $normalized[$id] = [
+                    (int) $row['supplier_advance_id'],
+                    (int) ($actual ? $row['supplier_obligation_id'] : $row['obligation_id']),
+                    round((float) $row['advance_amount'], 2),
+                    round((float) $row['obligation_amount'], 2),
+                    strtoupper((string) $row['advance_currency']),
+                    strtoupper((string) $row['obligation_currency']),
+                ];
+            }
+            ksort($normalized);
+            return $normalized;
+        };
+        if ($normalizeApplications($sourceCreditVoid['applications'], true)
+            !== $normalizeApplications($preview['advance_applications'], false)) {
+            throw new RuntimeException('The credit applications changed during review. Reload Void Impact; nothing was voided.');
+        }
+
+        $accounting = new AccountingRepository($this->app);
+        $reference = 'VOID-' . (string) $payment['payment_no'];
+        $journalIds = [];
+        foreach ($sourceCreditVoid['applications'] as $application) {
+            $applicationId = (int) $application['application_id'];
+            $journalIds[] = $accounting->postSupplierAdvanceApplicationAdjusted([
+                'branch_id' => (int) $application['branch_id'],
+                'booking_reference' => (string) $application['booking_reference'],
+                'service_line_reference' => (string) $application['service_line_reference'],
+                'supplier_obligation_id' => (int) $application['supplier_obligation_id'],
+                'adjustment_amount' => -(float) $application['obligation_amount'],
+                'source_reference' => $reference . '-APP-' . $applicationId,
+                'entry_date' => date('Y-m-d'),
+                'currency' => (string) $application['obligation_currency'],
+                'narration' => 'Supplier payment void reopened payable funded by its credit',
+                'actor_user_id' => $actorUserId,
+            ]);
+            if (strtoupper((string) $application['advance_currency'])
+                !== strtoupper((string) $application['obligation_currency'])) {
+                $journalIds = array_merge($journalIds, $accounting->postCrossCurrencySupplierAdvanceConversion([
+                    'source_branch_id' => (int) $application['branch_id'],
+                    'destination_branch_id' => (int) $application['advance_branch_id'],
+                    'source_currency' => (string) $application['obligation_currency'],
+                    'destination_currency' => (string) $application['advance_currency'],
+                    'source_amount' => (float) $application['obligation_amount'],
+                    'destination_amount' => (float) $application['advance_amount'],
+                    'source_reference' => $reference . '-FX-APP-' . $applicationId,
+                    'source_type' => 'supplier_advance_fx_reversal',
+                    'narration' => 'Supplier payment void reversed advance FX application; no cash movement',
+                    'entry_date' => date('Y-m-d'),
+                    'actor_user_id' => $actorUserId,
+                ]));
+            }
+        }
+
+        $currentAllocations = (new SupplierPaymentVoidImpactRepository($this->app))->directAllocations($paymentId);
+        if ($currentAllocations !== $preview['direct_allocations']) {
+            throw new RuntimeException('Direct payment allocations changed during review. Reload Void Impact; nothing was voided.');
+        }
+
+        $cancellationJournalIds = $cancellationVoid->post($preparedCancellationCredits, $payment, $actorUserId);
+        $journalIds = array_merge($journalIds, $cancellationJournalIds);
+
+        $sourceCreditVoid['journal_entry_ids'] = $journalIds;
+        $sourceCreditVoid['cancellation_journal_entry_ids'] = $cancellationJournalIds;
+        $sourceCreditVoid['replacement_plan'] = $preview['replacement'];
+        return $sourceCreditVoid;
+    }
+
+    private function applyConfirmedVoidReplacements(SupplierRepository $repository, array $plan, array $input, int $actorUserId, array $accessibleBranchIds): array
+    {
+        $apply = (string) ($input['apply_replacement_advances'] ?? '') === '1';
+        $applications = [];
+        if ($apply) {
+            foreach ($plan['obligations'] as $obligation) {
+                if ((float) $obligation['covered_amount'] <= 0.005) {
+                    continue;
+                }
+                $current = $repository->findObligationById((int) $obligation['id']);
+                if ($current === null || abs((float) $current['net_payable_amount'] - (float) $obligation['projected_payable']) > 0.01) {
+                    throw new RuntimeException('A reopened supplier payable differs from the confirmed preview. Nothing was voided.');
+                }
+            }
+            foreach ($plan['lines'] as $line) {
+                $applicationResult = $this->applySupplierAdvance([
+                    'booking_id' => $line['booking_id'],
+                    'supplier_advance_id' => $line['advance_id'],
+                    'supplier_obligation_id' => $line['obligation_id'],
+                    'advance_apply_amount' => $line['amount'],
+                ], $actorUserId, $accessibleBranchIds);
+                $applications[] = $line + ['journal_entry_id' => (int) ($applicationResult['journal_entry_id'] ?? 0)];
+            }
+        }
+
+        $obligations = [];
+        foreach ($plan['obligations'] as $obligation) {
+            $current = $repository->findObligationById((int) $obligation['id']);
+            if ($current === null) {
+                throw new RuntimeException('An affected supplier payable disappeared during void. Nothing was voided.');
+            }
+            $open = round((float) $current['net_payable_amount'], 2);
+            if ($apply && (float) $obligation['covered_amount'] > 0.005
+                && abs($open - (float) $obligation['remaining_open']) > 0.01) {
+                throw new RuntimeException('A replacement advance did not settle the confirmed amount. Nothing was voided.');
+            }
+            $obligations[] = [
+                'obligation_id' => (int) $obligation['id'],
+                'booking_reference' => (string) $obligation['booking_reference'],
+                'branch_id' => (int) $obligation['branch_id'],
+                'currency' => (string) $obligation['currency'],
+                'covered' => $apply ? (float) $obligation['covered_amount'] : 0.0,
+                'open' => $open,
+            ];
+        }
+        return ['applications' => $applications, 'obligations' => $obligations];
     }
 
     public function allocateSupplierPayment(array $input, int $actorUserId, array $accessibleBranchIds): array
@@ -732,6 +962,9 @@ final class SupplierSettlementWorkspaceService extends Service
         }
 
         try {
+            $sourceCreditVoid = $this->releaseSourceCreditsForPaymentVoid(
+                $repository, $payment, $input, $actorUserId, $accessibleBranchIds, $voidReason
+            );
             $reversalReference = 'VOID-' . (string) ($payment['payment_no'] ?? ('P-' . $paymentId));
             $accountingRepository = new AccountingRepository($this->app);
             $reversalJournalEntryId = $accountingRepository->postSupplierPaymentVoidReversal([
@@ -745,6 +978,10 @@ final class SupplierSettlementWorkspaceService extends Service
                 'narration' => 'Supplier payment void reversal for ' . (string) ($payment['payment_no'] ?? $paymentId),
                 'actor_user_id' => $actorUserId,
             ]);
+            if ($reversalJournalEntryId === null) {
+                throw new RuntimeException('The original supplier payment journal is missing. Nothing was voided.');
+            }
+            $paymentReversalJournalIds = $accountingRepository->supplierPaymentVoidReversalJournalIds($paymentId);
 
             $voidResult = $repository->voidSupplierPayment(
                 $paymentId,
@@ -754,7 +991,11 @@ final class SupplierSettlementWorkspaceService extends Service
                 $reversalJournalEntryId
             );
 
-            AuditLog::record($this->app, 'supplier.payment.voided', [
+            $replacement = $this->applyConfirmedVoidReplacements(
+                $repository, $sourceCreditVoid['replacement_plan'], $input, $actorUserId, $accessibleBranchIds
+            );
+
+            AuditLog::recordRequired($this->app, 'supplier.payment.voided', [
                 'user_id' => $actorUserId,
                 'supplier_payment_id' => $paymentId,
                 'payment_no' => (string) ($voidResult['payment_no'] ?? ''),
@@ -766,22 +1007,64 @@ final class SupplierSettlementWorkspaceService extends Service
                 'allocation_count_reversed' => (int) ($voidResult['allocation_count_reversed'] ?? 0),
                 'total_allocated_amount_reversed' => (float) ($voidResult['total_allocated_amount_reversed'] ?? 0),
                 'affected_supplier_obligation_ids' => $voidResult['affected_supplier_obligation_ids'] ?? [],
+                'neutralized_supplier_advances' => array_column($sourceCreditVoid['advances'], 'id'),
+                'reopened_advance_application_ids' => array_column($sourceCreditVoid['applications'], 'application_id'),
+                'source_credit_journal_entry_ids' => $sourceCreditVoid['journal_entry_ids'] ?? [],
+                'payment_reversal_journal_entry_ids' => $paymentReversalJournalIds,
                 'accounting_reversal_posted' => $reversalJournalEntryId !== null,
+                'replacement_applications' => $replacement['applications'],
+                'replacement_obligations' => $replacement['obligations'],
             ]);
 
             if ($startedTransaction && $db->inTransaction()) {
                 $db->commit();
             }
 
+            if ($startedTransaction) {
+                app_write_log('supplier.payment.void.completed', 'Booking supplier payment void committed.', [
+                    'request_id' => app_request_id(),
+                    'actor_user_id' => $actorUserId,
+                    'supplier_payment_id' => $paymentId,
+                    'payment_no' => (string) ($voidResult['payment_no'] ?? ''),
+                    'booking_reference' => (string) ($voidResult['booking_reference'] ?? ''),
+                    'branch_id' => (int) ($voidResult['branch_id'] ?? 0),
+                    'currency' => (string) ($voidResult['currency'] ?? ''),
+                    'paid_amount' => (float) ($voidResult['paid_amount'] ?? 0),
+                    'released_application_ids' => array_column($sourceCreditVoid['applications'], 'application_id'),
+                    'neutralized_advance_ids' => array_column($sourceCreditVoid['advances'], 'id'),
+                    'journal_entry_ids' => $sourceCreditVoid['journal_entry_ids'] ?? [],
+                    'payment_reversal_journal_entry_id' => $reversalJournalEntryId,
+                    'payment_reversal_journal_entry_ids' => $paymentReversalJournalIds,
+                    'replacement_applications' => $replacement['applications'],
+                    'replacement_obligations' => $replacement['obligations'],
+                    'outcome' => 'committed',
+                ]);
+            }
+
             return [
                 'booking_id' => (int) $booking['id'],
                 'supplier_payment_id' => $paymentId,
                 'reversal_journal_entry_id' => $reversalJournalEntryId,
+                'replacement' => $replacement,
+                'payment_no' => (string) ($payment['payment_no'] ?? ''),
             ];
         } catch (\Throwable $exception) {
             if ($startedTransaction && $db->inTransaction()) {
                 $db->rollBack();
             }
+
+            app_write_log('supplier.payment.void.failed', 'Booking supplier payment void failed.', [
+                'request_id' => app_request_id(),
+                'actor_user_id' => $actorUserId,
+                'supplier_payment_id' => $paymentId,
+                'payment_no' => (string) ($payment['payment_no'] ?? ''),
+                'booking_reference' => (string) ($payment['booking_reference'] ?? ''),
+                'branch_id' => (int) ($payment['branch_id'] ?? 0),
+                'currency' => (string) ($payment['currency'] ?? ''),
+                'error' => $exception->getMessage(),
+                'previous_error' => $exception->getPrevious()?->getMessage(),
+                'outcome' => $startedTransaction ? 'rolled_back' : 'failed_in_outer_transaction',
+            ]);
 
             if ($exception instanceof RuntimeException) {
                 throw $exception;
@@ -1645,12 +1928,32 @@ final class SupplierSettlementWorkspaceService extends Service
                     $appliedTotal = round($appliedTotal + $delta, 2);
                     $applicationCount++;
                 }
-                if (abs($delta) > 0.005) {
+                foreach ((array) ($result['supplier_payment_credit_applications'] ?? []) as $application) {
+                    $amount = round((float) ($application['applied_amount'] ?? 0), 2);
+                    $accounting->postSupplierPaymentAllocation([
+                        'branch_id' => (int) ($obligation['branch_id'] ?? 0),
+                        'booking_reference' => (string) ($obligation['booking_reference'] ?? ''),
+                        'source_reference' => (string) ($application['payment_no'] ?? '') . '-ALLOC-' . (int) ($application['allocation_id'] ?? 0),
+                        'service_line_reference' => (string) ($obligation['service_line_reference'] ?? '') !== ''
+                            ? (string) $obligation['service_line_reference'] : null,
+                        'supplier_obligation_id' => (int) ($obligation['id'] ?? 0),
+                        'supplier_payment_id' => (int) ($application['supplier_payment_id'] ?? 0),
+                        'allocated_amount' => $amount,
+                        'entry_date' => $effectiveDate,
+                        'currency' => (string) ($obligation['currency'] ?? 'PKR'),
+                        'actor_user_id' => $actorUserId,
+                        'narration' => 'Existing supplier payment credit applied against payable',
+                    ]);
+                    $appliedTotal = round($appliedTotal + $amount, 2);
+                    $applicationCount++;
+                }
+                if (abs($delta) > 0.005 || (float) ($result['supplier_payment_credit_applied_amount'] ?? 0) > 0.005) {
                     $results[] = [
                         'supplier_obligation_id' => (int) ($obligation['id'] ?? 0),
                         'booking_reference' => (string) ($obligation['booking_reference'] ?? ''),
                         'currency' => (string) ($obligation['currency'] ?? ''),
                         'applied_amount_delta' => $delta,
+                        'supplier_payment_credit_applied_amount' => round((float) ($result['supplier_payment_credit_applied_amount'] ?? 0), 2),
                         'remaining_payable' => round((float) ($result['obligation']['net_payable_amount'] ?? 0), 2),
                     ];
                 }
@@ -1881,8 +2184,11 @@ final class SupplierSettlementWorkspaceService extends Service
             if ($appliedAmount <= 0.005) {
                 throw new RuntimeException('No supplier advance amount could be applied to the selected payable.');
             }
+            if (abs($appliedAmount - $amount) > 0.005) {
+                throw new RuntimeException('The selected advance or payable has less available than requested. Refresh the balances and enter the exact amount to apply.');
+            }
 
-            $accounting->postSupplierAdvanceApplication([
+            $journalEntryId = $accounting->postSupplierAdvanceApplication([
                 'branch_id' => (int) $booking['branch_id'],
                 'booking_reference' => (string) $booking['booking_reference'],
                 'source_reference' => 'SADV-APPLY-' . $advanceId . '-' . $obligationId,
@@ -1900,6 +2206,7 @@ final class SupplierSettlementWorkspaceService extends Service
 
             return [
                 'booking_id' => (int) $booking['id'],
+                'journal_entry_id' => $journalEntryId,
             ];
         } catch (\Throwable $exception) {
             if ($startedTransaction && $db->inTransaction()) {

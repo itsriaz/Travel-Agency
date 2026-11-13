@@ -307,7 +307,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const supplierPaymentEditPreview = station.querySelector('[data-supplier-payment-edit-preview]');
     const supplierPaymentEditFeedback = station.querySelector('[data-supplier-payment-edit-feedback]');
     const supplierPaymentEditSubmit = station.querySelector('[data-supplier-payment-edit-submit]');
-    const supplierPaymentEditVoidButton = station.querySelector('[data-supplier-payment-edit-void]');
+    const supplierPaymentEditVoidLink = station.querySelector('[data-supplier-payment-edit-void]');
     const supplierPaymentEditOriginalBranchId = station.querySelector('[data-supplier-payment-edit-original-branch-id]');
     const supplierPaymentEditOriginalSupplierId = station.querySelector('[data-supplier-payment-edit-original-supplier-id]');
     const supplierPaymentEditOriginalCurrency = station.querySelector('[data-supplier-payment-edit-original-currency]');
@@ -745,10 +745,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const paymentTargetRow = station.querySelector('[data-payment-target-row]');
     const paymentScopeNote = station.querySelector('[data-payment-scope-note]');
     const paymentCustomerCreditApplyRow = station.querySelector('[data-payment-customer-credit-apply-row]');
-    const paymentCustomerCreditSelect = paymentForm?.elements?.namedItem('customer_credit_receipt_id') instanceof HTMLSelectElement
-        ? paymentForm.elements.namedItem('customer_credit_receipt_id')
-        : null;
+    const paymentCustomerCreditPoolInput = station.querySelector('[data-payment-customer-credit-pool]');
     const paymentCustomerCreditAmountRow = station.querySelector('[data-payment-customer-credit-amount-row]');
+    const paymentCustomerCreditUseInput = paymentForm?.elements?.namedItem('customer_credit_use_pool') instanceof HTMLInputElement
+        ? paymentForm.elements.namedItem('customer_credit_use_pool')
+        : null;
+    const paymentCustomerCreditUsePreview = station.querySelector('[data-payment-customer-credit-use-preview]');
     const paymentCustomerCreditAmountInput = paymentForm?.elements?.namedItem('customer_credit_apply_amount') instanceof HTMLInputElement
         ? paymentForm.elements.namedItem('customer_credit_apply_amount')
         : null;
@@ -763,6 +765,7 @@ document.addEventListener('DOMContentLoaded', () => {
         : null;
     let paymentAdvanceOptions = [];
     let paymentAdvanceLoadController = null;
+    let paymentCreditLookupFailed = false;
     const paymentCurrentBalancePkrRow = station.querySelector('[data-payment-current-balance-pkr-row]');
     const paymentCurrentBalancePkrInput = commercialLookup('commercial-payment-current-balance-pkr', '[data-payment-current-balance-pkr]');
     var dailySettlementRatesDataNode = null;
@@ -2748,6 +2751,8 @@ document.addEventListener('DOMContentLoaded', () => {
     let customerPaidSupplierSelectedResult = null;
     let customerPaidSupplierCollapseToSelected = false;
     let customerPaidSupplierPendingSave = false;
+    let paymentAccountBalanceLookupReady = true;
+    let paymentAccountBalanceRequestId = 0;
     const syncPaymentAccountBalanceRate = () => {
         if (!(paymentAccountBalanceRateRow instanceof HTMLElement) || !(paymentAccountBalanceSelect instanceof HTMLSelectElement)) {
             return;
@@ -2766,7 +2771,8 @@ document.addEventListener('DOMContentLoaded', () => {
             paymentAccountBalanceRow.hidden = !isAccountHolderBalanceMethod();
         }
         if (paymentAccountBalanceSelect instanceof HTMLSelectElement) {
-            paymentAccountBalanceSelect.disabled = isDirectSupplierPaymentMethod(paymentMethodSelect?.value || '') || !isAccountHolderBalanceMethod();
+            paymentAccountBalanceSelect.disabled = isDirectSupplierPaymentMethod(paymentMethodSelect?.value || '')
+                || !isAccountHolderBalanceMethod() || !paymentAccountBalanceLookupReady;
             if (paymentAccountBalanceSelect.disabled) {
                 paymentAccountBalanceSelect.value = '';
             }
@@ -2776,13 +2782,15 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         syncPaymentAccountBalanceRate();
     };
-    const populatePaymentAccountBalanceOptions = (rows = []) => {
+    const populatePaymentAccountBalanceOptions = (rows = [], placeholder = 'No account balance', ready = true) => {
         if (!(paymentAccountBalanceSelect instanceof HTMLSelectElement)) {
             return;
         }
 
+        paymentAccountBalanceLookupReady = ready;
         const previousValue = String(paymentAccountBalanceSelect.value || '').trim().toUpperCase();
-        paymentAccountBalanceSelect.innerHTML = '<option value="">No account balance</option>';
+        paymentAccountBalanceSelect.innerHTML = '';
+        paymentAccountBalanceSelect.add(new Option(placeholder, ''));
         rows.forEach((row) => {
             const currency = String(row?.currency || '').trim().toUpperCase();
             if (currency === '') {
@@ -2803,6 +2811,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!(paymentAccountBalanceSelect instanceof HTMLSelectElement) || accountHolderBalancesUrl === '') {
             return;
         }
+        const requestId = ++paymentAccountBalanceRequestId;
 
         const branchField = paymentForm?.elements?.namedItem('branch_id');
         const branchId = branchField instanceof HTMLInputElement || branchField instanceof HTMLSelectElement
@@ -2827,15 +2836,28 @@ document.addEventListener('DOMContentLoaded', () => {
             branch_id: String(branchId),
             business_source_id: String(businessSourceId),
         });
-        const response = await fetch(`${accountHolderBalancesUrl}?${params.toString()}`, {
-            method: 'GET',
-            credentials: 'same-origin',
-            headers: {
-                Accept: 'application/json',
-            },
-        });
-        const payload = await response.json().catch(() => ({ ok: false, balances: [] }));
-        populatePaymentAccountBalanceOptions(Array.isArray(payload?.balances) ? payload.balances : []);
+        populatePaymentAccountBalanceOptions([], 'Checking account balance...', false);
+        try {
+            const response = await fetch(`${accountHolderBalancesUrl}?${params.toString()}`, {
+                method: 'GET',
+                credentials: 'same-origin',
+                headers: { Accept: 'application/json' },
+            });
+            if (!response.ok) {
+                throw new Error('Account balance lookup failed');
+            }
+            const payload = await response.json();
+            if (payload?.ok !== true || !Array.isArray(payload.balances)) {
+                throw new Error('Invalid account balance response');
+            }
+            if (requestId === paymentAccountBalanceRequestId) {
+                populatePaymentAccountBalanceOptions(payload.balances);
+            }
+        } catch (error) {
+            if (requestId === paymentAccountBalanceRequestId) {
+                populatePaymentAccountBalanceOptions([], 'Balance unavailable - reselect account to retry', false);
+            }
+        }
     };
 
     const normalizeDirectSupplierObligation = (row = {}) => {
@@ -8711,30 +8733,26 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     };
 
-    const selectedPaymentCustomerCreditOption = () => {
-        if (!paymentCustomerCreditSelect || paymentCustomerCreditSelect.value === '') {
-            return null;
-        }
-
-        return paymentCustomerCreditOptions.find(
-            (credit) => String(credit.id || '') === String(paymentCustomerCreditSelect.value)
-        ) || null;
-    };
-
     const setPaymentCustomerCreditVisible = (visible) => {
         if (paymentCustomerCreditApplyRow) {
             paymentCustomerCreditApplyRow.hidden = false;
         }
-        if (paymentCustomerCreditSelect) {
-            paymentCustomerCreditSelect.disabled = !visible;
-        }
         if (paymentCustomerCreditAmountRow) {
             paymentCustomerCreditAmountRow.hidden = !visible;
         }
+        if (paymentCustomerCreditUseInput) {
+            paymentCustomerCreditUseInput.disabled = !visible;
+        }
+        if (paymentCustomerCreditPoolInput instanceof HTMLInputElement) {
+            const currency = paymentCurrencySelect?.value || 'PKR';
+            const available = paymentCustomerCreditOptions.reduce(
+                (sum, credit) => sum + Math.max(toNumber(credit.unallocated_amount || 0), 0), 0
+            );
+            paymentCustomerCreditPoolInput.value = visible
+                ? `${currency} ${formatNumberInputValue(available)}`
+                : 'No credit available';
+        }
         if (!visible) {
-            if (paymentCustomerCreditSelect) {
-                paymentCustomerCreditSelect.value = '';
-            }
             if (paymentCustomerCreditAmountInput) {
                 paymentCustomerCreditAmountInput.value = '0';
             }
@@ -8742,13 +8760,26 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     const syncPaymentCustomerCreditAmountCap = (currentDueOverride = null, otherCreditUsed = 0) => {
+        const showCreditUse = (amount) => {
+            if (paymentCustomerCreditUsePreview instanceof HTMLElement) {
+                const currency = paymentCurrencySelect?.value || 'PKR';
+                paymentCustomerCreditUsePreview.textContent = amount > 0.005
+                    ? `${currency} ${formatNumberInputValue(amount)} expected to apply`
+                    : 'No credit will be used';
+            }
+        };
         if (!paymentCustomerCreditAmountInput) {
             return 0;
         }
 
-        const selectedCredit = selectedPaymentCustomerCreditOption();
-        if (!selectedCredit) {
+        if (paymentCustomerCreditOptions.length === 0) {
             paymentCustomerCreditAmountInput.value = '0';
+            showCreditUse(0);
+            return 0;
+        }
+        if (!paymentCustomerCreditUseInput?.checked) {
+            paymentCustomerCreditAmountInput.value = '0';
+            showCreditUse(0);
             return 0;
         }
 
@@ -8757,10 +8788,13 @@ document.addEventListener('DOMContentLoaded', () => {
         if (String(invoiceCurrency).toUpperCase() !== String(paymentCurrency).toUpperCase()) {
             paymentCustomerCreditAmountInput.value = '0';
             setPaymentCustomerCreditVisible(false);
+            showCreditUse(0);
             return 0;
         }
 
-        const available = Math.max(toNumber(selectedCredit.unallocated_amount || 0), 0);
+        const available = paymentCustomerCreditOptions.reduce(
+            (sum, credit) => sum + Math.max(toNumber(credit.unallocated_amount || 0), 0), 0
+        );
         const fallbackDue = paymentTotalOutstandingInput?.dataset.paymentTotalDueNow
             || paymentCurrentBalanceInput?.dataset.paymentPersistedInvoiceBalance
             || paymentCurrentBalanceInput?.value
@@ -8771,17 +8805,9 @@ document.addEventListener('DOMContentLoaded', () => {
             available,
             Math.max(currentDue - cashNow - Math.max(toNumber(otherCreditUsed), 0), 0)
         ), 0);
-        let requested = Math.max(toNumber(paymentCustomerCreditAmountInput.value || 0), 0);
-
-        if (requested <= 0.005 && maxCreditUse > 0.005 && paymentCustomerCreditSelect?.value) {
-            requested = maxCreditUse;
-        }
-        if (requested > maxCreditUse) {
-            requested = maxCreditUse;
-        }
-
-        paymentCustomerCreditAmountInput.value = formatNumberInputValue(requested);
-        return requested;
+        paymentCustomerCreditAmountInput.value = formatNumberInputValue(maxCreditUse);
+        showCreditUse(maxCreditUse);
+        return maxCreditUse;
     };
 
     const currentPaymentAdvanceContext = () => ({
@@ -8865,14 +8891,20 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         const context = currentPaymentAdvanceContext();
+        if (paymentCustomerCreditUseInput) {
+            const creditContext = [context.branchId, context.travelerId, context.currency,
+                context.targetBookingReference].join('|');
+            if (paymentCustomerCreditUseInput.dataset.creditContext !== creditContext) {
+                paymentCustomerCreditUseInput.dataset.creditContext = creditContext;
+                paymentCustomerCreditUseInput.checked = true;
+            }
+        }
         if (context.branchId <= 0 || context.travelerId <= 0 || context.currency !== context.invoiceCurrency) {
+            paymentCreditLookupFailed = false;
             paymentAdvanceOptions = [];
             paymentCustomerCreditOptions = [];
             paymentAdvanceSelect.innerHTML = '<option value="">No advance available</option>';
             setPaymentAdvanceVisible(false);
-            if (paymentCustomerCreditSelect) {
-                paymentCustomerCreditSelect.innerHTML = '<option value="">No transferable credit available</option>';
-            }
             setPaymentCustomerCreditVisible(false);
             return;
         }
@@ -8898,10 +8930,10 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!response.ok || payload?.ok !== true) {
                 throw new Error('Customer credit lookup unavailable');
             }
+            paymentCreditLookupFailed = false;
             paymentAdvanceOptions = uniqueCustomerAdvanceRows(payload.advances);
             paymentCustomerCreditOptions = uniqueCustomerAdvanceRows(payload.credits);
             const previousValue = paymentAdvanceSelect.value;
-            const previousCreditValue = paymentCustomerCreditSelect?.value || '';
 
             paymentAdvanceSelect.innerHTML = '<option value="">No advance available</option>';
             paymentAdvanceOptions.forEach((advance) => {
@@ -8921,23 +8953,6 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             setPaymentAdvanceVisible(paymentAdvanceOptions.length > 0);
-            if (paymentCustomerCreditSelect) {
-                paymentCustomerCreditSelect.innerHTML = '<option value="">No transferable credit available</option>';
-                paymentCustomerCreditOptions.forEach((credit) => {
-                    const amount = Math.max(toNumber(credit.unallocated_amount || 0), 0);
-                    const option = document.createElement('option');
-                    option.value = String(credit.id || '');
-                    option.dataset.amount = String(amount);
-                    option.textContent = `${credit.booking_reference || 'Booking'} / ${credit.receipt_no || 'Receipt'} / ${context.currency} ${formatNumberInputValue(amount)}`;
-                    paymentCustomerCreditSelect.appendChild(option);
-                });
-                if (paymentCustomerCreditSelect.options.length > 1) {
-                    paymentCustomerCreditSelect.options[0].textContent = 'Select customer credit';
-                }
-                if (previousCreditValue && Array.from(paymentCustomerCreditSelect.options).some((option) => option.value === previousCreditValue)) {
-                    paymentCustomerCreditSelect.value = previousCreditValue;
-                }
-            }
             setPaymentCustomerCreditVisible(paymentCustomerCreditOptions.length > 0);
             syncPaymentAdvanceAmountCap();
             syncPaymentCustomerCreditAmountCap();
@@ -8945,13 +8960,14 @@ document.addEventListener('DOMContentLoaded', () => {
             if (error instanceof DOMException && error.name === 'AbortError') {
                 return;
             }
+            paymentCreditLookupFailed = true;
             paymentAdvanceOptions = [];
             paymentCustomerCreditOptions = [];
             paymentAdvanceSelect.innerHTML = '<option value="">Advance lookup unavailable - retry</option>';
             setPaymentAdvanceVisible(true);
-            if (paymentCustomerCreditSelect) {
-                paymentCustomerCreditSelect.innerHTML = '<option value="">Credit lookup unavailable - retry</option>';
-                setPaymentCustomerCreditVisible(true);
+            setPaymentCustomerCreditVisible(false);
+            if (paymentCustomerCreditPoolInput instanceof HTMLInputElement) {
+                paymentCustomerCreditPoolInput.value = 'Credit lookup unavailable - retry';
             }
             syncPaymentAdvanceAmountCap();
             syncPaymentCustomerCreditAmountCap();
@@ -8970,9 +8986,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (bookingCreditApplied > 0.005) {
             paymentCustomerCreditOptions = [];
-            if (paymentCustomerCreditSelect) {
-                paymentCustomerCreditSelect.value = '';
-            }
             if (paymentCustomerCreditAmountInput) {
                 paymentCustomerCreditAmountInput.value = '0';
             }
@@ -9469,16 +9482,8 @@ document.addEventListener('DOMContentLoaded', () => {
         paymentAdvanceAmountInput.addEventListener('change', refreshPaymentPreview);
     }
 
-    if (paymentCustomerCreditSelect instanceof HTMLSelectElement) {
-        paymentCustomerCreditSelect.addEventListener('change', () => {
-            syncPaymentCustomerCreditAmountCap(null, syncPaymentAdvanceAmountCap());
-            refreshPaymentPreview();
-        });
-    }
-
-    if (paymentCustomerCreditAmountInput instanceof HTMLInputElement) {
-        paymentCustomerCreditAmountInput.addEventListener('input', refreshPaymentPreview);
-        paymentCustomerCreditAmountInput.addEventListener('change', refreshPaymentPreview);
+    if (paymentCustomerCreditUseInput instanceof HTMLInputElement) {
+        paymentCustomerCreditUseInput.addEventListener('change', refreshPaymentPreview);
     }
 
     if (paymentCurrencySelect) {
@@ -10705,7 +10710,6 @@ document.addEventListener('DOMContentLoaded', () => {
     if (businessSourceInput instanceof HTMLSelectElement) {
         businessSourceInput.addEventListener('change', () => {
             loadPaymentAccountHolderBalances()
-                .catch(() => populatePaymentAccountBalanceOptions([]))
                 .finally(() => {
                     syncPaymentTreasurySelector();
                 });
@@ -10905,7 +10909,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     syncPaymentTreasurySelector();
-    loadPaymentAccountHolderBalances().catch(() => populatePaymentAccountBalanceOptions([]));
+    loadPaymentAccountHolderBalances();
 
     if (paymentDueDatePicker && paymentDueDateInput) {
         paymentDueDatePicker.addEventListener('change', () => {
@@ -10970,6 +10974,17 @@ document.addEventListener('DOMContentLoaded', () => {
         paymentSubmitDebug.lastBackendError = null;
         paymentSubmitDebug.lastBackendResponse = null;
 
+        const bookingCreditSaveSummary = (payload) => {
+            const parts = Array.isArray(payload?.customer_credit_applied?.receipt_breakdown)
+                ? payload.customer_credit_applied.receipt_breakdown
+                : [];
+            if (parts.length === 0) {
+                return '';
+            }
+            const currency = paymentCurrencySelect?.value || 'PKR';
+            return `Credit used: ${parts.map((part) => `${part.receipt_no || 'Receipt'} ${currency} ${formatNumberInputValue(toNumber(part.amount || 0))}`).join(', ')}`;
+        };
+
         try {
             if (currentSavedPaymentApplies()) {
                 logWorkflowTrace('save-payment:aborted-already-saved');
@@ -10977,6 +10992,19 @@ document.addEventListener('DOMContentLoaded', () => {
                 syncSavedPaymentUiState();
                 return null;
             }
+
+            const creditWasSelected = paymentCustomerCreditUseInput?.checked
+                && paymentCustomerCreditOptions.length > 0;
+            await refreshPaymentAdvanceControls();
+            if (paymentCreditLookupFailed) {
+                showFeedback('Available customer credit could not be verified. Retry before saving this payment.');
+                return null;
+            }
+            if (creditWasSelected && paymentCustomerCreditOptions.length === 0) {
+                showFeedback('Selected customer credit is no longer available. Reload the booking before saving.');
+                return null;
+            }
+            refreshPaymentPreview();
 
             const isExchangeSettlement = paymentSettlementModeInput?.value === 'exchange';
             const selectedPaymentCurrency = paymentCurrencySelect?.value || paymentCurrentInvoiceInput?.dataset.paymentCurrency || 'PKR';
@@ -10986,17 +11014,19 @@ document.addEventListener('DOMContentLoaded', () => {
                 : 0;
             const selectedAdvanceReceiptId = paymentAdvanceSelect?.value || '';
             const usesCustomerAdvance = selectedAdvanceUsed > 0.005;
-            const selectedCustomerCreditUsed = paymentCustomerCreditSelect?.value
+            const useCustomerCredit = paymentCustomerCreditUseInput?.checked
+                && paymentCustomerCreditOptions.length > 0;
+            const selectedCustomerCreditUsed = useCustomerCredit
                 ? Math.max(toNumber(paymentCustomerCreditAmountInput?.value || 0), 0)
                 : 0;
-            const selectedCustomerCreditReceiptId = paymentCustomerCreditSelect?.value || '';
             const usesBookingCustomerCredit = selectedCustomerCreditUsed > 0.005;
             const preserveSelectedSettlementOn = (formData) => {
                 if (!(formData instanceof FormData)) {
                     return;
                 }
 
-                formData.set('customer_credit_receipt_id', selectedCustomerCreditReceiptId);
+                formData.set('customer_credit_use_pool', useCustomerCredit ? '1' : '0');
+                formData.delete('customer_credit_receipt_id');
                 formData.set('customer_credit_apply_amount', formatNumberInputValue(selectedCustomerCreditUsed));
                 formData.set('advance_receipt_id', selectedAdvanceReceiptId);
                 formData.set('advance_apply_amount', formatNumberInputValue(selectedAdvanceUsed));
@@ -11215,6 +11245,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 const appliedBookingCredit = Math.max(toNumber(payload?.customer_credit_applied?.allocated_amount || 0), 0);
                 const appliedFormalAdvance = Math.max(toNumber(payload?.advance_applied?.allocated_amount || 0), 0);
+                const bookingCreditSummary = bookingCreditSaveSummary(payload);
+                if (bookingCreditSummary) {
+                    showFeedback(bookingCreditSummary);
+                }
                 if (appliedBookingCredit > 0.005 || appliedFormalAdvance > 0.005) {
                     if (autoOpenReceipt) {
                         openCustomerReceiptWindowOnce('credit-settlement-save', receiptWindow);
@@ -11419,7 +11453,11 @@ document.addEventListener('DOMContentLoaded', () => {
             lockSavedPaymentStateFromPayload(payload, 'same_currency');
             refreshPaymentPreview();
             const receiptSummary = currentReceiptSummary(payload);
-            showFeedback(receiptSummary.receiptNo !== '' ? `Payment saved: ${receiptSummary.receiptNo}` : (payload.message || 'Customer receipt recorded successfully.'));
+            const bookingCreditSummary = bookingCreditSaveSummary(payload);
+            const paymentMessage = receiptSummary.receiptNo !== ''
+                ? `Payment saved: ${receiptSummary.receiptNo}`
+                : (payload.message || 'Customer receipt recorded successfully.');
+            showFeedback(bookingCreditSummary ? `${paymentMessage}. ${bookingCreditSummary}` : paymentMessage);
             if (autoOpenReceipt && !openCustomerReceiptWindowOnce('save-payment', receiptWindow)) {
                 showFeedback('Payment saved. Use Print Receipt if the receipt window did not open automatically.');
             }
@@ -11970,7 +12008,6 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     supplierPaymentEditCloseButtons.forEach((button) => button.addEventListener('click', () => closeSupplierPaymentEdit()));
     supplierPaymentEditForm?.addEventListener('submit', (event) => void submitSupplierPaymentEdit(event));
-    supplierPaymentEditVoidButton?.addEventListener('click', submitSupplierPaymentVoid);
     [supplierPaymentEditSupplier, supplierPaymentEditDate, supplierPaymentEditAmount, supplierPaymentEditReference, supplierPaymentEditBankDetail, supplierPaymentEditRemarks].forEach((field) => {
         field?.addEventListener('input', () => updateSupplierPaymentEditPreview());
         field?.addEventListener('change', () => updateSupplierPaymentEditPreview());
@@ -12302,6 +12339,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const globalPaymentCorrectionUrl = String(globalPaymentManagerModal?.dataset.globalPaymentCorrectionUrl || '').trim();
     const globalPaymentSupplierCorrectionUrl = String(globalPaymentManagerModal?.dataset.globalPaymentSupplierCorrectionUrl || '').trim();
     const supplierPaymentEditUrl = String(globalPaymentManagerModal?.dataset.supplierPaymentEditUrl || '').trim();
+    const supplierPaymentVoidImpactUrl = String(supplierPaymentEditModal?.dataset.supplierPaymentVoidImpactUrl || '').trim();
     const prepaidPaymentHistoryUrl = String(prepaidPaymentManagerModal?.dataset.prepaidPaymentHistoryUrl || '').trim();
     const prepaidPaymentCorrectionUrl = String(prepaidPaymentManagerModal?.dataset.prepaidPaymentCorrectionUrl || '').trim();
     let supplierHistoryFinderState = {
@@ -21535,6 +21573,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (supplierPaymentEditBankDetail instanceof HTMLInputElement) supplierPaymentEditBankDetail.value = String(row?.bank_card_detail || '');
         if (supplierPaymentEditRemarks instanceof HTMLInputElement) supplierPaymentEditRemarks.value = String(row?.remarks || '');
         if (supplierPaymentEditReason instanceof HTMLInputElement) supplierPaymentEditReason.value = '';
+        if (supplierPaymentEditVoidLink instanceof HTMLAnchorElement) {
+            supplierPaymentEditVoidLink.href = `${supplierPaymentVoidImpactUrl}?supplier_payment_id=${encodeURIComponent(String(normalizedId))}`;
+        }
         if (supplierPaymentEditAccount instanceof HTMLSelectElement) {
             supplierPaymentEditAccount.dataset.requestedAccountId = String(Number.parseInt(String(row?.treasury_account_id || 0), 10) || 0);
         }
@@ -21557,46 +21598,6 @@ document.addEventListener('DOMContentLoaded', () => {
         supplierPaymentEditForm?.reset();
         supplierPaymentEditOriginal = null;
     };
-
-    function submitSupplierPaymentVoid() {
-        const paymentId = Number.parseInt(String(supplierPaymentEditId?.value || 0), 10) || 0;
-        if (paymentId <= 0 || globalPaymentCorrectionUrl === '') {
-            setSupplierPaymentEditFeedback('Void payment is unavailable for this entry.');
-            return;
-        }
-
-        const reason = window.prompt('Enter the reason for voiding this supplier payment:');
-        if (reason === null) {
-            return;
-        }
-        if (reason.trim().length < 5) {
-            window.alert('Enter a reason of at least 5 characters.');
-            return;
-        }
-        const form = document.createElement('form');
-        const branchId = Number.parseInt(String(supplierPaymentEditOriginalBranchId?.value || 0), 10) || 0;
-        const supplierId = Number.parseInt(String(supplierPaymentEditOriginalSupplierId?.value || 0), 10) || 0;
-        const currency = String(supplierPaymentEditOriginalCurrency?.value || supplierPaymentEditOriginal?.currency || 'PKR').trim().toUpperCase();
-        const fields = {
-            _token: csrfToken,
-            supplier_payment_id: String(paymentId),
-            branch_id: String(branchId),
-            supplier_id: String(supplierId),
-            currency,
-            correction_action: 'void',
-            void_reason: reason.trim(),
-        };
-        Object.entries(fields).forEach(([name, value]) => {
-            const input = document.createElement('input');
-            input.name = name;
-            input.value = String(value);
-            form.appendChild(input);
-        });
-        void submitGlobalPaymentManagerForm(form, 'void', {
-            successMessage: 'Supplier payment voided successfully.',
-            source: 'edit-modal',
-        });
-    }
 
     async function submitGlobalPaymentManagerForm(form, action, options = {}) {
         if (!(form instanceof HTMLFormElement)) {
@@ -21802,19 +21803,27 @@ document.addEventListener('DOMContentLoaded', () => {
                 : (status === 'partially_used' ? 'status-pill--warning' : 'status-pill--success');
             const sourcePaymentId = Number.parseInt(String(row?.source_supplier_payment_id || 0), 10) || 0;
             const sourcePaymentNo = String(row?.source_supplier_payment_no || '').trim();
+            const creditCount = Number.parseInt(String(row?.credit_count || 1), 10) || 1;
+            const paid = toNumber(row?.display_paid_amount ?? row?.deposit_amount ?? 0);
+            const used = toNumber(row?.display_used_amount ?? row?.used_amount ?? 0);
+            const available = toNumber(row?.display_available_amount ?? row?.available_amount ?? 0);
+            const returned = toNumber(row?.returned_amount || 0);
+            const balanceNote = Math.abs(paid - used - available - returned) > 0.01
+                ? '<small>Payment totals need review</small>'
+                : (returned > 0.005 ? `<small>Returned: ${escapeHtml(formatMoney(returned))}</small>` : '');
             const action = sourcePaymentId > 0
                 ? `<button class="btn btn-primary btn-sm" type="button" data-prepaid-source-payment-edit-open="${sourcePaymentId}" data-prepaid-source-payment-no="${escapeHtml(sourcePaymentNo)}">Edit Payment</button>`
                 : `<button class="btn btn-primary btn-sm" type="button" data-prepaid-payment-edit-open="${Number.parseInt(String(row?.id || 0), 10) || 0}">Edit Payment</button>`;
 
             return `<tr>
                 <td>${escapeHtml(String(row?.payment_date || ''))}</td>
-                <td><strong>SADV-${String(Number.parseInt(String(row?.id || 0), 10) || 0).padStart(6, '0')}</strong>${String(row?.reference_no || '').trim() !== '' ? `<small>${escapeHtml(String(row.reference_no))}</small>` : ''}</td>
+                <td><strong>${escapeHtml(creditCount > 1 && sourcePaymentNo !== '' ? sourcePaymentNo : `SADV-${String(Number.parseInt(String(row?.id || 0), 10) || 0).padStart(6, '0')}`)}</strong>${creditCount > 1 ? `<small>${creditCount} credit records</small>` : (String(row?.reference_no || '').trim() !== '' ? `<small>${escapeHtml(String(row.reference_no))}</small>` : '')}${balanceNote}</td>
                 <td>${escapeHtml(String(row?.supplier_name || ''))}${String(row?.supplier_code || '').trim() !== '' ? `<small>${escapeHtml(String(row.supplier_code))}</small>` : ''}</td>
                 <td>${escapeHtml(String(row?.branch_name || ''))}</td>
                 <td>${escapeHtml(String(row?.currency || ''))}</td>
-                <td>${escapeHtml(formatMoney(toNumber(row?.deposit_amount || 0)))}</td>
-                <td>${escapeHtml(formatMoney(toNumber(row?.used_amount || 0)))}</td>
-                <td>${escapeHtml(formatMoney(toNumber(row?.available_amount || 0)))}</td>
+                <td>${escapeHtml(formatMoney(paid))}</td>
+                <td>${escapeHtml(formatMoney(used))}</td>
+                <td>${escapeHtml(formatMoney(available))}</td>
                 <td>${escapeHtml(String(row?.treasury_account_name || 'N/A'))}</td>
                 <td><span class="status-pill ${statusClass}">${escapeHtml(prepaidPaymentStatusLabel(status))}</span></td>
                 <td>${action}</td>

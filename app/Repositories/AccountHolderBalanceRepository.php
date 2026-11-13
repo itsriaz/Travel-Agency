@@ -36,7 +36,8 @@ final class AccountHolderBalanceRepository extends BaseRepository
             $legacyPrefixCondition = $hasTreasuryBusinessSource ? 'tt.business_source_id IS NULL AND ' : '';
             $treasuryConditions[] = '('
                 . $legacyPrefixCondition
-                . 'LOWER(COALESCE(tt.counterparty_name, "")) = LOWER(:legacy_business_source_name_exact)'
+                . 'CONVERT(COALESCE(tt.counterparty_name, "") USING utf8mb4) COLLATE utf8mb4_unicode_ci'
+                . ' = CONVERT(:legacy_business_source_name_exact USING utf8mb4) COLLATE utf8mb4_unicode_ci'
                 . ')';
             $treasuryParams['legacy_business_source_name_exact'] = $businessSourceName;
         }
@@ -44,7 +45,10 @@ final class AccountHolderBalanceRepository extends BaseRepository
             $legacyPrefixCondition = $hasTreasuryBusinessSource ? 'tt.business_source_id IS NULL AND ' : '';
             $treasuryConditions[] = '('
                 . $legacyPrefixCondition
-                . 'LOWER(COALESCE(tt.narration, "")) LIKE CONCAT("%", LOWER(:legacy_business_source_name_like), "%")'
+                . 'LOCATE('
+                . 'CONVERT(:legacy_business_source_name_like USING utf8mb4) COLLATE utf8mb4_unicode_ci, '
+                . 'CONVERT(COALESCE(tt.narration, "") USING utf8mb4) COLLATE utf8mb4_unicode_ci'
+                . ') > 0'
                 . ')';
             $treasuryParams['legacy_business_source_name_like'] = $businessSourceName;
         }

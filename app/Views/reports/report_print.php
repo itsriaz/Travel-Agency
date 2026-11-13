@@ -129,17 +129,18 @@ $formatLedgerBalance = static function (string $value, string $report) use ($isL
     }
 
     $amount = (float) $numeric;
+    $precision = $report === 'supplier_ledger' ? 0 : 2;
     if (abs($amount) < 0.005) {
-        return number_format(0, 2);
+        return number_format(0, $precision);
     }
 
     if ($report === 'supplier_ledger') {
         if ($isLinkedPartyLedger) {
-            return number_format(abs($amount), 2) . ($amount > 0 ? ' Payable' : ' Receivable');
+            return number_format(abs($amount), $precision) . ($amount > 0 ? ' Payable' : ' Receivable');
         }
         $isAdvance = stripos($text, 'advance') !== false || ($amount < 0 && stripos($text, 'payable') === false);
 
-        return number_format(abs($amount), 2) . ($isAdvance ? ' Advance' : ' Payable');
+        return number_format(abs($amount), $precision) . ($isAdvance ? ' Advance' : ' Payable');
     }
 
     $suffix = $amount > 0 ? 'Dr' : 'Cr';

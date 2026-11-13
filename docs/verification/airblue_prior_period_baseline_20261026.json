@@ -1,0 +1,27 @@
+{
+    "captured_at": "2026-10-26T20:49:45+05:00",
+    "supplier_id": 349,
+    "currency": "PKR",
+    "branches": [
+        1,
+        2
+    ],
+    "supplier_ledger_rows": 201,
+    "supplier_ledger_last_balance": -193140,
+    "supplier_account": {
+        "net": 193140,
+        "bills": 13762659,
+        "payments": 13955799
+    },
+    "cash_swt_pkr_account_id": 33,
+    "cash_swt_pkr_journal": {
+        "n": 549,
+        "debit": "68307942.01",
+        "credit": "72318063.00",
+        "net": "-4010120.99"
+    },
+    "supplier_payment_headers": {
+        "n": 31,
+        "amount": "13955799.00"
+    }
+}

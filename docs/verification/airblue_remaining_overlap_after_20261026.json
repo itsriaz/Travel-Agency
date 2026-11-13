@@ -1,0 +1,27 @@
+{
+    "scope": "AirBlue Imdad Int, supplier 349, PKR, both branches",
+    "supplier_ledger_after": {
+        "branch_1": {"row_count": 75, "debit_total": 4313974, "credit_total": 6558477, "net_advance": 2244503},
+        "branch_2": {"row_count": 142, "debit_total": 10859359, "credit_total": 8732719, "net_advance": -2126640},
+        "all_branches": {"row_count": 203, "debit_total": 15173333, "credit_total": 15291196, "net_advance": 117863}
+    },
+    "supplier_account_summary_after": {"net": 117863, "bills": 13762659, "payments": 13880522},
+    "supplier_position_audit_after": {"account_net": 117863, "operational_net": 117863, "gap": 0, "available_advances": 221653, "open_supplier_payables": 103790},
+    "separate_open_payable": {"booking": "BK-001187", "obligation_id": 1175, "branch_id": 2, "currency": "PKR", "open_amount": 103790, "advance_used_from_released_credit": 0},
+    "released_applications": [
+        {"booking": "BK-000643", "obligation_id": 649, "application_id": 93, "released": 111208, "adjustment_journal_id": 8199, "supplier_payable": 0},
+        {"booking": "BK-000886", "obligation_id": 888, "application_id": 131, "released": 24885, "adjustment_journal_id": 8200, "supplier_payable": 0}
+    ],
+    "advances_after": {
+        "36": {"deposit": 400000, "used": 203232, "available": 196768},
+        "52": {"deposit": 24885, "used": 0, "available": 24885}
+    },
+    "cash_swt_pkr_after": {"journal_rows": 550, "net": "-3934843.99"},
+    "customer_receivables_after": [
+        {"branch_id": 1, "currency": "PKR", "row_count": 319, "due": "33784026.00", "allocated": "31678456.00", "outstanding": "2105570.00"},
+        {"branch_id": 2, "currency": "AED", "row_count": 867, "due": "1064225.11", "allocated": "891266.72", "outstanding": "172958.39"},
+        {"branch_id": 2, "currency": "PKR", "row_count": 2, "due": "171000.00", "allocated": "171000.00", "outstanding": "0.00"}
+    ],
+    "balanced_adjustment_journals": 2,
+    "required_audit_records": 1
+}

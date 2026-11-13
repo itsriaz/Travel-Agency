@@ -9872,6 +9872,35 @@ textarea {
     grid-column: 3 / 8;
 }
 
+/* Keep the six settlement fields and the refund controls on the same edges. */
+.legacy-service-correction-bar[data-service-correction-bar="settlement"]:not(:has(> .supplier-refund-equivalent-card:not([hidden]))) {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.legacy-service-correction-bar[data-service-correction-bar="settlement"]:not(:has(> .supplier-refund-equivalent-card:not([hidden]))):has(> .legacy-service-event-field--customer-fx-rate[hidden])
+    .legacy-service-event-field--customer-method,
+.legacy-service-correction-bar[data-service-correction-bar="settlement"]:not(:has(> .supplier-refund-equivalent-card:not([hidden]))):has(> .legacy-service-event-field--supplier-fx-rate[hidden])
+    .legacy-service-event-field--supplier-method {
+    grid-column: 3 / 5;
+}
+
+.legacy-service-correction-bar[data-service-correction-bar="settlement"]:not(:has(> .supplier-refund-equivalent-card:not([hidden]))):has(> .legacy-service-event-field--customer-fx-rate[hidden])
+    .legacy-service-event-field--customer-account,
+.legacy-service-correction-bar[data-service-correction-bar="settlement"]:not(:has(> .supplier-refund-equivalent-card:not([hidden]))):has(> .legacy-service-event-field--supplier-fx-rate[hidden])
+    .legacy-service-event-field--supplier-account {
+    grid-column: 5 / 7;
+}
+
+.legacy-service-correction-bar[data-service-correction-bar="settlement"] [data-correction-supplier-refund-status] {
+    grid-column: 1 / -1 !important;
+    grid-row: 4;
+    min-height: 40px;
+    padding: 7px 12px;
+    border-radius: 6px;
+    background: #f1f8fc;
+    box-shadow: none;
+}
+
 .supplier-refund-fx-review[hidden] {
     display: none;
 }
@@ -10923,6 +10952,27 @@ textarea {
     width: 100%;
     min-width: 0;
     max-width: 100%;
+}
+
+.legacy-payment-panel__body--form input[data-payment-customer-credit-use] {
+    width: 18px;
+    height: 18px;
+    min-height: 18px;
+    justify-self: start;
+    accent-color: #11749e;
+}
+
+.legacy-payment-credit-choice {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+.legacy-payment-credit-choice small {
+    color: #36566f;
+    font-weight: 700;
+    line-height: 1.2;
 }
 
 .legacy-payment-panel__body--form .legacy-payment-panel__full-row {

@@ -1,0 +1,25 @@
+{
+    "scope": "nine same-currency supplier advance application detail rows",
+    "applications_after": {
+        "2": 20, "5": 390, "39": 332, "43": 1, "50": 941,
+        "150": 28591, "79": 97444, "142": 34658, "86": 82030
+    },
+    "detail_rule": "For each listed row, applied_amount = advance_amount_consumed = obligation_amount_applied.",
+    "same_currency_detail_mismatches_after": 0,
+    "affected_advance_ids": [3, 4, 17, 19, 27, 29, 34],
+    "supplier_advance_source_audit": "PASS: Every supplier advance conserves its source-currency amount.",
+    "supplier_account_positions_unchanged": {
+        "349": {"PKR": {"net": 117863, "bills": 13762659, "payments": 13880522}},
+        "350": {"AED": {"net": -157, "bills": 20457, "payments": 20300}},
+        "371": {"AED": {"net": 631, "bills": 225930, "payments": 226561}, "PKR": {"net": -49982, "bills": 49982, "payments": 0}}
+    },
+    "cash_swt_pkr_unchanged": {"journal_rows": 550, "net": "-3934843.99"},
+    "customer_receivables_unchanged": [
+        {"branch_id": 1, "currency": "PKR", "row_count": 319, "due": "33784026.00", "allocated": "31678456.00", "outstanding": "2105570.00"},
+        {"branch_id": 2, "currency": "AED", "row_count": 867, "due": "1064225.11", "allocated": "891266.72", "outstanding": "172958.39"},
+        {"branch_id": 2, "currency": "PKR", "row_count": 2, "due": "171000.00", "allocated": "171000.00", "outstanding": "0.00"}
+    ],
+    "audit_log_id": 58264,
+    "financial_amounts_changed": false,
+    "new_journals": 0
+}

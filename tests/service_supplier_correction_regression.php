@@ -128,6 +128,51 @@ try {
         json_encode($unpaidUpdate['debug']['supplierCorrection'] ?? [], JSON_UNESCAPED_SLASHES)
     );
 
+    $unpaidReturn = $serviceWorkspace->saveService(
+        $serviceInput($bookingId, $unpaidServiceId, $oldSupplierName, 'Unpaid Supplier Correction Passenger', [
+            'service_updated_at' => (string) ($unpaidCorrectedService['updated_at'] ?? ''),
+        ]),
+        $actorUserId,
+        $accessibleBranchIds
+    );
+    $returnRows = $reportRepository->supplierLedger([2], null, null, 'AED', '', 0, 0, $bookingReference);
+    $returnNet = [$oldSupplierId => 0.0, $newSupplierId => 0.0];
+    $transferJournals = [];
+    foreach ($returnRows as $row) {
+        if ((string) ($row['service_line_reference'] ?? '') !== $unpaidLineReference
+            || ! in_array((string) ($row['entry_type'] ?? ''), ['Payable Created', 'Payable Transfer'], true)) {
+            continue;
+        }
+        $supplier = (int) ($row['supplier_id'] ?? 0);
+        $returnNet[$supplier] = ($returnNet[$supplier] ?? 0.0)
+            + (float) ($row['credit_amount'] ?? 0) - (float) ($row['debit_amount'] ?? 0);
+        if ((string) ($row['entry_type'] ?? '') === 'Payable Transfer') {
+            $transferJournals[(int) ($row['journal_entry_id'] ?? 0)] = true;
+        }
+    }
+    $check(
+        'Changing supplier back posts a second transfer without duplicating cost',
+        (int) (($unpaidReturn['service'] ?? [])['supplier_id'] ?? 0) === $oldSupplierId
+            && count($transferJournals) === 2
+            && abs(($returnNet[$oldSupplierId] ?? 0) - 1000.0) <= 0.005
+            && abs($returnNet[$newSupplierId] ?? 0) <= 0.005
+    );
+    $visibleOld = (new \App\Services\SupplierLedgerService($app))->report(
+        ['supplierId' => $oldSupplierId, 'currency' => 'AED', 'bookingReference' => $bookingReference], [2]
+    );
+    $visibleNew = (new \App\Services\SupplierLedgerService($app))->report(
+        ['supplierId' => $newSupplierId, 'currency' => 'AED', 'bookingReference' => $bookingReference], [2]
+    );
+    $oldPayableRows = array_values(array_filter($visibleOld['rows'],
+        static fn (array $row): bool => (string) ($row['booking_reference'] ?? '') === $bookingReference
+            && (string) ($row['source_entry_type'] ?? '') === 'Payable Transfer'
+            && (float) ($row['raw_debit_amount'] ?? 0) > 0));
+    $newPayableRows = array_values(array_filter($visibleNew['rows'],
+        static fn (array $row): bool => (string) ($row['booking_reference'] ?? '') === $bookingReference
+            && in_array((string) ($row['source_entry_type'] ?? ''), ['Payable Created', 'Payable Transfer'], true)));
+    $check('Current supplier ledger hides the former supplier after a change back',
+        count($oldPayableRows) === 1 && count($newPayableRows) === 0);
+
     // Case 1b: mixed-currency saved services reuse their stored FX for supplier-only correction.
     $mixedCreate = $serviceWorkspace->saveService(
         $serviceInput($bookingId, 0, $oldSupplierName, 'Mixed Currency Supplier Correction Passenger', [
@@ -309,13 +354,24 @@ try {
     );
     $newSupplierInvoiceVisible = false;
     $oldSupplierPaymentVisible = false;
+    $oldSupplierPayableNet = 0.0;
+    $newSupplierPayableNet = 0.0;
     foreach ($supplierLedgerRows as $ledgerRow) {
         if (
             (string) ($ledgerRow['service_line_reference'] ?? '') === $paidLineReference
-            && (string) ($ledgerRow['entry_type'] ?? '') === 'Payable Created'
+            && (string) ($ledgerRow['entry_type'] ?? '') === 'Payable Transfer'
             && (string) ($ledgerRow['supplier_name'] ?? '') === $newSupplierName
         ) {
             $newSupplierInvoiceVisible = true;
+        }
+        if ((string) ($ledgerRow['service_line_reference'] ?? '') === $paidLineReference
+            && in_array((string) ($ledgerRow['entry_type'] ?? ''), ['Payable Created', 'Payable Adjustment', 'Payable Transfer'], true)) {
+            $signed = (float) ($ledgerRow['credit_amount'] ?? 0) - (float) ($ledgerRow['debit_amount'] ?? 0);
+            if ((string) ($ledgerRow['supplier_name'] ?? '') === $oldSupplierName) {
+                $oldSupplierPayableNet += $signed;
+            } elseif ((string) ($ledgerRow['supplier_name'] ?? '') === $newSupplierName) {
+                $newSupplierPayableNet += $signed;
+            }
         }
         if (
             (int) ($ledgerRow['supplier_payment_id'] ?? 0) === $paymentId
@@ -325,8 +381,10 @@ try {
         }
     }
     $check(
-        'Supplier Ledger shows the new supplier invoice but preserves old supplier payment history',
-        $newSupplierInvoiceVisible && $oldSupplierPaymentVisible,
+        'Supplier Ledger transfers the full payable once and preserves old supplier payment history',
+        $newSupplierInvoiceVisible && $oldSupplierPaymentVisible
+            && abs($oldSupplierPayableNet) <= 0.005
+            && abs($newSupplierPayableNet - 1000.00) <= 0.005,
         json_encode(array_map(static fn (array $row): array => [
             'supplier' => $row['supplier_name'] ?? null,
             'type' => $row['entry_type'] ?? null,
@@ -334,6 +392,45 @@ try {
             'payment_id' => $row['supplier_payment_id'] ?? null,
         ], $supplierLedgerRows), JSON_UNESCAPED_SLASHES)
     );
+    $oldOperational = (new \App\Services\SupplierLedgerService($app))->report(
+        ['supplierId' => $oldSupplierId, 'currency' => 'AED', 'bookingReference' => $bookingReference], [2]
+    );
+    $oldPayableVisible = array_values(array_filter($oldOperational['rows'],
+        static fn (array $row): bool => (string) ($row['booking_reference'] ?? '') === $bookingReference
+            && (string) ($row['source_entry_type'] ?? '') === 'Payable Created'
+            && (float) ($row['raw_debit_amount'] ?? 0) > 0));
+    $check('Current old-supplier ledger hides the transferred ticket charge while retaining payment history',
+        $oldPayableVisible === []
+            && count(array_filter($oldOperational['rows'],
+                static fn (array $row): bool => (int) ($row['supplier_payment_id'] ?? 0) === $paymentId)) === 1);
+
+    $oldVoucher = $reportRepository->bookingVoucherLedger(
+        [2], null, null, 'AED', 0, '', $oldSupplierId, $bookingReference
+    );
+    $newVoucher = $reportRepository->bookingVoucherLedger(
+        [2], null, null, 'AED', 0, '', $newSupplierId, $bookingReference
+    );
+    $voucherAmount = static function (array $rows, string $type, string $supplier, string $passenger): float {
+        return round(array_sum(array_map(
+            static fn (array $row): float => (string) ($row['entry_type'] ?? '') === $type
+                && (string) ($row['party_name'] ?? '') === $supplier
+                && (string) ($row['passenger_name'] ?? '') === $passenger
+                ? (float) ($row['credit_amount'] ?? 0) - (float) ($row['debit_amount'] ?? 0)
+                : 0.0,
+            $rows
+        )), 2);
+    };
+    $check('Booking Voucher attributes the original payable and transfer to their recorded suppliers',
+        abs($voucherAmount($oldVoucher, 'Supplier Payable', $oldSupplierName, 'Paid Supplier Correction Passenger') - 1000.0) <= 0.005
+            && abs($voucherAmount($oldVoucher, 'Supplier Payable Transferred Out', $oldSupplierName, 'Paid Supplier Correction Passenger') + 1000.0) <= 0.005
+            && abs($voucherAmount($newVoucher, 'Supplier Payable Transferred In', $newSupplierName, 'Paid Supplier Correction Passenger') - 1000.0) <= 0.005
+            && abs($voucherAmount($newVoucher, 'Supplier Payable', $newSupplierName, 'Paid Supplier Correction Passenger')) <= 0.005);
+    $check('Booking Voucher keeps both directions of a supplier change attributed correctly',
+        abs($voucherAmount($oldVoucher, 'Supplier Payable', $oldSupplierName, 'Unpaid Supplier Correction Passenger') - 1000.0) <= 0.005
+            && abs($voucherAmount($oldVoucher, 'Supplier Payable Transferred Out', $oldSupplierName, 'Unpaid Supplier Correction Passenger') + 1000.0) <= 0.005
+            && abs($voucherAmount($oldVoucher, 'Supplier Payable Transferred In', $oldSupplierName, 'Unpaid Supplier Correction Passenger') - 1000.0) <= 0.005
+            && abs($voucherAmount($newVoucher, 'Supplier Payable Transferred In', $newSupplierName, 'Unpaid Supplier Correction Passenger') - 1000.0) <= 0.005
+            && abs($voucherAmount($newVoucher, 'Supplier Payable Transferred Out', $newSupplierName, 'Unpaid Supplier Correction Passenger') + 1000.0) <= 0.005);
 
     // Case 3: changing only the supplier must not re-demand the reason for an
     // already-approved loss sale.

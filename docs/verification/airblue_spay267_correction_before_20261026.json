@@ -1,0 +1,65 @@
+{
+    "captured_at": "2026-10-26T23:31:28+05:00",
+    "supplier_id": 349,
+    "supplier_ledger": {
+        "branch_1": {
+            "row_count": 74,
+            "debit_total": 4313974,
+            "credit_total": 6558477,
+            "net_advance": 2244503
+        },
+        "branch_2": {
+            "row_count": 142,
+            "debit_total": 10859359,
+            "credit_total": 8732719,
+            "net_advance": -2126640
+        },
+        "all_branches": {
+            "row_count": 202,
+            "debit_total": 15173333,
+            "credit_total": 15291196,
+            "net_advance": 117863
+        }
+    },
+    "customer_receivables": [
+        {
+            "branch_id": 1,
+            "currency": "PKR",
+            "row_count": 319,
+            "due_amount": "33784026.00",
+            "allocated_amount": "31678456.00",
+            "outstanding_amount": "2105570.00"
+        },
+        {
+            "branch_id": 2,
+            "currency": "AED",
+            "row_count": 867,
+            "due_amount": "1064225.11",
+            "allocated_amount": "891266.72",
+            "outstanding_amount": "172958.39"
+        },
+        {
+            "branch_id": 2,
+            "currency": "PKR",
+            "row_count": 2,
+            "due_amount": "171000.00",
+            "allocated_amount": "171000.00",
+            "outstanding_amount": "0.00"
+        }
+    ],
+    "cash_swt_pkr": {
+        "row_count": 549,
+        "debit": "68307942.01",
+        "credit": "72318063.00",
+        "net": "-4010120.99"
+    },
+    "airblue_active_payment_headers": {
+        "row_count": 31,
+        "paid_total": "13955799.00"
+    },
+    "supplier_account_net": {
+        "net": 117863,
+        "bills": 13837936,
+        "payments": 13955799
+    }
+}

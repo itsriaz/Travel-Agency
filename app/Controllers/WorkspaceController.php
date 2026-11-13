@@ -28,7 +28,9 @@ use App\Services\OperationalOutputService;
 use App\Services\ReminderWorkspaceService;
 use App\Services\ServiceWorkspaceService;
 use App\Services\SupplierSettlementWorkspaceService;
+use App\Services\SupplierPaymentVoidReplacementService;
 use App\Services\SupplierFoundationService;
+use App\Services\SupplierAccountBalanceService;
 use App\Services\TravelerWorkspaceService;
 use PDO;
 use RuntimeException;
@@ -1146,8 +1148,15 @@ final class WorkspaceController extends BaseController
             (int) ($supplier['id'] ?? 0),
             (string) ($supplier['name'] ?? $supplierName)
         );
-        $availableAmount = $supplierRepository->availableAdvanceBalanceForSupplierName($resolvedSupplierName, $currency);
-        $availableBalances = $supplierRepository->availableAdvanceBalancesForSupplierName($resolvedSupplierName);
+        $availableBalances = (new SupplierAccountBalanceService($this->app))->pooledPositions(
+            (int) $supplier['id'],
+            (new \App\Repositories\SupplierAccountBalanceRepository($this->app))->allBranchIds()
+        );
+        $availableBalances = array_map(
+            static fn (float $amount): float => round(max(0.0, $amount), 2),
+            $availableBalances
+        );
+        $availableAmount = (float) ($availableBalances[$currency] ?? 0.0);
         $advanceCandidates = array_map(
             static fn (array $row): array => [
                 'id' => (int) ($row['id'] ?? 0),
@@ -1157,6 +1166,16 @@ final class WorkspaceController extends BaseController
             ],
             $supplierRepository->availableAdvanceCandidatesForSupplierName($resolvedSupplierName)
         );
+        // Source advances remain individually traceable, but cannot advertise more
+        // spendable credit than the supplier account ledger contains in a currency.
+        $remainingByCurrency = $availableBalances;
+        foreach ($advanceCandidates as &$candidate) {
+            $candidateCurrency = strtoupper((string) $candidate['currency']);
+            $remaining = (float) ($remainingByCurrency[$candidateCurrency] ?? 0.0);
+            $candidate['available_amount'] = round(min((float) $candidate['available_amount'], $remaining), 2);
+            $remainingByCurrency[$candidateCurrency] = round($remaining - $candidate['available_amount'], 2);
+        }
+        unset($candidate);
         $availableBalances = array_filter(
             $availableBalances,
             static fn (float $amount): bool => $amount > 0.005
@@ -2215,7 +2234,7 @@ final class WorkspaceController extends BaseController
                 (int) Auth::id(),
                 Authorization::accessibleBranchIds()
             );
-            Flash::success('Supplier payment voided successfully.');
+            Flash::success(SupplierPaymentVoidReplacementService::outcomeMessage((string) ($result['payment_no'] ?? ''), $result['replacement'] ?? []));
             $this->redirect('/workspace?booking_id=' . (int) $result['booking_id'] . '#dock-panel-suppliers');
         } catch (RuntimeException $exception) {
             Flash::error($exception->getMessage());
@@ -2383,6 +2402,12 @@ final class WorkspaceController extends BaseController
                     'deposit_amount' => round((float) ($row['deposit_amount'] ?? 0), 2),
                     'used_amount' => $usedAmount,
                     'available_amount' => round((float) ($row['available_amount'] ?? 0), 2),
+                    'display_paid_amount' => round((float) ($row['display_paid_amount'] ?? 0), 2),
+                    'display_used_amount' => round((float) ($row['display_used_amount'] ?? 0), 2),
+                    'display_available_amount' => round((float) ($row['display_available_amount'] ?? 0), 2),
+                    'returned_amount' => round((float) ($row['returned_amount'] ?? 0), 2),
+                    'credit_count' => (int) ($row['credit_count'] ?? 1),
+                    'credit_ids' => (string) ($row['credit_ids'] ?? ''),
                     'reference_no' => (string) ($row['reference_no'] ?? ''),
                     'remarks' => (string) ($row['remarks'] ?? ''),
                     'payment_method' => (string) ($row['payment_method'] ?? 'cash'),

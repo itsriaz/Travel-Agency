@@ -42,10 +42,11 @@ $check(
         && str_contains($serviceCode, 'voidGlobalSupplierPayment')
 );
 $check(
-    'Used overpayment advances block unsafe payment correction',
-    str_contains($repositoryCode, 'neutralizeUnusedConvertedAdvanceForPaymentVoid')
-        && str_contains($repositoryCode, 'has already been used')
-        && str_contains($repositoryCode, 'supplier.advance.neutralized_with_payment_void')
+    'Used overpayment advances require confirmed, audited payable reopening',
+    str_contains($serviceCode, 'releaseSourceCreditsForPaymentVoid')
+        && str_contains($serviceCode, 'confirm_reopen_payables')
+        && str_contains($repositoryCode, 'releasePaymentSourcedAdvancesForVoid')
+        && str_contains($repositoryCode, 'supplier.payment.source_credit_released_for_void')
 );
 
 $candidate = $db->query(
@@ -54,6 +55,9 @@ $candidate = $db->query(
      WHERE (p.payment_scope = "global" OR p.booking_reference = "GLOBAL")
        AND p.status <> "void"
        AND COALESCE(p.converted_advance_amount, 0) <= 0.005
+       AND NOT EXISTS (
+           SELECT 1 FROM supplier_advances sa WHERE sa.source_supplier_payment_id = p.id
+       )
      ORDER BY p.id DESC
      LIMIT 1'
 )->fetch(PDO::FETCH_ASSOC);
@@ -299,12 +303,12 @@ if ($fixtureObligation === false) {
                     'void_reason' => 'Rollback-only used advance block fixture',
                 ], $actorId, [(int) $fixtureObligation['branch_id']]);
             } catch (RuntimeException $exception) {
-                $blocked = str_contains($exception->getMessage(), 'already been used');
+                $blocked = str_contains($exception->getMessage(), 'do not reconcile');
             }
             $paymentStatusStatement = $db->prepare('SELECT status FROM supplier_payments WHERE id = :id');
             $paymentStatusStatement->execute(['id' => $usedAdvancePaymentId]);
             $check(
-                'Used overpayment advance blocks the void before the payment changes',
+                'Advance balance without a matching application blocks the void before the payment changes',
                 $blocked && (string) $paymentStatusStatement->fetchColumn() !== 'void'
             );
         } catch (Throwable $exception) {

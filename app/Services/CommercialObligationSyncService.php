@@ -373,18 +373,21 @@ final class CommercialObligationSyncService extends Service
                 $updatedObligation = is_array($autoAdvanceApplication['obligation'] ?? null)
                     ? $autoAdvanceApplication['obligation']
                     : $obligationRecord;
-                $accountingRepository->postSupplierAdvanceApplication([
-                    'branch_id' => (int) ($service['branch_id'] ?? 0),
-                    'booking_reference' => (string) ($booking['booking_reference'] ?? ''),
-                    'source_reference' => (string) ($service['line_reference'] ?? '') . '-PAY-CREDIT',
-                    'service_line_reference' => (string) ($service['line_reference'] ?? ''),
-                    'supplier_obligation_id' => $obligationId,
-                    'amount' => $supplierPaymentCreditAppliedAmount,
-                    'entry_date' => $entryDate,
-                    'currency' => (string) ($updatedObligation['currency'] ?? $costCurrency),
-                    'narration' => 'Existing supplier payment credit applied against corrected payable',
-                    'actor_user_id' => $actorUserId,
-                ]);
+                foreach ((array) ($autoAdvanceApplication['supplier_payment_credit_applications'] ?? []) as $application) {
+                    $accountingRepository->postSupplierPaymentAllocation([
+                        'branch_id' => (int) ($updatedObligation['branch_id'] ?? $service['branch_id'] ?? 0),
+                        'booking_reference' => (string) ($booking['booking_reference'] ?? ''),
+                        'source_reference' => (string) ($application['payment_no'] ?? '') . '-ALLOC-' . (int) ($application['allocation_id'] ?? 0),
+                        'service_line_reference' => (string) ($service['line_reference'] ?? ''),
+                        'supplier_obligation_id' => $obligationId,
+                        'supplier_payment_id' => (int) ($application['supplier_payment_id'] ?? 0),
+                        'allocated_amount' => (float) ($application['applied_amount'] ?? 0),
+                        'entry_date' => $entryDate,
+                        'currency' => (string) ($updatedObligation['currency'] ?? $costCurrency),
+                        'narration' => 'Existing supplier payment credit applied against payable',
+                        'actor_user_id' => $actorUserId,
+                    ]);
+                }
                 $obligationRecord = $updatedObligation;
             }
         }

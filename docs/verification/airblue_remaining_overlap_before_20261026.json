@@ -1,0 +1,24 @@
+{
+    "scope": "AirBlue Imdad Int, supplier 349, PKR, both branches",
+    "supplier_ledger_before": {
+        "branch_1": {"row_count": 75, "debit_total": 4313974, "credit_total": 6558477, "net_advance": 2244503},
+        "branch_2": {"row_count": 142, "debit_total": 10859359, "credit_total": 8732719, "net_advance": -2126640},
+        "all_branches": {"row_count": 203, "debit_total": 15173333, "credit_total": 15291196, "net_advance": 117863}
+    },
+    "supplier_account_summary_before": {"net": 117863, "bills": 13762659, "payments": 13880522},
+    "supplier_position_audit_before": {"account_net": 117863, "operational_net": -18230, "gap": 136093},
+    "duplicate_cover": [
+        {"booking": "BK-000643", "obligation_id": 649, "gross": 111208, "direct_payment": 111208, "duplicate_advance_application_id": 93, "advance_id": 36, "duplicate_amount": 111208, "application_journal_id": 5653},
+        {"booking": "BK-000886", "obligation_id": 888, "gross": 179740, "direct_payment": 179740, "duplicate_advance_application_id": 131, "advance_id": 52, "duplicate_amount": 24885, "application_journal_id": 7102}
+    ],
+    "advances_before": {
+        "36": {"deposit": 400000, "used": 314440, "available": 85560},
+        "52": {"deposit": 24885, "used": 24885, "available": 0}
+    },
+    "cash_swt_pkr_before": {"journal_rows": 550, "net": "-3934843.99"},
+    "customer_receivables_before": [
+        {"branch_id": 1, "currency": "PKR", "row_count": 319, "due": "33784026.00", "allocated": "31678456.00", "outstanding": "2105570.00"},
+        {"branch_id": 2, "currency": "AED", "row_count": 867, "due": "1064225.11", "allocated": "891266.72", "outstanding": "172958.39"},
+        {"branch_id": 2, "currency": "PKR", "row_count": 2, "due": "171000.00", "allocated": "171000.00", "outstanding": "0.00"}
+    ]
+}

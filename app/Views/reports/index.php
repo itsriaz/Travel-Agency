@@ -25,7 +25,7 @@ foreach ($summaryCards as $summaryCard) {
     $groupedSummaryCards[$groupKey]['cards'][] = $summaryCard;
 }
 $supplierCurrencyCards = [];
-if (($selectedReport ?? '') === 'supplier_ledger') {
+if (in_array(($selectedReport ?? ''), ['supplier_ledger', 'supplier_all_payments'], true)) {
     foreach ($regularSummaryCards as $summaryCard) {
         $label = (string) ($summaryCard['label'] ?? '');
         $currency = preg_match('/\/ ([A-Z]{3})$/', $label, $matches) === 1 ? $matches[1] : 'Other';
@@ -33,6 +33,17 @@ if (($selectedReport ?? '') === 'supplier_ledger') {
     }
     $currencyOrder = ['AED' => 0, 'PKR' => 1, 'USD' => 2];
     uksort($supplierCurrencyCards, static fn (string $left, string $right): int =>
+        (($currencyOrder[$left] ?? 99) <=> ($currencyOrder[$right] ?? 99)) ?: strcmp($left, $right));
+}
+$supplierAdvanceCurrencyCards = [];
+if (($selectedReport ?? '') === 'prepaid_supplier_ledger') {
+    foreach ($regularSummaryCards as $summaryCard) {
+        $label = (string) ($summaryCard['label'] ?? '');
+        $currency = preg_match('/\/ ([A-Z]{3})$/', $label, $matches) === 1 ? $matches[1] : 'Other';
+        $supplierAdvanceCurrencyCards[$currency][] = $summaryCard;
+    }
+    $currencyOrder = ['PKR' => 0, 'AED' => 1, 'USD' => 2];
+    uksort($supplierAdvanceCurrencyCards, static fn (string $left, string $right): int =>
         (($currencyOrder[$left] ?? 99) <=> ($currencyOrder[$right] ?? 99)) ?: strcmp($left, $right));
 }
 $serviceProfitCurrencyCards = [];
@@ -66,6 +77,9 @@ $customerFilteredReports = ['customer_outstanding', 'receivable_aging', 'custome
 $wideViewReports = array_merge($customerLedgerReports, ['customer_advance_ledger', 'actual_money_voucher_ledger', 'booking_voucher_ledger', 'receivable_aging', 'airline_payable_report', 'supplier_receivable', 'payable_refunds', 'supplier_ledger', 'supplier_prepaid_payments', 'prepaid_supplier_ledger', 'financial_correction_register', 'reversed_linked_adjustments', 'expense_register', 'salary_report', 'money_in_out_ledger', 'internal_treasury_transfer', 'cash_bank_ledger', 'issue_reissue_refund_register', 'service_profit', 'loss_report', 'reminder_hub']);
 $printableReportKeys = ['receivable_aging', 'customer_outstanding', 'customer_detail_ledger', 'customer_advance_ledger', 'actual_money_voucher_ledger', 'booking_voucher_ledger', 'customer_departure_register', 'expense_register', 'salary_report', 'money_in_out_ledger', 'internal_treasury_transfer', 'cash_bank_ledger', 'cash_flow', 'cash_bank_position', 'supplier_ledger', 'supplier_outstanding', 'supplier_receivable', 'payable_refunds', 'airline_payable_report', 'supplier_postpaid_payments', 'supplier_prepaid_payments', 'supplier_all_payments', 'prepaid_supplier_ledger', 'reversed_linked_adjustments', 'service_profit', 'loss_report'];
 $canCorrectSupplierAdvances = \App\Helpers\Auth::isFinancialAdmin();
+if ($selectedReport === 'prepaid_supplier_ledger' && ! $canCorrectSupplierAdvances) {
+    $columns = array_values(array_filter($columns, static fn (array $column): bool => ($column['key'] ?? '') !== 'action'));
+}
 
 $formatReportDate = static function (?string $value): string {
     $date = trim((string) $value);
@@ -563,18 +577,18 @@ $formatLedgerBalance = static function (string $value, string $report) use ($isL
     }
 
     $amount = (float) $numeric;
-    $precision = 2;
+    $precision = $report === 'supplier_ledger' ? 0 : 2;
     if (abs($amount) < 0.005) {
         return number_format(0, $precision);
     }
 
     if ($report === 'supplier_ledger') {
         if ($isLinkedPartyLedger) {
-            return number_format(abs($amount), 2) . ($amount > 0 ? ' Payable' : ' Receivable');
+            return number_format(abs($amount), $precision) . ($amount > 0 ? ' Payable' : ' Receivable');
         }
         $isAdvance = stripos($text, 'advance') !== false || ($amount < 0 && stripos($text, 'payable') === false);
 
-        return number_format(abs($amount), 2) . ($isAdvance ? ' Advance' : ' Payable');
+        return number_format(abs($amount), $precision) . ($isAdvance ? ' Advance' : ' Payable');
     }
 
     $suffix = $amount > 0 ? 'Dr' : 'Cr';
@@ -668,7 +682,7 @@ if ($selectedReport === 'receivable_aging') {
     ksort($agingFooterByCurrency);
     foreach ($agingFooterByCurrency as $currency => $totals) {
         $footerRow = [
-            '_label' => 'Total ' . $currency,
+            '_label' => ($linkedAgingNetShown ?? false) ? 'Invoice Total ' . $currency : 'Total ' . $currency,
             'currency' => $currency,
         ];
         foreach (array_slice($agingAmountKeys, 0, 6) as $amountKey) {
@@ -730,7 +744,7 @@ if ($selectedReport === 'receivable_aging') {
             'balance_amount' => $formatReportTotal($debitTotal - $creditTotal),
         ];
     }
-} elseif (in_array($selectedReport, ['service_profit', 'loss_report'], true)) {
+} elseif (in_array($selectedReport, ['service_profit', 'loss_report', 'supplier_all_payments'], true)) {
     // Currency-aware footer rows are prepared by ReportService.
 } elseif (! in_array($selectedReport, ['supplier_ledger', 'customer_ledger', 'customer_detail_ledger'], true)) {
     $reportFooterTotals = [];
@@ -779,6 +793,10 @@ if ($selectedReport === 'receivable_aging') {
     }
 
     .report-stat-grid--supplier-ledger {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .report-stat-grid--supplier-advance {
         grid-template-columns: repeat(3, minmax(0, 1fr));
     }
 
@@ -1420,6 +1438,46 @@ if ($selectedReport === 'receivable_aging') {
         width: 64px;
     }
 
+    .supplier-advance-ledger-table {
+        min-width: 1540px;
+    }
+
+    .supplier-advance-ledger-table th[data-column-key="branch_name"],
+    .supplier-advance-ledger-table td[data-column-key="branch_name"] {
+        min-width: 110px;
+        width: 110px;
+        white-space: nowrap;
+    }
+
+    .supplier-advance-ledger-table th[data-column-key="currency"],
+    .supplier-advance-ledger-table td[data-column-key="currency"] {
+        min-width: 66px;
+        width: 66px;
+    }
+
+    .supplier-advance-ledger-table th[data-column-key="reference_no"],
+    .supplier-advance-ledger-table td[data-column-key="reference_no"] {
+        min-width: 155px;
+        width: 155px;
+        white-space: nowrap;
+    }
+
+    .supplier-advance-ledger-table th[data-column-key="remarks"],
+    .supplier-advance-ledger-table td[data-column-key="remarks"] {
+        min-width: 395px;
+        width: 395px;
+        white-space: normal;
+        overflow-wrap: break-word;
+        word-break: normal;
+        line-height: 1.25;
+    }
+
+    .supplier-advance-ledger-table th[data-column-key="action"],
+    .supplier-advance-ledger-table td[data-column-key="action"] {
+        min-width: 76px;
+        width: 76px;
+    }
+
     .supplier-all-payments-table {
         min-width: 1460px;
         table-layout: fixed;
@@ -1524,6 +1582,50 @@ if ($selectedReport === 'receivable_aging') {
 
     .report-total-row strong {
         font-weight: 900;
+    }
+
+    .supplier-prepaid-report-table .supplier-advance-footer-row > td,
+    .supplier-all-payments-table .supplier-advance-footer-row > td {
+        width: auto;
+        min-width: 0;
+        padding: 12px;
+        white-space: normal;
+    }
+
+    .supplier-advance-footer-title {
+        display: block;
+        margin-bottom: 8px;
+        font-weight: 800;
+    }
+
+    .supplier-advance-footer-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+    }
+
+    .supplier-advance-footer-item {
+        min-width: 0;
+        padding: 9px 12px;
+        border: 1px solid #cbddeb;
+        border-radius: 8px;
+        background: #fff;
+    }
+
+    .supplier-advance-footer-item span,
+    .supplier-advance-footer-item strong {
+        display: block;
+    }
+
+    .supplier-advance-footer-item span {
+        margin-bottom: 4px;
+        font-size: 11px;
+    }
+
+    @media (max-width: 760px) {
+        .supplier-advance-footer-grid {
+            grid-template-columns: 1fr;
+        }
     }
 
     .receivable-summary-drilldown-link {
@@ -2160,6 +2262,10 @@ if ($selectedReport === 'receivable_aging') {
             grid-template-columns: 1fr;
         }
 
+        .report-stat-grid--supplier-advance {
+            grid-template-columns: 1fr;
+        }
+
         .report-stat-grid--service-profit {
             grid-template-columns: 1fr;
         }
@@ -2194,7 +2300,7 @@ if ($selectedReport === 'receivable_aging') {
         <p>Clear financial positions, operational activity, and audit-ready detail.</p>
     </div>
     <div class="page-actions">
-        <a class="btn btn-primary" id="reports-export-link" href="<?= e(url('/reports/export.csv?' . $exportQuery)) ?>">Export CSV</a>
+        <a class="btn btn-primary" id="reports-export-link" data-report-csv-link href="<?= e(url('/reports/export.csv?' . $exportQuery)) ?>">Export CSV</a>
         <?php if ($selectedReport === 'customer_ledger'): ?>
             <a class="btn btn-sm" href="<?= e(url('/reports/account-ledger-print?' . $exportQuery)) ?>" target="_blank" rel="noopener">Print / PDF</a>
         <?php elseif (in_array($selectedReport, $printableReportKeys, true)): ?>
@@ -2629,9 +2735,17 @@ if ($selectedReport === 'receivable_aging') {
     </article>
 <?php }; ?>
 
-<?php if ($selectedReport === 'supplier_ledger'): ?>
+<?php if (in_array($selectedReport, ['supplier_ledger', 'supplier_all_payments'], true)): ?>
     <?php foreach ($supplierCurrencyCards as $currency => $currencyCards): ?>
         <section class="stat-grid report-stat-grid report-stat-grid--supplier-ledger" data-supplier-currency="<?= e($currency) ?>">
+            <?php foreach ($currencyCards as $summaryCard): ?>
+                <?php $renderSummaryCard($summaryCard); ?>
+            <?php endforeach; ?>
+        </section>
+    <?php endforeach; ?>
+<?php elseif ($selectedReport === 'prepaid_supplier_ledger'): ?>
+    <?php foreach ($supplierAdvanceCurrencyCards as $currency => $currencyCards): ?>
+        <section class="stat-grid report-stat-grid report-stat-grid--supplier-advance" data-supplier-advance-currency="<?= e($currency) ?>">
             <?php foreach ($currencyCards as $summaryCard): ?>
                 <?php $renderSummaryCard($summaryCard); ?>
             <?php endforeach; ?>
@@ -2700,6 +2814,9 @@ if ($selectedReport === 'receivable_aging') {
             <h2><?= e((string) ($reportOptions[$selectedReport] ?? 'Report')) ?></h2>
             <?php if (in_array($selectedReport, $wideViewReports, true)): ?>
                 <div class="customer-ledger-toolbar-actions">
+                    <?php if ($selectedReport === 'prepaid_supplier_ledger'): ?>
+                        <a class="btn btn-sm" data-report-csv-link href="<?= e(url('/reports/export.csv?' . $exportQuery)) ?>">Export CSV</a>
+                    <?php endif; ?>
                     <?php if ($selectedReport === 'customer_ledger'): ?>
                         <a class="btn btn-sm" href="<?= e(url('/reports/account-ledger-print?' . $exportQuery)) ?>" target="_blank" rel="noopener">Print / PDF</a>
                     <?php elseif (in_array($selectedReport, $printableReportKeys, true)): ?>
@@ -2719,6 +2836,9 @@ if ($selectedReport === 'receivable_aging') {
         <?php if ((int) ($unjournaledTreasuryTransferCount ?? 0) > 0): ?>
             <p class="report-context-line">Attention: <?= e((string) $unjournaledTreasuryTransferCount) ?> historical transfer(s) without cash journals are excluded pending verification.</p>
         <?php endif; ?>
+    <?php endif; ?>
+    <?php if ($selectedReport === 'receivable_aging' && ($linkedAgingNetShown ?? false)): ?>
+        <p class="report-context-line">Invoice details show each unpaid invoice. The summary subtracts what we owe a linked supplier to show the amount left to collect from that account.</p>
     <?php endif; ?>
     <?php if ($selectedReport === 'receivable_aging' && $receivableAgingSummaryRows !== []): ?>
         <div class="dense-table-wrap customer-ledger-summary-wrap">
@@ -2815,6 +2935,7 @@ if ($selectedReport === 'receivable_aging') {
         </div>
     <?php endif; ?>
     <?php if ($selectedReport === 'prepaid_supplier_ledger' && $supplierAdvanceSummaryRows !== []): ?>
+        <p class="report-context-note">Supplier account advance above follows the Supplier Ledger. The entries below show individual advance records and their usage.</p>
         <div class="dense-table-wrap customer-ledger-summary-wrap">
             <table class="dense-table supplier-advance-summary-table">
                 <thead>
@@ -2847,8 +2968,11 @@ if ($selectedReport === 'receivable_aging') {
             <button type="button" class="btn btn-sm" id="receivable-aging-filter-clear"><?= e(in_array($selectedReport, $customerLedgerReports, true) ? 'Show All Details' : 'Show All Invoices') ?></button>
         </div>
     <?php endif; ?>
+    <?php if ($selectedReport === 'supplier_all_payments'): ?>
+        <p class="report-context-note">Supplier account balance above follows the Supplier Ledger. Payment rows below show each payment's recorded allocation and remaining source credit.</p>
+    <?php endif; ?>
     <div class="dense-table-wrap receivable-aging-detail-section" id="ledger-detail-section">
-        <table class="dense-table<?= $selectedReport === 'reminder_hub' ? ' reminder-hub-table' : '' ?><?= in_array($selectedReport, $customerLedgerReports, true) ? ' customer-ledger-table' : '' ?><?= $selectedReport === 'customer_ledger' ? ' account-ledger-detail-table' : '' ?><?= $selectedReport === 'customer_advance_ledger' ? ' customer-advance-ledger-table' : '' ?><?= $selectedReport === 'expense_register' ? ' expense-register-table' : '' ?><?= in_array($selectedReport, ['prepaid_supplier_ledger', 'supplier_prepaid_payments'], true) ? ' supplier-prepaid-report-table' : '' ?><?= $selectedReport === 'supplier_all_payments' ? ' supplier-all-payments-table' : '' ?><?= $showTraceColumn ? ' supplier-ledger-trace-table' : '' ?>">
+        <table class="dense-table<?= $selectedReport === 'reminder_hub' ? ' reminder-hub-table' : '' ?><?= in_array($selectedReport, $customerLedgerReports, true) ? ' customer-ledger-table' : '' ?><?= $selectedReport === 'customer_ledger' ? ' account-ledger-detail-table' : '' ?><?= $selectedReport === 'customer_advance_ledger' ? ' customer-advance-ledger-table' : '' ?><?= $selectedReport === 'expense_register' ? ' expense-register-table' : '' ?><?= in_array($selectedReport, ['prepaid_supplier_ledger', 'supplier_prepaid_payments'], true) ? ' supplier-prepaid-report-table' : '' ?><?= $selectedReport === 'prepaid_supplier_ledger' ? ' supplier-advance-ledger-table' : '' ?><?= $selectedReport === 'supplier_all_payments' ? ' supplier-all-payments-table' : '' ?><?= $showTraceColumn ? ' supplier-ledger-trace-table' : '' ?>">
             <thead>
                 <tr>
                     <?php foreach ($columns as $column): ?>
@@ -3027,6 +3151,26 @@ if ($selectedReport === 'receivable_aging') {
             <?php if ($reportFooterRows !== [] && ! in_array($selectedReport, ['customer_ledger', 'customer_detail_ledger'], true)): ?>
                 <tfoot>
                     <?php foreach ($reportFooterRows as $footerRow): ?>
+                        <?php if (in_array($selectedReport, ['prepaid_supplier_ledger', 'supplier_all_payments'], true)): ?>
+                            <?php $footerCurrency = (string) ($footerRow['currency'] ?? 'PKR'); ?>
+                            <tr class="report-total-row supplier-advance-footer-row">
+                                <td colspan="<?= count($columns) ?>">
+                                    <span class="supplier-advance-footer-title"><?= e($footerCurrency) ?> supplier account totals</span>
+                                    <div class="supplier-advance-footer-grid">
+                                        <?php $footerAmounts = $selectedReport === 'supplier_all_payments'
+                                            ? ['ledger_payments' => 'Supplier ledger payments', 'ledger_bills' => 'Supplier bills and adjustments', 'account_balance' => 'Supplier account balance']
+                                            : ['ledger_payments' => 'Supplier ledger payments', 'ledger_bills' => 'Supplier bills and adjustments', 'account_advance' => 'Supplier account advance']; ?>
+                                        <?php foreach ($footerAmounts as $amountKey => $amountLabel): ?>
+                                            <div class="supplier-advance-footer-item">
+                                                <span><?= e($amountLabel) ?></span>
+                                                <strong><?= e($footerCurrency . ' ' . (string) ($footerRow[$amountKey] ?? '0.00')) ?></strong>
+                                            </div>
+                                        <?php endforeach; ?>
+                                    </div>
+                                </td>
+                            </tr>
+                            <?php continue; ?>
+                        <?php endif; ?>
                         <tr class="report-total-row">
                             <?php $totalLabelPrinted = false; ?>
                             <?php foreach ($columns as $column): ?>

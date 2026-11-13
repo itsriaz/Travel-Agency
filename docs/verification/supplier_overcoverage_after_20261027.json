@@ -1,0 +1,332 @@
+{
+    "supplier_ledger_by_branch_supplier_currency": {
+        "1|ABU ABAAN AIR SVC|AED": {
+            "rows": 6,
+            "debit": 370900,
+            "credit": 370900,
+            "balance": 0
+        },
+        "1|ABU ABAAN AIR SVC|PKR": {
+            "rows": 89,
+            "debit": 9853225,
+            "credit": 9712225,
+            "balance": 141000
+        },
+        "1|AIR ARABIA IMDAD INT|PKR": {
+            "rows": 2,
+            "debit": 119122,
+            "credit": 127280,
+            "balance": -8158
+        },
+        "1|AIR ARABIA NOBLE ROUTE|AED": {
+            "rows": 3,
+            "debit": 3373,
+            "credit": 2432,
+            "balance": 941
+        },
+        "1|AIR SIAL IMD INT|AED": {
+            "rows": 2,
+            "debit": 251784,
+            "credit": 251784,
+            "balance": 0
+        },
+        "1|AIR SIAL IMD INT|PKR": {
+            "rows": 24,
+            "debit": 1629153,
+            "credit": 2302063,
+            "balance": -672910
+        },
+        "1|AJWA SWAT TOURISM|AED": {
+            "rows": 3,
+            "debit": 6086,
+            "credit": 0,
+            "balance": 6086
+        },
+        "1|AKBAR TRAVELS|AED": {
+            "rows": 5,
+            "debit": 2324,
+            "credit": 2320,
+            "balance": 4
+        },
+        "1|AL HAMD AIR SERVICES|PKR": {
+            "rows": 2,
+            "debit": 63000,
+            "credit": 63000,
+            "balance": 0
+        },
+        "1|AL JOOF MAIN POWER PKR|AED": {
+            "rows": 2,
+            "debit": 127000,
+            "credit": 127000,
+            "balance": 0
+        },
+        "1|AL JOOF MAIN POWER PKR|PKR": {
+            "rows": 6,
+            "debit": 589000,
+            "credit": 589000,
+            "balance": 0
+        },
+        "1|AL SAUDIA AED|AED": {
+            "rows": 12,
+            "debit": 766165,
+            "credit": 766165,
+            "balance": 0
+        },
+        "1|AL SAUDIA AED|PKR": {
+            "rows": 158,
+            "debit": 13741855,
+            "credit": 12532708,
+            "balance": 1209147
+        },
+        "1|AL SAUDIA|PKR": {
+            "rows": 2,
+            "debit": 490869,
+            "credit": 490869,
+            "balance": 0
+        },
+        "1|AirBlue imdad int|AED": {
+            "rows": 2,
+            "debit": 24000,
+            "credit": 24000,
+            "balance": 0
+        },
+        "1|AirBlue imdad int|PKR": {
+            "rows": 75,
+            "debit": 4313974,
+            "credit": 6558477,
+            "balance": -2244503
+        },
+        "1|GULAB MAIN POWER|AED": {
+            "rows": 2,
+            "debit": 20000,
+            "credit": 20000,
+            "balance": 0
+        },
+        "1|GULAB MAIN POWER|PKR": {
+            "rows": 27,
+            "debit": 386000,
+            "credit": 351000,
+            "balance": 35000
+        },
+        "1|JALAL MARDAN|PKR": {
+            "rows": 12,
+            "debit": 248000,
+            "credit": 248000,
+            "balance": 0
+        },
+        "1|PRINCESS PKR|PKR": {
+            "rows": 25,
+            "debit": 1237174,
+            "credit": 2082794,
+            "balance": -845620
+        },
+        "1|SALES FROM IMDAD PKR|AED": {
+            "rows": 4,
+            "debit": 7800,
+            "credit": 7800,
+            "balance": 0
+        },
+        "1|SALES FROM IMDAD PKR|PKR": {
+            "rows": 49,
+            "debit": 129891,
+            "credit": 48850,
+            "balance": 81041
+        },
+        "1|WAQAS SHO TRV PKR|AED": {
+            "rows": 2,
+            "debit": 84500,
+            "credit": 84500,
+            "balance": 0
+        },
+        "1|WAQAS SHO TRV PKR|PKR": {
+            "rows": 5,
+            "debit": 219300,
+            "credit": 219300,
+            "balance": 0
+        },
+        "1|princess tourism|AED": {
+            "rows": 12,
+            "debit": 5443,
+            "credit": 5709,
+            "balance": -266
+        },
+        "2|ABU ABAAN AIR SVC|PKR": {
+            "rows": 12,
+            "debit": 415526,
+            "credit": 415526,
+            "balance": 0
+        },
+        "2|AED PKR CHANGE EXCHANGE|AED": {
+            "rows": 4,
+            "debit": 1000,
+            "credit": 1985,
+            "balance": -985
+        },
+        "2|AIR ARABIA IMDAD INT|PKR": {
+            "rows": 6,
+            "debit": 383060,
+            "credit": 383060,
+            "balance": 0
+        },
+        "2|AIR ARABIA NOBLE ROUTE|AED": {
+            "rows": 30,
+            "debit": 19516,
+            "credit": 20300,
+            "balance": -784
+        },
+        "2|AIR SIAL IMD INT|PKR": {
+            "rows": 22,
+            "debit": 1555327,
+            "credit": 1019569,
+            "balance": 535758
+        },
+        "2|AJWA SWAT TOURISM|AED": {
+            "rows": 75,
+            "debit": 58371,
+            "credit": 5,
+            "balance": 58366
+        },
+        "2|AKBAR TRAVELS|AED": {
+            "rows": 94,
+            "debit": 69535,
+            "credit": 69784,
+            "balance": -249
+        },
+        "2|AL MEEZAB GROUP|AED": {
+            "rows": 2,
+            "debit": 580,
+            "credit": 580,
+            "balance": 0
+        },
+        "2|AL SAUDIA AED|PKR": {
+            "rows": 296,
+            "debit": 27642143,
+            "credit": 26339292,
+            "balance": 1302851
+        },
+        "2|AirBlue imdad int|PKR": {
+            "rows": 142,
+            "debit": 10859359,
+            "credit": 8732719,
+            "balance": 2126640
+        },
+        "2|BOOK YOUR VOYAGE TRV|AED": {
+            "rows": 6,
+            "debit": 4365,
+            "credit": 2500,
+            "balance": 1865
+        },
+        "2|D2W TRAVELS|AED": {
+            "rows": 8,
+            "debit": 4377,
+            "credit": 4377,
+            "balance": 0
+        },
+        "2|GUJJAR TRV|AED": {
+            "rows": 1,
+            "debit": 1150,
+            "credit": 0,
+            "balance": 1150
+        },
+        "2|MEROKHEL AIR SERVICES|PKR": {
+            "rows": 8,
+            "debit": 518601,
+            "credit": 518601,
+            "balance": 0
+        },
+        "2|ONLINE WEB|AED": {
+            "rows": 21,
+            "debit": 11341,
+            "credit": 11341,
+            "balance": 0
+        },
+        "2|PIA NOBLE ROUTE|AED": {
+            "rows": 15,
+            "debit": 8955,
+            "credit": 9000,
+            "balance": -45
+        },
+        "2|PRINCESS PKR|PKR": {
+            "rows": 4,
+            "debit": 385326,
+            "credit": 0,
+            "balance": 385326
+        },
+        "2|ROLLA TRAVELS|AED": {
+            "rows": 2,
+            "debit": 1660,
+            "credit": 1660,
+            "balance": 0
+        },
+        "2|S TT UMRAH TRAVELS|AED": {
+            "rows": 12,
+            "debit": 9200,
+            "credit": 9200,
+            "balance": 0
+        },
+        "2|WADI AL DHAID|AED": {
+            "rows": 62,
+            "debit": 38623,
+            "credit": 37153,
+            "balance": 1470
+        },
+        "2|WAQAS SHO TRV PKR|PKR": {
+            "rows": 6,
+            "debit": 439000,
+            "credit": 439000,
+            "balance": 0
+        },
+        "2|princess tourism|AED": {
+            "rows": 306,
+            "debit": 309584,
+            "credit": 309949,
+            "balance": -365
+        },
+        "2|princess tourism|PKR": {
+            "rows": 1,
+            "debit": 49982,
+            "credit": 0,
+            "balance": 49982
+        }
+    },
+    "journal_by_branch_currency": [
+        {
+            "branch_id": 1,
+            "currency": "AED",
+            "entries": 39,
+            "line_count": 78,
+            "debit": "823649.00",
+            "credit": "823649.00"
+        },
+        {
+            "branch_id": 1,
+            "currency": "PKR",
+            "entries": 2175,
+            "line_count": 4414,
+            "debit": "296965842.01",
+            "credit": "296965842.01"
+        },
+        {
+            "branch_id": 2,
+            "currency": "AED",
+            "entries": 4560,
+            "line_count": 9132,
+            "debit": "17428612.97",
+            "credit": "17428612.97"
+        },
+        {
+            "branch_id": 2,
+            "currency": "PKR",
+            "entries": 973,
+            "line_count": 1952,
+            "debit": "156088343.00",
+            "credit": "156088343.00"
+        }
+    ],
+    "source_counts": {
+        "supplier_payments": 282,
+        "supplier_allocations": 1093,
+        "customer_receipts": 1290,
+        "treasury_accounts": 8
+    }
+}

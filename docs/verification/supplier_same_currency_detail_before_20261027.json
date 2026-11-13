@@ -1,0 +1,23 @@
+{
+    "scope": "nine same-currency supplier advance application detail rows",
+    "applications": {
+        "2": [20, 901], "5": [390, 440], "39": [332, 527], "43": [1, 325],
+        "50": [941, 2432], "150": [28591, 28619], "79": [97444, 98444],
+        "142": [34658, 67190], "86": [82030, 107533]
+    },
+    "application_tuple_meaning": ["applied_amount", "advance_amount_consumed_before"],
+    "affected_advance_ids": [3, 4, 17, 19, 27, 29, 34],
+    "source_conservation": "For each affected advance, deposit = available + SUM(applied_amount). Each affected obligation's current advance total also equals its net supplier-advance journal movement.",
+    "supplier_account_positions": {
+        "349": {"PKR": {"net": 117863, "bills": 13762659, "payments": 13880522}},
+        "350": {"AED": {"net": -157, "bills": 20457, "payments": 20300}},
+        "371": {"AED": {"net": 631, "bills": 225930, "payments": 226561}, "PKR": {"net": -49982, "bills": 49982, "payments": 0}}
+    },
+    "cash_swt_pkr": {"journal_rows": 550, "net": "-3934843.99"},
+    "airblue_supplier_ledger": {"row_count": 203, "net_advance": 117863},
+    "customer_receivables": [
+        {"branch_id": 1, "currency": "PKR", "row_count": 319, "due": "33784026.00", "allocated": "31678456.00", "outstanding": "2105570.00"},
+        {"branch_id": 2, "currency": "AED", "row_count": 867, "due": "1064225.11", "allocated": "891266.72", "outstanding": "172958.39"},
+        {"branch_id": 2, "currency": "PKR", "row_count": 2, "due": "171000.00", "allocated": "171000.00", "outstanding": "0.00"}
+    ]
+}

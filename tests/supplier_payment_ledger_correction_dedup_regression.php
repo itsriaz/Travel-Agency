@@ -158,6 +158,11 @@ if ($actorId <= 0 || $branchId <= 0) {
             'narration' => 'Corrected supplier payment allocated to payable',
         ]);
         $newAllocationB = $supplierRepo->allocateSupplierPayment($paymentId, $obligationIds[3], 40, 1.0, 'New allocation B', $actorId);
+        $check(
+            'Supplier payment allocation returns traceable IDs before subsequent updates',
+            $newAllocationA > 0 && $newAllocationB > 0 && $newAllocationA !== $newAllocationB,
+            json_encode(['first_id' => $newAllocationA, 'second_id' => $newAllocationB])
+        );
         $journalB = $accounting->postSupplierPaymentAllocation([
             'branch_id' => $branchId,
             'booking_reference' => 'LEDGER-DEDUP-' . $token . '-4',
@@ -341,10 +346,13 @@ if ($actorId <= 0 || $branchId <= 0) {
              SET allocated_amount = 90, converted_advance_amount = 10, unallocated_amount = 0
              WHERE id = :payment_id'
         )->execute(['payment_id' => $paymentId]);
-        $db->prepare('UPDATE supplier_payment_allocations SET allocated_amount = 20 WHERE id = :id')
-            ->execute(['id' => $newAllocationA]);
-        $db->prepare('UPDATE supplier_payment_allocations SET allocated_amount = 70 WHERE id = :id')
-            ->execute(['id' => $newAllocationB]);
+        $allocationUpdate = $db->prepare(
+            'UPDATE supplier_payment_allocations
+             SET allocated_amount = :amount
+             WHERE supplier_payment_id = :payment_id AND supplier_obligation_id = :obligation_id'
+        );
+        $allocationUpdate->execute(['amount' => 20, 'payment_id' => $paymentId, 'obligation_id' => $obligationIds[2]]);
+        $allocationUpdate->execute(['amount' => 70, 'payment_id' => $paymentId, 'obligation_id' => $obligationIds[3]]);
         $releasedAllocationRows = [
             [
                 'branch_id' => $branchId,

@@ -253,7 +253,7 @@ final class ServiceWorkspaceService extends Service
                 $serviceRow['supplier_refundable_credit_amount'] = $supplierRefundState['remaining_expected_supplier_refund'];
                 $serviceRow['supplier_credit_recorded_source_amount'] = $supplierRefundState['supplier_credit_recorded_source_amount'];
                 $serviceRow['supplier_payable_reduced_source_amount'] = (float) ($latestCancelPayload['supplier_payable_reduced_source_amount'] ?? 0);
-                $serviceRow['supplier_credit_auto_recording'] = array_key_exists('supplier_credit_recording_version', $latestCancelPayload);
+                $serviceRow['supplier_credit_auto_recording'] = $supplierRefundState['supplier_credit_already_recorded'];
                 $serviceRow['customer_refundable_credit_amount'] = $customerRefundState['remaining_customer_refund_credit'];
                 $serviceRow['customer_refund_received_amount'] = $customerRefundState['customer_refund_received_amount'];
                 $serviceRow['customer_refund_summary'] = [
@@ -400,6 +400,22 @@ final class ServiceWorkspaceService extends Service
                     $actorUserId
                 );
                 BookingEditTraceService::checkpoint('ServiceWorkspaceService::prepareSupplierCorrection', 'completed', $supplierCorrection);
+
+                if (($supplierCorrection['payable_transfer_required'] ?? false) === true) {
+                    $supplierCorrection['payable_transfer_journal_id'] = (new AccountingRepository($this->app))->postSupplierPayableTransfer([
+                        'branch_id' => (int) $booking['branch_id'],
+                        'booking_reference' => (string) $booking['booking_reference'],
+                        'source_reference' => (string) $existingService['line_reference'],
+                        'service_line_reference' => (string) $existingService['line_reference'],
+                        'supplier_obligation_id' => (int) $supplierCorrection['supplier_obligation_id'],
+                        'prior_supplier_id' => (int) $supplierCorrection['prior_supplier_id'],
+                        'new_supplier_id' => (int) $supplierCorrection['new_supplier_id'],
+                        'amount' => (float) $supplierCorrection['payable_transfer_amount'],
+                        'currency' => (string) $supplierCorrection['payable_transfer_currency'],
+                        'entry_date' => date('Y-m-d'),
+                        'actor_user_id' => $actorUserId,
+                    ]);
+                }
 
                 BookingEditTraceService::checkpoint('BookingServiceRepository::updateService', 'started', ['service_id' => $serviceId]);
                 $repository->updateService(
@@ -1589,7 +1605,9 @@ final class ServiceWorkspaceService extends Service
                 && $customerReceiptCreditConsumptionAmount <= 0.005
                 && (float) ($customerRefundState['service_remaining_customer_refund_credit'] ?? 0) > 0.005;
             $supplierRefundableBalance = $supplierRefundState['remaining_expected_supplier_refund'];
-            if ($supplierRefundAmount > 0.005 && array_key_exists('supplier_credit_recording_version', $cancelPayload)) {
+            if ($supplierRefundAmount > 0.005
+                && (array_key_exists('supplier_credit_recording_version', $cancelPayload)
+                    || ($supplierRefundState['supplier_credit_already_recorded'] && ! $refundEditMode))) {
                 throw new RuntimeException('Supplier refund was settled as payable reduction or reusable credit when cancellation was saved. Do not record it again.');
             }
 
@@ -7078,6 +7096,10 @@ final class ServiceWorkspaceService extends Service
         }
 
         $grossAmount = round((float) ($obligation['gross_amount'] ?? 0), 2);
+        $result['payable_transfer_required'] = $grossAmount > 0.005;
+        $result['payable_transfer_amount'] = $grossAmount;
+        $result['payable_transfer_currency'] = (string) $obligation['currency'];
+        $result['supplier_obligation_id'] = (int) $obligation['id'];
         $netPayableAmount = round((float) ($obligation['net_payable_amount'] ?? 0), 2);
         $settledAmount = round(max($grossAmount - $netPayableAmount, 0), 2);
         if ($settledAmount <= 0.005) {
@@ -8726,9 +8748,19 @@ final class ServiceWorkspaceService extends Service
         }
 
         $expectedSupplierRefund = round(max(...$expectedSupplierRefundCandidates), 2);
+        // Older cancellations released paid supplier allocations back to their
+        // payment (or advance) source without the later auto-recording marker.
+        // Count only releases with source IDs; the expected refund by itself is
+        // an entitlement, not evidence that reusable credit was created.
+        $legacyPaymentCredit = ! empty($cancelPayload['released_supplier_payment_ids'])
+            ? round(max((float) ($cancelPayload['released_supplier_payment_credit'] ?? 0), 0), 2)
+            : 0.0;
+        $legacyAdvanceCredit = ! empty($cancelPayload['released_supplier_advance_ids'])
+            ? round(max((float) ($cancelPayload['released_supplier_advance_credit'] ?? 0), 0), 2)
+            : 0.0;
         $recordedSupplierCreditSourceAmount = array_key_exists('supplier_credit_recorded_source_amount', $cancelPayload)
             ? round((float) $cancelPayload['supplier_credit_recorded_source_amount'], 2)
-            : round((float) ($cancelPayload['released_supplier_advance_credit'] ?? 0), 2);
+            : round($legacyPaymentCredit + $legacyAdvanceCredit, 2);
         $recordedSupplierCreditBookingAmount = array_key_exists('supplier_credit_recorded_booking_amount', $cancelPayload)
             ? round((float) $cancelPayload['supplier_credit_recorded_booking_amount'], 2)
             : $this->convertSettlementTruthAmountToBookingCurrency(
@@ -8739,6 +8771,9 @@ final class ServiceWorkspaceService extends Service
             );
         // A cash/credit refund event can document an already released advance;
         // it is not a second recovery of the same supplier money.
+        $supplierCreditAlreadyRecorded = array_key_exists('supplier_credit_recording_version', $cancelPayload)
+            || ($expectedSupplierRefund > 0.005
+                && $recordedSupplierCreditBookingAmount + 0.005 >= $expectedSupplierRefund);
         $remainingExpectedSupplierRefund = array_key_exists('supplier_credit_recording_version', $cancelPayload)
             ? 0.0
             : round(max(
@@ -8751,6 +8786,7 @@ final class ServiceWorkspaceService extends Service
             'supplier_refund_received_amount' => $supplierRefundReceivedAmount,
             'supplier_credit_recorded_source_amount' => $recordedSupplierCreditSourceAmount,
             'supplier_credit_recorded_booking_amount' => $recordedSupplierCreditBookingAmount,
+            'supplier_credit_already_recorded' => $supplierCreditAlreadyRecorded,
             'remaining_expected_supplier_refund' => $remainingExpectedSupplierRefund,
             'supplier_settled_amount' => $supplierSettledAmount,
             'repository_credit_balance' => $repositoryCreditBalance,

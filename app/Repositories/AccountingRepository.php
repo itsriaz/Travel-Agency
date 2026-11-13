@@ -104,6 +104,10 @@ final class AccountingRepository extends BaseRepository
                 'service_line_reference',
                 'supplier_obligation_id',
             ];
+            $hasSupplierSnapshot = $this->columnExists('journal_entry_lines', 'supplier_id_snapshot');
+            if ($hasSupplierSnapshot) {
+                $lineColumns[] = 'supplier_id_snapshot';
+            }
             if ($this->columnExists('journal_entry_lines', 'supplier_payment_id')) {
                 $lineColumns[] = 'supplier_payment_id';
             }
@@ -123,7 +127,50 @@ final class AccountingRepository extends BaseRepository
                 implode(', ', $linePlaceholders)
             ));
 
+            $supplierSnapshotStatement = $hasSupplierSnapshot
+                ? $this->db->prepare('SELECT supplier_id FROM supplier_obligations WHERE id = :obligation_id')
+                : null;
+            $paymentSupplierSnapshotStatement = $hasSupplierSnapshot
+                ? $this->db->prepare('SELECT supplier_id FROM supplier_payments WHERE id = :payment_id')
+                : null;
+            $supplierSnapshots = [];
+            $paymentSupplierSnapshots = [];
+
             foreach ($effectiveLines as $line) {
+                $obligationId = (int) ($line['supplier_obligation_id'] ?? 0);
+                $paymentId = (int) ($line['supplier_payment_id'] ?? 0);
+                $allowsExplicitSupplier = in_array((string) ($header['source_type'] ?? ''), [
+                    'supplier_payment_void_reversed',
+                    'supplier_prior_period_adjustment',
+                    'supplier_prior_period_adjustment_reversed',
+                    'supplier_payable_transferred',
+                ], true);
+                $originalSupplierId = $allowsExplicitSupplier
+                    ? (int) ($line['supplier_id_snapshot'] ?? 0)
+                    : 0;
+                if ($hasSupplierSnapshot
+                    && str_starts_with((string) ($header['source_type'] ?? ''), 'supplier_prior_period_adjustment')
+                    && $originalSupplierId <= 0) {
+                    throw new RuntimeException('Prior-period supplier adjustment needs a supplier snapshot on every line.');
+                }
+                if ($supplierSnapshotStatement !== null && $obligationId > 0
+                    && $originalSupplierId === 0 && ! array_key_exists($obligationId, $supplierSnapshots)) {
+                    $supplierSnapshotStatement->execute(['obligation_id' => $obligationId]);
+                    $supplierId = $supplierSnapshotStatement->fetchColumn();
+                    if ($supplierId === false) {
+                        throw new RuntimeException('Supplier obligation is missing while posting its journal line.');
+                    }
+                    $supplierSnapshots[$obligationId] = (int) $supplierId;
+                }
+                if ($paymentSupplierSnapshotStatement !== null && $obligationId === 0 && $paymentId > 0
+                    && $originalSupplierId === 0 && ! array_key_exists($paymentId, $paymentSupplierSnapshots)) {
+                    $paymentSupplierSnapshotStatement->execute(['payment_id' => $paymentId]);
+                    $supplierId = $paymentSupplierSnapshotStatement->fetchColumn();
+                    if ($supplierId === false) {
+                        throw new RuntimeException('Supplier payment is missing while posting its journal line.');
+                    }
+                    $paymentSupplierSnapshots[$paymentId] = (int) $supplierId;
+                }
                 $linePayload = [
                     'journal_entry_id' => $journalEntryId,
                     'account_id' => isset($line['account_id']) && (int) ($line['account_id'] ?? 0) > 0
@@ -131,6 +178,11 @@ final class AccountingRepository extends BaseRepository
                         : $this->accountIdByCode($line['account_code']),
                     'service_line_reference' => $line['service_line_reference'] ?? null,
                     'supplier_obligation_id' => $line['supplier_obligation_id'] ?? null,
+                    'supplier_id_snapshot' => $originalSupplierId > 0
+                        ? $originalSupplierId
+                        : ($obligationId > 0
+                            ? ($supplierSnapshots[$obligationId] ?? null)
+                            : ($paymentSupplierSnapshots[$paymentId] ?? null)),
                     'supplier_payment_id' => $line['supplier_payment_id'] ?? null,
                     'customer_receivable_item_id' => $line['customer_receivable_item_id'] ?? null,
                     'customer_receipt_id' => $line['customer_receipt_id'] ?? null,
@@ -307,6 +359,49 @@ final class AccountingRepository extends BaseRepository
         ]);
     }
 
+    /** Move an existing payable between suppliers without changing cash or service cost. */
+    public function postSupplierPayableTransfer(array $data): int
+    {
+        $amount = round((float) ($data['amount'] ?? 0), 2);
+        $priorSupplierId = (int) ($data['prior_supplier_id'] ?? 0);
+        $newSupplierId = (int) ($data['new_supplier_id'] ?? 0);
+        if ($amount <= 0 || $priorSupplierId <= 0 || $newSupplierId <= 0 || $priorSupplierId === $newSupplierId) {
+            throw new RuntimeException('Supplier payable transfer requires an amount and two different suppliers.');
+        }
+        if (! $this->columnExists('journal_entry_lines', 'supplier_id_snapshot')) {
+            throw new RuntimeException('Supplier snapshot migration is required before changing a saved supplier.');
+        }
+
+        $reference = [
+            'service_line_reference' => $data['service_line_reference'],
+            'supplier_obligation_id' => $data['supplier_obligation_id'],
+            'account_code' => 'AP_CONTROL',
+        ];
+        return $this->postJournalEntry([
+            'branch_id' => $data['branch_id'],
+            'booking_reference' => $data['booking_reference'],
+            'source_type' => 'supplier_payable_transferred',
+            'source_reference' => $data['source_reference'],
+            'entry_date' => $data['entry_date'],
+            'currency' => $data['currency'],
+            'narration' => 'Supplier payable moved to corrected supplier',
+            'actor_user_id' => $data['actor_user_id'],
+        ], [
+            array_merge($reference, [
+                'supplier_id_snapshot' => $priorSupplierId,
+                'line_description' => 'Payable released from prior supplier',
+                'debit_amount' => $amount,
+                'credit_amount' => 0,
+            ]),
+            array_merge($reference, [
+                'supplier_id_snapshot' => $newSupplierId,
+                'line_description' => 'Payable assigned to corrected supplier',
+                'debit_amount' => 0,
+                'credit_amount' => $amount,
+            ]),
+        ]);
+    }
+
     public function postReceivableAdjusted(array $data): int
     {
         $amount = abs((float) $data['adjustment_amount']);
@@ -456,10 +551,10 @@ final class AccountingRepository extends BaseRepository
         $reference = (string) ($data['source_reference'] ?? 'SUPPLIER-ADVANCE-FX');
         $header = [
             'booking_reference' => null,
-            'source_type' => 'supplier_advance_fx_conversion',
+            'source_type' => $data['source_type'] ?? 'supplier_advance_fx_conversion',
             'entry_date' => $data['entry_date'] ?? date('Y-m-d'),
             'actor_user_id' => $data['actor_user_id'] ?? null,
-            'narration' => 'Supplier advance converted within supplier pool; no cash movement',
+            'narration' => $data['narration'] ?? 'Supplier advance converted within supplier pool; no cash movement',
         ];
         $sourceJournalId = $this->postJournalEntry(array_merge($header, [
             'branch_id' => (int) $data['source_branch_id'],
@@ -546,6 +641,42 @@ final class AccountingRepository extends BaseRepository
                 'line_description' => 'Accounts payable restored from cancellation settlement release',
                 'debit_amount' => 0,
                 'credit_amount' => $data['released_amount'],
+            ],
+        ]);
+    }
+
+    public function postSupplierSettlementReleaseVoidAdjustment(array $data): int
+    {
+        $amount = round((float) $data['amount'], 2);
+        if ($amount <= 0) {
+            throw new \RuntimeException('Supplier cancellation credit adjustment must be greater than zero.');
+        }
+
+        return $this->postJournalEntry([
+            'branch_id' => (int) $data['branch_id'],
+            'booking_reference' => (string) $data['booking_reference'],
+            'source_type' => 'supplier_settlement_release_void_adjustment',
+            'source_reference' => (string) $data['source_reference'],
+            'entry_date' => (string) $data['entry_date'],
+            'currency' => (string) $data['currency'],
+            'narration' => 'Duplicate supplier payment void removed only its cancellation credit share',
+            'actor_user_id' => (int) $data['actor_user_id'],
+        ], [
+            [
+                'account_code' => 'AP_CONTROL',
+                'service_line_reference' => (string) $data['service_line_reference'],
+                'supplier_obligation_id' => (int) $data['supplier_obligation_id'],
+                'line_description' => 'Reversal of cancellation release funded by voided payment',
+                'debit_amount' => $amount,
+                'credit_amount' => 0,
+            ],
+            [
+                'account_code' => 'SUPPLIER_ADVANCES',
+                'service_line_reference' => (string) $data['service_line_reference'],
+                'supplier_obligation_id' => (int) $data['supplier_obligation_id'],
+                'line_description' => 'Remove cancellation credit from voided payment',
+                'debit_amount' => 0,
+                'credit_amount' => $amount,
             ],
         ]);
     }
@@ -660,11 +791,28 @@ final class AccountingRepository extends BaseRepository
 
     public function postSupplierPaymentAllocation(array $data): int
     {
+        $sourceReference = trim((string) ($data['source_reference'] ?? ''));
+        if (preg_match('/-(?:ALLOC|REALLOC)-([1-9][0-9]*)$/', $sourceReference, $matches) !== 1) {
+            throw new \RuntimeException('Supplier payment allocation must have a recorded allocation ID.');
+        }
+        $allocationStatement = $this->db->prepare(
+            'SELECT supplier_payment_id, supplier_obligation_id, allocated_amount
+             FROM supplier_payment_allocations WHERE id = :allocation_id'
+        );
+        $allocationStatement->execute(['allocation_id' => (int) $matches[1]]);
+        $allocation = $allocationStatement->fetch();
+        if (! is_array($allocation)
+            || (int) $allocation['supplier_payment_id'] !== (int) ($data['supplier_payment_id'] ?? 0)
+            || (int) $allocation['supplier_obligation_id'] !== (int) ($data['supplier_obligation_id'] ?? 0)
+            || abs((float) $allocation['allocated_amount'] - (float) ($data['allocated_amount'] ?? 0)) > 0.005) {
+            throw new \RuntimeException('Supplier payment allocation journal does not match its allocation record.');
+        }
+
         return $this->postJournalEntry([
             'branch_id' => $data['branch_id'],
             'booking_reference' => $data['booking_reference'],
             'source_type' => 'supplier_payment_allocated',
-            'source_reference' => $data['source_reference'] ?? null,
+            'source_reference' => $sourceReference,
             'entry_date' => $data['entry_date'],
             'currency' => $data['currency'],
             'narration' => $data['narration'] ?? 'Supplier payment allocated to supplier obligation',
@@ -705,6 +853,7 @@ final class AccountingRepository extends BaseRepository
                     coa.code AS account_code,
                     jel.service_line_reference,
                     jel.supplier_obligation_id,
+                    ' . ($this->columnExists('journal_entry_lines', 'supplier_id_snapshot') ? 'jel.supplier_id_snapshot' : 'NULL AS supplier_id_snapshot') . ',
                     jel.supplier_payment_id,
                     jel.line_description,
                     jel.debit_amount,
@@ -732,6 +881,7 @@ final class AccountingRepository extends BaseRepository
                     coa.code AS account_code,
                     jel.service_line_reference,
                     jel.supplier_obligation_id,
+                    ' . ($this->columnExists('journal_entry_lines', 'supplier_id_snapshot') ? 'jel.supplier_id_snapshot' : 'NULL AS supplier_id_snapshot') . ',
                     NULL AS supplier_payment_id,
                     jel.line_description,
                     jel.debit_amount,
@@ -805,6 +955,9 @@ final class AccountingRepository extends BaseRepository
                     'supplier_obligation_id' => (int) ($row['supplier_obligation_id'] ?? 0) > 0
                         ? (int) $row['supplier_obligation_id']
                         : null,
+                    'supplier_id_snapshot' => (int) ($row['supplier_id_snapshot'] ?? 0) > 0
+                        ? (int) $row['supplier_id_snapshot']
+                        : null,
                     'supplier_payment_id' => (int) ($data['supplier_payment_id'] ?? 0) > 0
                         ? (int) $data['supplier_payment_id']
                         : null,
@@ -848,6 +1001,21 @@ final class AccountingRepository extends BaseRepository
         }
 
         return $createdJournalId;
+    }
+
+    public function supplierPaymentVoidReversalJournalIds(int $paymentId): array
+    {
+        $statement = $this->db->prepare(
+            'SELECT DISTINCT je.id
+             FROM journal_entries je
+             INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+             WHERE je.source_type = "supplier_payment_void_reversed"
+               AND jel.supplier_payment_id = :payment_id
+             ORDER BY je.id'
+        );
+        $statement->execute(['payment_id' => $paymentId]);
+
+        return array_map('intval', $statement->fetchAll(\PDO::FETCH_COLUMN) ?: []);
     }
 
     public function postCustomerReceiptRecorded(array $data): int

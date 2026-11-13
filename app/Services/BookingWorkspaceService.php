@@ -178,6 +178,9 @@ final class BookingWorkspaceService extends Service
                 'branch_id' => (int) $savedBooking['branch_id'],
                 'branch_changed' => (int) $priorBooking['branch_id'] !== (int) $savedBooking['branch_id'],
                 'booking_status' => (string) $savedBooking['booking_status'],
+                'prior_lead_traveler_id' => (int) ($priorBooking['lead_traveler_id'] ?? 0),
+                'lead_traveler_id' => (int) ($savedBooking['lead_traveler_id'] ?? 0),
+                'lead_traveler_changed' => (int) ($priorBooking['lead_traveler_id'] ?? 0) !== (int) ($savedBooking['lead_traveler_id'] ?? 0),
             ]);
 
             return [

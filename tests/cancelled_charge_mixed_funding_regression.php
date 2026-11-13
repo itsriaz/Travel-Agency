@@ -148,6 +148,20 @@ try {
         'customer_credit_apply_amount' => 20,
     ];
 
+    $db->exec('SAVEPOINT pooled_cancelled_charge_check');
+    $pooled = $receipts->saveReceipt(array_replace($request, [
+        'customer_credit_use_pool' => '1',
+        'customer_credit_receipt_id' => 0,
+        'customer_credit_apply_amount' => 0,
+    ]), 1, [$branch]);
+    $pooledDue = $payments->findReceivableByServiceLine($reference, $line);
+    $check(abs((float) ($pooled['receipt']['received_amount'] ?? 0) - 10) < 0.005
+        && abs((float) ($pooled['customer_credit_applied']['allocated_amount'] ?? 0) - 20) < 0.005
+        && abs((float) ($pooledDue['outstanding_amount'] ?? -1)) < 0.005,
+        'Selected pooled credit automatically covers the remaining cancelled charge after cash');
+    $db->exec('ROLLBACK TO SAVEPOINT pooled_cancelled_charge_check');
+    $db->exec('RELEASE SAVEPOINT pooled_cancelled_charge_check');
+
     $blocked = false;
     try {
         $receipts->saveReceipt(array_replace($request, ['customer_credit_receipt_id' => 999999999]), 1, [$branch]);

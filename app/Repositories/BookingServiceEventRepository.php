@@ -342,6 +342,27 @@ final class BookingServiceEventRepository extends BaseRepository
         ]);
     }
 
+    public function reduceCancellationCreditForSupplierPaymentVoid(
+        int $eventId,
+        float $bookingCreditAmount,
+        array $payload
+    ): void {
+        $statement = $this->db->prepare(
+            'UPDATE booking_service_events
+             SET supplier_credit_amount = :credit_amount,
+                 payload_json = :payload_json
+             WHERE id = :id AND event_type = "cancel" AND event_status = "posted"'
+        );
+        $statement->execute([
+            'id' => $eventId,
+            'credit_amount' => round($bookingCreditAmount, 2),
+            'payload_json' => json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
+        ]);
+        if ($statement->rowCount() !== 1) {
+            throw new \RuntimeException('The cancellation changed before its supplier credit could be adjusted. Nothing was voided.');
+        }
+    }
+
     public function updateRefundFinancials(int $eventId, array $data): void
     {
         $existing = $this->findPostedEventById($eventId, 'refund');

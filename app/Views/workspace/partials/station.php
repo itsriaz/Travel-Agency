@@ -2196,14 +2196,16 @@ Kept here in case manual service save is needed again later.
                             >
                         </label>
                         <label data-payment-customer-credit-apply-row>
-                            <span>Available Customer Credit</span>
-                            <select name="customer_credit_receipt_id" data-payment-customer-credit-select>
-                                <option value="">No transferable credit available</option>
-                            </select>
+                            <span>Available Credit from Other Bookings</span>
+                            <input type="text" value="No credit available" data-payment-customer-credit-pool readonly>
                         </label>
                         <label data-payment-customer-credit-amount-row hidden>
-                            <span>Customer Credit Used</span>
-                            <input type="number" name="customer_credit_apply_amount" step="1" value="0" data-payment-customer-credit-amount>
+                            <span>Use Available Credit</span>
+                            <div class="legacy-payment-credit-choice">
+                                <input type="checkbox" name="customer_credit_use_pool" value="1" data-payment-customer-credit-use checked>
+                                <small data-payment-customer-credit-use-preview></small>
+                            </div>
+                            <input type="hidden" name="customer_credit_apply_amount" value="0" data-payment-customer-credit-amount>
                         </label>
                         <label data-payment-advance-row>
                             <span>Customer Advance</span>
@@ -3330,7 +3332,7 @@ Kept here in case manual service save is needed again later.
         </div>
     </section>
 
-    <section class="customer-picker-modal customer-picker-modal--child financial-finder-modal financial-finder-modal--supplier-payment-edit" data-supplier-payment-edit-modal hidden aria-hidden="true">
+    <section class="customer-picker-modal customer-picker-modal--child financial-finder-modal financial-finder-modal--supplier-payment-edit" data-supplier-payment-edit-modal data-supplier-payment-void-impact-url="<?= e(url('/suppliers/payments/void-impact')) ?>" hidden aria-hidden="true">
         <div class="customer-picker-modal__backdrop" data-supplier-payment-edit-close></div>
         <div class="customer-picker-modal__dialog supplier-payment-edit-dialog financial-finder-dialog" role="dialog" aria-modal="true" aria-labelledby="supplier-payment-edit-title">
             <header class="customer-picker-modal__header financial-finder-header">
@@ -3365,9 +3367,10 @@ Kept here in case manual service save is needed again later.
                     </div>
                     <div class="supplier-payment-edit-preview supplier-payment-edit-preview--financial" data-supplier-payment-edit-preview hidden></div>
                     <div class="workspace-feedback workspace-feedback--inline" data-supplier-payment-edit-feedback hidden></div>
+                    <p class="muted">To void this payment, review its impact and enter the required void reason on the next page. Remarks and Optional Note above are for edits only.</p>
                     <div class="station-command-buttons top-gap supplier-payment-edit-actions">
                         <button class="btn btn-sm" type="button" data-supplier-payment-edit-close>Cancel</button>
-                        <button class="btn btn-danger btn-sm" type="button" data-supplier-payment-edit-void>Void Payment</button>
+                        <a class="btn btn-danger btn-sm" href="#" data-supplier-payment-edit-void>Review &amp; Void</a>
                         <button class="btn btn-primary btn-sm" type="submit" data-supplier-payment-edit-submit>Save Changes</button>
                     </div>
                 </form>
@@ -3403,6 +3406,7 @@ Kept here in case manual service save is needed again later.
                     </div>
                 </div>
                 <div class="workspace-feedback workspace-feedback--inline" data-prepaid-payment-manager-feedback hidden></div>
+                <small>Paid is the full original payment. Used includes payables covered at payment time or later; Available includes unused credit and any unallocated payment.</small>
                 <div class="dense-table-wrap top-gap financial-finder-table-wrap">
                     <table class="dense-table prepaid-payment-manager-table">
                         <thead><tr><th>Date</th><th>Payment</th><th>Supplier</th><th>Branch</th><th>Curr.</th><th>Paid</th><th>Used</th><th>Available</th><th>Source Account</th><th>Status</th><th>Action</th></tr></thead>
@@ -3646,7 +3650,7 @@ Kept here in case manual service save is needed again later.
                                 <a href="<?= e($supplierRecreateClearUrl) ?>" style="margin-left:8px;">Clear Draft</a>
                             </div>
                         <?php endif; ?>
-                        <form method="post" action="<?= e(url('/workspace/suppliers/payments/simple-save')) ?>" data-simple-postpaid-form>
+                        <form method="post" action="<?= e(url('/workspace/suppliers/payments/simple-save')) ?>" data-simple-postpaid-form data-supplier-duplicate-check-url="<?= e(url('/suppliers/payments/similar')) ?>">
                             <?= \App\Helpers\Csrf::input() ?>
                             <input type="hidden" name="booking_id" value="<?= e((string) $workspaceBooking['id']) ?>">
                             <input type="hidden" name="branch_id" value="<?= e((string) $workspaceBooking['branchId']) ?>">
@@ -3694,6 +3698,53 @@ Kept here in case manual service save is needed again later.
                             <div class="station-command-buttons top-gap"><button class="btn btn-primary btn-sm" type="submit" data-simple-postpaid-submit data-booking-gated-control <?= $workspaceBooking['id'] > 0 ? '' : 'disabled' ?>>Save Payment</button></div>
                         </form>
                     </article>
+                    <?php
+                    $sameCurrencyAdvancePayables = [];
+                    foreach (($supplierFoundation['openObligations'] ?? []) as $openObligation) {
+                        $matchingAdvances = array_values(array_filter(
+                            $supplierFoundation['advances'] ?? [],
+                            static fn (array $advance): bool => (int) ($advance['supplierId'] ?? 0) === (int) ($openObligation['supplierId'] ?? 0)
+                                && (string) ($advance['currency'] ?? '') === (string) ($openObligation['currency'] ?? '')
+                                && (float) ($advance['availableAmount'] ?? 0) > 0.005
+                        ));
+                        if ((float) ($openObligation['netPayableAmount'] ?? 0) > 0.005 && $matchingAdvances !== []) {
+                            $sameCurrencyAdvancePayables[] = ['payable' => $openObligation, 'advances' => $matchingAdvances];
+                        }
+                    }
+                    ?>
+                    <?php if ($sameCurrencyAdvancePayables !== []): ?>
+                    <article>
+                        <h3>Apply Existing Supplier Advance</h3>
+                        <p>Use an available credit for this supplier instead of making another payment. Choose the exact amount; nothing is applied until you confirm.</p>
+                        <table class="legacy-table">
+                            <thead><tr><th>Supplier</th><th>Service</th><th>Open Payable</th><th>Advance and Amount</th></tr></thead>
+                            <tbody>
+                            <?php foreach ($sameCurrencyAdvancePayables as $pair): ?>
+                                <?php $openObligation = $pair['payable']; ?>
+                                <tr>
+                                    <td><?= e((string) ($openObligation['supplier'] ?? '')) ?></td>
+                                    <td><?= e((string) ($openObligation['serviceLineReference'] ?? '')) ?></td>
+                                    <td><?= e((string) ($openObligation['currency'] ?? '')) ?> <?= e($formatMoney((float) ($openObligation['netPayableAmount'] ?? 0))) ?></td>
+                                    <td>
+                                        <form method="post" action="<?= e(url('/workspace/suppliers/advances/apply')) ?>" class="station-form-grid station-form-grid--6 station-form-grid--inline" onsubmit="return confirm('Apply this existing supplier advance to the selected payable? No new cash payment will be made.');">
+                                            <?= \App\Helpers\Csrf::input() ?>
+                                            <input type="hidden" name="booking_id" value="<?= e((string) $workspaceBooking['id']) ?>">
+                                            <input type="hidden" name="supplier_obligation_id" value="<?= e((string) ($openObligation['id'] ?? 0)) ?>">
+                                            <label class="station-field span-3"><span>Available advance</span><select name="supplier_advance_id" required>
+                                                <?php foreach ($pair['advances'] as $advance): ?>
+                                                    <option value="<?= e((string) ($advance['id'] ?? 0)) ?>"><?= e((string) ($advance['referenceNo'] ?? 'Advance')) ?> / <?= e((string) ($advance['currency'] ?? '')) ?> <?= e($formatMoney((float) ($advance['availableAmount'] ?? 0))) ?> available</option>
+                                                <?php endforeach; ?>
+                                            </select></label>
+                                            <label class="station-field span-2"><span>Amount to use</span><input type="number" name="advance_apply_amount" min="0.01" max="<?= e(number_format((float) ($openObligation['netPayableAmount'] ?? 0), 2, '.', '')) ?>" step="0.01" required></label>
+                                            <div class="station-command-buttons span-1"><button class="btn btn-primary btn-sm" type="submit">Apply</button></div>
+                                        </form>
+                                    </td>
+                                </tr>
+                            <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </article>
+                    <?php endif; ?>
                     <article>
                         <details class="supplier-dashboard-advanced">
                             <summary>Advanced: Manual Allocation</summary>
@@ -3706,7 +3757,7 @@ Kept here in case manual service save is needed again later.
                                             This is a fresh draft only; the old payment stays voided and unchanged.
                                         </div>
                                     <?php endif; ?>
-                                    <form method="post" action="<?= e(url('/workspace/suppliers/payments/save')) ?>">
+                                    <form method="post" action="<?= e(url('/workspace/suppliers/payments/save')) ?>" data-supplier-duplicate-check-url="<?= e(url('/suppliers/payments/similar')) ?>">
                                         <?= \App\Helpers\Csrf::input() ?>
                                         <input type="hidden" name="booking_id" value="<?= e((string) $workspaceBooking['id']) ?>">
                                         <input type="hidden" name="branch_id" value="<?= e((string) $workspaceBooking['branchId']) ?>">
@@ -3861,7 +3912,7 @@ Kept here in case manual service save is needed again later.
                                     <?php endif; ?>
                                     <?php if ($showSupplierPaymentOperationalActions): ?>
                                     <td><form method="post" action="<?= e(url('/workspace/suppliers/payments/metadata-save')) ?>" style="display:grid;gap:6px;min-width:190px;"><?= \App\Helpers\Csrf::input() ?><input type="hidden" name="booking_id" value="<?= e((string) ($workspaceBooking['id'] ?? 0)) ?>"><input type="hidden" name="supplier_payment_id" value="<?= e((string) ($paymentRow['id'] ?? 0)) ?>"><input type="text" name="supplier_reference_number" value="<?= e((string) ($paymentRow['referenceNumber'] ?? '')) ?>" placeholder="Reference" maxlength="100"><input type="text" name="supplier_bank_card_detail" value="<?= e((string) ($paymentRow['bankCardDetail'] ?? '')) ?>" placeholder="Bank / Card detail" maxlength="190"><input type="text" name="supplier_payment_remarks" value="<?= e((string) ($paymentRow['remarks'] ?? '')) ?>" placeholder="Remarks" maxlength="4000"><button class="btn btn-sm" type="submit">Save Notes</button></form></td>
-                                    <td><?php if ($canPostServiceEvents && $supplierPaymentStatusRaw !== 'void'): ?><form method="post" action="<?= e(url('/workspace/suppliers/payments/void')) ?>" onsubmit="return confirm('Void this supplier payment and reverse its allocations?');" style="display:grid;gap:6px;min-width:150px;"><?= \App\Helpers\Csrf::input() ?><input type="hidden" name="booking_id" value="<?= e((string) ($workspaceBooking['id'] ?? 0)) ?>"><input type="hidden" name="supplier_payment_id" value="<?= e((string) ($paymentRow['id'] ?? 0)) ?>"><input type="text" name="void_reason" value="" placeholder="Void reason" minlength="5" maxlength="1000" required><button class="btn btn-sm" type="submit">Void</button></form><?php else: ?>-<?php endif; ?></td>
+                                    <td><?php if ($canPostServiceEvents && $supplierPaymentStatusRaw !== 'void'): ?><a class="btn btn-sm" href="<?= e(url('/suppliers/payments/void-impact?supplier_payment_id=' . (int) ($paymentRow['id'] ?? 0))) ?>">Review &amp; Void</a><?php else: ?>-<?php endif; ?></td>
                                     <td><?php if ($supplierPaymentStatusRaw === 'void'): ?><a class="btn btn-sm" href="<?= e($supplierPaymentRecreateUrl) ?>">Recreate</a><?php else: ?>-<?php endif; ?></td>
                                     <?php endif; ?>
                                 </tr>
@@ -5808,3 +5859,4 @@ Kept here in case manual service save is needed again later.
     })();
 </script>
 </section>
+<script src="<?= e(asset('assets/js/supplier-payment-warning.js')) ?>" defer></script>

@@ -1,0 +1,19 @@
+{
+    "supplier_id": 371,
+    "currency": "AED",
+    "supplier_ledger": {
+        "branch_1": {"rows": 12, "debit": 5443, "credit": 5709, "net": 266},
+        "branch_2": {"rows": 306, "debit": 309584, "credit": 309949, "net": 365},
+        "all_branches": {"rows": 314, "debit": 315027, "credit": 315658, "net": 631}
+    },
+    "customer_receivables": [
+        {"branch_id": 1, "currency": "PKR", "row_count": 319, "due": "33784026.00", "allocated": "31678456.00", "outstanding": "2105570.00"},
+        {"branch_id": 2, "currency": "AED", "row_count": 867, "due": "1064225.11", "allocated": "891266.72", "outstanding": "172958.39"},
+        {"branch_id": 2, "currency": "PKR", "row_count": 2, "due": "171000.00", "allocated": "171000.00", "outstanding": "0.00"}
+    ],
+    "allocation": {"id": 567, "payment_id": 167, "obligation_id": 794, "current_amount": 1, "original_journal_amount": 1068, "released_to_credit": 1067},
+    "related_payment": {"payment_id": 168, "current_allocation": 0, "original_journal_amount": 1030, "released_to_credit": 1030},
+    "cancellation": {"event_id": 82, "released_payment_credit": 2097, "release_journal_id": 8112, "converted_advances": [85, 86]},
+    "cash_journal_changes_expected": 0,
+    "audit_result_before": "allocation_journal_missing_or_misattributed for allocation 567"
+}

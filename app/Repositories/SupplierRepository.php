@@ -1889,6 +1889,33 @@ final class SupplierRepository extends BaseRepository
         )));
     }
 
+    public function originalAllocationJournalAmount(int $paymentId, int $supplierId, string $currency): float
+    {
+        if ($paymentId <= 0 || $supplierId <= 0) {
+            return 0.0;
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT COALESCE(SUM(jel.debit_amount), 0)
+             FROM journal_entry_lines jel
+             INNER JOIN journal_entries je ON je.id = jel.journal_entry_id
+             INNER JOIN chart_of_accounts coa ON coa.id = jel.account_id
+             INNER JOIN supplier_obligations so ON so.id = jel.supplier_obligation_id
+             WHERE jel.supplier_payment_id = :payment_id
+               AND so.supplier_id = :supplier_id
+               AND je.source_type = "supplier_payment_allocated"
+               AND je.currency = :currency
+               AND coa.code = "AP_CONTROL"'
+        );
+        $statement->execute([
+            'payment_id' => $paymentId,
+            'supplier_id' => $supplierId,
+            'currency' => strtoupper(trim($currency)),
+        ]);
+
+        return round((float) $statement->fetchColumn(), 2);
+    }
+
     public function supplierPaymentAllocationCurrencies(int $paymentId): array
     {
         if ($paymentId <= 0) {
@@ -2070,7 +2097,7 @@ final class SupplierRepository extends BaseRepository
 
         $query = trim((string) ($filters['query'] ?? ''));
         if ($query !== '') {
-            $conditions[] = '(s.name LIKE ? OR s.code LIKE ? OR a.reference_no LIKE ? OR CAST(a.id AS CHAR) LIKE ?)';
+            $conditions[] = '(s.name LIKE ? OR s.code LIKE ? OR a.reference_no LIKE ? OR a.credit_ids LIKE ?)';
             $like = '%' . $query . '%';
             array_push($parameters, $like, $like, $like, $like);
         }
@@ -2095,23 +2122,25 @@ final class SupplierRepository extends BaseRepository
 
         $dateFrom = trim((string) ($filters['date_from'] ?? ''));
         if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $dateFrom) === 1) {
-            $conditions[] = 'a.received_at >= ?';
+            $conditions[] = 'COALESCE(source_payment.payment_date, a.received_at) >= ?';
             $parameters[] = $dateFrom;
         }
 
         $dateTo = trim((string) ($filters['date_to'] ?? ''));
         if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $dateTo) === 1) {
-            $conditions[] = 'a.received_at <= ?';
+            $conditions[] = 'COALESCE(source_payment.payment_date, a.received_at) <= ?';
             $parameters[] = $dateTo;
         }
 
         $status = strtolower(trim((string) ($filters['status'] ?? '')));
+        $availableExpression = '(a.available_amount + COALESCE(source_payment.unallocated_amount, 0))';
+        $paidExpression = 'COALESCE(source_payment.paid_amount, a.deposit_amount)';
         if ($status === 'available') {
-            $conditions[] = 'a.available_amount + 0.005 >= a.deposit_amount';
+            $conditions[] = $availableExpression . ' + 0.005 >= ' . $paidExpression;
         } elseif ($status === 'partially_used') {
-            $conditions[] = 'a.available_amount > 0.005 AND a.available_amount + 0.005 < a.deposit_amount';
+            $conditions[] = $availableExpression . ' > 0.005 AND ' . $availableExpression . ' + 0.005 < ' . $paidExpression;
         } elseif ($status === 'fully_used') {
-            $conditions[] = 'a.available_amount <= 0.005';
+            $conditions[] = $availableExpression . ' <= 0.005';
         }
 
         $statement = $this->db->prepare(
@@ -2120,14 +2149,20 @@ final class SupplierRepository extends BaseRepository
                 a.supplier_id,
                 a.branch_id,
                 a.currency,
-                a.received_at AS payment_date,
+                COALESCE(source_payment.payment_date, a.received_at) AS payment_date,
                 a.deposit_amount,
                 (a.deposit_amount - a.available_amount) AS used_amount,
                 a.available_amount,
+                COALESCE(source_payment.paid_amount, a.deposit_amount) AS display_paid_amount,
+                (COALESCE(source_payment.allocated_amount, 0) + a.deposit_amount - a.available_amount) AS display_used_amount,
+                (a.available_amount + COALESCE(source_payment.unallocated_amount, 0)) AS display_available_amount,
+                COALESCE(source_payment.returned_amount, 0) AS returned_amount,
+                a.credit_count,
+                a.credit_ids,
                 a.reference_no,
                 a.remarks,
                 a.payment_method,
-                a.treasury_account_id,
+                COALESCE(source_payment.treasury_account_id, a.treasury_account_id) AS treasury_account_id,
                 a.journal_entry_id,
                 a.source_supplier_payment_id,
                 source_payment.payment_no AS source_supplier_payment_no,
@@ -2136,17 +2171,28 @@ final class SupplierRepository extends BaseRepository
                 br.name AS branch_name,
                 ta.account_name AS treasury_account_name,
                 CASE
-                    WHEN a.available_amount <= 0.005 THEN "fully_used"
-                    WHEN a.available_amount + 0.005 < a.deposit_amount THEN "partially_used"
+                    WHEN (a.available_amount + COALESCE(source_payment.unallocated_amount, 0)) <= 0.005 THEN "fully_used"
+                    WHEN (a.available_amount + COALESCE(source_payment.unallocated_amount, 0)) + 0.005 < COALESCE(source_payment.paid_amount, a.deposit_amount) THEN "partially_used"
                     ELSE "available"
                 END AS status
-             FROM supplier_advances a
+             FROM (
+                SELECT MIN(id) AS id, supplier_id, branch_id, currency,
+                    MIN(received_at) AS received_at, SUM(deposit_amount) AS deposit_amount,
+                    SUM(available_amount) AS available_amount, MAX(reference_no) AS reference_no,
+                    MAX(remarks) AS remarks, MAX(payment_method) AS payment_method,
+                    MAX(treasury_account_id) AS treasury_account_id, MAX(journal_entry_id) AS journal_entry_id,
+                    source_supplier_payment_id, COUNT(*) AS credit_count,
+                    GROUP_CONCAT(id ORDER BY id SEPARATOR ",") AS credit_ids
+                FROM supplier_advances
+                WHERE deposit_amount > 0.005
+                GROUP BY COALESCE(source_supplier_payment_id, -id), supplier_id, branch_id, currency
+             ) a
              INNER JOIN suppliers s ON s.id = a.supplier_id
              INNER JOIN branches br ON br.id = a.branch_id
              LEFT JOIN supplier_payments source_payment ON source_payment.id = a.source_supplier_payment_id
-             LEFT JOIN treasury_accounts ta ON ta.id = a.treasury_account_id
+             LEFT JOIN treasury_accounts ta ON ta.id = COALESCE(source_payment.treasury_account_id, a.treasury_account_id)
              WHERE ' . implode(' AND ', $conditions) . '
-             ORDER BY a.received_at DESC, a.id DESC
+             ORDER BY COALESCE(source_payment.payment_date, a.received_at) DESC, a.id DESC
              LIMIT ' . $limit
         );
         $statement->execute($parameters);
@@ -2276,6 +2322,59 @@ final class SupplierRepository extends BaseRepository
         return $statement->fetchAll() ?: [];
     }
 
+    public function similarSupplierPayments(
+        int $supplierId,
+        string $currency,
+        float $amount,
+        string $paymentDate,
+        ?int $treasuryAccountId,
+        ?string $referenceNumber,
+        array $accessibleBranchIds
+    ): array {
+        $branchIds = array_values(array_unique(array_filter(array_map('intval', $accessibleBranchIds))));
+        if ($supplierId <= 0 || $amount <= 0 || $branchIds === []) {
+            return [];
+        }
+
+        $branchParameters = [];
+        $parameters = [
+            'supplier_id' => $supplierId,
+            'currency' => strtoupper(trim($currency)),
+            'paid_amount' => number_format($amount, 2, '.', ''),
+            'reference_for_rank' => trim((string) $referenceNumber),
+            'reference_match' => trim((string) $referenceNumber),
+            'treasury_for_rank' => (int) $treasuryAccountId,
+            'treasury_match' => (int) $treasuryAccountId,
+            'payment_date' => $paymentDate,
+        ];
+        foreach ($branchIds as $index => $branchId) {
+            $key = 'branch_' . $index;
+            $branchParameters[] = ':' . $key;
+            $parameters[$key] = $branchId;
+        }
+
+        $statement = $this->db->prepare(
+            'SELECT p.payment_no, p.payment_date, p.created_at, p.branch_id,
+                    p.currency, p.paid_amount, s.name AS supplier_name,
+                    ta.account_name AS treasury_account_name
+             FROM supplier_payments p
+             INNER JOIN suppliers s ON s.id = p.supplier_id
+             LEFT JOIN treasury_accounts ta ON ta.id = p.treasury_account_id
+             WHERE p.supplier_id = :supplier_id
+               AND p.currency = :currency
+               AND p.paid_amount = :paid_amount
+               AND p.status <> "void"
+               AND p.branch_id IN (' . implode(', ', $branchParameters) . ')
+             ORDER BY CASE WHEN :reference_for_rank <> "" AND p.reference_number = :reference_match THEN 0 ELSE 1 END,
+                      CASE WHEN :treasury_for_rank > 0 AND p.treasury_account_id = :treasury_match THEN 0 ELSE 1 END,
+                      ABS(DATEDIFF(p.payment_date, :payment_date)), p.created_at DESC
+             LIMIT 5'
+        );
+        $statement->execute($parameters);
+
+        return $statement->fetchAll() ?: [];
+    }
+
     public function globalSupplierPaymentConfirmation(int $paymentId, array $accessibleBranchIds): ?array
     {
         $branchIds = array_values(array_unique(array_filter(array_map('intval', $accessibleBranchIds))));
@@ -2372,6 +2471,168 @@ final class SupplierRepository extends BaseRepository
         ), static fn (int $id): bool => $id > 0)));
 
         return $payment;
+    }
+
+    public function releasePaymentSourcedAdvancesForVoid(
+        int $paymentId,
+        int $actorUserId,
+        string $reason,
+        bool $removeCancellationCredit = false
+    ): array
+    {
+        return $this->transaction(function () use ($paymentId, $actorUserId, $reason, $removeCancellationCredit): array {
+            $paymentStatement = $this->db->prepare(
+                'SELECT id, converted_advance_id, supplier_id, currency, status, reversal_journal_entry_id,
+                        paid_amount, allocated_amount, unallocated_amount, returned_amount
+                 FROM supplier_payments WHERE id = :id FOR UPDATE'
+            );
+            $paymentStatement->execute(['id' => $paymentId]);
+            $payment = $paymentStatement->fetch();
+            if ($payment === false || (string) $payment['status'] === 'void') {
+                throw new RuntimeException('This supplier payment is missing or already void.');
+            }
+            $existingReversal = $this->db->prepare(
+                'SELECT 1 FROM journal_entries je
+                 INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+                 WHERE je.source_type = "supplier_payment_void_reversed"
+                   AND jel.supplier_payment_id = :payment_id LIMIT 1'
+            );
+            $existingReversal->execute(['payment_id' => $paymentId]);
+            if ((int) ($payment['reversal_journal_entry_id'] ?? 0) > 0
+                || $existingReversal->fetchColumn() !== false) {
+                throw new RuntimeException('This payment already has void-journal evidence. It cannot be reversed again; review its correction history.');
+            }
+
+            $advanceStatement = $this->db->prepare(
+                'SELECT id, supplier_id, branch_id, currency, reference_no,
+                        deposit_amount, available_amount, source_supplier_payment_id
+                 FROM supplier_advances
+                 WHERE source_supplier_payment_id = :payment_id
+                    OR id = :converted_advance_id
+                 ORDER BY id FOR UPDATE'
+            );
+            $advanceStatement->execute([
+                'payment_id' => $paymentId,
+                'converted_advance_id' => (int) ($payment['converted_advance_id'] ?? 0),
+            ]);
+            $advances = $advanceStatement->fetchAll() ?: [];
+
+            $applicationStatement = $this->db->prepare(
+                'SELECT aa.id AS application_id, aa.supplier_advance_id,
+                        aa.supplier_obligation_id, aa.application_type,
+                        aa.applied_amount, aa.rate_from_currency, aa.rate_to_currency,
+                        aa.exchange_rate, aa.exchange_rate_effective_date,
+                        aa.application_note, aa.created_by_user_id, aa.created_at,
+                        COALESCE(aa.advance_amount_consumed, aa.applied_amount) AS advance_amount,
+                        COALESCE(aa.obligation_amount_applied, aa.applied_amount) AS obligation_amount,
+                        COALESCE(aa.advance_currency, sa.currency) AS advance_currency,
+                        COALESCE(aa.obligation_currency, o.currency) AS obligation_currency,
+                        o.branch_id, o.booking_reference, o.service_line_reference
+                 FROM supplier_advance_applications aa
+                 INNER JOIN supplier_advances sa ON sa.id = aa.supplier_advance_id
+                 INNER JOIN supplier_obligations o ON o.id = aa.supplier_obligation_id
+                 WHERE aa.supplier_advance_id = :advance_id
+                 ORDER BY aa.id FOR UPDATE'
+            );
+            $lockObligation = $this->db->prepare(
+                'SELECT id, gross_amount, advance_applied_amount, net_payable_amount, status
+                 FROM supplier_obligations WHERE id = :id FOR UPDATE'
+            );
+            $deleteApplication = $this->db->prepare(
+                'DELETE FROM supplier_advance_applications WHERE id = :id'
+            );
+            $updateObligation = $this->db->prepare(
+                'UPDATE supplier_obligations
+                 SET advance_applied_amount = :applied, net_payable_amount = :payable, status = :status
+                 WHERE id = :id'
+            );
+            $neutralizeAdvance = $this->db->prepare(
+                'UPDATE supplier_advances SET deposit_amount = 0, available_amount = 0,
+                    remarks = CONCAT(COALESCE(remarks, ""), " [Neutralized with source payment void.]")
+                 WHERE id = :id'
+            );
+
+            $applications = [];
+            foreach ($advances as $advance) {
+                $advanceId = (int) $advance['id'];
+                if ((int) $advance['source_supplier_payment_id'] !== $paymentId
+                    || (int) $advance['supplier_id'] !== (int) $payment['supplier_id']
+                    || strtoupper((string) $advance['currency']) !== strtoupper((string) $payment['currency'])) {
+                    throw new RuntimeException('A linked supplier credit does not belong to this payment in the same supplier and currency. Nothing was voided.');
+                }
+
+                $applicationStatement->execute(['advance_id' => $advanceId]);
+                $advanceApplications = $applicationStatement->fetchAll() ?: [];
+                $usedAmount = round(array_sum(array_map(
+                    static fn (array $row): float => (float) $row['advance_amount'], $advanceApplications
+                )), 2);
+                if (abs((float) $advance['deposit_amount'] - (float) $advance['available_amount'] - $usedAmount) > 0.01) {
+                    throw new RuntimeException('This supplier credit does not reconcile with its later applications. Nothing was voided.');
+                }
+
+                $reference = (string) ($advance['reference_no'] ?? '');
+                if (str_starts_with($reference, 'CANCEL-CREDIT-')) {
+                    if (! $removeCancellationCredit) {
+                        throw new RuntimeException(
+                            'This payment funds a cancellation supplier credit. Review Void Impact before voiding; nothing was changed.'
+                        );
+                    }
+                } elseif (! str_starts_with($reference, 'SPAY-')) {
+                    throw new RuntimeException('This payment backs a separately recorded supplier refund credit. Its source must be reviewed before voiding; nothing was changed.');
+                }
+
+                foreach ($advanceApplications as $application) {
+                    $applications[] = $application + ['advance_branch_id' => (int) $advance['branch_id']];
+                }
+            }
+
+            $releasedByObligation = [];
+            foreach ($applications as $application) {
+                $obligationId = (int) $application['supplier_obligation_id'];
+                $releasedByObligation[$obligationId] = round(($releasedByObligation[$obligationId] ?? 0)
+                    + (float) $application['obligation_amount'], 2);
+                $deleteApplication->execute(['id' => (int) $application['application_id']]);
+            }
+            foreach ($releasedByObligation as $obligationId => $releasedAmount) {
+                $lockObligation->execute(['id' => $obligationId]);
+                $obligation = $lockObligation->fetch();
+                if ($obligation === false) {
+                    throw new RuntimeException('An affected supplier payable no longer exists. Nothing was voided.');
+                }
+                $newApplied = round((float) $obligation['advance_applied_amount'] - $releasedAmount, 2);
+                $newPayable = round((float) $obligation['net_payable_amount'] + $releasedAmount, 2);
+                if ($newApplied < -0.01 || $newPayable > (float) $obligation['gross_amount'] + 0.01) {
+                    throw new RuntimeException('A later supplier payable cannot be reopened safely. Nothing was voided.');
+                }
+                $otherSettled = round($this->paymentAllocatedAmountForObligation((int) $obligationId)
+                    + $this->linkedPartyOffsetAmountForObligation((int) $obligationId), 2);
+                $status = (string) $obligation['status'] === 'cancelled' ? 'cancelled'
+                    : $this->obligationStatus((float) $obligation['gross_amount'], max($newApplied, 0), $otherSettled, $newPayable);
+                $updateObligation->execute([
+                    'id' => $obligationId,
+                    'applied' => max($newApplied, 0),
+                    'payable' => $newPayable,
+                    'status' => $status,
+                ]);
+            }
+            foreach ($advances as $advance) {
+                $neutralizeAdvance->execute(['id' => (int) $advance['id']]);
+            }
+
+            AuditLog::recordRequired($this->app, 'supplier.payment.source_credit_released_for_void', [
+                'user_id' => $actorUserId,
+                'supplier_payment_id' => $paymentId,
+                'reason' => $reason,
+                'advances' => $advances,
+                'applications' => $applications,
+            ]);
+
+            return [
+                'payment' => $payment,
+                'advances' => $advances,
+                'applications' => $applications,
+            ];
+        });
     }
 
     public function neutralizeUnusedConvertedAdvanceForPaymentVoid(int $paymentId, int $actorUserId): ?array
@@ -3371,23 +3632,22 @@ final class SupplierRepository extends BaseRepository
 
                 $grossAmount = round((float) ($allocation['gross_amount'] ?? 0), 2);
                 $advanceAppliedAmount = round((float) ($allocation['advance_applied_amount'] ?? 0), 2);
-                $currentNetPayableAmount = round((float) ($allocation['net_payable_amount'] ?? 0), 2);
-                $originalPayableBasis = round(max(0, $grossAmount - $advanceAppliedAmount), 2);
-                $restoredNetPayableAmount = round($currentNetPayableAmount + $reversedAmount, 2);
-                if ($originalPayableBasis > 0) {
-                    $restoredNetPayableAmount = round(min($restoredNetPayableAmount, $originalPayableBasis), 2);
-                }
-
                 $remainingAllocatedAmount = round((float) ($activeAllocationTotals[$obligationId] ?? 0), 2);
-                if ($restoredNetPayableAmount <= 0.005) {
-                    $newStatus = $advanceAppliedAmount > 0.005 && $remainingAllocatedAmount <= 0.005
-                        ? 'covered_by_advance'
-                        : 'paid';
-                } elseif ($remainingAllocatedAmount > 0.005) {
-                    $newStatus = 'partially_covered';
-                } else {
-                    $newStatus = 'open';
+                $linkedOffsetAmount = $this->linkedPartyOffsetAmountForObligation($obligationId);
+                $restoredNetPayableAmount = round(
+                    $grossAmount - $advanceAppliedAmount - $remainingAllocatedAmount - $linkedOffsetAmount,
+                    2
+                );
+                if ($restoredNetPayableAmount < -0.005) {
+                    throw new RuntimeException('Voiding this payment leaves the supplier payable overcovered by other settlements. No change was saved.');
                 }
+                $restoredNetPayableAmount = max(0, $restoredNetPayableAmount);
+                $newStatus = $this->obligationStatus(
+                    $grossAmount,
+                    $advanceAppliedAmount,
+                    $remainingAllocatedAmount + $linkedOffsetAmount,
+                    $restoredNetPayableAmount
+                );
 
                 $updateObligationStatement->execute([
                     'net_payable_amount' => $restoredNetPayableAmount,
@@ -3557,7 +3817,14 @@ final class SupplierRepository extends BaseRepository
                 throw new \RuntimeException('A valid exchange rate is required for cross-currency supplier allocation.');
             }
 
-            $remainingObligation = (float) $obligation['net_payable_amount'];
+            $coveredAmount = round((float) $obligation['advance_applied_amount']
+                + $this->paymentAllocatedAmountForObligation($obligationId)
+                + $this->linkedPartyOffsetAmountForObligation($obligationId), 2);
+            $remainingObligation = round((float) $obligation['gross_amount'] - $coveredAmount, 2);
+            if ($remainingObligation < -0.005
+                || abs($remainingObligation - (float) $obligation['net_payable_amount']) > 0.005) {
+                throw new \RuntimeException('Supplier payable does not reconcile with its payments, advances and offsets. Review the financial integrity audit before allocating more money.');
+            }
             $requestedAmount = min($amount, $remainingObligation);
             if ($requestedAmount <= 0) {
                 throw new \RuntimeException('No allocatable supplier amount remains.');
@@ -3595,6 +3862,10 @@ final class SupplierRepository extends BaseRepository
                 'exchange_rate_used' => $effectiveRate,
                 'created_by_user_id' => $actorUserId,
             ]);
+            $allocationId = (int) $this->db->lastInsertId();
+            if ($allocationId <= 0) {
+                throw new \RuntimeException('Supplier payment allocation ID was not recorded.');
+            }
 
             $updatePayment = $this->db->prepare(
                 'UPDATE supplier_payments
@@ -3629,8 +3900,6 @@ final class SupplierRepository extends BaseRepository
                 'status' => $newObligationStatus,
                 'obligation_id' => $obligationId,
             ]);
-
-            $allocationId = (int) $this->db->lastInsertId();
 
             AuditLog::record($this->app, 'supplier.payment.allocated', [
                 'user_id' => $actorUserId,
@@ -4340,6 +4609,7 @@ final class SupplierRepository extends BaseRepository
                  FROM supplier_payment_allocations a
                  INNER JOIN supplier_payments p ON p.id = a.supplier_payment_id
                  WHERE a.supplier_obligation_id = :obligation_id
+                   AND p.status <> "void"
                  ORDER BY a.allocated_at DESC, a.id DESC
                  FOR UPDATE'
             );
@@ -4351,7 +4621,13 @@ final class SupplierRepository extends BaseRepository
                     aa.id,
                     aa.supplier_advance_id,
                     aa.applied_amount,
-                    sa.available_amount
+                    aa.advance_amount_consumed,
+                    aa.obligation_amount_applied,
+                    aa.advance_currency,
+                    aa.obligation_currency,
+                    sa.currency AS source_currency,
+                    sa.available_amount,
+                    sa.deposit_amount
                  FROM supplier_advance_applications aa
                  INNER JOIN supplier_advances sa ON sa.id = aa.supplier_advance_id
                  WHERE aa.supplier_obligation_id = :obligation_id
@@ -4385,6 +4661,8 @@ final class SupplierRepository extends BaseRepository
             $updateAdvanceApplication = $this->db->prepare(
                 'UPDATE supplier_advance_applications
                  SET applied_amount = :applied_amount,
+                     advance_amount_consumed = :advance_amount_consumed,
+                     obligation_amount_applied = :obligation_amount_applied,
                      created_by_user_id = :created_by_user_id
                  WHERE id = :application_id'
             );
@@ -4471,8 +4749,26 @@ final class SupplierRepository extends BaseRepository
                     continue;
                 }
 
+                $sourceCurrency = strtoupper((string) ($application['advance_currency'] ?: $application['source_currency']));
+                $obligationCurrency = strtoupper((string) ($application['obligation_currency'] ?: $obligation['currency']));
+                $sameCurrency = $sourceCurrency === $obligationCurrency;
+                $sourceConsumed = $sameCurrency
+                    ? $appliedAmount
+                    : round((float) ($application['advance_amount_consumed'] ?? 0), 2);
+                if (! $sameCurrency && ($sourceConsumed <= 0.005
+                    || abs((float) ($application['obligation_amount_applied'] ?? 0) - $appliedAmount) > 0.005)) {
+                    throw new \RuntimeException('Cross-currency supplier advance application does not reconcile. No settlement was released.');
+                }
+                $sourceRelease = $releaseAmount + 0.005 >= $appliedAmount
+                    ? $sourceConsumed
+                    : ($sameCurrency ? $releaseAmount : round($sourceConsumed * $releaseAmount / $appliedAmount, 2));
+                if ($sourceRelease <= 0.005 || $sourceRelease > $sourceConsumed + 0.005
+                    || (float) $application['available_amount'] + $sourceRelease > (float) $application['deposit_amount'] + 0.005) {
+                    throw new \RuntimeException('Supplier advance release would create invalid available credit. No change was saved.');
+                }
+
                 $increaseAdvance->execute([
-                    'returned_amount' => $releaseAmount,
+                    'returned_amount' => $sourceRelease,
                     'advance_id' => (int) $application['supplier_advance_id'],
                 ]);
 
@@ -4480,6 +4776,8 @@ final class SupplierRepository extends BaseRepository
                 if ($remainingApplicationAmount > 0.005) {
                     $updateAdvanceApplication->execute([
                         'applied_amount' => $remainingApplicationAmount,
+                        'advance_amount_consumed' => round($sourceConsumed - $sourceRelease, 2),
+                        'obligation_amount_applied' => $remainingApplicationAmount,
                         'created_by_user_id' => $actorUserId,
                         'application_id' => (int) $application['id'],
                     ]);
@@ -4548,9 +4846,11 @@ final class SupplierRepository extends BaseRepository
         }
 
         $statement = $this->db->prepare(
-            'SELECT COALESCE(SUM(allocated_amount), 0)
-             FROM supplier_payment_allocations
-             WHERE supplier_obligation_id = :obligation_id'
+            'SELECT COALESCE(SUM(allocation.allocated_amount), 0)
+             FROM supplier_payment_allocations allocation
+             INNER JOIN supplier_payments payment ON payment.id = allocation.supplier_payment_id
+                AND payment.status <> "void"
+             WHERE allocation.supplier_obligation_id = :obligation_id'
         );
         $statement->execute(['obligation_id' => $obligationId]);
 
@@ -4576,6 +4876,26 @@ final class SupplierRepository extends BaseRepository
         return round((float) $statement->fetchColumn(), 2);
     }
 
+    private function reconciledRemainingSupplierObligation(array $obligation): float
+    {
+        $obligationId = (int) $obligation['id'];
+        $covered = round(
+            (float) $obligation['advance_applied_amount']
+            + $this->paymentAllocatedAmountForObligation($obligationId)
+            + $this->linkedPartyOffsetAmountForObligation($obligationId),
+            2
+        );
+        $remaining = round((float) $obligation['gross_amount'] - $covered, 2);
+        if ($remaining < -0.005 || abs($remaining - (float) $obligation['net_payable_amount']) > 0.005) {
+            throw new \RuntimeException(
+                'Supplier payable #' . $obligationId
+                . ' does not reconcile with its payments, advances and offsets. Review the financial integrity audit before applying supplier credit.'
+            );
+        }
+
+        return max(0.0, $remaining);
+    }
+
     private function autoApplyUnallocatedSupplierPaymentCreditToObligation(array $obligation, float $remainingNetPayableAmount, ?int $actorUserId = null, ?string $traceId = null): array
     {
         $obligationId = (int) ($obligation['id'] ?? 0);
@@ -4595,15 +4915,14 @@ final class SupplierRepository extends BaseRepository
 
         $hasPaymentScope = $this->columnExists('supplier_payments', 'payment_scope');
         $scopeCondition = $hasPaymentScope
-            ? '(payment_scope = "global" OR booking_reference = :booking_reference)'
-            : 'booking_reference = :booking_reference';
+            ? '((payment_scope = "global" AND UPPER(booking_reference) = "GLOBAL") OR (branch_id = :branch_id AND booking_reference = :booking_reference))'
+            : '(branch_id = :branch_id AND booking_reference = :booking_reference)';
 
         $paymentStatement = $this->db->prepare(
-            'SELECT id, payment_no, payment_date, booking_reference, currency, paid_amount, allocated_amount,
+            'SELECT id, payment_no, payment_date, branch_id, booking_reference, currency, paid_amount, allocated_amount,
                     unallocated_amount' . ($hasPaymentScope ? ', payment_scope' : ', "booking" AS payment_scope') . '
              FROM supplier_payments
              WHERE supplier_id = :supplier_id
-               AND branch_id = :branch_id
                AND currency = :currency
                AND status <> "void"
                AND unallocated_amount > 0.005
@@ -4682,6 +5001,10 @@ final class SupplierRepository extends BaseRepository
                 'allocation_note' => 'Automatically applied supplier overpayment credit to current payable.',
                 'created_by_user_id' => $actorUserId,
             ]);
+            $allocationId = (int) $this->db->lastInsertId();
+            if ($allocationId <= 0) {
+                throw new \RuntimeException('Supplier payment credit allocation ID was not recorded.');
+            }
 
             $updatePayment->execute([
                 'allocated_amount_delta' => $appliedAmount,
@@ -4691,9 +5014,12 @@ final class SupplierRepository extends BaseRepository
             ]);
 
             $applications[] = [
+                'allocation_id' => $allocationId,
                 'supplier_payment_id' => $paymentId,
                 'payment_no' => (string) ($paymentRow['payment_no'] ?? ''),
                 'payment_scope' => (string) ($paymentRow['payment_scope'] ?? 'booking'),
+                'payment_branch_id' => (int) ($paymentRow['branch_id'] ?? 0),
+                'obligation_branch_id' => $branchId,
                 'applied_amount' => $appliedAmount,
                 'available_before' => $availableAmount,
                 'available_after' => $remainingPaymentCredit,
@@ -4706,6 +5032,8 @@ final class SupplierRepository extends BaseRepository
                 'supplier_payment_id' => $paymentId,
                 'supplier_obligation_id' => $obligationId,
                 'booking_reference' => $bookingReference,
+                'payment_branch_id' => (int) ($paymentRow['branch_id'] ?? 0),
+                'obligation_branch_id' => $branchId,
                 'currency' => $currency,
                 'allocated_amount' => $appliedAmount,
                 'reason' => 'supplier_overpayment_credit_used_for_new_payable',
@@ -4719,6 +5047,8 @@ final class SupplierRepository extends BaseRepository
                 'obligation_id' => $obligationId,
                 'supplier_payment_id' => $paymentId,
                 'payment_no' => (string) ($paymentRow['payment_no'] ?? ''),
+                'payment_branch_id' => (int) ($paymentRow['branch_id'] ?? 0),
+                'obligation_branch_id' => $branchId,
                 'applied_amount' => $appliedAmount,
                 'available_amount_before' => $availableAmount,
                 'available_amount_after' => $remainingPaymentCredit,
@@ -4939,11 +5269,7 @@ final class SupplierRepository extends BaseRepository
             }
 
             $availableAmount = (float) $advance['available_amount'];
-            // net_payable_amount already reflects cash allocations and earlier
-            // advance applications. Use it as the remaining truth so this
-            // application is neither duplicated nor allowed to overwrite a
-            // prior partial supplier payment.
-            $remainingObligation = max(0, (float) $obligation['net_payable_amount']);
+            $remainingObligation = $this->reconciledRemainingSupplierObligation($obligation);
             $applicableAmount = min($amount, $availableAmount, $remainingObligation);
 
             if ($applicableAmount <= 0) {
@@ -5143,8 +5469,7 @@ final class SupplierRepository extends BaseRepository
                 throw new \RuntimeException('Exchange rate must be greater than zero.');
             }
 
-            // The remaining payable already excludes supplier payments and prior credit applications.
-            $remainingObligation = max(0, (float) $obligation['net_payable_amount']);
+            $remainingObligation = $this->reconciledRemainingSupplierObligation($obligation);
             $obligationAmountApplied = round(min($obligationAmount, $remainingObligation), 2);
             if ($obligationAmountApplied <= 0) {
                 return [
@@ -5379,8 +5704,9 @@ final class SupplierRepository extends BaseRepository
                 0.0
             ), 2);
             $paymentAllocatedAmount = $this->paymentAllocatedAmountForObligation($obligationId);
+            $linkedOffsetAmount = $this->linkedPartyOffsetAmountForObligation($obligationId);
             $desiredAppliedAmount = ($supplierId > 0 && $branchId > 0 && $grossAmount > 0)
-                ? round($protectedAppliedAmount + min(max(0, $grossAmount - $protectedAppliedAmount - $paymentAllocatedAmount), $matchingAvailableAmount + $matchingAppliedAmount), 2)
+                ? round($protectedAppliedAmount + min(max(0, $grossAmount - $protectedAppliedAmount - $paymentAllocatedAmount - $linkedOffsetAmount), $matchingAvailableAmount + $matchingAppliedAmount), 2)
                 : 0.0;
 
             $increaseAdvance = $this->db->prepare(
@@ -5584,8 +5910,13 @@ final class SupplierRepository extends BaseRepository
 
             $finalAppliedAmount = round($currentAppliedAmount, 2);
             $finalPaymentAllocatedAmount = $this->paymentAllocatedAmountForObligation($obligationId);
-            $finalNetPayableAmount = round(max(0, $grossAmount - $finalAppliedAmount - $finalPaymentAllocatedAmount), 2);
-            $finalStatus = $this->obligationStatus($grossAmount, $finalAppliedAmount, $finalPaymentAllocatedAmount, $finalNetPayableAmount);
+            $finalLinkedOffsetAmount = $this->linkedPartyOffsetAmountForObligation($obligationId);
+            $finalNetPayableAmount = round($grossAmount - $finalAppliedAmount - $finalPaymentAllocatedAmount - $finalLinkedOffsetAmount, 2);
+            if ($finalNetPayableAmount < -0.005) {
+                throw new \RuntimeException('Supplier advance reconciliation would overcover the payable. No change was saved.');
+            }
+            $finalNetPayableAmount = max(0, $finalNetPayableAmount);
+            $finalStatus = $this->obligationStatus($grossAmount, $finalAppliedAmount, $finalPaymentAllocatedAmount + $finalLinkedOffsetAmount, $finalNetPayableAmount);
 
             $updateObligation->execute([
                 'advance_applied_amount' => $finalAppliedAmount,

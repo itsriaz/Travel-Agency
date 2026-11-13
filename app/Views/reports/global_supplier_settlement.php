@@ -4,6 +4,8 @@ $branchOptions = is_array($branchOptions ?? null) ? $branchOptions : [];
 $supplierOptions = is_array($supplierOptions ?? null) ? $supplierOptions : [];
 $currencyOptions = is_array($currencyOptions ?? null) ? $currencyOptions : [];
 $openObligations = is_array($openObligations ?? null) ? $openObligations : [];
+$availableSupplierAdvances = is_array($availableSupplierAdvances ?? null) ? $availableSupplierAdvances : [];
+$showAdvanceChoiceAfterVoid = (bool) ($showAdvanceChoiceAfterVoid ?? false);
 $sourceAccounts = is_array($sourceAccounts ?? null) ? $sourceAccounts : [];
 $paymentMethods = is_array($paymentMethods ?? null) ? $paymentMethods : [];
 $globalPaymentHistory = is_array($globalPaymentHistory ?? null) ? $globalPaymentHistory : [];
@@ -187,6 +189,7 @@ $clearHistoryUrl = url('/suppliers/settlements/global?' . http_build_query(array
         }
     })();
 </script>
+<script src="<?= e(asset('assets/js/supplier-payment-warning.js')) ?>" defer></script>
 
 <section class="panel compact-panel global-settlement-panel global-settlement-filter-panel">
     <div class="panel-header">
@@ -251,6 +254,48 @@ $clearHistoryUrl = url('/suppliers/settlements/global?' . http_build_query(array
     </form>
 </section>
 
+<?php if ($selectedSupplierId > 0 && $showAdvanceChoiceAfterVoid): ?>
+<section class="panel compact-panel global-settlement-panel" id="supplier-advance-choice">
+    <div class="panel-header"><h2>Use Another Supplier Advance?</h2></div>
+    <p>The voided payment has not been replaced. Reopened supplier payables remain outstanding until you choose an available advance below or leave them unpaid.</p>
+    <?php if ($availableSupplierAdvances === []): ?><p>No other <?= e($selectedCurrency) ?> advance is currently available for this supplier.</p><?php endif; ?>
+    <?php if ($openObligations === []): ?><p>No open <?= e($selectedCurrency) ?> payable is currently shown for this branch.</p><?php endif; ?>
+</section>
+<?php endif; ?>
+<?php if ($selectedSupplierId > 0 && $availableSupplierAdvances !== [] && $openObligations !== []): ?>
+<section class="panel compact-panel global-settlement-panel" id="available-supplier-advances">
+    <div class="panel-header"><h2>Apply Existing Supplier Advance</h2></div>
+    <p>Choose the source credit and amount for each booking. Nothing is applied until you confirm. This uses existing credit; it does not pay out more cash.</p>
+    <div class="table-responsive"><table class="legacy-table">
+        <thead><tr><th>Booking</th><th>Service</th><th>Open Payable</th><th>Advance to Use</th><th>Amount</th><th>Action</th></tr></thead>
+        <tbody>
+        <?php foreach ($openObligations as $openObligation): ?>
+            <?php if ((int) ($openObligation['booking_id'] ?? 0) <= 0): continue; endif; ?>
+            <tr>
+                <td><?= e((string) ($openObligation['booking_reference'] ?? '')) ?></td>
+                <td><?= e((string) ($openObligation['service_line_reference'] ?? '')) ?></td>
+                <td><?= e($selectedCurrency) ?> <?= e($formatMoney((float) ($openObligation['net_payable_amount'] ?? 0))) ?></td>
+                <td colspan="3">
+                    <form method="post" action="<?= e(url('/workspace/suppliers/advances/apply')) ?>" class="station-form-grid station-form-grid--6 station-form-grid--inline" onsubmit="return confirm('Apply the selected existing supplier advance to this booking payable? No new cash payment will be made.');">
+                        <?= \App\Helpers\Csrf::input() ?>
+                        <input type="hidden" name="booking_id" value="<?= e((string) ($openObligation['booking_id'] ?? 0)) ?>">
+                        <input type="hidden" name="supplier_obligation_id" value="<?= e((string) ($openObligation['id'] ?? 0)) ?>">
+                        <label class="station-field span-3"><span>Available credit</span><select name="supplier_advance_id" required>
+                            <?php foreach ($availableSupplierAdvances as $advance): ?>
+                                <option value="<?= e((string) ($advance['id'] ?? 0)) ?>"><?= e((string) ($advance['advance_no'] ?? $advance['id'])) ?> / <?= e($selectedCurrency) ?> <?= e($formatMoney((float) ($advance['available_amount'] ?? 0))) ?> available</option>
+                            <?php endforeach; ?>
+                        </select></label>
+                        <label class="station-field span-2"><span>Amount to use</span><input type="number" name="advance_apply_amount" min="0.01" max="<?= e(number_format((float) ($openObligation['net_payable_amount'] ?? 0), 2, '.', '')) ?>" step="0.01" required></label>
+                        <div class="station-command-buttons span-1"><button class="btn btn-primary btn-sm" type="submit">Apply</button></div>
+                    </form>
+                </td>
+            </tr>
+        <?php endforeach; ?>
+        </tbody>
+    </table></div>
+</section>
+<?php endif; ?>
+
 <?php if ($postedPaymentConfirmation !== null): ?>
 <section class="panel compact-panel global-settlement-panel" data-global-supplier-payment-confirmation>
     <div class="panel-header">
@@ -288,7 +333,7 @@ $clearHistoryUrl = url('/suppliers/settlements/global?' . http_build_query(array
             Correcting <?= e((string) ($recreateDraft['payment_no'] ?? 'supplier payment')) ?>. Its original allocations were reversed; review the prefilled details and save the replacement.
         </div>
     <?php endif; ?>
-    <form method="post" action="<?= e(url('/suppliers/settlements/global')) ?>" class="global-settlement-payment-form" data-global-supplier-settlement-form>
+    <form method="post" action="<?= e(url('/suppliers/settlements/global')) ?>" class="global-settlement-payment-form" data-global-supplier-settlement-form data-supplier-duplicate-check-url="<?= e(url('/suppliers/payments/similar')) ?>">
         <?= \App\Helpers\Csrf::input() ?>
         <input type="hidden" name="branch_id" value="<?= e((string) $selectedBranchId) ?>">
         <input type="hidden" name="supplier_id" value="<?= e((string) $selectedSupplierId) ?>">
@@ -490,7 +535,7 @@ $clearHistoryUrl = url('/suppliers/settlements/global?' . http_build_query(array
                     <tr class="global-payment-history-action-row global-payment-history-group-end <?= e($paymentToneClass) ?>">
                         <td colspan="8">
                             <?php if (! $isVoid): ?>
-                                <form method="post" action="<?= e(url('/suppliers/settlements/global/void')) ?>" class="inline-form global-payment-correction-controls">
+                                <form method="post" action="<?= e(url('/suppliers/settlements/global/supplier-correct')) ?>" class="inline-form global-payment-correction-controls">
                                     <?= \App\Helpers\Csrf::input() ?>
                                     <input type="hidden" name="supplier_payment_id" value="<?= e((string) ($payment['id'] ?? 0)) ?>">
                                     <input type="hidden" name="branch_id" value="<?= e((string) ($payment['branch_id'] ?? 0)) ?>">
@@ -506,10 +551,10 @@ $clearHistoryUrl = url('/suppliers/settlements/global?' . http_build_query(array
                                         <?php endforeach; ?>
                                     </select>
                                     <input type="text" name="void_reason" maxlength="500" placeholder="Remarks" aria-label="Remarks for <?= e((string) ($payment['payment_no'] ?? 'payment')) ?>">
+                                    <a class="btn btn-sm" href="<?= e(url('/suppliers/payments/void-impact?supplier_payment_id=' . (int) ($payment['id'] ?? 0))) ?>">Review &amp; Void</a>
                                     <button class="btn btn-primary btn-sm" type="submit" formaction="<?= e(url('/suppliers/settlements/global/supplier-correct')) ?>">Change Supplier</button>
                                     <?php if ($isBulkPayment): ?>
-                                        <button class="btn btn-sm" type="submit" name="correction_action" value="edit" formnovalidate onclick="return confirm('Reverse this payment and reopen its payables for correction?')">Edit</button>
-                                        <button class="btn btn-danger btn-sm" type="submit" name="correction_action" value="void" formnovalidate onclick="return confirm('Void this payment and reopen all payables it covered?')">Void</button>
+                                        <button class="btn btn-sm" type="submit" name="correction_action" value="edit" formaction="<?= e(url('/suppliers/settlements/global/void')) ?>" formnovalidate onclick="return confirm('Reverse this payment and reopen its payables for correction?')">Edit</button>
                                     <?php elseif ($paymentBookingId > 0): ?>
                                         <a class="btn btn-sm" href="<?= e(url('/workspace?booking_id=' . $paymentBookingId . '#dock-panel-suppliers')) ?>">Open Payment</a>
                                     <?php endif; ?>
@@ -780,7 +825,14 @@ $clearHistoryUrl = url('/suppliers/settlements/global?' . http_build_query(array
                 amountField.dataset.autofilled = '0';
             }
         };
-        amountField?.addEventListener('focus', markAmountAsManual);
+        amountField?.addEventListener('focus', () => {
+            markAmountAsManual();
+            if (amountField instanceof HTMLInputElement && Number(amountField.value) === 0) {
+                amountField.value = '';
+                syncTotal();
+                syncExchangeField();
+            }
+        });
         amountField?.addEventListener('keydown', markAmountAsManual);
         amountField?.addEventListener('change', markAmountAsManual);
         amountField?.addEventListener('input', () => {

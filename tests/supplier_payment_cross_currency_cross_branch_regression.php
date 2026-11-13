@@ -237,6 +237,32 @@ if ($failures === []) {
                 && abs((float) ($payment['unallocated_amount'] ?? 0)) <= 0.005
                 && (int) ($result['advance_id'] ?? 0) === 0
         );
+
+        $service->voidGlobalSupplierPayment([
+            'supplier_payment_id' => $paymentId,
+            'void_reason' => 'Rollback-only cross-currency payment void',
+        ], $actorId, [$swatBranchId, $nobleBranchId]);
+        $restoredStatement = $db->prepare('SELECT net_payable_amount FROM supplier_obligations WHERE id = :id');
+        $restoredStatement->execute(['id' => $obligationId]);
+        $check('Cross-currency void reopens the AED supplier payable',
+            abs((float) $restoredStatement->fetchColumn() - $expectedAedPayment) <= 0.005);
+        $check('Cross-currency void restores the original Swat PKR cash amount',
+            abs($treasury->currentBalanceForAccountId($treasuryAccountId) - $balanceBefore) <= 0.005);
+        $netJournalStatement = $db->prepare(
+            'SELECT je.branch_id, je.currency, coa.code,
+                    ROUND(SUM(jel.debit_amount - jel.credit_amount), 2) AS net
+             FROM journal_entries je
+             INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+             INNER JOIN chart_of_accounts coa ON coa.id = jel.account_id
+             WHERE jel.supplier_payment_id = :payment_id
+             GROUP BY je.branch_id, je.currency, coa.code'
+        );
+        $netJournalStatement->execute(['payment_id' => $paymentId]);
+        $journalsCancel = true;
+        foreach ($netJournalStatement as $row) {
+            $journalsCancel = $journalsCancel && abs((float) $row['net']) <= 0.005;
+        }
+        $check('Original and void journals cancel by branch, currency, and account', $journalsCancel);
     } catch (Throwable $exception) {
         $check('Cross-currency/cross-branch payment probe completed', false, $exception->getMessage());
     } finally {

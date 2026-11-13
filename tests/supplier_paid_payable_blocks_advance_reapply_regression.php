@@ -220,6 +220,16 @@ try {
             && abs((float) ($partialObligation['advance_applied_amount'] ?? 0) - 4) < 0.005
             && abs((float) ($partialObligation['net_payable_amount'] ?? 0)) < 0.005
     );
+
+    $db->prepare('UPDATE supplier_obligations SET net_payable_amount = 1 WHERE id = ?')
+        ->execute([$partialObligationId]);
+    $stalePayableRejected = false;
+    try {
+        $repository->allocateSupplierPayment($partialPaymentId, $partialObligationId, 1, 1.0, 'Stale payable probe', $actorUserId);
+    } catch (RuntimeException $exception) {
+        $stalePayableRejected = str_contains($exception->getMessage(), 'does not reconcile');
+    }
+    $check('A stale stored payable cannot accept another supplier payment', $stalePayableRejected);
 } finally {
     if ($db->inTransaction()) {
         $db->rollBack();

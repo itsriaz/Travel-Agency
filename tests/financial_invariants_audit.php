@@ -7,6 +7,8 @@ defined('BASE_PATH') || define('BASE_PATH', dirname(__DIR__));
 require_once BASE_PATH . '/app/Helpers/functions.php';
 require_once BASE_PATH . '/app/Core/bootstrap.php';
 require_once BASE_PATH . '/tests/support/CrossBranchSupplierAllocationAudit.php';
+require_once BASE_PATH . '/tests/support/SupplierObligationCoverageAudit.php';
+require_once BASE_PATH . '/tests/support/SupplierPositionReconciliationAudit.php';
 
 $app = (isset($app) && $app instanceof \App\Core\App)
     ? $app
@@ -247,6 +249,44 @@ $check(
     $negativeSupplierObligations === [],
     $negativeSupplierObligations === [] ? 'No invalid supplier obligation negatives found' : json_encode($negativeSupplierObligations, JSON_UNESCAPED_SLASHES)
 );
+
+$supplierCoverageBreaks = SupplierObligationCoverageAudit::failures($db);
+$check(
+    'Supplier obligations reconcile to payments, advances, offsets, and open payable',
+    $supplierCoverageBreaks === [],
+    $supplierCoverageBreaks === [] ? 'Every supplier obligation follows its due equation' : json_encode($supplierCoverageBreaks, JSON_UNESCAPED_SLASHES)
+);
+
+$supplierPositions = SupplierPositionReconciliationAudit::inspect($db, 0, $app);
+$advanceConservationBreaks = array_values(array_filter(
+    $supplierPositions['exceptions'],
+    static fn (array $row): bool => $row['type'] === 'advance_conservation'
+));
+$supplierPositionBreaks = array_values(array_filter(
+    $supplierPositions['exceptions'],
+    static fn (array $row): bool => $row['type'] === 'supplier_position'
+));
+$excludedSupplierPositions = count(array_filter(
+    $supplierPositions['groups'],
+    static fn (array $row): bool => $row['exclusions'] !== []
+));
+$check(
+    'Supplier advance sources conserve deposit, applications, and available credit',
+    $advanceConservationBreaks === [],
+    $advanceConservationBreaks === [] ? 'Every supplier advance conserves its source-currency amount'
+        : json_encode(array_slice($advanceConservationBreaks, 0, 10), JSON_UNESCAPED_SLASHES)
+);
+$check(
+    'Same-currency supplier positions reconcile payments, payables, and credit',
+    $supplierPositionBreaks === [],
+    ($supplierPositionBreaks === [] ? 'No same-currency supplier position drift found'
+        : json_encode(array_slice($supplierPositionBreaks, 0, 10), JSON_UNESCAPED_SLASHES))
+        . '; ' . $excludedSupplierPositions . ' cross-currency/refund groups require separate review'
+);
+if ($supplierPositions['reviews'] !== []) {
+    echo '[REVIEW] Supplier ledger versus operational credit/payable differences (not proof the ledger is wrong) - '
+        . json_encode(array_slice($supplierPositions['reviews'], 0, 10), JSON_UNESCAPED_SLASHES) . PHP_EOL;
+}
 
 if ($columnExists('booking_services', 'service_charge_currency')) {
     $invalidServiceCurrencySnapshots = $fetchAll(

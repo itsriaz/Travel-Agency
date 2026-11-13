@@ -9,7 +9,7 @@
     const textFilters = form.querySelectorAll('[data-report-filter="debounced-text"], [data-report-filter="debounced"]');
     const referenceFilters = form.querySelectorAll('[data-report-filter="debounced-reference"]');
     const amountFilters = form.querySelectorAll('[data-report-filter="debounced-amount"]');
-    const exportLink = document.getElementById('reports-export-link');
+    const exportLinks = document.querySelectorAll('[data-report-csv-link]');
     const status = document.getElementById('reports-auto-status');
     const runButton = document.getElementById('reports-run-button');
     const exportBaseUrl = form.getAttribute('data-export-url') || '';
@@ -31,7 +31,7 @@
 
     const isCompleteDateValue = (value) => /^\d{4}-\d{2}-\d{2}$/.test(String(value || '').trim());
     const syncExportUrl = () => {
-        if (!exportLink || !exportBaseUrl) {
+        if (exportLinks.length === 0 || !exportBaseUrl) {
             return;
         }
 
@@ -47,7 +47,10 @@
         }
 
         const query = params.toString();
-        exportLink.href = query ? `${exportBaseUrl}?${query}` : exportBaseUrl;
+        const href = query ? `${exportBaseUrl}?${query}` : exportBaseUrl;
+        exportLinks.forEach((link) => {
+            link.href = href;
+        });
     };
 
     const submitReport = () => {

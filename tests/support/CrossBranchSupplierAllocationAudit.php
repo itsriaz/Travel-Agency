@@ -18,6 +18,7 @@ final class CrossBranchSupplierAllocationAudit
                 SELECT
                     spa.id AS allocation_id,
                     sp.id AS supplier_payment_id,
+                    sp.supplier_id AS payment_supplier_id,
                     sp.payment_no,
                     sp.payment_scope,
                     sp.branch_id AS payment_branch_id,
@@ -96,7 +97,8 @@ final class CrossBranchSupplierAllocationAudit
         $failures = [];
         while (($row = $statement->fetch(PDO::FETCH_ASSOC)) !== false) {
             if ($row['failure_reason'] === 'allocation_journal_missing_or_misattributed'
-                && self::hasLinkedNetAllocationHistory($db, $row)) {
+                && (self::hasLinkedNetAllocationHistory($db, $row)
+                    || self::hasLinkedMultiPaymentCancellationHistory($db, $row))) {
                 continue;
             }
 
@@ -205,6 +207,159 @@ final class CrossBranchSupplierAllocationAudit
             }
         }
 
+        return false;
+    }
+
+    /**
+     * A cancellation can release parts of two global payments in one balanced
+     * journal. The original per-payment allocation journals then exceed the
+     * current rows. Require the event, journal, payment-credit source rows,
+     * and every payment's original-minus-current amount to agree exactly.
+     */
+    private static function hasLinkedMultiPaymentCancellationHistory(PDO $db, array $allocation): bool
+    {
+        $obligationId = (int) $allocation['supplier_obligation_id'];
+        $paymentId = (int) $allocation['supplier_payment_id'];
+        $branchId = (int) $allocation['obligation_branch_id'];
+        $currency = (string) $allocation['obligation_currency'];
+        $events = $db->prepare(
+            'SELECT event.id, event.payload_json,
+                    CAST(JSON_UNQUOTE(JSON_EXTRACT(event.payload_json, "$.released_supplier_payment_credit")) AS DECIMAL(18,2)) AS released_credit
+             FROM booking_service_events event
+             INNER JOIN supplier_obligations so ON so.booking_reference = event.booking_reference
+                 AND so.service_line_reference = event.service_line_reference
+             WHERE so.id = :obligation_id
+               AND event.event_type = "cancel" AND event.event_status = "posted"
+               AND JSON_LENGTH(JSON_EXTRACT(event.payload_json, "$.released_supplier_payment_ids")) > 1
+               AND JSON_CONTAINS(event.payload_json, CAST(:payment_id AS CHAR), "$.released_supplier_payment_ids")'
+        );
+        $events->execute(['obligation_id' => $obligationId, 'payment_id' => $paymentId]);
+        foreach ($events->fetchAll(PDO::FETCH_ASSOC) as $event) {
+            $payload = json_decode((string) $event['payload_json'], true);
+            $ids = $payload['released_supplier_payment_ids'] ?? null;
+            $journalIds = $payload['journal_entry_ids'] ?? null;
+            if (! is_array($ids) || ! is_array($journalIds) || count($ids) < 2
+                || count($ids) !== count(array_unique(array_map('intval', $ids)))) {
+                continue;
+            }
+            $ids = array_map('intval', $ids);
+            if (in_array(0, $ids, true) || ! in_array($paymentId, $ids, true)) {
+                continue;
+            }
+            $releaseAmount = round((float) $event['released_credit'], 2);
+            if ($releaseAmount <= 0.005) {
+                continue;
+            }
+            $releaseJournal = $db->prepare(
+                'SELECT je.id, je.branch_id, je.currency,
+                        SUM(CASE WHEN coa.code = "AP_CONTROL" THEN jel.debit_amount ELSE 0 END) AS ap_debit,
+                        SUM(CASE WHEN coa.code = "AP_CONTROL" THEN jel.credit_amount ELSE 0 END) AS ap_credit,
+                        SUM(CASE WHEN coa.code = "SUPPLIER_ADVANCES" THEN jel.debit_amount ELSE 0 END) AS advance_debit,
+                        SUM(CASE WHEN coa.code = "SUPPLIER_ADVANCES" THEN jel.credit_amount ELSE 0 END) AS advance_credit
+                 FROM journal_entries je
+                 JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+                 JOIN chart_of_accounts coa ON coa.id = jel.account_id
+                 WHERE je.source_type = "supplier_settlement_released"
+                   AND je.branch_id = :branch_id AND je.currency = :currency
+                   AND jel.supplier_obligation_id = :obligation_id
+                 GROUP BY je.id, je.branch_id, je.currency'
+            );
+            $releaseJournal->execute([
+                'branch_id' => $branchId, 'currency' => $currency, 'obligation_id' => $obligationId,
+            ]);
+            $matchedRelease = false;
+            foreach ($releaseJournal->fetchAll(PDO::FETCH_ASSOC) as $journal) {
+                if (! in_array((int) $journal['id'], array_map('intval', $journalIds), true)) {
+                    continue;
+                }
+                if (abs((float) $journal['ap_debit']) <= 0.005
+                    && abs((float) $journal['advance_credit']) <= 0.005
+                    && abs((float) $journal['ap_credit'] - $releaseAmount) <= 0.005
+                    && abs((float) $journal['advance_debit'] - $releaseAmount) <= 0.005) {
+                    $matchedRelease = true;
+                    break;
+                }
+            }
+            if (! $matchedRelease) {
+                continue;
+            }
+
+            $source = $db->prepare(
+                'SELECT sa.source_supplier_payment_id AS payment_id, sa.deposit_amount,
+                        sp.supplier_id, sp.currency, sp.payment_scope, sp.status,
+                        sp.converted_advance_amount
+                 FROM supplier_advances sa JOIN supplier_payments sp
+                   ON sp.id = sa.source_supplier_payment_id
+                 WHERE sa.reference_no = :reference'
+            );
+            $source->execute(['reference' => 'CANCEL-CREDIT-' . (int) $event['id']]);
+            $credits = [];
+            foreach ($source->fetchAll(PDO::FETCH_ASSOC) as $credit) {
+                $id = (int) $credit['payment_id'];
+                if (! in_array($id, $ids, true) || isset($credits[$id])
+                    || $credit['status'] === 'void' || $credit['payment_scope'] !== 'global'
+                    || $credit['currency'] !== $currency
+                    || (int) $credit['supplier_id'] !== (int) $allocation['payment_supplier_id']) {
+                    continue 2;
+                }
+                $credits[$id] = $credit;
+            }
+            if (count($credits) !== count($ids)
+                || abs(array_sum(array_map(static fn (array $row): float => (float) $row['deposit_amount'], $credits))
+                    - $releaseAmount) > 0.005) {
+                continue;
+            }
+
+            $history = $db->prepare(
+                'SELECT je.id,
+                        SUM(CASE WHEN coa.code = "AP_CONTROL" THEN jel.debit_amount ELSE 0 END) AS ap_debit,
+                        SUM(CASE WHEN coa.code = "AP_CONTROL" THEN jel.credit_amount ELSE 0 END) AS ap_credit,
+                        SUM(CASE WHEN coa.code = "SUPPLIER_ADVANCES" THEN jel.debit_amount ELSE 0 END) AS advance_debit,
+                        SUM(CASE WHEN coa.code = "SUPPLIER_ADVANCES" THEN jel.credit_amount ELSE 0 END) AS advance_credit
+                 FROM journal_entries je JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+                 JOIN chart_of_accounts coa ON coa.id = jel.account_id
+                 WHERE je.source_type = "supplier_payment_allocated"
+                   AND je.branch_id = :branch_id AND je.currency = :currency
+                   AND jel.supplier_obligation_id = :obligation_id
+                   AND jel.supplier_payment_id = :payment_id
+                 GROUP BY je.id'
+            );
+            $current = $db->prepare(
+                'SELECT COALESCE(SUM(spa.allocated_amount),0)
+                 FROM supplier_payment_allocations spa
+                 WHERE spa.supplier_obligation_id = :obligation_id
+                   AND spa.supplier_payment_id = :payment_id'
+            );
+            $allMatched = true;
+            foreach ($ids as $id) {
+                $history->execute([
+                    'branch_id' => $branchId, 'currency' => $currency,
+                    'obligation_id' => $obligationId, 'payment_id' => $id,
+                ]);
+                $originalRows = $history->fetchAll(PDO::FETCH_ASSOC);
+                if (count($originalRows) !== 1) {
+                    $allMatched = false;
+                    break;
+                }
+                $original = $originalRows[0];
+                $current->execute(['obligation_id' => $obligationId, 'payment_id' => $id]);
+                $currentAmount = (float) $current->fetchColumn();
+                $oldAmount = (float) $original['ap_debit'];
+                if ($oldAmount <= 0.005
+                    || abs((float) $original['ap_credit']) > 0.005
+                    || abs((float) $original['advance_debit']) > 0.005
+                    || abs((float) $original['advance_credit'] - $oldAmount) > 0.005
+                    || abs($oldAmount - $currentAmount - (float) $credits[$id]['deposit_amount']) > 0.005
+                    || (float) $credits[$id]['converted_advance_amount'] + 0.005
+                        < (float) $credits[$id]['deposit_amount']) {
+                    $allMatched = false;
+                    break;
+                }
+            }
+            if ($allMatched) {
+                return true;
+            }
+        }
         return false;
     }
 }

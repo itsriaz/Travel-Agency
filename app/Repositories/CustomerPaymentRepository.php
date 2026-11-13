@@ -1118,7 +1118,8 @@ final class CustomerPaymentRepository extends BaseRepository
 
     /**
      * Unused booking receipts that may be transferred to another invoice for
-     * the same customer. Formal customer advances remain a separate workflow.
+     * the current booking customer. The receipt traveler remains the original
+     * payer; formal customer advances remain a separate workflow.
      */
     public function availableBookingCredits(
         int $branchId,
@@ -1160,7 +1161,7 @@ final class CustomerPaymentRepository extends BaseRepository
              LEFT JOIN travelers t ON t.id = cr.traveler_id
              WHERE cr.branch_id = :branch_id
                AND b.branch_id = cr.branch_id
-               AND COALESCE(NULLIF(cr.traveler_id, 0), b.lead_traveler_id) = :traveler_id
+               AND COALESCE(NULLIF(b.lead_traveler_id, 0), NULLIF(cr.traveler_id, 0)) = :traveler_id
                AND cr.currency = :currency
                AND cr.status <> "void"
                AND cr.unallocated_amount > 0.005'

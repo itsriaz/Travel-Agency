@@ -1,0 +1,17 @@
+{
+    "supplier_id": 371,
+    "currency": "AED",
+    "supplier_ledger_unchanged": {
+        "branch_1": {"rows": 12, "debit": 5443, "credit": 5709, "net": 266},
+        "branch_2": {"rows": 306, "debit": 309584, "credit": 309949, "net": 365},
+        "all_branches": {"rows": 314, "debit": 315027, "credit": 315658, "net": 631}
+    },
+    "allocation_567": "PASS: Original AED 1,068 allocation less AED 1,067 posted cancellation credit equals current AED 1 allocation. The other original AED 1,030 allocation was fully released in the same AED 2,097 cancellation journal.",
+    "negative_control": "Changing one supplier-credit source by AED 1 inside a rolled-back transaction causes the audit to flag allocation 567 again.",
+    "financial_records_changed": false,
+    "audit_code_changed": "tests/support/CrossBranchSupplierAllocationAudit.php",
+    "full_audit_remaining_failures": [
+        "Eight supplier obligations with duplicate or excess payment/advance coverage",
+        "Four supplier/currency position groups affected by that coverage"
+    ]
+}

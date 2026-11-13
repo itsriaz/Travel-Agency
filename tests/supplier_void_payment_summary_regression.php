@@ -68,24 +68,8 @@ if (($cards['Supplier Balance / PKR'] ?? '') !== 'PKR 1,188.00 Payable') {
     $fail('Voided supplier payment must restore the payable balance to PKR 1,188.00.');
 }
 
-if ((string) ($rows[1]['entry_type'] ?? '') !== 'Supplier payment voided') {
-    $fail('Supplier ledger detail must show the voided payment clearly.');
-}
-
-if ((string) ($rows[1]['trace'] ?? '') !== 'Voided: double entry | Original amount PKR 1,188.00') {
-    $fail('Supplier ledger detail must show the void reason and original amount.');
-}
-
-if ((string) ($rows[1]['credit_amount'] ?? '') !== '1,188.00') {
-    $fail('Supplier ledger detail must keep the original voided amount visible.');
-}
-
-if ((string) ($rows[1]['balance_amount'] ?? '') !== '1,188.00 Payable') {
-    $fail('Voided supplier payment must not change the running payable balance.');
-}
-
-if (count($rows) !== 2) {
-    $fail('Supplier ledger must suppress the extra reversal row once the payment is shown as voided.');
+if (count($rows) !== 1 || (string) ($rows[0]['entry_type'] ?? '') !== 'Supplier invoice recorded') {
+    $fail('Supplier ledger must hide the voided payment and reversal while retaining the invoice.');
 }
 
 $bookingReport = $service->buildReport([

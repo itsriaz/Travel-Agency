@@ -336,6 +336,8 @@ $totalOutstanding = array_sum(array_map(static fn (array $row): float => (float)
         const directSupplierAmount = form.querySelector('[data-global-direct-supplier-amount]');
         const summaryCaption = form.querySelector('[data-global-customer-summary-caption]');
         const accountBalanceLookupUrl = '<?= e(url('/workspace/payments/account-holder-balances')) ?>';
+        let accountBalanceLookupReady = true;
+        let accountBalanceRequestId = 0;
 
         const money = (value) => Number(value || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
         const selectedTotal = () => checkboxes.reduce((sum, box) => box.checked ? sum + Number(box.dataset.balance || 0) : sum, 0);
@@ -389,7 +391,7 @@ $totalOutstanding = array_sum(array_map(static fn (array $row): float => (float)
                 if (isDirectSupplierMethod()) {
                     accountBalanceCurrencyField.value = '';
                 }
-                accountBalanceCurrencyField.disabled = !usingAccountBalance || isDirectSupplierMethod();
+                accountBalanceCurrencyField.disabled = !usingAccountBalance || isDirectSupplierMethod() || !accountBalanceLookupReady;
             }
             if (treasuryRow instanceof HTMLElement) {
                 treasuryRow.hidden = usingAccountBalance || isDirectSupplierMethod();
@@ -403,13 +405,15 @@ $totalOutstanding = array_sum(array_map(static fn (array $row): float => (float)
             syncAccountBalanceRate();
             syncAccountBalanceSummary();
         };
-        const populateAccountBalanceCurrencies = (rows) => {
+        const populateAccountBalanceCurrencies = (rows, placeholder = 'No account balance', ready = true) => {
             if (!(accountBalanceCurrencyField instanceof HTMLSelectElement)) {
                 return;
             }
 
+            accountBalanceLookupReady = ready;
             const previousValue = String(accountBalanceCurrencyField.value || '').trim().toUpperCase();
-            accountBalanceCurrencyField.innerHTML = '<option value="">No account balance</option>';
+            accountBalanceCurrencyField.innerHTML = '';
+            accountBalanceCurrencyField.add(new Option(placeholder, ''));
             (Array.isArray(rows) ? rows : []).forEach((row) => {
                 const currency = String(row?.currency || '').trim().toUpperCase();
                 if (currency === '') {
@@ -430,6 +434,7 @@ $totalOutstanding = array_sum(array_map(static fn (array $row): float => (float)
             if (!(accountBalanceBusinessSourceField instanceof HTMLSelectElement) || accountBalanceLookupUrl === '') {
                 return;
             }
+            const requestId = ++accountBalanceRequestId;
 
             const businessSourceId = Number.parseInt(String(accountBalanceBusinessSourceField.value || '0'), 10) || 0;
             if (businessSourceId <= 0) {
@@ -441,13 +446,28 @@ $totalOutstanding = array_sum(array_map(static fn (array $row): float => (float)
                 branch_id: '<?= e((string) $selectedBranchId) ?>',
                 business_source_id: String(businessSourceId),
             });
-            const response = await fetch(`${accountBalanceLookupUrl}?${params.toString()}`, {
-                method: 'GET',
-                credentials: 'same-origin',
-                headers: { Accept: 'application/json' },
-            });
-            const payload = await response.json().catch(() => ({ ok: false, balances: [] }));
-            populateAccountBalanceCurrencies(Array.isArray(payload?.balances) ? payload.balances : []);
+            populateAccountBalanceCurrencies([], 'Checking account balance...', false);
+            try {
+                const response = await fetch(`${accountBalanceLookupUrl}?${params.toString()}`, {
+                    method: 'GET',
+                    credentials: 'same-origin',
+                    headers: { Accept: 'application/json' },
+                });
+                if (!response.ok) {
+                    throw new Error('Account balance lookup failed');
+                }
+                const payload = await response.json();
+                if (payload?.ok !== true || !Array.isArray(payload.balances)) {
+                    throw new Error('Invalid account balance response');
+                }
+                if (requestId === accountBalanceRequestId) {
+                    populateAccountBalanceCurrencies(payload.balances);
+                }
+            } catch (error) {
+                if (requestId === accountBalanceRequestId) {
+                    populateAccountBalanceCurrencies([], 'Balance unavailable - reselect account to retry', false);
+                }
+            }
         };
         const syncSelectAll = () => {
             if (!(selectAll instanceof HTMLInputElement)) {
@@ -585,7 +605,7 @@ $totalOutstanding = array_sum(array_map(static fn (array $row): float => (float)
             syncFundingVsTreasury();
         });
         accountBalanceBusinessSourceField?.addEventListener('change', () => {
-            loadAccountBalances().catch(() => populateAccountBalanceCurrencies([]));
+            loadAccountBalances();
         });
         accountBalanceCurrencyField?.addEventListener('change', () => {
             syncFundingVsTreasury();
@@ -605,7 +625,9 @@ $totalOutstanding = array_sum(array_map(static fn (array $row): float => (float)
                 message = 'Enter a valid customer payment amount.';
             } else if (isDirectSupplierMethod() && String(directSupplierSelect?.value || '') === '') {
                 message = 'Please select the supplier the customer paid directly.';
-            } else if (String(methodField?.value || '') === 'account_holder_balance' && String(accountBalanceCurrencyField?.value || '') === '') {
+            } else if (isAccountBalanceMethod() && !accountBalanceLookupReady) {
+                message = 'Account balance is unavailable. Reselect the Account Holder to retry.';
+            } else if (isAccountBalanceMethod() && String(accountBalanceCurrencyField?.value || '') === '') {
                 message = 'Please select the account-balance currency to use for this payment.';
             } else if (['cash', 'bank_transfer'].includes(String(methodField?.value || '')) && String(treasuryField?.value || '') === '') {
                 message = 'Please select the cash or bank account receiving this payment.';
@@ -625,6 +647,6 @@ $totalOutstanding = array_sum(array_map(static fn (array $row): float => (float)
         filterSuppliers();
         syncDirectSupplierMode();
         syncFundingVsTreasury();
-        loadAccountBalances().catch(() => populateAccountBalanceCurrencies([]));
+        loadAccountBalances();
     })();
 </script>

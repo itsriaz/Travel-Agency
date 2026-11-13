@@ -18,10 +18,37 @@ use App\Repositories\TreasuryRepository;
 use App\Services\CustomerReceiptWorkspaceService;
 use App\Services\ReportService;
 use App\Services\SupplierSettlementWorkspaceService;
+use App\Services\SupplierPaymentVoidImpactService;
+use App\Services\SupplierPaymentVoidReplacementService;
 use RuntimeException;
 
 final class ReportsController extends BaseController
 {
+    public function supplierPaymentVoidImpact(): string
+    {
+        try {
+            $impact = (new SupplierPaymentVoidImpactService($this->app))->preview(
+                (int) ($_GET['supplier_payment_id'] ?? 0),
+                Authorization::accessibleBranchIds()
+            );
+        } catch (RuntimeException $exception) {
+            Flash::error($exception->getMessage());
+            $this->redirect('/suppliers/settlements/global');
+        }
+
+        return $this->view('reports/supplier_payment_void_impact', [
+            'user' => Auth::user(),
+            'title' => 'Supplier Payment Void Impact',
+            'impact' => $impact,
+            'booking' => strtoupper((string) ($impact['payment']['booking_reference'] ?? '')) === 'GLOBAL'
+                ? null
+                : (new BookingRepository($this->app))->findBookingByReference(
+                    (string) ($impact['payment']['booking_reference'] ?? ''),
+                    Authorization::accessibleBranchIds()
+                ),
+        ]);
+    }
+
     public function index(): string
     {
         try {
@@ -269,6 +296,9 @@ final class ReportsController extends BaseController
         $openObligations = $selectedSupplierId > 0 && $effectiveBranchId > 0
             ? $supplierRepository->globalOpenObligations($effectiveBranchId, $selectedSupplierId, $currency)
             : [];
+        $availableSupplierAdvances = $selectedSupplierId > 0 && $currency !== ''
+            ? $supplierRepository->availableAdvanceRowsForSupplier($selectedSupplierId, $currency)
+            : [];
 
         $sourceAccounts = [];
         $paymentMethodTypes = [
@@ -326,6 +356,8 @@ final class ReportsController extends BaseController
             'selectedCurrency' => $currency,
             'currencyOptions' => $currencyOptions,
             'openObligations' => $openObligations,
+            'availableSupplierAdvances' => $availableSupplierAdvances,
+            'showAdvanceChoiceAfterVoid' => (int) ($_GET['review_available_advance'] ?? 0) === 1,
             'sourceAccounts' => array_values($sourceAccounts),
             'paymentMethods' => $paymentMethods,
             'globalPaymentHistory' => $supplierRepository->searchGlobalSupplierPayments(
@@ -464,6 +496,31 @@ final class ReportsController extends BaseController
         $this->redirect('/suppliers/settlements/global');
     }
 
+    public function similarSupplierPayments(): never
+    {
+        $supplierId = (int) ($_GET['supplier_id'] ?? 0);
+        $currency = strtoupper(trim((string) ($_GET['currency'] ?? '')));
+        $amount = (float) ($_GET['amount'] ?? 0);
+        $paymentDate = trim((string) ($_GET['payment_date'] ?? ''));
+        $date = \DateTimeImmutable::createFromFormat('!Y-m-d', $paymentDate);
+        if ($supplierId <= 0 || ! in_array($currency, ['PKR', 'AED', 'USD'], true)
+            || ! is_finite($amount) || $amount <= 0
+            || $date === false || $date->format('Y-m-d') !== $paymentDate) {
+            $this->jsonResponse(['matches' => []]);
+        }
+
+        $matches = (new SupplierRepository($this->app))->similarSupplierPayments(
+            $supplierId,
+            $currency,
+            round($amount, 2),
+            $paymentDate,
+            (int) ($_GET['treasury_account_id'] ?? 0),
+            trim((string) ($_GET['reference_number'] ?? '')),
+            Authorization::accessibleBranchIds()
+        );
+        $this->jsonResponse(['matches' => $matches]);
+    }
+
     public function saveGlobalSupplierSettlement(): never
     {
         Csrf::verifyOrFail($_POST['_token'] ?? null);
@@ -521,17 +578,20 @@ final class ReportsController extends BaseController
                 (int) Auth::id(),
                 Authorization::accessibleBranchIds()
             );
+            $voidMessage = SupplierPaymentVoidReplacementService::outcomeMessage(
+                (string) ($result['payment_no'] ?? ''), $result['replacement'] ?? []
+            );
             Flash::success(
                 $action === 'edit'
                     ? 'The original supplier payment was safely reversed. Review the prefilled correction and save it.'
-                    : 'Supplier payment ' . (string) ($result['payment_no'] ?? '') . ' was voided and its payables were reopened.'
+                    : $voidMessage
             );
             if ($isAjax) {
                 $this->jsonResponse([
                     'ok' => true,
                     'message' => $action === 'edit'
                         ? 'The original supplier payment was safely reversed. Review the prefilled correction and save it.'
-                        : 'Supplier payment ' . (string) ($result['payment_no'] ?? '') . ' was voided and its payables were reopened.',
+                        : $voidMessage,
                     'result' => [
                         'payment_no' => (string) ($result['payment_no'] ?? ''),
                         'supplier_payment_id' => (int) ($result['supplier_payment_id'] ?? 0),
@@ -558,6 +618,8 @@ final class ReportsController extends BaseController
         ];
         if ($result !== null && $action === 'edit') {
             $queryData['recreate_payment_id'] = (int) ($result['supplier_payment_id'] ?? 0);
+        } elseif ($result !== null && ($result['replacement']['applications'] ?? []) === []) {
+            $queryData['review_available_advance'] = 1;
         }
 
         $this->redirect('/suppliers/settlements/global?' . http_build_query($queryData));

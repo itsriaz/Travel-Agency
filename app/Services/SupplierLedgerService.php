@@ -23,7 +23,12 @@ final class SupplierLedgerService extends Service
             (string) ($filters['bookingReference'] ?? '')
         );
 
-        return $this->buildReport($rows, $currency, trim((string) ($filters['bookingReference'] ?? '')) !== '');
+        return $this->buildReport(
+            $rows,
+            $currency,
+            trim((string) ($filters['bookingReference'] ?? '')) !== '',
+            empty($filters['dateFrom']) && empty($filters['dateTo'])
+        );
     }
 
     /**
@@ -34,7 +39,7 @@ final class SupplierLedgerService extends Service
      * - Debit: supplier invoice, adjustment, or refund/value received.
      * - Credit: payment/value given to the supplier.
      */
-    public function buildReport(array $rows, string $currencyFilter = '', bool $bookingScoped = false): array
+    public function buildReport(array $rows, string $currencyFilter = '', bool $bookingScoped = false, bool $currentView = true): array
     {
         // The full supplier account already includes the original advance payment.
         // Applying, adjusting, or releasing that credit only moves it between
@@ -63,6 +68,9 @@ final class SupplierLedgerService extends Service
         $rows = $this->consolidateSupplierPayableState($rows);
         $rows = $this->dropStaleAdvanceAdjustmentsAfterCurrencyCorrection($rows);
         $rows = $this->reconcileHistoricalCancellationGross($rows);
+        if ($currentView) {
+            $rows = $this->hideClosedSupplierPayableTransfers($rows);
+        }
         $currencyFilter = strtoupper(trim($currencyFilter));
         if ($currencyFilter !== '') {
             $rows = array_values(array_filter(
@@ -235,6 +243,7 @@ final class SupplierLedgerService extends Service
             switch ($sourceEntryType) {
                 case 'Payable Created':
                 case 'Payable Adjustment':
+                case 'Payable Transfer':
                 case 'Payable Reversed on Cancellation':
                 case 'Supplier Penalty Retained':
                     $debitSummary[$currency] = round(
@@ -278,7 +287,11 @@ final class SupplierLedgerService extends Service
         }
 
         return [
-            'rows' => $reportRows,
+            // Voided payments remain in financial history, not in the operational ledger.
+            'rows' => array_values(array_filter(
+                $reportRows,
+                static fn (array $row): bool => (int) ($row['exclude_from_footer_totals'] ?? 0) !== 1
+            )),
             'summaryCards' => array_merge(
                 $this->summaryCards('Supplier bills and adjustments', $debitSummary, $currencyFilter),
                 $this->summaryCards('Payments to suppliers', $creditSummary, $currencyFilter),
@@ -298,6 +311,9 @@ final class SupplierLedgerService extends Service
             'Payable Adjustment' => $this->amount($row['debit_amount'] ?? 0) > $this->amount($row['credit_amount'] ?? 0)
                 ? 'Supplier credit note received'
                 : 'Supplier debit note recorded',
+            'Payable Transfer' => $this->amount($row['debit_amount'] ?? 0) > 0
+                ? 'Payable moved from this supplier'
+                : 'Payable moved to this supplier',
             'Payable Reversed on Cancellation' => 'Supplier invoice reversed on cancellation',
             'Supplier Payment' => 'Supplier payment made',
             'Supplier Credit Applied' => 'Supplier credit applied',
@@ -313,8 +329,61 @@ final class SupplierLedgerService extends Service
             'Customer Paid Supplier' => $customerName !== '' ? 'Customer ' . $customerName . ' paid supplier.' : 'Customer paid supplier.',
             'Supplier Advance / Overpayment' => 'Supplier advance paid',
             'Linked Account Balance Adjustment' => 'Linked account balance adjustment',
+            'Prior-Period Supplier Charge' => 'Historical supplier charge',
             default => $sourceEntryType,
         };
+    }
+
+    /**
+     * A completed supplier reassignment leaves an original charge and an equal
+     * transfer-out under the former supplier. Keep both journals for audit,
+     * but omit the cancelling pair from the current operational ledger.
+     * A dated report still presents the movements that existed at that date.
+     */
+    private function hideClosedSupplierPayableTransfers(array $rows): array
+    {
+        $groups = [];
+        foreach ($rows as $index => $row) {
+            if (! is_array($row) || ! in_array((string) ($row['entry_type'] ?? ''), [
+                'Payable Created', 'Payable Adjustment', 'Payable Transfer',
+            ], true)) {
+                continue;
+            }
+            $key = implode('|', [
+                (int) ($row['supplier_id'] ?? 0),
+                (string) ($row['booking_reference'] ?? ''),
+                (string) ($row['service_line_reference'] ?? ''),
+                $this->currency($row),
+            ]);
+            $groups[$key][] = $index;
+        }
+
+        foreach ($groups as $indexes) {
+            usort($indexes, static fn (int $a, int $b): int =>
+                ((int) ($rows[$a]['journal_entry_id'] ?? 0)) <=> ((int) ($rows[$b]['journal_entry_id'] ?? 0)));
+            $openIndexes = [];
+            $openAmount = 0.0;
+            foreach ($indexes as $index) {
+                $row = $rows[$index];
+                $type = (string) ($row['entry_type'] ?? '');
+                $debit = $this->amount($row['debit_amount'] ?? 0);
+                $credit = $this->amount($row['credit_amount'] ?? 0);
+                if ($type === 'Payable Transfer' && $debit > 0.005
+                    && $openIndexes !== [] && abs($openAmount - $debit) <= 0.005) {
+                    foreach ($openIndexes as $openIndex) {
+                        unset($rows[$openIndex]);
+                    }
+                    unset($rows[$index]);
+                    $openIndexes = [];
+                    $openAmount = 0.0;
+                    continue;
+                }
+                $openIndexes[] = $index;
+                $openAmount = round($openAmount + $credit - $debit, 2);
+            }
+        }
+
+        return array_values($rows);
     }
 
     /**
@@ -370,10 +439,26 @@ final class SupplierLedgerService extends Service
                 fn (int $index): float => $this->amount($rows[$index]['debit_amount'] ?? 0),
                 $indexes
             )), 2);
-            // Released allocations remain part of the original money-out when converted to supplier credit.
-            $preserveGrossPayment = $convertedToAdvance > 0.005
-                && count($allocationDerivedIndexes) === count($indexes)
-                && $grossPaymentAmount > 0.005
+            // A payment's original cash outflow does not shrink when its allocations
+            // are later released or reused. Historical journals can have -ALLOC-0
+            // references, so current allocation IDs cannot identify their rows.
+            // Preserve the complete original payment only when all source rows in
+            // this report belong to its saved supplier and currency and conserve
+            // the saved amount. Partial branch/currency views keep their own rows.
+            $sourceSupplierId = (int) ($payment['supplier_id'] ?? 0);
+            $sourceCurrency = strtoupper(trim((string) ($payment['currency'] ?? '')));
+            $originalRowsMatchPayment = $sourceSupplierId > 0
+                && $sourceCurrency !== ''
+                && array_reduce(
+                    $indexes,
+                    fn (bool $matches, int $index): bool => $matches
+                        && (int) ($rows[$index]['supplier_id'] ?? 0) === $sourceSupplierId
+                        && $this->currency($rows[$index]) === $sourceCurrency,
+                    true
+                );
+            $preserveGrossPayment = $grossPaymentAmount > 0.005
+                && (string) ($payment['status'] ?? '') !== 'void'
+                && $originalRowsMatchPayment
                 && abs($historicalPaymentTotal - $grossPaymentAmount) <= 0.005;
             if ($allocationDerivedIndexes !== [] && ! $preserveGrossPayment) {
                 if ($liveAllocationIds === []) {
@@ -511,10 +596,21 @@ final class SupplierLedgerService extends Service
 
         $db = $this->app->get('db');
         $statement = $db->prepare(
-            'SELECT id
-             FROM supplier_payment_allocations
-             WHERE supplier_payment_id = :supplier_payment_id
-             ORDER BY id ASC'
+            'SELECT spa.id
+             FROM supplier_payment_allocations spa
+             INNER JOIN supplier_payments sp ON sp.id = spa.supplier_payment_id
+             WHERE spa.supplier_payment_id = :supplier_payment_id
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM journal_entries je
+                   INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+                   WHERE je.source_type = "supplier_payment_allocated"
+                     AND je.narration = "Existing supplier payment credit applied against payable"
+                     AND je.source_reference = CONCAT(sp.payment_no, "-ALLOC-", spa.id)
+                     AND jel.supplier_payment_id = spa.supplier_payment_id
+                     AND jel.supplier_obligation_id = spa.supplier_obligation_id
+               )
+             ORDER BY spa.id ASC'
         );
         $statement->execute(['supplier_payment_id' => $paymentId]);
 
