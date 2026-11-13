@@ -4,12 +4,15 @@ $branches = $branches ?? [];
 $currencies = $currencies ?? [];
 $ledgerAccounts = $ledgerAccounts ?? [];
 $businessSourceOptions = $businessSourceOptions ?? [];
+$historyBusinessSourceOptions = $historyBusinessSourceOptions ?? $businessSourceOptions;
 $editAccount = $editAccount ?? null;
 $editTransaction = $editTransaction ?? null;
 $accountTypes = $accountTypes ?? [];
 $transferAccounts = $transferAccounts ?? [];
 $recentDirectEntries = $recentDirectEntries ?? [];
 $recentInternalTransfers = $recentInternalTransfers ?? [];
+$directHistoryFilters = $directHistoryFilters ?? [];
+$directHistoryTotals = $directHistoryTotals ?? [];
 $returnTo = trim((string) ($returnTo ?? ''));
 $returnToQuery = $returnTo !== '' ? '?return_to=' . rawurlencode($returnTo) : '';
 $formAccount = is_array($editAccount) ? $editAccount : [
@@ -23,7 +26,7 @@ $formTitle = $editAccount ? 'Edit Treasury Account' : 'Add Treasury Account';
 $showBankFields = in_array((string) ($formAccount['account_type'] ?? 'cash'), ['bank', 'wallet'], true);
 $isEditDirectTransaction = is_array($editTransaction) && in_array((string) ($editTransaction['transaction_type'] ?? ''), ['adjustment_increase', 'adjustment_decrease'], true);
 $isEditTransferTransaction = is_array($editTransaction) && in_array((string) ($editTransaction['transaction_type'] ?? ''), ['cash_deposit_to_bank', 'bank_withdrawal_to_cash', 'bank_to_bank_transfer', 'cash_to_cash_transfer'], true);
-$activeTreasuryTab = $editAccount ? 'account' : ($isEditDirectTransaction ? 'direct' : 'transfer');
+$activeTreasuryTab = $editAccount ? 'account' : ($isEditDirectTransaction || isset($_GET['history_filter']) ? 'direct' : 'transfer');
 $transferDraft = [
     'transaction_id' => $isEditTransferTransaction ? (int) ($editTransaction['id'] ?? 0) : 0,
     'source_branch_id' => $isEditTransferTransaction
@@ -401,6 +404,79 @@ $bankAccountsCount = count(array_filter($accounts, static fn (array $row): bool 
 .treasury-page[data-treasury-active-tab="direct"] #treasury-recent-activity [data-treasury-activity-kind="transfer"],
 .treasury-page[data-treasury-active-tab="transfer"] #treasury-recent-activity [data-treasury-activity-kind="direct"] {
     display: none;
+}
+.treasury-history-filters {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 16px;
+    align-items: end;
+    padding: 16px 14px;
+    border-top: 1px solid #dbe8f2;
+}
+.treasury-history-filters > .station-field {
+    min-width: 0;
+}
+.treasury-history-filters > .station-field > input,
+.treasury-history-filters > .station-field > select {
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+}
+.treasury-history-filter-actions {
+    grid-column: 3 / -1;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+    align-self: end;
+}
+.treasury-history-filter-actions > .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    min-height: 36px;
+    box-sizing: border-box;
+    text-align: center;
+}
+@media (max-width: 1100px) {
+    .treasury-history-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .treasury-history-filter-actions { grid-column: 1 / -1; }
+}
+@media (max-width: 700px) {
+    .treasury-history-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 520px) {
+    .treasury-history-filters { grid-template-columns: minmax(0, 1fr); }
+    .treasury-history-filter-actions { grid-template-columns: minmax(0, 1fr); }
+}
+.treasury-direct-totals {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    padding: 2px 14px 8px;
+}
+.treasury-direct-total {
+    padding: 8px 10px;
+    border: 1px solid #d8e6f1;
+    border-radius: 9px;
+    background: #f6faff;
+}
+.treasury-direct-total small,
+.treasury-direct-total strong {
+    display: block;
+}
+.treasury-direct-total small {
+    color: #536e84;
+    font-size: 10px;
+    font-weight: 800;
+    text-transform: uppercase;
+}
+.treasury-direct-total strong {
+    margin-top: 3px;
+    color: #102f49;
+}
+@media (max-width: 850px) {
+    .treasury-direct-totals { grid-template-columns: 1fr; }
 }
 .treasury-section-kicker {
     margin-bottom: 5px;
@@ -1654,6 +1730,73 @@ if (typeof window.__treasuryRestoreTab === 'function') {
         </div>
     </div>
 
+    <form method="get" action="<?= e(url('/treasury/accounts')) ?>#treasury-recent-activity" class="treasury-history-filters" data-treasury-activity-kind="direct">
+        <input type="hidden" name="history_filter" value="1">
+        <?php if ($returnTo !== ''): ?><input type="hidden" name="return_to" value="<?= e($returnTo) ?>"><?php endif; ?>
+        <label class="station-field"><span>Account Holder</span>
+            <select name="history_holder_id">
+                <option value="0">All Account Holders / Other</option>
+                <option value="-1" <?= (int) ($directHistoryFilters['holder_id'] ?? 0) === -1 ? 'selected' : '' ?>>No Account Holder</option>
+                <?php foreach ($historyBusinessSourceOptions as $holder): ?>
+                    <option value="<?= (int) ($holder['id'] ?? 0) ?>" <?= (int) ($directHistoryFilters['holder_id'] ?? 0) === (int) ($holder['id'] ?? 0) ? 'selected' : '' ?>><?= e((string) ($holder['name'] ?? 'Account Holder')) ?></option>
+                <?php endforeach; ?>
+            </select>
+        </label>
+        <label class="station-field"><span>Branch</span>
+            <select name="history_branch_id"><option value="0">All Accessible Branches</option>
+                <?php foreach ($branches as $branch): ?>
+                    <option value="<?= (int) ($branch['id'] ?? 0) ?>" <?= (int) ($directHistoryFilters['branch_id'] ?? 0) === (int) ($branch['id'] ?? 0) ? 'selected' : '' ?>><?= e((string) ($branch['name'] ?? 'Branch')) ?></option>
+                <?php endforeach; ?>
+            </select>
+        </label>
+        <label class="station-field"><span>From</span><input type="date" name="history_date_from" value="<?= e((string) ($directHistoryFilters['date_from'] ?? '')) ?>"></label>
+        <label class="station-field"><span>To</span><input type="date" name="history_date_to" value="<?= e((string) ($directHistoryFilters['date_to'] ?? '')) ?>"></label>
+        <label class="station-field"><span>Currency</span>
+            <select name="history_currency"><option value="">All</option>
+                <?php foreach ($currencies as $currency): ?>
+                    <option value="<?= e((string) ($currency['code'] ?? '')) ?>" <?= (string) ($directHistoryFilters['currency'] ?? '') === (string) ($currency['code'] ?? '') ? 'selected' : '' ?>><?= e((string) ($currency['code'] ?? '')) ?></option>
+                <?php endforeach; ?>
+            </select>
+        </label>
+        <label class="station-field"><span>Direction</span>
+            <select name="history_direction">
+                <option value="all">In &amp; Out</option>
+                <option value="in" <?= ($directHistoryFilters['direction'] ?? 'all') === 'in' ? 'selected' : '' ?>>Money In</option>
+                <option value="out" <?= ($directHistoryFilters['direction'] ?? 'all') === 'out' ? 'selected' : '' ?>>Money Out</option>
+            </select>
+        </label>
+        <label class="station-field"><span>Cash / Bank Account</span>
+            <select name="history_account_id"><option value="0">All Cash / Bank Accounts</option>
+                <?php foreach ($transferAccounts as $account): ?>
+                    <option value="<?= (int) ($account['id'] ?? 0) ?>" <?= (int) ($directHistoryFilters['account_id'] ?? 0) === (int) ($account['id'] ?? 0) ? 'selected' : '' ?>><?= e((string) ($account['account_name'] ?? 'Account') . ' / ' . (string) ($account['currency'] ?? '')) ?></option>
+                <?php endforeach; ?>
+            </select>
+        </label>
+        <div class="treasury-history-filter-actions">
+            <button class="btn btn-primary btn-sm" type="submit">Apply Filters</button>
+            <a class="btn btn-sm" href="<?= e(url('/treasury/accounts?history_filter=1#treasury-recent-activity')) ?>">Reset</a>
+            <?php $reportQuery = http_build_query(array_filter([
+                'report' => 'money_in_out_ledger',
+                'branch_id' => $directHistoryFilters['branch_id'] ?? 0,
+                'date_from' => $directHistoryFilters['date_from'] ?? '',
+                'date_to' => $directHistoryFilters['date_to'] ?? '',
+                'currency' => $directHistoryFilters['currency'] ?? '',
+                'treasury_account_id' => $directHistoryFilters['account_id'] ?? 0,
+                'money_account_holder_id' => $directHistoryFilters['holder_id'] ?? 0,
+                'money_direction' => $directHistoryFilters['direction'] ?? 'all',
+            ], static fn ($value): bool => $value !== '' && $value !== 0)); ?>
+            <a class="btn btn-sm" href="<?= e(url('/reports?' . $reportQuery)) ?>">Full Report / Print</a>
+        </div>
+    </form>
+    <div class="treasury-direct-totals" data-treasury-activity-kind="direct">
+        <?php foreach ($directHistoryTotals as $currency => $amounts): ?>
+            <div class="treasury-direct-total"><small>Received / <?= e($currency) ?></small><strong><?= e($currency . ' ' . number_format((float) ($amounts['in'] ?? 0), 2)) ?></strong></div>
+            <div class="treasury-direct-total"><small>Paid Out / <?= e($currency) ?></small><strong><?= e($currency . ' ' . number_format((float) ($amounts['out'] ?? 0), 2)) ?></strong></div>
+            <div class="treasury-direct-total"><small>Net Movement / <?= e($currency) ?></small><strong><?= e($currency . ' ' . number_format((float) ($amounts['in'] ?? 0) - (float) ($amounts['out'] ?? 0), 2)) ?></strong></div>
+        <?php endforeach; ?>
+        <?php if ($directHistoryTotals === []): ?><span class="panel-meta">No Money In/Out amounts match these filters.</span><?php endif; ?>
+    </div>
+    <p class="panel-meta" data-treasury-activity-kind="direct">Totals cover all matching journal entries and include correction reversals. The table shows the latest 20 source records.</p>
     <div class="table-wrap">
         <table class="data-table">
             <thead>
@@ -1689,7 +1832,10 @@ if (typeof window.__treasuryRestoreTab === 'function') {
                     'adjustment_decrease' => 'Money Out',
                     default => ucwords(str_replace('_', ' ', (string) ($transfer['transaction_type'] ?? ''))),
                 };
-                $counterpartyName = trim((string) ($transfer['counterparty_name'] ?? ''));
+                $counterpartyName = trim((string) ($transfer['business_source_name'] ?? ''));
+                if ($counterpartyName === '') {
+                    $counterpartyName = trim((string) ($transfer['counterparty_name'] ?? ''));
+                }
                 $fromAccountName = (string) ($transfer['from_account_name'] ?? '');
                 $fromAccountCode = (string) ($transfer['from_account_code'] ?? '');
                 $toAccountName = (string) ($transfer['to_account_name'] ?? '');

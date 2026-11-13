@@ -206,15 +206,20 @@ final class ReportService extends Service
                     $directTreasurySource = 'all';
                 }
 
+                $holderFilter = filter_var($query['money_account_holder_id'] ?? 0, FILTER_VALIDATE_INT);
+                $holderFilter = $holderFilter === false || $holderFilter < -1 ? 0 : $holderFilter;
+
                 $reportData = $repository->directMoneyInOutLedger(
                     $filters['branchScopeIds'],
                     $filters['dateFrom'],
                     $filters['dateTo'],
                     $treasuryAccountId,
                     $moneyDirection,
-                    $directTreasurySource
+                    $directTreasurySource,
+                    $holderFilter === 0 ? null : $holderFilter,
+                    $filters['currency']
                 );
-                [$rows, $summaryCards] = $this->moneyInOutLedgerReport($reportData);
+                [$rows, $summaryCards, $footerRows] = $this->moneyInOutLedgerReport($reportData, $directTreasurySource);
                 $columns = [
                     ['key' => 'date', 'label' => 'Date'],
                     ['key' => 'branch', 'label' => 'Branch'],
@@ -1779,6 +1784,9 @@ final class ReportService extends Service
             'branchOptions' => $branchOptions,
             'showTraceColumn' => $filters['report'] === 'supplier_ledger' && $mode !== 'csv',
             'businessSourceOptions' => (new MasterDataRepository($this->app))->activeRows('business_sources'),
+            'moneyAccountHolderOptions' => $filters['report'] === 'money_in_out_ledger'
+                ? (new MasterDataRepository($this->app))->rows('business_sources')
+                : [],
             'expenseCategoryOptions' => (new MasterDataRepository($this->app))->activeRows('expense_categories'),
             'customerOptions' => $filters['report'] === 'customer_advance_ledger'
                 ? $repository->customerAdvanceCustomers($filters['branchScopeIds'])
@@ -3906,11 +3914,12 @@ final class ReportService extends Service
         return [$rows, $summaryCards];
     }
 
-    private function moneyInOutLedgerReport(array $data): array
+    private function moneyInOutLedgerReport(array $data, string $sourceType = 'all'): array
     {
         $rows = [];
         $balances = [];
         $totals = [];
+        $footerRows = [];
 
         foreach ($data as $entry) {
             $accountId = (int) ($entry['treasury_account_id'] ?? 0);
@@ -3920,11 +3929,11 @@ final class ReportService extends Service
             $debit = round((float) ($entry['debit_amount'] ?? 0), 2);
             $credit = round((float) ($entry['credit_amount'] ?? 0), 2);
 
-            $balances[$balanceKey] = round(($balances[$balanceKey] ?? 0) + $debit - $credit, 2);
             $totals[$currency] ??= ['in' => 0.0, 'out' => 0.0];
             $totals[$currency]['in'] += $debit;
             $totals[$currency]['out'] += $credit;
 
+            $balances[$balanceKey] = round(($balances[$balanceKey] ?? 0) + $debit - $credit, 2);
             $rows[] = [
                 'date' => (string) ($entry['entry_date'] ?? ''),
                 'branch' => (string) ($entry['branch_name'] ?? 'N/A'),
@@ -3946,23 +3955,37 @@ final class ReportService extends Service
             ];
         }
 
+        ksort($totals);
         $summaryCards = [];
         foreach ($totals as $currency => $amounts) {
+            $prefix = match ($sourceType) {
+                'posted' => 'ORIGINAL ',
+                'reversal' => 'REVERSED ',
+                default => '',
+            };
+            $moneyIn = round($amounts['in'], 2);
+            $moneyOut = round($amounts['out'], 2);
             $summaryCards[] = [
-                'label' => 'MONEY IN / ' . $currency,
-                'value' => $currency . ' ' . number_format($amounts['in'], 2),
+                'label' => $prefix . 'MONEY IN / ' . $currency,
+                'value' => $currency . ' ' . number_format($moneyIn, 2),
             ];
             $summaryCards[] = [
-                'label' => 'MONEY OUT / ' . $currency,
-                'value' => $currency . ' ' . number_format($amounts['out'], 2),
+                'label' => $prefix . 'MONEY OUT / ' . $currency,
+                'value' => $currency . ' ' . number_format($moneyOut, 2),
             ];
             $summaryCards[] = [
-                'label' => 'BALANCE / ' . $currency,
-                'value' => $currency . ' ' . number_format($amounts['in'] - $amounts['out'], 2),
+                'label' => 'BALANCE (IN - OUT) / ' . $currency,
+                'value' => $currency . ' ' . number_format($moneyIn - $moneyOut, 2),
+            ];
+            $footerRows[] = [
+                '_label' => 'Total ' . $currency,
+                'money_in' => $this->money($moneyIn),
+                'money_out' => $this->money($moneyOut),
+                'balance' => $this->money($moneyIn - $moneyOut),
             ];
         }
 
-        return [$rows, $summaryCards];
+        return [$rows, $summaryCards, $footerRows];
     }
 
     private function internalTreasuryTransferReport(array $data): array

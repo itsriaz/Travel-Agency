@@ -439,13 +439,24 @@ if ($selectedReport === 'receivable_aging') {
 } elseif (in_array($selectedReport, ['money_in_out_ledger', 'cash_bank_ledger', 'actual_money_voucher_ledger', 'booking_voucher_ledger'], true)) {
     $currencyLabel = $selectedCurrency !== '' ? $selectedCurrency : 'All currencies';
     $sourceLabel = (string) ($treasurySourceTypeOptions[$selectedTreasurySourceType] ?? 'All Sources');
+    $moneyHolderId = (int) ($_GET['money_account_holder_id'] ?? 0);
+    $moneyHolderLabel = $moneyHolderId === -1 ? 'No Account Holder' : 'All Account Holders / Other';
+    foreach (($moneyAccountHolderOptions ?? []) as $holder) {
+        if ($moneyHolderId > 0 && (int) ($holder['id'] ?? 0) === $moneyHolderId) {
+            $moneyHolderLabel = (string) ($holder['name'] ?? 'Account Holder');
+            break;
+        }
+    }
     $reportContextLine = 'Period: ' . $reportPeriodLabel
         . ' | Branch: ' . $selectedBranchLabel
         . ' | Currency: ' . $currencyLabel
         . ($selectedReport === 'cash_bank_ledger' ? ' | Treasury account: ' . $selectedTreasuryAccountLabel : '')
         . ($selectedReport === 'cash_bank_ledger' ? ' | Source: ' . $sourceLabel : '')
         . ($selectedReport === 'cash_bank_ledger' && $selectedCashBankReference !== '' ? ' | Reference: ' . $selectedCashBankReference : '')
-        . ($selectedReport !== 'cash_bank_ledger'
+        . ($selectedReport === 'money_in_out_ledger'
+            ? ' | Account Holder: ' . $moneyHolderLabel
+            : '')
+        . (! in_array($selectedReport, ['cash_bank_ledger', 'money_in_out_ledger'], true)
             ? ' | Account: ' . $selectedBusinessSourceLabel . ' | Supplier: ' . $selectedSupplierLabel
             : '')
         . ($selectedReport === 'cash_bank_ledger' && $selectedCashBankAmount !== null
@@ -707,7 +718,7 @@ if ($selectedReport === 'receivable_aging') {
             'balance_amount' => $formatReportTotal($closingBalance),
         ];
     }
-} elseif (in_array($selectedReport, ['money_in_out_ledger', 'cash_bank_ledger', 'actual_money_voucher_ledger', 'booking_voucher_ledger'], true)) {
+} elseif (in_array($selectedReport, ['cash_bank_ledger', 'actual_money_voucher_ledger', 'booking_voucher_ledger'], true)) {
     $ledgerTotalsByCurrency = [];
     foreach ($rows as $row) {
         if ((int) ($row['exclude_from_footer_totals'] ?? 0) === 1) {
@@ -744,7 +755,7 @@ if ($selectedReport === 'receivable_aging') {
             'balance_amount' => $formatReportTotal($debitTotal - $creditTotal),
         ];
     }
-} elseif (in_array($selectedReport, ['service_profit', 'loss_report', 'supplier_all_payments'], true)) {
+} elseif (in_array($selectedReport, ['money_in_out_ledger', 'service_profit', 'loss_report', 'supplier_all_payments'], true)) {
     // Currency-aware footer rows are prepared by ReportService.
 } elseif (! in_array($selectedReport, ['supplier_ledger', 'customer_ledger', 'customer_detail_ledger'], true)) {
     $reportFooterTotals = [];
@@ -2080,6 +2091,21 @@ if ($selectedReport === 'receivable_aging') {
         align-items: end;
     }
 
+    #reports-filter-form.reports-filter-grid.reports-filter-grid--money {
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+    }
+
+    #reports-filter-form.reports-filter-grid--money > .station-field,
+    #reports-filter-form.reports-filter-grid--money > .report-filter-field {
+        min-width: 0;
+    }
+
+    #reports-filter-form.reports-filter-grid--money > .report-filter-field > select {
+        width: 100%;
+        min-width: 0;
+        box-sizing: border-box;
+    }
+
     #reports-filter-form.reports-filter-grid .station-field {
         gap: 5px;
     }
@@ -2240,6 +2266,10 @@ if ($selectedReport === 'receivable_aging') {
             grid-template-columns: repeat(3, minmax(170px, 1fr));
         }
 
+        #reports-filter-form.reports-filter-grid.reports-filter-grid--money {
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+
         .report-summary-group--account_summary .report-stat-grid {
             grid-template-columns: repeat(2, minmax(0, 1fr));
         }
@@ -2287,6 +2317,10 @@ if ($selectedReport === 'receivable_aging') {
             grid-template-columns: 1fr;
         }
 
+        #reports-filter-form.reports-filter-grid.reports-filter-grid--money {
+            grid-template-columns: 1fr;
+        }
+
         .report-summary-group--account_summary .report-stat-grid {
             grid-template-columns: 1fr;
         }
@@ -2320,7 +2354,7 @@ if ($selectedReport === 'receivable_aging') {
         id="reports-filter-form"
         method="get"
         action="<?= e(url('/reports')) ?>"
-        class="station-form-grid station-form-grid--6 station-form-grid--inline reports-filter-grid<?= $selectedReport === 'reminder_hub' ? ' reminder-hub-filter-grid' : '' ?>"
+        class="station-form-grid station-form-grid--6 station-form-grid--inline reports-filter-grid<?= $selectedReport === 'reminder_hub' ? ' reminder-hub-filter-grid' : '' ?><?= $selectedReport === 'money_in_out_ledger' ? ' reports-filter-grid--money' : '' ?>"
         data-auto-submit="reports"
         data-export-url="<?= e(url('/reports/export.csv')) ?>"
     >
@@ -2434,7 +2468,19 @@ if ($selectedReport === 'receivable_aging') {
     $selectedTreasuryAccountId = max(0, (int) ($_GET['treasury_account_id'] ?? 0));
     $selectedMoneyDirection = (string) ($_GET['money_direction'] ?? 'all');
     $selectedDirectTreasurySource = (string) ($_GET['direct_treasury_source'] ?? 'all');
+    $selectedMoneyHolderId = (int) ($_GET['money_account_holder_id'] ?? 0);
     ?>
+    <div class="report-filter-field">
+        <label for="money_account_holder_id">Account Holder</label>
+        <select id="money_account_holder_id" name="money_account_holder_id">
+            <option value="0">All Account Holders / Other</option>
+            <option value="-1" <?= $selectedMoneyHolderId === -1 ? 'selected' : '' ?>>No Account Holder</option>
+            <?php foreach (($moneyAccountHolderOptions ?? []) as $holder): ?>
+                <?php $holderId = (int) ($holder['id'] ?? 0); ?>
+                <option value="<?= $holderId ?>" <?= $selectedMoneyHolderId === $holderId ? 'selected' : '' ?>><?= e((string) ($holder['name'] ?? 'Account Holder')) ?></option>
+            <?php endforeach; ?>
+        </select>
+    </div>
     <div class="report-filter-field">
         <label for="treasury_account_id">Cash / Bank Account</label>
         <select id="treasury_account_id" name="treasury_account_id">

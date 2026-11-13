@@ -326,7 +326,9 @@ final class ReportRepository extends BaseRepository
         ?string $dateTo = null,
         ?int $treasuryAccountId = null,
         string $direction = 'all',
-        string $sourceType = 'all'
+        string $sourceType = 'all',
+        ?int $businessSourceId = null,
+        string $currency = ''
     ): array {
         if ($branchIds === []) {
             return [];
@@ -360,10 +362,31 @@ final class ReportRepository extends BaseRepository
             $params[':direct_treasury_account_id'] = $treasuryAccountId;
         }
 
+        $hasBusinessSource = $this->columnExists('treasury_transactions', 'business_source_id');
+        if ($businessSourceId !== null) {
+            if (! $hasBusinessSource && $businessSourceId > 0) {
+                return [];
+            }
+            if ($hasBusinessSource) {
+                if ($businessSourceId > 0) {
+                    $where[] = 'direct_rows.business_source_id = :direct_business_source_id';
+                    $params[':direct_business_source_id'] = $businessSourceId;
+                } elseif ($businessSourceId === -1) {
+                    $where[] = 'direct_rows.business_source_id IS NULL';
+                }
+            }
+        }
+
+        $currency = strtoupper(trim($currency));
+        if ($currency !== '') {
+            $where[] = 'direct_rows.currency = :direct_currency';
+            $params[':direct_currency'] = $currency;
+        }
+
         if ($direction === 'in') {
-            $where[] = 'direct_rows.debit_amount > 0';
+            $where[] = "direct_rows.transaction_type = 'adjustment_increase'";
         } elseif ($direction === 'out') {
-            $where[] = 'direct_rows.credit_amount > 0';
+            $where[] = "direct_rows.transaction_type = 'adjustment_decrease'";
         }
 
         if ($sourceType === 'posted') {
@@ -375,12 +398,19 @@ final class ReportRepository extends BaseRepository
         $counterpartyExpression = $this->columnExists('treasury_transactions', 'counterparty_name')
             ? "NULLIF(TRIM(tt.counterparty_name), '')"
             : 'NULL';
+        $businessSourceSelect = $hasBusinessSource ? 'tt.business_source_id' : 'NULL';
+        $businessSourceJoin = $hasBusinessSource
+            ? 'LEFT JOIN business_sources bs ON bs.id = tt.business_source_id'
+            : '';
+        $businessSourceName = $hasBusinessSource ? "NULLIF(TRIM(bs.name), '')" : 'NULL';
 
         $sql = "
             SELECT direct_rows.*
             FROM (
                 SELECT
                     tt.id AS treasury_transaction_id,
+                    tt.transaction_type,
+                    {$businessSourceSelect} AS business_source_id,
                     ta.id AS treasury_account_id,
                     tt.branch_id,
                     COALESCE(b.name, 'N/A') AS branch_name,
@@ -392,7 +422,7 @@ final class ReportRepository extends BaseRepository
                     'posted' AS source_group,
                     tt.status AS transaction_status,
                     CASE WHEN COALESCE(jel.debit_amount, 0) > 0 THEN 'in' ELSE 'out' END AS direction,
-                    COALESCE({$counterpartyExpression}, 'Direct Treasury') AS party_name,
+                    COALESCE({$businessSourceName}, {$counterpartyExpression}, 'Direct Treasury') AS party_name,
                     COALESCE(NULLIF(TRIM(tt.reference_no), ''), je.source_reference, CONCAT('DTE-', LPAD(tt.id, 6, '0'))) AS reference,
                     COALESCE(
                         NULLIF(TRIM(tt.narration), ''),
@@ -403,6 +433,7 @@ final class ReportRepository extends BaseRepository
                     ROUND(COALESCE(jel.credit_amount, 0), 2) AS credit_amount,
                     jel.id AS line_id
                 FROM treasury_transactions tt
+                {$businessSourceJoin}
                 INNER JOIN branches b ON b.id = tt.branch_id
                 INNER JOIN treasury_accounts ta
                     ON ta.id = CASE
@@ -422,6 +453,8 @@ final class ReportRepository extends BaseRepository
 
                 SELECT
                     tt.id AS treasury_transaction_id,
+                    tt.transaction_type,
+                    {$businessSourceSelect} AS business_source_id,
                     ta.id AS treasury_account_id,
                     tt.branch_id,
                     COALESCE(b.name, 'N/A') AS branch_name,
@@ -433,7 +466,7 @@ final class ReportRepository extends BaseRepository
                     'reversal' AS source_group,
                     tt.status AS transaction_status,
                     CASE WHEN COALESCE(reversal_line.debit_amount, 0) > 0 THEN 'in' ELSE 'out' END AS direction,
-                    COALESCE({$counterpartyExpression}, 'Direct Treasury') AS party_name,
+                    COALESCE({$businessSourceName}, {$counterpartyExpression}, 'Direct Treasury') AS party_name,
                     COALESCE(reversal_je.source_reference, CONCAT('VOID-DTE-', tt.id)) AS reference,
                     CONCAT(
                         'Correction reversal',
@@ -447,6 +480,7 @@ final class ReportRepository extends BaseRepository
                     ROUND(COALESCE(reversal_line.credit_amount, 0), 2) AS credit_amount,
                     reversal_line.id AS line_id
                 FROM treasury_transactions tt
+                {$businessSourceJoin}
                 INNER JOIN branches b ON b.id = tt.branch_id
                 INNER JOIN treasury_accounts ta
                     ON ta.id = CASE

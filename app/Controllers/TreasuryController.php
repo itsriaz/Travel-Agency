@@ -9,7 +9,9 @@ use App\Helpers\Authorization;
 use App\Helpers\Csrf;
 use App\Helpers\Flash;
 use App\Repositories\MasterDataRepository;
+use App\Repositories\ReportRepository;
 use App\Repositories\TreasuryRepository;
+use App\Services\DirectMoneyInOutSummary;
 use RuntimeException;
 
 final class TreasuryController extends BaseController
@@ -17,7 +19,7 @@ final class TreasuryController extends BaseController
     public function accounts(): string
     {
         $repository = new TreasuryRepository($this->app);
-        $accessibleBranchIds = Authorization::accessibleBranchIds();
+        $accessibleBranchIds = array_values(array_map('intval', Authorization::accessibleBranchIds()));
         $returnTo = $this->sanitizeReturnTo((string) ($_GET['return_to'] ?? ''));
 
         $editId = (int) ($_GET['id'] ?? 0);
@@ -29,16 +31,60 @@ final class TreasuryController extends BaseController
             ? $repository->findTransactionForCorrection($editTransactionId, $accessibleBranchIds)
             : null;
 
+        $historyBranchId = (int) ($_GET['history_branch_id'] ?? 0);
+        if ($historyBranchId > 0 && ! in_array($historyBranchId, $accessibleBranchIds, true)) {
+            $historyBranchId = 0;
+        }
+        $historyScope = $historyBranchId > 0 ? [$historyBranchId] : $accessibleBranchIds;
+        $historyDate = static function (mixed $value): string {
+            $date = trim((string) $value);
+            if ($date === '') {
+                return '';
+            }
+            $parsed = \DateTimeImmutable::createFromFormat('!Y-m-d', $date);
+            return $parsed !== false && $parsed->format('Y-m-d') === $date ? $date : '';
+        };
+        $historyCurrency = strtoupper(trim((string) ($_GET['history_currency'] ?? '')));
+        if (! in_array($historyCurrency, ['', 'PKR', 'AED', 'USD'], true)) {
+            $historyCurrency = '';
+        }
+        $historyDirection = (string) ($_GET['history_direction'] ?? 'all');
+        if (! in_array($historyDirection, ['all', 'in', 'out'], true)) {
+            $historyDirection = 'all';
+        }
+        $historyFilters = [
+            'branch_id' => $historyBranchId,
+            'date_from' => $historyDate($_GET['history_date_from'] ?? ''),
+            'date_to' => $historyDate($_GET['history_date_to'] ?? ''),
+            'currency' => $historyCurrency,
+            'direction' => $historyDirection,
+            'account_id' => max(0, (int) ($_GET['history_account_id'] ?? 0)),
+            'holder_id' => max(-1, (int) ($_GET['history_holder_id'] ?? 0)),
+        ];
+        $historyRows = (new ReportRepository($this->app))->directMoneyInOutLedger(
+            $historyScope,
+            $historyFilters['date_from'] ?: null,
+            $historyFilters['date_to'] ?: null,
+            $historyFilters['account_id'] ?: null,
+            $historyDirection,
+            'all',
+            $historyFilters['holder_id'] ?: null,
+            $historyCurrency
+        );
+
         return $this->view('treasury/accounts', [
             'title' => 'Treasury Accounts',
             'accounts' => $repository->accounts($accessibleBranchIds),
             'transferAccounts' => $repository->transferAccounts($accessibleBranchIds),
-            'recentDirectEntries' => $repository->recentTransfers($accessibleBranchIds, 20, 'direct'),
+            'recentDirectEntries' => $repository->recentTransfers($historyScope, 20, 'direct', $historyFilters),
+            'directHistoryFilters' => $historyFilters,
+            'directHistoryTotals' => DirectMoneyInOutSummary::byCurrency($historyRows),
             'recentInternalTransfers' => $repository->recentTransfers($accessibleBranchIds, 20, 'transfer'),
             'branches' => $repository->branches($accessibleBranchIds),
             'currencies' => $repository->currencies(),
             'ledgerAccounts' => $repository->assetLedgerAccounts(),
             'businessSourceOptions' => (new MasterDataRepository($this->app))->activeRows('business_sources'),
+            'historyBusinessSourceOptions' => (new MasterDataRepository($this->app))->rows('business_sources'),
             'editAccount' => $editAccount,
             'editTransaction' => $editTransaction,
             'returnTo' => $returnTo,

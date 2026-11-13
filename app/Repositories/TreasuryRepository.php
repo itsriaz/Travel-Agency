@@ -157,7 +157,7 @@ final class TreasuryRepository extends BaseRepository
         return $rows;
     }
 
-    public function recentTransfers(array $branchIds, int $limit = 20, string $transactionGroup = 'all'): array
+    public function recentTransfers(array $branchIds, int $limit = 20, string $transactionGroup = 'all', array $filters = []): array
     {
         $branchIds = array_values(array_map('intval', $branchIds));
         $limit = max(1, min($limit, 100));
@@ -172,6 +172,42 @@ final class TreasuryRepository extends BaseRepository
         }
 
         $placeholders = implode(',', array_fill(0, count($branchIds), '?'));
+        $params = $branchIds;
+        $directFilter = '';
+        $hasBusinessSource = $this->columnExists('treasury_transactions', 'business_source_id');
+        if ($transactionGroup === 'direct') {
+            if (($filters['date_from'] ?? '') !== '') {
+                $directFilter .= ' AND tt.transaction_date >= ?';
+                $params[] = $filters['date_from'];
+            }
+            if (($filters['date_to'] ?? '') !== '') {
+                $directFilter .= ' AND tt.transaction_date <= ?';
+                $params[] = $filters['date_to'];
+            }
+            if (($filters['currency'] ?? '') !== '') {
+                $directFilter .= ' AND tt.currency = ?';
+                $params[] = $filters['currency'];
+            }
+            if (($filters['direction'] ?? '') === 'in') {
+                $directFilter .= " AND tt.transaction_type = 'adjustment_increase'";
+            } elseif (($filters['direction'] ?? '') === 'out') {
+                $directFilter .= " AND tt.transaction_type = 'adjustment_decrease'";
+            }
+            if ((int) ($filters['account_id'] ?? 0) > 0) {
+                $directFilter .= ' AND COALESCE(tt.from_treasury_account_id, tt.to_treasury_account_id) = ?';
+                $params[] = (int) $filters['account_id'];
+            }
+            $holderId = (int) ($filters['holder_id'] ?? 0);
+            if ($holderId > 0) {
+                if (! $hasBusinessSource) {
+                    return [];
+                }
+                $directFilter .= ' AND tt.business_source_id = ?';
+                $params[] = $holderId;
+            } elseif ($holderId === -1 && $hasBusinessSource) {
+                $directFilter .= ' AND tt.business_source_id IS NULL';
+            }
+        }
         $counterpartySelect = $this->columnExists('treasury_transactions', 'counterparty_name')
             ? ', tt.counterparty_name'
             : ', NULL AS counterparty_name';
@@ -208,6 +244,7 @@ final class TreasuryRepository extends BaseRepository
                 tt.reference_no,
                 tt.narration,
                 " . ltrim($counterpartySelect, ', ') . ",
+                " . ($hasBusinessSource ? 'bs.name' : 'NULL') . " AS business_source_name,
                 " . ltrim($sourceBranchSelect, ', ') . ",
                 " . ltrim($destinationBranchSelect, ', ') . ",
                 " . ltrim($sourceCurrencySelect, ', ') . ",
@@ -228,6 +265,7 @@ final class TreasuryRepository extends BaseRepository
                 void_user.username AS voided_by_username
              FROM treasury_transactions tt
              INNER JOIN branches b ON b.id = tt.branch_id
+             " . ($hasBusinessSource ? 'LEFT JOIN business_sources bs ON bs.id = tt.business_source_id' : '') . "
              " . ($hasSourceBranchColumn ? 'LEFT JOIN branches source_branch ON source_branch.id = tt.source_branch_id' : '') . "
              " . ($hasDestinationBranchColumn ? 'LEFT JOIN branches destination_branch ON destination_branch.id = tt.destination_branch_id' : '') . "
              LEFT JOIN treasury_accounts from_ta ON from_ta.id = tt.from_treasury_account_id
@@ -236,10 +274,11 @@ final class TreasuryRepository extends BaseRepository
              LEFT JOIN users void_user ON void_user.id = tt.voided_by_user_id
              WHERE tt.branch_id IN ({$placeholders})
              {$typeFilter}
+             {$directFilter}
              ORDER BY tt.transaction_date DESC, tt.id DESC
              LIMIT {$limit}"
         );
-        $statement->execute($branchIds);
+        $statement->execute($params);
 
         return $statement->fetchAll(PDO::FETCH_ASSOC) ?: [];
     }
